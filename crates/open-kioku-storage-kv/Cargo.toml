@@ -1,0 +1,13 @@
+[package]
+name = "open-kioku-storage-kv"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-graph = { path = "../open-kioku-graph" }
+

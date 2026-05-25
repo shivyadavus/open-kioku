@@ -1,0 +1,288 @@
+error[rejected]: failed to satisfy license requirements
+   ┌─ /Users/shivyadav/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/notify-6.1.1/Cargo.toml:33:12
+   │
+33 │ license = "CC0-1.0"
+   │            ━━━━━━━
+   │            │
+   │            rejected: license is not explicitly allowed
+   │
+   ├ CC0-1.0 - Creative Commons Zero v1.0 Universal:
+   ├   - FSF Free/Libre
+   ├ notify v6.1.1
+     └── ocf-watch v0.1.0
+         └── ocf-cli v0.1.0
+
+error[rejected]: failed to satisfy license requirements
+   ┌─ /Users/shivyadav/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/unicode-ident-1.0.24/Cargo.toml:36:36
+   │
+36 │ license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+   │            ────────────────────────━━━━━━━━━━━
+   │                                    │
+   │                                    rejected: license is not explicitly allowed
+   │
+   ├ Unicode-3.0 - Unicode License v3:
+   ├   - OSI approved
+   ├ unicode-ident v1.0.24
+     ├── proc-macro2 v1.0.106
+     │   ├── async-trait v0.1.89
+     │   │   └── tantivy-common v0.7.0
+     │   │       ├── tantivy v0.22.1
+     │   │       │   └── ocf-search-tantivy v0.1.0
+     │   │       │       ├── ocf-cli v0.1.0
+     │   │       │       └── ocf-mcp v0.1.0
+     │   │       │           └── ocf-cli v0.1.0 (*)
+     │   │       ├── tantivy-columnar v0.3.0
+     │   │       │   └── tantivy v0.22.1 (*)
+     │   │       ├── tantivy-sstable v0.3.0
+     │   │       │   └── tantivy-columnar v0.3.0 (*)
+     │   │       └── tantivy-stacker v0.3.0
+     │   │           ├── tantivy v0.22.1 (*)
+     │   │           └── tantivy-columnar v0.3.0 (*)
+     │   ├── clap_derive v4.6.1
+     │   │   └── clap v4.6.1
+     │   │       └── ocf-cli v0.1.0 (*)
+     │   ├── quote v1.0.45
+     │   │   ├── async-trait v0.1.89 (*)
+     │   │   ├── clap_derive v4.6.1 (*)
+     │   │   ├── schemars_derive v0.8.22
+     │   │   │   └── schemars v0.8.22
+     │   │   │       └── ocf-core v0.1.0
+     │   │   │           ├── ocf-architecture v0.1.0
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   └── ocf-mcp v0.1.0 (*)
+     │   │   │           ├── ocf-cli v0.1.0 (*)
+     │   │   │           ├── ocf-context v0.1.0
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   ├── ocf-mcp v0.1.0 (*)
+     │   │   │           │   └── ocf-patch v0.1.0
+     │   │   │           │       ├── ocf-cli v0.1.0 (*)
+     │   │   │           │       └── ocf-mcp v0.1.0 (*)
+     │   │   │           ├── ocf-evidence v0.1.0
+     │   │   │           ├── ocf-graph v0.1.0
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   └── ocf-storage-kv v0.1.0
+     │   │   │           ├── ocf-impact v0.1.0
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   ├── ocf-context v0.1.0 (*)
+     │   │   │           │   └── ocf-mcp v0.1.0 (*)
+     │   │   │           ├── ocf-ingest v0.1.0
+     │   │   │           │   └── ocf-cli v0.1.0 (*)
+     │   │   │           ├── ocf-languages v0.1.0
+     │   │   │           │   └── ocf-ingest v0.1.0 (*)
+     │   │   │           ├── ocf-parse v0.1.0
+     │   │   │           │   └── ocf-ingest v0.1.0 (*)
+     │   │   │           ├── ocf-patch v0.1.0 (*)
+     │   │   │           ├── ocf-ranking v0.1.0
+     │   │   │           │   └── ocf-context v0.1.0 (*)
+     │   │   │           ├── ocf-scip v0.1.0
+     │   │   │           │   └── ocf-ingest v0.1.0 (*)
+     │   │   │           ├── ocf-search v0.1.0
+     │   │   │           ├── ocf-search-regex v0.1.0
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   ├── ocf-context v0.1.0 (*)
+     │   │   │           │   ├── ocf-impact v0.1.0 (*)
+     │   │   │           │   └── ocf-mcp v0.1.0 (*)
+     │   │   │           ├── ocf-search-tantivy v0.1.0 (*)
+     │   │   │           ├── ocf-semantic v0.1.0
+     │   │   │           ├── ocf-storage v0.1.0
+     │   │   │           │   ├── ocf-architecture v0.1.0 (*)
+     │   │   │           │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   ├── ocf-context v0.1.0 (*)
+     │   │   │           │   ├── ocf-graph v0.1.0 (*)
+     │   │   │           │   ├── ocf-impact v0.1.0 (*)
+     │   │   │           │   ├── ocf-mcp v0.1.0 (*)
+     │   │   │           │   ├── ocf-patch v0.1.0 (*)
+     │   │   │           │   ├── ocf-search-regex v0.1.0 (*)
+     │   │   │           │   ├── ocf-search-tantivy v0.1.0 (*)
+     │   │   │           │   ├── ocf-storage-sqlite v0.1.0
+     │   │   │           │   │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   │   ├── (dev) ocf-impact v0.1.0 (*)
+     │   │   │           │   │   └── ocf-mcp v0.1.0 (*)
+     │   │   │           │   ├── ocf-symbols v0.1.0
+     │   │   │           │   │   ├── ocf-cli v0.1.0 (*)
+     │   │   │           │   │   └── ocf-mcp v0.1.0 (*)
+     │   │   │           │   └── ocf-tests v0.1.0
+     │   │   │           │       ├── ocf-cli v0.1.0 (*)
+     │   │   │           │       ├── ocf-context v0.1.0 (*)
+     │   │   │           │       └── ocf-mcp v0.1.0 (*)
+     │   │   │           ├── ocf-storage-kv v0.1.0 (*)
+     │   │   │           ├── ocf-storage-sqlite v0.1.0 (*)
+     │   │   │           ├── ocf-symbols v0.1.0 (*)
+     │   │   │           ├── ocf-tests v0.1.0 (*)
+     │   │   │           └── ocf-tree-sitter v0.1.0
+     │   │   │               └── ocf-parse v0.1.0 (*)
+     │   │   ├── serde_derive v1.0.228
+     │   │   │   ├── rust-stemmers v1.2.0
+     │   │   │   │   └── tantivy v0.22.1 (*)
+     │   │   │   └── serde v1.0.228
+     │   │   │       ├── chrono v0.4.44
+     │   │   │       │   ├── ocf-context v0.1.0 (*)
+     │   │   │       │   ├── ocf-core v0.1.0 (*)
+     │   │   │       │   ├── ocf-graph v0.1.0 (*)
+     │   │   │       │   ├── ocf-impact v0.1.0 (*)
+     │   │   │       │   ├── ocf-ingest v0.1.0 (*)
+     │   │   │       │   ├── ocf-parse v0.1.0 (*)
+     │   │   │       │   ├── ocf-patch v0.1.0 (*)
+     │   │   │       │   ├── (dev) ocf-ranking v0.1.0 (*)
+     │   │   │       │   ├── ocf-scip v0.1.0 (*)
+     │   │   │       │   ├── ocf-search-regex v0.1.0 (*)
+     │   │   │       │   ├── ocf-search-tantivy v0.1.0 (*)
+     │   │   │       │   ├── (dev) ocf-storage-sqlite v0.1.0 (*)
+     │   │   │       │   └── schemars v0.8.22 (*)
+     │   │   │       ├── ocf-architecture v0.1.0 (*)
+     │   │   │       ├── ocf-cli v0.1.0 (*)
+     │   │   │       ├── ocf-config v0.1.0
+     │   │   │       │   ├── ocf-actions v0.1.0
+     │   │   │       │   │   ├── ocf-mcp v0.1.0 (*)
+     │   │   │       │   │   ├── ocf-patch v0.1.0 (*)
+     │   │   │       │   │   └── ocf-sandbox v0.1.0
+     │   │   │       │   ├── ocf-cli v0.1.0 (*)
+     │   │   │       │   ├── ocf-ingest v0.1.0 (*)
+     │   │   │       │   ├── ocf-mcp v0.1.0 (*)
+     │   │   │       │   ├── ocf-patch v0.1.0 (*)
+     │   │   │       │   └── ocf-sandbox v0.1.0 (*)
+     │   │   │       ├── ocf-core v0.1.0 (*)
+     │   │   │       ├── ocf-mcp v0.1.0 (*)
+     │   │   │       ├── ocf-sandbox v0.1.0 (*)
+     │   │   │       ├── ocf-scip v0.1.0 (*)
+     │   │   │       ├── ocf-search v0.1.0 (*)
+     │   │   │       ├── ocf-search-tantivy v0.1.0 (*)
+     │   │   │       ├── ocf-storage-sqlite v0.1.0 (*)
+     │   │   │       ├── rust-stemmers v1.2.0 (*)
+     │   │   │       ├── schemars v0.8.22 (*)
+     │   │   │       ├── serde_spanned v0.6.9
+     │   │   │       │   ├── toml v0.8.23
+     │   │   │       │   │   └── ocf-config v0.1.0 (*)
+     │   │   │       │   └── toml_edit v0.22.27
+     │   │   │       │       └── toml v0.8.23 (*)
+     │   │   │       ├── sketches-ddsketch v0.2.2
+     │   │   │       │   └── tantivy v0.22.1 (*)
+     │   │   │       ├── tantivy v0.22.1 (*)
+     │   │   │       ├── tantivy-columnar v0.3.0 (*)
+     │   │   │       ├── tantivy-common v0.7.0 (*)
+     │   │   │       ├── tantivy-tokenizer-api v0.3.0
+     │   │   │       │   └── tantivy v0.22.1 (*)
+     │   │   │       ├── toml v0.8.23 (*)
+     │   │   │       ├── toml_datetime v0.6.11
+     │   │   │       │   ├── toml v0.8.23 (*)
+     │   │   │       │   └── toml_edit v0.22.27 (*)
+     │   │   │       └── toml_edit v0.22.27 (*)
+     │   │   ├── serde_derive_internals v0.29.1
+     │   │   │   └── schemars_derive v0.8.22 (*)
+     │   │   ├── syn v2.0.117
+     │   │   │   ├── async-trait v0.1.89 (*)
+     │   │   │   ├── clap_derive v4.6.1 (*)
+     │   │   │   ├── schemars_derive v0.8.22 (*)
+     │   │   │   ├── serde_derive v1.0.228 (*)
+     │   │   │   ├── serde_derive_internals v0.29.1 (*)
+     │   │   │   ├── thiserror-impl v1.0.69
+     │   │   │   │   └── thiserror v1.0.69
+     │   │   │   │       ├── ocf-errors v0.1.0
+     │   │   │   │       │   ├── ocf-actions v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-architecture v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-cli v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-config v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-context v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-daemon v0.1.0
+     │   │   │   │       │   ├── ocf-embeddings v0.1.0
+     │   │   │   │       │   ├── ocf-git v0.1.0
+     │   │   │   │       │   │   └── ocf-ingest v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-graph v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-impact v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-ingest v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-lsp v0.1.0
+     │   │   │   │       │   ├── ocf-patch v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-qdrant v0.1.0
+     │   │   │   │       │   ├── ocf-sandbox v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-scip v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-search-regex v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-search-tantivy v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-semantic v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-storage v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-storage-kv v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-storage-sqlite v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-symbols v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-tests v0.1.0 (*)
+     │   │   │   │       │   ├── ocf-tree-sitter v0.1.0 (*)
+     │   │   │   │       │   └── ocf-watch v0.1.0
+     │   │   │   │       │       └── ocf-cli v0.1.0 (*)
+     │   │   │   │       ├── protobuf v3.7.1
+     │   │   │   │       │   ├── ocf-scip v0.1.0 (*)
+     │   │   │   │       │   └── scip v0.5.2
+     │   │   │   │       │       └── ocf-scip v0.1.0 (*)
+     │   │   │   │       ├── protobuf-support v3.7.1
+     │   │   │   │       │   └── protobuf v3.7.1 (*)
+     │   │   │   │       └── tantivy v0.22.1 (*)
+     │   │   │   ├── tokio-macros v2.7.0
+     │   │   │   │   └── tokio v1.52.3
+     │   │   │   │       ├── ocf-cli v0.1.0 (*)
+     │   │   │   │       ├── ocf-daemon v0.1.0 (*)
+     │   │   │   │       ├── ocf-mcp v0.1.0 (*)
+     │   │   │   │       └── ocf-sandbox v0.1.0 (*)
+     │   │   │   ├── tracing-attributes v0.1.31
+     │   │   │   │   └── tracing v0.1.44
+     │   │   │   │       ├── ocf-ingest v0.1.0 (*)
+     │   │   │   │       └── tracing-subscriber v0.3.23
+     │   │   │   │           └── ocf-cli v0.1.0 (*)
+     │   │   │   ├── wasm-bindgen-macro-support v0.2.122
+     │   │   │   │   └── wasm-bindgen-macro v0.2.122
+     │   │   │   │       └── wasm-bindgen v0.2.122
+     │   │   │   │           ├── chrono v0.4.44 (*)
+     │   │   │   │           ├── iana-time-zone v0.1.65
+     │   │   │   │           │   └── chrono v0.4.44 (*)
+     │   │   │   │           ├── instant v0.1.13
+     │   │   │   │           │   └── measure_time v0.8.3
+     │   │   │   │           │       └── tantivy v0.22.1 (*)
+     │   │   │   │           ├── js-sys v0.3.99
+     │   │   │   │           │   ├── chrono v0.4.44 (*)
+     │   │   │   │           │   ├── iana-time-zone v0.1.65 (*)
+     │   │   │   │           │   ├── instant v0.1.13 (*)
+     │   │   │   │           │   └── web-sys v0.3.99
+     │   │   │   │           │       └── instant v0.1.13 (*)
+     │   │   │   │           └── web-sys v0.3.99 (*)
+     │   │   │   ├── windows-implement v0.60.2
+     │   │   │   │   └── windows-core v0.62.2
+     │   │   │   │       └── iana-time-zone v0.1.65 (*)
+     │   │   │   └── windows-interface v0.59.3
+     │   │   │       └── windows-core v0.62.2 (*)
+     │   │   ├── thiserror-impl v1.0.69 (*)
+     │   │   ├── tokio-macros v2.7.0 (*)
+     │   │   ├── tracing-attributes v0.1.31 (*)
+     │   │   ├── wasm-bindgen-macro v0.2.122 (*)
+     │   │   ├── wasm-bindgen-macro-support v0.2.122 (*)
+     │   │   ├── windows-implement v0.60.2 (*)
+     │   │   └── windows-interface v0.59.3 (*)
+     │   ├── schemars_derive v0.8.22 (*)
+     │   ├── serde_derive v1.0.228 (*)
+     │   ├── serde_derive_internals v0.29.1 (*)
+     │   ├── syn v2.0.117 (*)
+     │   ├── thiserror-impl v1.0.69 (*)
+     │   ├── tokio-macros v2.7.0 (*)
+     │   ├── tracing-attributes v0.1.31 (*)
+     │   ├── wasm-bindgen-macro-support v0.2.122 (*)
+     │   ├── windows-implement v0.60.2 (*)
+     │   └── windows-interface v0.59.3 (*)
+     ├── syn v2.0.117 (*)
+     └── wasm-bindgen-shared v0.2.122
+         ├── wasm-bindgen v0.2.122 (*)
+         └── wasm-bindgen-macro-support v0.2.122 (*)
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /Users/shivyadav/dev/open-code-factory/deny.toml:17:6
+   │
+17 │     "0BSD",
+   │      ━━━━ unmatched license allowance
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /Users/shivyadav/dev/open-code-factory/deny.toml:20:6
+   │
+20 │     "BSL-1.0"
+   │      ━━━━━━━ unmatched license allowance
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /Users/shivyadav/dev/open-code-factory/deny.toml:19:6
+   │
+19 │     "Unicode-DFS-2016",
+   │      ━━━━━━━━━━━━━━━━ unmatched license allowance
+
+licenses FAILED

@@ -1,0 +1,69 @@
+[workspace]
+members = [
+  "crates/open-kioku-core",
+  "crates/open-kioku-config",
+  "crates/open-kioku-errors",
+  "crates/open-kioku-git",
+  "crates/open-kioku-ingest",
+  "crates/open-kioku-watch",
+  "crates/open-kioku-parse",
+  "crates/open-kioku-tree-sitter",
+  "crates/open-kioku-languages",
+  "crates/open-kioku-symbols",
+  "crates/open-kioku-scip",
+  "crates/open-kioku-lsp",
+  "crates/open-kioku-search",
+  "crates/open-kioku-search-tantivy",
+  "crates/open-kioku-search-regex",
+  "crates/open-kioku-graph",
+  "crates/open-kioku-impact",
+  "crates/open-kioku-architecture",
+  "crates/open-kioku-semantic",
+  "crates/open-kioku-embeddings",
+  "crates/open-kioku-qdrant",
+  "crates/open-kioku-storage",
+  "crates/open-kioku-storage-sqlite",
+  "crates/open-kioku-storage-kv",
+  "crates/open-kioku-context",
+  "crates/open-kioku-ranking",
+  "crates/open-kioku-evidence",
+  "crates/open-kioku-actions",
+  "crates/open-kioku-patch",
+  "crates/open-kioku-tests",
+  "crates/open-kioku-sandbox",
+  "crates/open-kioku-mcp",
+  "crates/open-kioku-cli",
+  "crates/open-kioku-daemon",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/shivyadavus/open-code-factory"
+rust-version = "1.78"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+globset = "0.4"
+ignore = "0.4"
+notify = "6"
+rayon = "1.10"
+regex = "1.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
+schemars = { version = "0.8", features = ["chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tantivy = "0.22"
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "time", "sync"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tree-sitter = "0.25"
+walkdir = "2"

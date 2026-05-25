@@ -1,0 +1,19 @@
+[package]
+name = "open-kioku-scip"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-errors = { path = "../open-kioku-errors" }
+protobuf = "3.7"
+scip = "0.5.2"
+serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

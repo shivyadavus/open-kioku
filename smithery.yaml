@@ -1,0 +1,10 @@
+startCommand:
+  type: stdio
+  config:
+    command: ok
+    args:
+      - mcp
+      - serve
+      - --repo
+      - "."
+      - --read-only

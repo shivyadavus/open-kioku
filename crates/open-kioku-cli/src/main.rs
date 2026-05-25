@@ -1,0 +1,441 @@
+use clap::{Args, Parser, Subcommand};
+use open_kioku_architecture::ArchitectureDetector;
+use open_kioku_config::OcfConfig;
+use open_kioku_context::ContextPackBuilder;
+use open_kioku_graph::InMemoryGraph;
+use open_kioku_impact::ImpactEngine;
+use open_kioku_ingest::Indexer;
+use open_kioku_patch::PatchPlanner;
+use open_kioku_search_regex::search_chunks;
+use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
+use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OcfStore, SearchIndex};
+use open_kioku_storage_sqlite::SqliteStore;
+use open_kioku_symbols::SymbolEngine;
+use open_kioku_tests::TestSelector;
+use std::path::{Path, PathBuf};
+
+#[derive(Parser)]
+#[command(name = "ok", about = "Open Code Factory code-intelligence platform")]
+struct Cli {
+    #[arg(long, global = true)]
+    json: bool,
+    #[arg(long, global = true, default_value = ".")]
+    repo: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Init {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Index {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Watch {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Status {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Symbol {
+        #[command(subcommand)]
+        command: SymbolCommand,
+    },
+    Explain {
+        #[command(subcommand)]
+        command: ExplainCommand,
+    },
+    Impact(ImpactArgs),
+    Path {
+        from: String,
+        to: String,
+    },
+    Tests {
+        #[arg(long)]
+        changed: PathBuf,
+    },
+    Context {
+        task: String,
+    },
+    Architecture {
+        #[command(subcommand)]
+        command: ArchitectureCommand,
+    },
+    Patch {
+        #[command(subcommand)]
+        command: PatchCommand,
+    },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SymbolCommand {
+    Find { name: String },
+    Definition { name: String },
+    Refs { name: String },
+}
+
+#[derive(Subcommand)]
+enum ExplainCommand {
+    File { path: PathBuf },
+    Symbol { name: String },
+}
+
+#[derive(Args)]
+struct ImpactArgs {
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    symbol: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum ArchitectureCommand {
+    Detect,
+    Boundaries,
+    Violations,
+}
+
+#[derive(Subcommand)]
+enum PatchCommand {
+    Plan {
+        task: String,
+    },
+    Review {
+        #[arg(long)]
+        id: String,
+    },
+    Apply {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        approved: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    Serve {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = true)]
+        read_only: bool,
+        #[arg(long, default_value_t = false)]
+        allow_write: bool,
+        #[arg(long, default_value_t = true)]
+        approval_required: bool,
+        #[arg(long = "allow-command")]
+        allow_command: Vec<String>,
+        #[arg(long, default_value_t = true)]
+        deny_network: bool,
+    },
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_env_filter("warn").init();
+    let cli = Cli::parse();
+    let repo = cli.repo.clone();
+    match cli.command {
+        Command::Init { repo: command_repo } => {
+            let repo = resolve_repo(&repo, command_repo);
+            std::fs::create_dir_all(repo.join(".ok"))?;
+            OcfConfig::write_default(repo.join("ocf.toml"))?;
+            print_text_or_json(
+                cli.json,
+                "initialized Open Code Factory repository",
+                &serde_json::json!({"status":"initialized"}),
+            )?;
+        }
+        Command::Index { repo: command_repo } => {
+            let repo = resolve_repo(&repo, command_repo);
+            let config = OcfConfig::load_from_repo(&repo)?;
+            let snapshot = Indexer::default().index_repo(&repo, &config)?;
+            let store = open_store(&repo)?;
+            store.replace_index(IndexData {
+                manifest: &snapshot.manifest,
+                files: &snapshot.files,
+                symbols: &snapshot.symbols,
+                chunks: &snapshot.chunks,
+                tests: &snapshot.tests,
+                imports: &snapshot.imports,
+                occurrences: &snapshot.occurrences,
+            })?;
+            let graph = InMemoryGraph::from_index_with_occurrences(
+                &snapshot.files,
+                &snapshot.symbols,
+                &snapshot.chunks,
+                &snapshot.occurrences,
+            );
+            store.replace_graph(
+                &graph.nodes.values().cloned().collect::<Vec<_>>(),
+                &graph.edges,
+            )?;
+            rebuild_disk_index(
+                default_index_dir(&repo),
+                &snapshot.chunks,
+                &snapshot.files,
+                &snapshot.symbols,
+            )?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&snapshot.manifest)?);
+            } else {
+                println!(
+                    "Indexed {} files, {} symbols, {} chunks",
+                    snapshot.manifest.file_count,
+                    snapshot.manifest.symbol_count,
+                    snapshot.manifest.chunk_count
+                );
+            }
+        }
+        Command::Watch { repo: command_repo } => {
+            let repo = resolve_repo(&repo, command_repo);
+            open_kioku_watch::watch_repo(&repo)?;
+        }
+        Command::Status { repo: command_repo } => {
+            let repo = resolve_repo(&repo, command_repo);
+            let store = open_store(&repo)?;
+            let manifest = store.manifest()?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else if let Some(manifest) = manifest {
+                println!(
+                    "Healthy index: {} files, {} symbols, indexed at {}",
+                    manifest.file_count, manifest.symbol_count, manifest.indexed_at
+                );
+            } else {
+                println!("No index found. Run `ocf index .`.");
+            }
+        }
+        Command::Search { query, limit } => {
+            let store = open_store(&repo)?;
+            let results = search(&repo, &store, &query, limit)?;
+            output(cli.json, &results, || {
+                for result in &results {
+                    println!(
+                        "{}:{}  {:.2}  {}",
+                        result.path.display(),
+                        result.line_range.as_ref().map(|r| r.start).unwrap_or(0),
+                        result.score,
+                        result.snippet
+                    );
+                }
+            })?;
+        }
+        Command::Symbol { command } => {
+            let store = open_store(&repo)?;
+            let engine = SymbolEngine::new(&store);
+            match command {
+                SymbolCommand::Find { name } => output(cli.json, &engine.find(&name, 50)?, || {})?,
+                SymbolCommand::Definition { name } => {
+                    output(cli.json, &engine.definition(&name)?, || {})?
+                }
+                SymbolCommand::Refs { name } => {
+                    output(cli.json, &engine.references(&name, 50)?, || {})?
+                }
+            }
+        }
+        Command::Explain { command } => {
+            let store = open_store(&repo)?;
+            match command {
+                ExplainCommand::File { path } => {
+                    let file = store.get_file_by_path(&path)?;
+                    let chunks = if let Some(file) = &file {
+                        store.chunks_for_file(&file.id)?
+                    } else {
+                        Vec::new()
+                    };
+                    output(
+                        cli.json,
+                        &serde_json::json!({"file": file, "chunks": chunks}),
+                        || {
+                            println!("{} chunks indexed for {}", chunks.len(), path.display());
+                        },
+                    )?;
+                }
+                ExplainCommand::Symbol { name } => {
+                    let symbol = SymbolEngine::new(&store).definition(&name)?;
+                    output(cli.json, &symbol, || {})?;
+                }
+            }
+        }
+        Command::Impact(args) => {
+            let store = open_store(&repo)?;
+            let report = if let Some(path) = args.file {
+                ImpactEngine::new(&store).for_file(&path)?
+            } else if let Some(symbol) = args.symbol {
+                let definition = SymbolEngine::new(&store).definition(&symbol)?;
+                let files = store.list_files(usize::MAX, 0)?;
+                let file = files.iter().find(|file| file.id == definition.file_id);
+                ImpactEngine::new(&store).for_file(
+                    file.map(|file| file.path.as_path())
+                        .unwrap_or(Path::new(&symbol)),
+                )?
+            } else {
+                anyhow::bail!("provide --file or --symbol");
+            };
+            output(cli.json, &report, || {})?;
+        }
+        Command::Path { from, to } => {
+            let store = open_store(&repo)?;
+            let from = resolve_graph_node(&store, &from)?;
+            let to = resolve_graph_node(&store, &to)?;
+            let path = store.shortest_path(&from, &to, 12)?;
+            output(cli.json, &path, || {
+                if path.is_empty() {
+                    println!("No dependency path found.");
+                } else {
+                    for edge in &path {
+                        println!("{} -> {} {:?}", edge.from, edge.to, edge.edge_type);
+                    }
+                }
+            })?;
+        }
+        Command::Tests { changed } => {
+            let store = open_store(&repo)?;
+            output(
+                cli.json,
+                &TestSelector::new(&store).for_changed_path(&changed, 20)?,
+                || {},
+            )?;
+        }
+        Command::Context { task } => {
+            let store = open_store(&repo)?;
+            output(
+                cli.json,
+                &ContextPackBuilder::new(&store as &dyn OcfStore).build(&task, 20)?,
+                || {},
+            )?;
+        }
+        Command::Architecture { command } => {
+            let store = open_store(&repo)?;
+            let summary = ArchitectureDetector::new(&store).detect()?;
+            match command {
+                ArchitectureCommand::Detect => output(cli.json, &summary, || {})?,
+                ArchitectureCommand::Boundaries => output(cli.json, &summary.components, || {})?,
+                ArchitectureCommand::Violations => output(cli.json, &summary.violations, || {})?,
+            }
+        }
+        Command::Patch { command } => {
+            let config = OcfConfig::load_from_repo(&repo)?;
+            let store = open_store(&repo)?;
+            let planner = PatchPlanner::new(&config, &store as &dyn OcfStore);
+            match command {
+                PatchCommand::Plan { task } => output(cli.json, &planner.plan(&task)?, || {})?,
+                PatchCommand::Review { id } => {
+                    println!("patch review requires stored patch plan id={id}")
+                }
+                PatchCommand::Apply { id, approved } => {
+                    anyhow::bail!("patch apply is policy gated and requires a stored diff; id={id} approved={approved}");
+                }
+            }
+        }
+        Command::Mcp { command } => match command {
+            McpCommand::Serve {
+                repo,
+                read_only,
+                allow_write,
+                approval_required,
+                allow_command,
+                deny_network,
+            } => {
+                let mut config = OcfConfig::load_from_repo(&repo)?;
+                config.mcp.mode = if read_only && !allow_write {
+                    "read-only".into()
+                } else {
+                    "write".into()
+                };
+                config.security.allow_write = allow_write;
+                config.security.approval_required = approval_required;
+                config.security.deny_network = deny_network;
+                if !allow_command.is_empty() {
+                    config.commands.allow = allow_command;
+                }
+                open_kioku_mcp::serve_stdio(repo, config).await?;
+            }
+        },
+    }
+    Ok(())
+}
+
+fn open_store(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {
+    Ok(SqliteStore::open(repo.as_ref().join(".ok/index.sqlite"))?)
+}
+
+fn search(
+    repo: impl AsRef<Path>,
+    store: &dyn MetadataStore,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let index_dir = default_index_dir(repo);
+    if TantivySearchIndex::exists(&index_dir) {
+        return Ok(TantivySearchIndex::open_or_create(index_dir)?.search(query, limit)?);
+    }
+    let files = store.list_files(usize::MAX, 0)?;
+    let chunks = store.all_chunks()?;
+    let symbols = store.list_symbols(None, usize::MAX, 0)?;
+    Ok(search_chunks(&chunks, &files, &symbols, query, limit)?)
+}
+
+fn resolve_repo(global: &Path, command: PathBuf) -> PathBuf {
+    if command == Path::new(".") {
+        global.to_path_buf()
+    } else {
+        command
+    }
+}
+
+fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<String> {
+    if query.starts_with("file:") || query.starts_with("symbol:") {
+        return Ok(query.to_string());
+    }
+    if let Some(file) = store.get_file_by_path(Path::new(query))? {
+        return Ok(format!("file:{}", file.path.display()));
+    }
+    if let Some(symbol) = store
+        .list_symbols(Some(query), 10, 0)?
+        .into_iter()
+        .find(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
+    {
+        return Ok(format!("symbol:{}", symbol.id.0));
+    }
+    Ok(query.to_string())
+}
+
+fn output<T: serde::Serialize>(json: bool, value: &T, human: impl FnOnce()) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        let text = serde_json::to_string_pretty(value)?;
+        if text.len() < 4096 {
+            println!("{text}");
+        } else {
+            human();
+        }
+    }
+    Ok(())
+}
+
+fn print_text_or_json(json: bool, text: &str, value: &serde_json::Value) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        println!("{text}");
+    }
+    Ok(())
+}

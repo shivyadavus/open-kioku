@@ -1,0 +1,25 @@
+[package]
+name = "open-kioku-ingest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+globset.workspace = true
+ignore.workspace = true
+open-kioku-config = { path = "../open-kioku-config" }
+open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-git = { path = "../open-kioku-git" }
+open-kioku-languages = { path = "../open-kioku-languages" }
+open-kioku-parse = { path = "../open-kioku-parse" }
+open-kioku-scip = { path = "../open-kioku-scip" }
+rayon.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

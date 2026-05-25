@@ -1,0 +1,18 @@
+[package]
+name = "open-kioku-context"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-impact = { path = "../open-kioku-impact" }
+open-kioku-ranking = { path = "../open-kioku-ranking" }
+open-kioku-search-regex = { path = "../open-kioku-search-regex" }
+open-kioku-storage = { path = "../open-kioku-storage" }
+open-kioku-tests = { path = "../open-kioku-tests" }
+
