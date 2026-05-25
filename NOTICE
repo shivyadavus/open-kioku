@@ -1,0 +1,15 @@
+Open Kioku
+Copyright 2026 Shiv Yadav
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+This software includes components from the following open-source projects:
+
+- tantivy (MIT) — https://github.com/quickwit-oss/tantivy
+- tree-sitter (MIT) — https://github.com/tree-sitter/tree-sitter
+- rusqlite (MIT) — https://github.com/rusqlite/rusqlite
+- tokio (MIT) — https://github.com/tokio-rs/tokio
+- serde (MIT OR Apache-2.0) — https://github.com/serde-rs/serde
+- clap (MIT OR Apache-2.0) — https://github.com/clap-rs/clap
+- anyhow (MIT OR Apache-2.0) — https://github.com/dtolnay/anyhow

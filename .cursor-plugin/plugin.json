@@ -1,0 +1,25 @@
+{
+  "name": "open-kioku",
+  "displayName": "Open Kioku — Code Intelligence",
+  "description": "Blazing-fast, local-first code intelligence for AI agents. BM25 full-text search, Tree-sitter symbol navigation, impact analysis, architecture detection, and patch planning — 100% local, zero cloud, zero telemetry.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Shiv Yadav",
+    "url": "https://github.com/shivyadavus"
+  },
+  "homepage": "https://github.com/shivyadavus/open-kioku",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shivyadavus/open-kioku"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["code-intelligence", "mcp", "search", "symbols", "rust", "local-first", "tree-sitter", "bm25"],
+  "categories": ["Developer Tools", "Code Intelligence"],
+  "mcpServers": {
+    "open-kioku": {
+      "command": "ok",
+      "args": ["mcp", "serve", "--repo", "${workspaceFolder}", "--read-only"]
+    }
+  },
+  "skills": ".cursor-plugin/skills"
+}

@@ -1,0 +1,49 @@
+---
+description: Use when navigating a codebase, searching for symbols, tracing definitions, analyzing change impact, or planning refactors. Requires the repository to be indexed with `ok index .` first.
+---
+
+# Open Kioku — Code Intelligence
+
+This plugin gives Cursor a persistent, evidence-backed memory of the indexed repository through 35+ MCP tools. All operations are local and read-only by default.
+
+## Key tools by task
+
+### Search
+- `search_code` — BM25 full-text search across indexed chunks (best for keywords and logic)
+- `regex_search` — pattern-based search for exact syntax matches
+- `list_symbols` — browse all symbols by name substring
+
+### Symbol navigation
+- `get_definition` — locate where a symbol is defined
+- `get_references` — find every usage of a symbol
+- `get_callers` / `get_callees` — trace call graphs
+- `get_implementations` — find all implementations of a trait or interface
+
+### Change impact
+- `impact_analysis` — measure blast radius before modifying a file
+- `find_tests_for_change` — identify tests to run after editing
+- `dependency_path` — find how two files or symbols are connected
+
+### Architecture
+- `detect_architecture` — get a high-level component map
+- `architecture_violations` — report boundary violations
+
+### Refactoring
+- `build_context_pack` — assemble file + symbol + test context for a complex task
+- `propose_patch` — plan a change without writing files
+
+## Prerequisites
+
+```sh
+# Install the ok binary
+cargo install --path crates/open-kioku-cli
+
+# Index your repository (run once, then re-run after large changes)
+ok index .
+```
+
+## Usage pattern
+
+Before editing any symbol: `get_definition` → `get_references` → `impact_analysis` → `find_tests_for_change`
+
+Before a large refactor: `build_context_pack` with a natural language task description → `propose_patch` → `validate_patch`
