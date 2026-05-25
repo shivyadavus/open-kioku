@@ -99,7 +99,7 @@ async fn dispatch(
                 .unwrap_or("2024-11-05");
             Ok(json!({
                 "protocolVersion": client_version,
-                "serverInfo": {"name": "open-code-factory", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "open-kioku", "version": env!("CARGO_PKG_VERSION")},
                 "capabilities": {"tools": {}}
             }))
         }
@@ -389,12 +389,12 @@ mod tests {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OcfConfig::default();
 
-        // Client requests newer version, server falls back or returns client's request
         let params = json!({"protocolVersion": "2024-11-05"});
         let result = dispatch(Path::new("."), &store, &config, "initialize", params)
             .await
             .unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "open-kioku");
 
         let params_other = json!({"protocolVersion": "2023-01-01"});
         let result_other = dispatch(Path::new("."), &store, &config, "initialize", params_other)

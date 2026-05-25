@@ -6,7 +6,7 @@
         "mcp",
         "serve",
         "--repo",
-        ".",
+        "${workspaceFolder}",
         "--read-only"
       ]
     }

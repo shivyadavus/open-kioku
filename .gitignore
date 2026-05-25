@@ -1,2 +1,20 @@
-/target
-**/*.rs.bk
+# Rust build artifacts
+target/
+
+# Open Kioku index files (generated at runtime)
+.ok/
+.ocf/
+
+# Environment and secrets
+.env
+.env.*
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
