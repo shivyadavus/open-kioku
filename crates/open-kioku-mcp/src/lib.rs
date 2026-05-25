@@ -1,6 +1,6 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
 use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::OcfConfig;
+use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_patch::PatchPlanner;
@@ -33,7 +33,7 @@ struct JsonRpcResponse {
     error: Option<Value>,
 }
 
-pub async fn serve_stdio(repo: PathBuf, config: OcfConfig) -> anyhow::Result<()> {
+pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> {
     let store = SqliteStore::open(repo.join(".ok/index.sqlite"))?;
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -62,7 +62,7 @@ pub async fn serve_stdio(repo: PathBuf, config: OcfConfig) -> anyhow::Result<()>
 async fn handle_request(
     repo: &Path,
     store: &SqliteStore,
-    config: &OcfConfig,
+    config: &OkConfig,
     request: JsonRpcRequest,
 ) -> JsonRpcResponse {
     let id = request.id.clone();
@@ -86,7 +86,7 @@ async fn handle_request(
 async fn dispatch(
     repo: &Path,
     store: &SqliteStore,
-    config: &OcfConfig,
+    config: &OkConfig,
     method: &str,
     params: Value,
 ) -> anyhow::Result<Value> {
@@ -241,7 +241,7 @@ async fn dispatch(
 fn call_tool<'a>(
     repo: &'a Path,
     store: &'a SqliteStore,
-    config: &'a OcfConfig,
+    config: &'a OkConfig,
     name: &'a str,
     args: Value,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send + 'a>> {
@@ -275,7 +275,7 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     )?))
 }
 
-fn tools(config: &OcfConfig) -> Vec<Value> {
+fn tools(config: &OkConfig) -> Vec<Value> {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Return the current index manifest (file count, symbol count, indexed_at)", json!({"type":"object","properties":{}})),
         ("list_files", "List all indexed files", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20, max 100)"}}})),
@@ -379,7 +379,7 @@ fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_config::OcfConfig;
+    use open_kioku_config::OkConfig;
     use open_kioku_storage_sqlite::SqliteStore;
     use serde_json::json;
     use std::path::Path;
@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_negotiates_version() {
         let store = SqliteStore::open(":memory:").unwrap();
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
 
         let params = json!({"protocolVersion": "2024-11-05"});
         let result = dispatch(Path::new("."), &store, &config, "initialize", params)
@@ -407,7 +407,7 @@ mod tests {
     async fn test_tools_list_respects_security_config() {
         let store = SqliteStore::open(":memory:").unwrap();
 
-        let mut config_read_only = OcfConfig::default();
+        let mut config_read_only = OkConfig::default();
         config_read_only.security.allow_write = false;
 
         let params = json!({});
@@ -423,7 +423,7 @@ mod tests {
         let tools_ro = result_ro["tools"].as_array().unwrap();
         assert!(tools_ro.iter().all(|t| t["name"] != "apply_patch"));
 
-        let mut config_write = OcfConfig::default();
+        let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;
 
         let result_rw = dispatch(Path::new("."), &store, &config_write, "tools/list", params)

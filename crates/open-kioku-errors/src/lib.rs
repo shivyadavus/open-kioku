@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-pub type Result<T> = std::result::Result<T, OcfError>;
+pub type Result<T> = std::result::Result<T, OkError>;
 
 #[derive(Debug, thiserror::Error)]
-pub enum OcfError {
+pub enum OkError {
     #[error("configuration error: {0}")]
     Config(String),
     #[error("repository error: {0}")]
@@ -28,11 +28,11 @@ pub enum OcfError {
     Json(#[from] serde_json::Error),
 }
 
-impl OcfError {
+impl OkError {
     pub fn user_message(&self) -> String {
         match self {
             Self::PolicyDenied(message) => {
-                format!("Denied by Open Code Factory security policy: {message}")
+                format!("Denied by Open Kioku security policy: {message}")
             }
             _ => self.to_string(),
         }

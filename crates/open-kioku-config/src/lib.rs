@@ -1,11 +1,11 @@
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_errors::{OkError, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OcfConfig {
+pub struct OkConfig {
     pub repo: RepoConfig,
     pub index: IndexConfig,
     pub languages: LanguagesConfig,
@@ -19,11 +19,11 @@ pub struct OcfConfig {
     pub architecture: ArchitectureConfig,
 }
 
-impl Default for OcfConfig {
+impl Default for OkConfig {
     fn default() -> Self {
         Self {
             repo: RepoConfig {
-                name: "open-code-factory-repo".to_string(),
+                name: "open-kioku-repo".to_string(),
                 root: PathBuf::from("."),
             },
             index: IndexConfig {
@@ -178,15 +178,15 @@ pub struct ArchitectureConfig {
     pub rules: PathBuf,
 }
 
-impl OcfConfig {
+impl OkConfig {
     pub fn load_from_repo(repo: impl AsRef<Path>) -> Result<Self> {
-        let path = repo.as_ref().join("ocf.toml");
+        let path = repo.as_ref().join("ok.toml");
         if !path.exists() {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(path)?;
         let mut config: Self =
-            toml::from_str(&raw).map_err(|err| OcfError::Config(err.to_string()))?;
+            toml::from_str(&raw).map_err(|err| OkError::Config(err.to_string()))?;
         config.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -195,7 +195,7 @@ impl OcfConfig {
     pub fn write_default(path: impl AsRef<Path>) -> Result<()> {
         let config = Self::default();
         let raw =
-            toml::to_string_pretty(&config).map_err(|err| OcfError::Config(err.to_string()))?;
+            toml::to_string_pretty(&config).map_err(|err| OkError::Config(err.to_string()))?;
         fs::write(path, raw)?;
         Ok(())
     }
@@ -206,12 +206,12 @@ impl OcfConfig {
 
     pub fn validate(&self) -> Result<()> {
         if self.security.allow_write && self.mcp.mode == "read-only" {
-            return Err(OcfError::Config(
+            return Err(OkError::Config(
                 "security.allow_write cannot be true while mcp.mode is read-only".into(),
             ));
         }
         if self.mcp.allow_write && !self.security.allow_write {
-            return Err(OcfError::Config(
+            return Err(OkError::Config(
                 "mcp.allow_write cannot be true while security.allow_write is false".into(),
             ));
         }
@@ -219,11 +219,11 @@ impl OcfConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(mode) = env::var("OCF_SECURITY_MODE") {
+        if let Ok(mode) = env::var("OK_SECURITY_MODE") {
             self.mcp.mode = mode.clone();
             self.security.allow_write = mode != "read-only";
         }
-        if let Ok(value) = env::var("OCF_DENY_NETWORK") {
+        if let Ok(value) = env::var("OK_DENY_NETWORK") {
             self.security.deny_network = value != "false";
         }
     }
@@ -237,20 +237,20 @@ pub fn parse_size(value: &str) -> Result<u64> {
     let (digits, unit) = trimmed.split_at(split_at);
     let number: u64 = digits
         .parse()
-        .map_err(|_| OcfError::Config(format!("invalid size: {value}")))?;
+        .map_err(|_| OkError::Config(format!("invalid size: {value}")))?;
     let multiplier = match unit.trim() {
         "" | "b" => 1,
         "kb" | "kib" => 1024,
         "mb" | "mib" => 1024 * 1024,
         "gb" | "gib" => 1024 * 1024 * 1024,
-        other => return Err(OcfError::Config(format!("unsupported size unit: {other}"))),
+        other => return Err(OkError::Config(format!("unsupported size unit: {other}"))),
     };
     Ok(number * multiplier)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_size, OcfConfig};
+    use super::{parse_size, OkConfig};
     use std::env;
 
     #[test]
@@ -264,13 +264,13 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn validate_catches_write_true_with_read_only_mcp() {
-        let mut config = OcfConfig::default();
+        let mut config = OkConfig::default();
         config.security.allow_write = true;
         config.mcp.mode = "read-only".into();
         assert!(config.validate().is_err());
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn validate_catches_mcp_allow_write_without_security_allow_write() {
-        let mut config = OcfConfig::default();
+        let mut config = OkConfig::default();
         config.mcp.allow_write = true;
         config.security.allow_write = false;
         assert!(config.validate().is_err());
@@ -287,28 +287,27 @@ mod tests {
     #[test]
     fn write_default_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ocf.toml");
-        OcfConfig::write_default(&path).unwrap();
-        let loaded = OcfConfig::load_from_repo(dir.path()).unwrap();
-        assert_eq!(loaded.repo.name, "open-code-factory-repo");
+        let path = dir.path().join("ok.toml");
+        OkConfig::write_default(&path).unwrap();
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        assert_eq!(loaded.repo.name, "open-kioku-repo");
         assert!(!loaded.security.allow_write);
     }
 
     #[test]
     fn env_override_sets_read_only() {
-        // Set OCF_SECURITY_MODE; it should override mcp.mode and security.allow_write.
         let dir = tempfile::tempdir().unwrap();
-        OcfConfig::write_default(dir.path().join("ocf.toml")).unwrap();
-        env::set_var("OCF_SECURITY_MODE", "read-only");
-        let config = OcfConfig::load_from_repo(dir.path()).unwrap();
+        OkConfig::write_default(dir.path().join("ok.toml")).unwrap();
+        env::set_var("OK_SECURITY_MODE", "read-only");
+        let config = OkConfig::load_from_repo(dir.path()).unwrap();
         assert_eq!(config.mcp.mode, "read-only");
         assert!(!config.security.allow_write);
-        env::remove_var("OCF_SECURITY_MODE");
+        env::remove_var("OK_SECURITY_MODE");
     }
 
     #[test]
     fn max_file_size_bytes_parses_correctly() {
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
         assert_eq!(config.max_file_size_bytes().unwrap(), 1024 * 1024);
     }
 }
