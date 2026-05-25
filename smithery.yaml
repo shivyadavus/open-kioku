@@ -1,10 +1,18 @@
 startCommand:
   type: stdio
+  configSchema:
+    type: object
+    properties:
+      repoPath:
+        type: string
+        description: Absolute path to the repository to index and serve
+        default: "."
+    required: []
   config:
     command: ok
     args:
       - mcp
       - serve
       - --repo
-      - "."
+      - "{{repoPath}}"
       - --read-only
