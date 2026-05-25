@@ -4,12 +4,98 @@ Copyright 2026 Shiv Yadav
 This product is licensed under the Apache License, Version 2.0.
 See the LICENSE file for the full license text.
 
-This software includes components from the following open-source projects:
+---
 
-- tantivy (MIT) — https://github.com/quickwit-oss/tantivy
-- tree-sitter (MIT) — https://github.com/tree-sitter/tree-sitter
-- rusqlite (MIT) — https://github.com/rusqlite/rusqlite
-- tokio (MIT) — https://github.com/tokio-rs/tokio
-- serde (MIT OR Apache-2.0) — https://github.com/serde-rs/serde
-- clap (MIT OR Apache-2.0) — https://github.com/clap-rs/clap
-- anyhow (MIT OR Apache-2.0) — https://github.com/dtolnay/anyhow
+This software includes components from the following open-source projects.
+Each entry lists the crate name, version used, license, and upstream URL.
+
+## Runtime and async
+
+- tokio v1.52.3 (MIT) — https://github.com/tokio-rs/tokio
+- async-trait v0.1.89 (MIT OR Apache-2.0) — https://github.com/dtolnay/async-trait
+
+## Serialization
+
+- serde v1.0.228 (MIT OR Apache-2.0) — https://github.com/serde-rs/serde
+- serde_json v1 (MIT OR Apache-2.0) — https://github.com/serde-rs/json
+- toml v0.8.23 (MIT OR Apache-2.0) — https://github.com/toml-rs/toml
+- toml_edit v0.22.27 (MIT OR Apache-2.0) — https://github.com/toml-rs/toml
+- schemars v0.8.22 (MIT) — https://github.com/GREsau/schemars
+- chrono v0.4.44 (MIT OR Apache-2.0) — https://github.com/chronotope/chrono
+
+## Full-text search
+
+- tantivy v0.22.1 (MIT) — https://github.com/quickwit-oss/tantivy
+- tantivy-columnar v0.3.0 (MIT) — https://github.com/quickwit-oss/tantivy
+- tantivy-common v0.7.0 (MIT) — https://github.com/quickwit-oss/tantivy
+- tantivy-sstable v0.3.0 (MIT) — https://github.com/quickwit-oss/tantivy
+- tantivy-stacker v0.3.0 (MIT) — https://github.com/quickwit-oss/tantivy
+- tantivy-tokenizer-api v0.3.0 (MIT) — https://github.com/quickwit-oss/tantivy
+- rust-stemmers v1.2.0 (MIT OR Apache-2.0) — https://github.com/CurrySoftware/rust-stemmers
+- sketches-ddsketch v0.2.2 (Apache-2.0) — https://github.com/DataDog/sketches-rust
+
+## Syntax parsing
+
+- tree-sitter v0.25 (MIT) — https://github.com/tree-sitter/tree-sitter
+
+## Storage
+
+- rusqlite v0.31 (MIT) — https://github.com/rusqlite/rusqlite
+  Note: built with the "bundled" feature; SQLite itself is public domain.
+
+## CLI
+
+- clap v4.6.1 (MIT OR Apache-2.0) — https://github.com/clap-rs/clap
+
+## Error handling
+
+- anyhow v1 (MIT OR Apache-2.0) — https://github.com/dtolnay/anyhow
+- thiserror v1.0.69 (MIT OR Apache-2.0) — https://github.com/dtolnay/thiserror
+
+## Observability
+
+- tracing v0.1.44 (MIT) — https://github.com/tokio-rs/tracing
+- tracing-subscriber v0.3.23 (MIT) — https://github.com/tokio-rs/tracing
+
+## File system and utilities
+
+- walkdir v2 (MIT OR Unlicense) — https://github.com/BurntSushi/walkdir
+- ignore v0.4 (MIT OR Unlicense) — https://github.com/BurntSushi/ripgrep
+- globset v0.4 (MIT OR Unlicense) — https://github.com/BurntSushi/ripgrep
+- notify v6.1.1 (CC0-1.0) — https://github.com/notify-rs/notify
+- tempfile v3 (MIT OR Apache-2.0) — https://github.com/Stebalien/tempfile
+
+## Concurrency
+
+- rayon v1.10 (MIT OR Apache-2.0) — https://github.com/rayon-rs/rayon
+
+## Cryptography and hashing
+
+- sha2 v0.10 (MIT OR Apache-2.0) — https://github.com/RustCrypto/hashes
+
+## Pattern matching
+
+- regex v1.10 (MIT OR Apache-2.0) — https://github.com/rust-lang/regex
+
+## Protobuf / SCIP
+
+- protobuf v3.7.1 (MIT) — https://github.com/stepancheg/rust-protobuf
+- scip v0.5.2 (Apache-2.0) — https://github.com/sourcegraph/scip
+
+## Unicode
+
+- unicode-ident v1.0.24 (MIT OR Apache-2.0 AND Unicode-3.0)
+  — https://github.com/dtolnay/unicode-ident
+  — Unicode License v3: https://www.unicode.org/license.txt
+
+## Proc-macro infrastructure (compile-time only)
+
+- proc-macro2 v1.0.106 (MIT OR Apache-2.0) — https://github.com/dtolnay/proc-macro2
+- quote v1.0.45 (MIT OR Apache-2.0) — https://github.com/dtolnay/quote
+- syn v2.0.117 (MIT OR Apache-2.0) — https://github.com/dtolnay/syn
+
+---
+
+All licenses listed above are OSI-approved permissive licenses.
+No GPL, LGPL, or AGPL dependencies are present; this is enforced
+automatically by `cargo-deny` in CI on every push.
