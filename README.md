@@ -1,122 +1,152 @@
 # Open Kioku (`ok`)
 
-![Build Status](https://img.shields.io/badge/build-passing-success)
-![Rust Version](https://img.shields.io/badge/rust-1.78%2B-orange)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+[![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-**Open Kioku** (記憶 — Japanese for “Memory”) is a blazing-fast, local-first code intelligence platform. It gives AI agents, IDEs, and CLI tools a persistent, evidence-backed memory of your repository.
+**Open Kioku** (記憶, Japanese for “Memory”) is a local MCP server that gives Claude and Cursor a precise, queryable index of your codebase — built from Tree-sitter ASTs and a BM25 full-text engine, running entirely on your machine.
 
-> **The Core Philosophy:** The LLM is not the source of truth. The indexed repository facts are.
-
----
-
-## ⚡ Why Open Kioku?
-
-When you pass an entire codebase to an LLM, you are trusting the model to guess the architecture. **Open Kioku** changes the paradigm by building a high-speed local graph of your codebase *first*.
-
-- **Blazing Fast BM25 Index:** Backed by `tantivy`, it instantly finds relevant chunks without relying on expensive cloud embeddings.
-- **Tree-sitter Precision:** Automatically extracts symbols, imports, and definitions across Rust, Java, Python, TypeScript, and Go.
-- **Model Context Protocol (MCP):** Connects directly to Claude Code, Claude Desktop, and Cursor so your AI can instantly navigate your local repositories.
-- **Security First:** 100% local, read-only by default, and actively blocks secret paths (`.env`, `.aws`, `.ssh`).
+No cloud. No embeddings API. No guessing from a context window.
 
 ---
 
-## 📦 Installation
+## The problem it solves
 
-Install `ok` directly from source using Cargo:
+When you drop a large codebase into an AI chat, the model has to infer architecture, symbol locations, and call graphs from raw text. It hallucinates file paths, misses callers, and proposes changes that break unrelated modules.
+
+Open Kioku inverts this: **index first, query precisely**. The agent calls a tool instead of guessing.
+
+---
+
+## What it does
+
+| Tool | What it returns |
+|---|---|
+| `search_code` | BM25-ranked chunks matching a query across all indexed files |
+| `get_definition` | Exact file + line range where a symbol is defined (Tree-sitter) |
+| `get_references` | Every call site for a symbol |
+| `impact_analysis` | All files that transitively depend on a given file |
+| `find_tests_for_change` | Tests that cover a file, derived from the dependency graph |
+| `build_context_pack` | A JSON bundle of relevant files + symbols for a described task |
+| `detect_architecture` | Inferred project structure (monorepo, service boundaries, etc.) |
+
+Full tool list: [`skills/open-kioku/SKILL.md`](skills/open-kioku/SKILL.md)
+
+---
+
+## Languages supported
+
+Rust, Python, TypeScript, JavaScript, Java, Go. Additional grammars can be added via the `open-kioku-tree-sitter` crate.
+
+---
+
+## Install
 
 ```sh
 git clone https://github.com/shivyadavus/open-kioku.git
 cd open-kioku
 cargo install --path crates/open-kioku-cli
-ok index .
 ```
+
+Requires Rust stable (1.78+).
 
 ---
 
-## 🤖 Claude Code Integration
-
-Install Open Kioku directly from Claude Code:
+## Index your repo
 
 ```sh
-/plugin marketplace add shivyadavus/open-kioku
-/plugin install open-kioku@open-kioku
+ok index /path/to/your/repo
+ok status
 ```
 
-Or add it manually to your Claude config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+The index is stored under `.ok/` in the target repo (SQLite + Tantivy). It is incremental: re-running `ok index` only processes changed files.
+
+---
+
+## Connect to Claude Code
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or equivalent:
 
 ```json
 {
   "mcpServers": {
     "open-kioku": {
       "command": "ok",
-      "args": ["mcp", "serve", "--repo", "/absolute/path/to/your/repository", "--read-only"]
+      "args": ["mcp", "serve", "--repo", "/absolute/path/to/your/repo", "--read-only"]
     }
   }
 }
 ```
 
-> **Pro Tip:** Make sure `ok` is in your system `PATH`, or replace `"ok"` with the absolute path (e.g., `/Users/yourname/.cargo/bin/ok`).
+Or install from the Claude Code plugin marketplace:
 
----
-
-## 🖥️ CLI Quick Start
-
-You don’t need Claude to use Open Kioku. It acts as a powerful standalone CLI for navigating massive codebases.
-
-### 1. Build the Memory
-```sh
-ok init
-ok index .
-ok status
 ```
-
-### 2. Query the Memory
-```sh
-# BM25 full-text search
-ok search "jwt validation token expiration"
-
-# Find precise symbol definitions via Tree-sitter
-ok symbol find AuthMiddleware
-
-# Generate an AI-ready context bundle for a complex refactor
-ok context "Migrate the deprecated auth middleware to use the new JWT service" --json
-
-# Analyse the blast radius of modifying a core file
-ok impact --file src/auth/jwt_middleware.rs
-
-# Find test targets related to changed files
-ok tests --changed src/auth/jwt_middleware.rs
+/plugin install open-kioku@open-kioku
 ```
 
 ---
 
-## 🏗️ Architecture Under the Hood
+## Connect to Cursor
 
-When you run `ok index .`, Open Kioku scans the repository, fingerprints files, detects languages, and extracts symbols/chunks into a highly optimised SQLite metadata graph under `.ok/`. Simultaneously, it builds a disk-backed Tantivy BM25 search index under `.ok/search/tantivy`.
+Add to your Cursor MCP config:
 
-The repository is structured as a modular Cargo workspace containing 34 highly-specialised crates:
-
-- **Core Engine:** `open-kioku-core`, `open-kioku-storage-sqlite`, `open-kioku-search-tantivy`
-- **Parsing:** `open-kioku-tree-sitter`, `open-kioku-scip`
-- **Integrations:** `open-kioku-mcp`, `open-kioku-daemon`
-- **CLI:** `open-kioku-cli`
-
-For a deep dive into the internal data flow, see [docs/architecture.md](docs/architecture.md).
-
----
-
-## 🔒 Security Posture
-
-Open Kioku operates on a principle of least privilege:
-
-- **Read-Only by Default:** No file writes or shell executions are permitted without explicit overrides.
-- **Zero Network:** All indexing and BM25 searching happens 100% locally on your machine.
-- **Secret Scanning:** Hardcoded rules deny indexing of sensitive paths (`.env`, `.aws/`, `.ssh/`).
-- **Apache-2.0 Licensed:** Fully open-source with clear contributor attribution via `NOTICE`.
+```json
+{
+  "open-kioku": {
+    "command": "ok",
+    "args": ["mcp", "serve", "--repo", "${workspaceFolder}", "--read-only"]
+  }
+}
+```
 
 ---
 
-## 🤝 Contributing
+## CLI usage
 
-Open Kioku is open-source and modular by design. Pull requests for new Tree-sitter grammars, SCIP indexers, or MCP tools are highly welcome! Check out [`CONTRIBUTING.md`](CONTRIBUTING.md) to get started.
+```sh
+# Full-text search
+ok search "token expiration handler"
+
+# Symbol lookup
+ok symbol find PolicyGate
+
+# Blast radius before a change
+ok impact --file crates/open-kioku-mcp/src/lib.rs
+
+# Tests that cover a file
+ok tests --changed crates/open-kioku-core/src/index.rs
+
+# Context bundle for a task (outputs JSON for piping to an LLM)
+ok context "refactor the BM25 scorer to support phrase queries" --json
+```
+
+---
+
+## Security
+
+- **Read-only by default.** `apply_patch` and write tools require `--allow-write` explicitly.
+- **No network calls.** The MCP server never makes outbound connections.
+- **Secret path blocking.** `.env`, `.aws/`, `.ssh/`, and similar paths are excluded from indexing at the policy layer (`PolicyGate`), not just `.gitignore`.
+
+---
+
+## Codebase
+
+34-crate Cargo workspace. CI runs `cargo fmt`, `cargo clippy -D warnings`, `cargo test --all`, `cargo audit`, and `cargo deny` on Ubuntu and macOS on every push.
+
+Key crates:
+
+- `open-kioku-core` — graph, indexer, query planner
+- `open-kioku-storage-sqlite` — metadata and dependency graph
+- `open-kioku-search-tantivy` — BM25 full-text index
+- `open-kioku-tree-sitter` — AST extraction and symbol resolution
+- `open-kioku-mcp` — MCP server (JSON-RPC 2.0 over stdio)
+- `open-kioku-cli` — the `ok` binary
+
+See [`docs/architecture.md`](docs/architecture.md) for the full data flow.
+
+---
+
+## Contributing
+
+PRs welcome, especially for new Tree-sitter grammars and SCIP indexer support. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
