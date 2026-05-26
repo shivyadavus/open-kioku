@@ -1,29 +1,56 @@
 {
-  "name": "open-kioku",
-  "description": "Open Kioku — local-first code intelligence MCP server",
+  "name": "open-kioku-marketplace",
   "owner": {
     "name": "Shiv Yadav",
     "email": "shivyadavus@users.noreply.github.com"
   },
+  "metadata": {
+    "description": "Local-first code intelligence for AI agents — instant code search, symbol resolution, impact analysis, dependency graphs, and context packs across any codebase. Works offline. No data leaves your machine.",
+    "version": "0.1.0"
+  },
   "plugins": [
     {
       "name": "open-kioku",
-      "displayName": "Open Kioku — Code Intelligence",
-      "description": "Blazing-fast, local-first code intelligence for AI agents. BM25 search, Tree-sitter symbol navigation, impact analysis, architecture detection, and patch planning — 100% local, zero cloud.",
-      "version": "0.1.0",
       "source": {
         "source": "github",
-        "repo": "shivyadavus/open-kioku",
-        "ref": "main"
+        "repo": "shivyadavus/open-kioku"
       },
+      "description": "Local-first code intelligence for AI agents — instant BM25 + regex code search, symbol resolution, call-graph traversal, impact analysis, architecture detection, and token-efficient context packs. Runs entirely on your machine via a native binary. Index once, query instantly. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
+      "version": "0.1.0",
       "author": {
-        "name": "Shiv Yadav"
+        "name": "Shiv Yadav",
+        "email": "shivyadavus@users.noreply.github.com"
       },
-      "homepage": "https://github.com/shivyadavus/open-kioku",
+      "homepage": "https://github.com/shivyadavus/open-kioku#readme",
       "repository": "https://github.com/shivyadavus/open-kioku",
       "license": "Elastic-2.0",
-      "keywords": ["code-intelligence", "mcp", "search", "symbols", "rust", "local-first", "tree-sitter", "bm25"],
-      "category": "developer-tools"
+      "keywords": [
+        "code-intelligence",
+        "code-search",
+        "symbol-resolution",
+        "impact-analysis",
+        "context-pack",
+        "dependency-graph",
+        "mcp",
+        "local-first",
+        "rust",
+        "typescript",
+        "python",
+        "go"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "code-intelligence",
+        "code-search",
+        "developer-tools",
+        "mcp",
+        "local-first",
+        "offline",
+        "symbol-graph",
+        "impact-analysis",
+        "context-pack",
+        "multi-language"
+      ]
     }
   ]
 }
