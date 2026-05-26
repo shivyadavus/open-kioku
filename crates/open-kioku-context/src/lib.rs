@@ -56,7 +56,21 @@ impl<'a> ContextPackBuilder<'a> {
         let evidence = primary
             .iter()
             .take(20)
-            .map(|result| result.evidence.clone())
+            .flat_map(|result| {
+                result.evidence.iter().map(|msg| Evidence {
+                    id: EvidenceId::new(format!("context:{}", result.path.display())),
+                    source: "open-kioku-search".into(),
+                    source_type: EvidenceSourceType::Lexical,
+                    file_range: result.line_range.clone().map(|lr| open_kioku_core::FileRange {
+                        path: result.path.clone(),
+                        line_range: Some(lr),
+                    }),
+                    symbol_id: result.symbol.as_ref().map(|s| s.id.clone()),
+                    confidence: Confidence::Medium,
+                    message: msg.clone(),
+                    indexed_at: Utc::now(),
+                })
+            })
             .chain(impact.evidence.clone())
             .collect::<Vec<_>>();
         let allowed_files = primary

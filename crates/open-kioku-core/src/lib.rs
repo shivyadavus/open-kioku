@@ -366,7 +366,8 @@ pub struct SearchResult {
     pub symbol: Option<Symbol>,
     pub score: f32,
     pub match_reason: String,
-    pub evidence: Evidence,
+    pub evidence: Vec<String>,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
