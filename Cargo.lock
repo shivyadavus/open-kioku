@@ -1025,6 +1025,7 @@ dependencies = [
  "open-kioku-watch",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
 ]

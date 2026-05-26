@@ -77,6 +77,7 @@ impl SearchIndex for TantivySearchIndex {
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let raw_query = query;
         let reader = self.index.reader().map_err(search_err)?;
         let searcher = reader.searcher();
         let parser = QueryParser::for_index(
@@ -119,7 +120,7 @@ impl SearchIndex for TantivySearchIndex {
             results.push(SearchResult {
                 path: file.path,
                 line_range: Some(chunk.range),
-                snippet: snippet(&chunk.text),
+                snippet: snippet(&chunk.text, raw_query),
                 symbol,
                 score,
                 match_reason: "tantivy bm25 lexical match".into(),
@@ -208,9 +209,16 @@ fn optional_json<T: serde::de::DeserializeOwned>(
     serde_json::from_str(value).map(Some).map_err(Into::into)
 }
 
-fn snippet(text: &str) -> String {
+fn snippet(text: &str, query: &str) -> String {
+    let normalized_query = query.to_ascii_lowercase();
     text.lines()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| {
+            !line.trim().is_empty()
+                && line
+                    .to_ascii_lowercase()
+                    .contains(normalized_query.as_str())
+        })
+        .or_else(|| text.lines().find(|line| !line.trim().is_empty()))
         .unwrap_or_default()
         .trim()
         .chars()
@@ -260,7 +268,7 @@ mod tests {
             file_id: file.id.clone(),
             range: LineRange { start: 1, end: 3 },
             language: Language::Rust,
-            text: "pub fn retry_import() {}".into(),
+            text: "use std::time::Duration;\npub fn retry_import() {}\n".into(),
             symbol_id: Some(symbol.id.clone()),
         };
         rebuild_disk_index(temp.path(), &[chunk], &[file], &[symbol]).unwrap();
@@ -268,6 +276,14 @@ mod tests {
         let results = index.search("retry", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(results[0].snippet, "pub fn retry_import() {}");
+        assert_eq!(results[0].line_range, Some(LineRange { start: 1, end: 3 }));
+        assert_eq!(results[0].match_reason, "tantivy bm25 lexical match");
+        assert_eq!(results[0].evidence.source, "open-kioku-search-tantivy");
+        assert_eq!(
+            results[0].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("retry_import")
+        );
     }
 
     use std::path::PathBuf;

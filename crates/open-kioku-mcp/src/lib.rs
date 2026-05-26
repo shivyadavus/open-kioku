@@ -324,9 +324,11 @@ fn tools(config: &OkConfig) -> Vec<Value> {
     let mut tools: Vec<Value> = read_only_tools
         .iter()
         .map(|(name, description, schema)| {
+            let maturity = tool_maturity(name);
             json!({
                 "name": name,
                 "description": description,
+                "maturity": maturity,
                 "inputSchema": schema
             })
         })
@@ -334,14 +336,32 @@ fn tools(config: &OkConfig) -> Vec<Value> {
 
     if config.security.allow_write {
         for (name, description, schema) in write_tools {
+            let maturity = tool_maturity(name);
             tools.push(json!({
                 "name": name,
                 "description": description,
+                "maturity": maturity,
                 "inputSchema": schema
             }));
         }
     }
     tools
+}
+
+fn tool_maturity(name: &str) -> &'static str {
+    match name {
+        "semantic_search"
+        | "structural_search"
+        | "get_implementations"
+        | "get_callers"
+        | "get_callees"
+        | "explain_flow"
+        | "map_stacktrace_to_code"
+        | "find_errors_for_symbol"
+        | "find_recent_failures"
+        | "apply_patch" => "experimental",
+        _ => "stable",
+    }
 }
 
 fn limit(params: &Value) -> usize {

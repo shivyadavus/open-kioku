@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
@@ -12,6 +12,7 @@ use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIn
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -40,6 +41,10 @@ enum Command {
         repo: PathBuf,
     },
     Status {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Doctor {
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
@@ -129,6 +134,11 @@ enum PatchCommand {
 
 #[derive(Subcommand)]
 enum McpCommand {
+    Install {
+        client: McpClient,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     Serve {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -143,6 +153,35 @@ enum McpCommand {
         #[arg(long, default_value_t = true)]
         deny_network: bool,
     },
+}
+
+#[derive(Clone, ValueEnum)]
+enum McpClient {
+    Claude,
+    Cursor,
+}
+
+#[derive(Serialize)]
+struct DoctorReport {
+    ok: bool,
+    repo: PathBuf,
+    checks: Vec<DoctorCheck>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    status: CheckStatus,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckStatus {
+    Pass,
+    Warn,
+    Fail,
 }
 
 #[tokio::main]
@@ -219,6 +258,33 @@ async fn main() -> anyhow::Result<()> {
                 );
             } else {
                 println!("No index found. Run `ok index .`.");
+            }
+        }
+        Command::Doctor { repo: command_repo } => {
+            let repo = resolve_repo(&repo, command_repo);
+            let report = doctor_report(&repo);
+            let ok = report.ok;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Open Kioku doctor for {}", report.repo.display());
+                for check in &report.checks {
+                    let marker = match check.status {
+                        CheckStatus::Pass => "PASS",
+                        CheckStatus::Warn => "WARN",
+                        CheckStatus::Fail => "FAIL",
+                    };
+                    println!("{marker} {:<16} {}", check.name, check.message);
+                }
+                if !report.next_steps.is_empty() {
+                    println!("\nNext steps:");
+                    for step in &report.next_steps {
+                        println!("- {step}");
+                    }
+                }
+            }
+            if !ok {
+                std::process::exit(1);
             }
         }
         Command::Search { query, limit } => {
@@ -345,6 +411,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Mcp { command } => match command {
+            McpCommand::Install { client, repo } => {
+                let repo = absolutize(&repo)?;
+                let snippet = mcp_install_snippet(client, &repo);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&snippet)?);
+                } else {
+                    println!("{}", snippet["instructions"].as_str().unwrap_or_default());
+                    if let Ok(config) = serde_json::to_string_pretty(&snippet["config"]) {
+                        println!("{config}");
+                    }
+                }
+            }
             McpCommand::Serve {
                 repo,
                 read_only,
@@ -370,6 +448,188 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+fn doctor_report(repo: &Path) -> DoctorReport {
+    let repo = absolutize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let mut checks = Vec::new();
+    let mut next_steps = Vec::new();
+
+    push_check(
+        &mut checks,
+        "repo",
+        repo.is_dir(),
+        format!("repository path exists: {}", repo.display()),
+        format!("repository path does not exist: {}", repo.display()),
+    );
+
+    let config_path = repo.join("ok.toml");
+    if config_path.exists() {
+        match OkConfig::load_from_repo(&repo) {
+            Ok(_) => checks.push(DoctorCheck {
+                name: "config",
+                status: CheckStatus::Pass,
+                message: format!("loaded {}", config_path.display()),
+            }),
+            Err(err) => {
+                checks.push(DoctorCheck {
+                    name: "config",
+                    status: CheckStatus::Fail,
+                    message: err.to_string(),
+                });
+                next_steps.push("Fix ok.toml or regenerate it with `ok init .`.".into());
+            }
+        }
+    } else {
+        checks.push(DoctorCheck {
+            name: "config",
+            status: CheckStatus::Warn,
+            message: "ok.toml is missing; defaults will be used".into(),
+        });
+        next_steps.push("Run `ok init .` to create ok.toml and .ok/.".into());
+    }
+
+    let index_path = repo.join(".ok/index.sqlite");
+    if index_path.exists() {
+        match SqliteStore::open(&index_path).and_then(|store| store.manifest()) {
+            Ok(Some(manifest)) => checks.push(DoctorCheck {
+                name: "index",
+                status: CheckStatus::Pass,
+                message: format!(
+                    "{} files, {} symbols, indexed at {}",
+                    manifest.file_count, manifest.symbol_count, manifest.indexed_at
+                ),
+            }),
+            Ok(None) => {
+                checks.push(DoctorCheck {
+                    name: "index",
+                    status: CheckStatus::Warn,
+                    message: "index database exists but has no manifest".into(),
+                });
+                next_steps.push("Run `ok index .` to build a fresh index.".into());
+            }
+            Err(err) => {
+                checks.push(DoctorCheck {
+                    name: "index",
+                    status: CheckStatus::Fail,
+                    message: err.to_string(),
+                });
+                next_steps.push("Remove .ok/index.sqlite and run `ok index .` again.".into());
+            }
+        }
+    } else {
+        checks.push(DoctorCheck {
+            name: "index",
+            status: CheckStatus::Warn,
+            message: ".ok/index.sqlite is missing".into(),
+        });
+        next_steps.push("Run `ok index .` before connecting an MCP client.".into());
+    }
+
+    let search_index = default_index_dir(&repo);
+    if TantivySearchIndex::exists(&search_index) {
+        checks.push(DoctorCheck {
+            name: "search",
+            status: CheckStatus::Pass,
+            message: format!("Tantivy index exists at {}", search_index.display()),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "search",
+            status: CheckStatus::Warn,
+            message: "Tantivy index is missing; regex fallback may be used".into(),
+        });
+        next_steps.push("Run `ok index .` to build the search index.".into());
+    }
+
+    match std::env::current_exe() {
+        Ok(path) => checks.push(DoctorCheck {
+            name: "binary",
+            status: CheckStatus::Pass,
+            message: format!("running {}", path.display()),
+        }),
+        Err(err) => checks.push(DoctorCheck {
+            name: "binary",
+            status: CheckStatus::Warn,
+            message: err.to_string(),
+        }),
+    }
+
+    next_steps.dedup();
+    let ok = checks
+        .iter()
+        .all(|check| !matches!(check.status, CheckStatus::Fail));
+    DoctorReport {
+        ok,
+        repo,
+        checks,
+        next_steps,
+    }
+}
+
+fn push_check(
+    checks: &mut Vec<DoctorCheck>,
+    name: &'static str,
+    passed: bool,
+    pass_message: String,
+    fail_message: String,
+) {
+    checks.push(DoctorCheck {
+        name,
+        status: if passed {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        message: if passed { pass_message } else { fail_message },
+    });
+}
+
+fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
+    let args = vec![
+        "mcp".to_string(),
+        "serve".to_string(),
+        "--repo".to_string(),
+        repo.display().to_string(),
+        "--read-only".to_string(),
+    ];
+    match client {
+        McpClient::Claude => serde_json::json!({
+            "client": "claude",
+            "instructions": "Add this entry to Claude Desktop's mcpServers config.",
+            "config": {
+                "mcpServers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args
+                    }
+                }
+            }
+        }),
+        McpClient::Cursor => serde_json::json!({
+            "client": "cursor",
+            "instructions": "Add this entry to Cursor's MCP config.",
+            "config": {
+                "open-kioku": {
+                    "command": "ok",
+                    "args": args
+                }
+            }
+        }),
+    }
+}
+
+fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if path.exists() {
+        Ok(path.canonicalize()?)
+    } else {
+        Ok(path)
+    }
 }
 
 fn open_store(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {

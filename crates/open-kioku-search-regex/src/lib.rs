@@ -185,3 +185,74 @@ fn lexical_score(text: &str, query: &str, generated: bool, vendor: bool) -> f32 
     }
     score
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{regex_search_file, search_chunks};
+    use open_kioku_core::{
+        CodeChunk, Confidence, EvidenceSourceType, File, FileId, Language, LineRange, RepositoryId,
+        Symbol, SymbolId, SymbolKind,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn lexical_search_returns_query_line_and_evidence() {
+        let file = File {
+            id: FileId::new("file-1"),
+            repository_id: RepositoryId::new("repo-1"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 42,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = Symbol {
+            id: SymbolId::new("symbol-1"),
+            name: "retry_import".into(),
+            qualified_name: "src::lib::retry_import".into(),
+            kind: SymbolKind::Function,
+            file_id: file.id.clone(),
+            range: Some(LineRange::single(2)),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let chunk = CodeChunk {
+            id: "chunk-1".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 1, end: 3 },
+            language: Language::Rust,
+            text: "use std::time::Duration;\npub fn retry_import() {}\n".into(),
+            symbol_id: Some(symbol.id.clone()),
+        };
+
+        let results = search_chunks(&[chunk], &[file], &[symbol], "retry", 10).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "pub fn retry_import() {}");
+        assert_eq!(results[0].line_range, Some(LineRange { start: 1, end: 3 }));
+        assert_eq!(results[0].match_reason, "lexical substring match");
+        assert_eq!(results[0].evidence.source, "open-kioku-search-regex");
+        assert_eq!(
+            results[0].symbol.as_ref().map(|s| s.name.as_str()),
+            Some("retry_import")
+        );
+    }
+
+    #[test]
+    fn regex_file_search_returns_line_level_evidence() {
+        let results = regex_search_file(
+            PathBuf::from("src/lib.rs"),
+            "fn first() {}\nfn retry_import() {}\n",
+            "retry_.*",
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].line_range, Some(LineRange::single(2)));
+        assert_eq!(results[0].snippet, "fn retry_import() {}");
+        assert_eq!(results[0].evidence.source_type, EvidenceSourceType::Regex);
+    }
+}

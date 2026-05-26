@@ -46,9 +46,16 @@ Rust, Python, TypeScript, JavaScript, Java, Go. Additional grammars can be added
 git clone https://github.com/shivyadavus/open-kioku.git
 cd open-kioku
 cargo install --path crates/open-kioku-cli
+ok --help
 ```
 
 Requires Rust stable (1.78+).
+
+Tagged releases build Linux and macOS `ok` binaries on GitHub Actions. Download the archive for your platform from the Releases page, put `ok` on your `PATH`, then run:
+
+```sh
+ok doctor /path/to/your/repo
+```
 
 ---
 
@@ -57,6 +64,7 @@ Requires Rust stable (1.78+).
 ```sh
 ok index /path/to/your/repo
 ok status
+ok doctor /path/to/your/repo
 ```
 
 The index is stored under `.ok/` in the target repo (SQLite + Tantivy). It is incremental: re-running `ok index` only processes changed files.
@@ -84,6 +92,12 @@ Or install from the Claude Code plugin marketplace:
 /plugin install open-kioku@open-kioku
 ```
 
+To print the MCP config snippet for your current repo:
+
+```sh
+ok mcp install claude --repo /absolute/path/to/your/repo
+```
+
 ---
 
 ## Connect to Cursor
@@ -97,6 +111,12 @@ Add to your Cursor MCP config:
     "args": ["mcp", "serve", "--repo", "${workspaceFolder}", "--read-only"]
   }
 }
+```
+
+To print the Cursor config snippet:
+
+```sh
+ok mcp install cursor --repo /absolute/path/to/your/repo
 ```
 
 ---
@@ -144,6 +164,7 @@ Key crates:
 - `open-kioku-cli` — the `ok` binary
 
 See [`docs/architecture.md`](docs/architecture.md) for the full data flow.
+See [`docs/roadmap.md`](docs/roadmap.md) for the product and engineering roadmap.
 
 ---
 
