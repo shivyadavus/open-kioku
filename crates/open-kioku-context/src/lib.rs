@@ -14,6 +14,7 @@ use open_kioku_tests::TestSelector;
 pub enum ContextPackFormat {
     Json,
     Markdown,
+    PromptText,
 }
 
 impl ContextPackFormat {
@@ -44,6 +45,25 @@ impl ContextPackFormat {
                     out.push_str(&format!("- {}\n", test.name));
                 }
 
+                Ok(out)
+            }
+            Self::PromptText => {
+                let mut out = String::new();
+                out.push_str(&format!("TASK: {}\n", pack.task));
+                for result in &pack.primary_files {
+                    out.push_str(&format!("[FILE: {}]\n", result.path.display()));
+                    if let Some(range) = &result.line_range {
+                        out.push_str(&format!("SYM: lines {}-{}\n", range.start, range.end));
+                    }
+                    out.push_str(&result.snippet);
+                    out.push_str("\n[END FILE]\n");
+                }
+                for result in &pack.supporting_files {
+                    out.push_str(&format!("IMPACT: {}\n", result.path.display()));
+                }
+                for test in &pack.validation_plan.tests {
+                    out.push_str(&format!("TEST: {}\n", test.name));
+                }
                 Ok(out)
             }
         }

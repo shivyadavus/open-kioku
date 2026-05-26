@@ -433,6 +433,34 @@ async fn main() -> anyhow::Result<()> {
                 "{:.2} files/sec",
                 manifest.file_count as f64 / duration.as_secs_f64()
             );
+
+            let index = open_kioku_search_tantivy::TantivySearchIndex::open_or_create(
+                open_kioku_search_tantivy::default_index_dir(&path),
+            )?;
+            let mut bm25_times = Vec::new();
+            use open_kioku_storage::SearchIndex;
+            for _ in 0..10 {
+                let s = std::time::Instant::now();
+                let _ = index.search("fn", 10);
+                bm25_times.push(s.elapsed());
+            }
+            bm25_times.sort();
+            let bm25_median = bm25_times[5];
+            println!("BM25 search: {:?} median", bm25_median);
+
+            let store = open_store(&path)?;
+            let files = store.list_files(usize::MAX, 0)?;
+            let chunks = store.all_chunks()?;
+            let symbols = store.list_symbols(None, usize::MAX, 0)?;
+            let mut regex_times = Vec::new();
+            for _ in 0..10 {
+                let s = std::time::Instant::now();
+                let _ = open_kioku_search_regex::search_chunks(&chunks, &files, &symbols, "fn", 10);
+                regex_times.push(s.elapsed());
+            }
+            regex_times.sort();
+            let regex_median = regex_times[5];
+            println!("Regex search: {:?} median", regex_median);
         }
         Command::Architecture { command } => {
             let store = open_store(&repo)?;
