@@ -159,6 +159,8 @@ enum McpCommand {
         allow_command: Vec<String>,
         #[arg(long, default_value_t = true)]
         deny_network: bool,
+        #[arg(long, default_value_t = false)]
+        hide_experimental: bool,
     },
 }
 
@@ -441,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
                 approval_required,
                 allow_command,
                 deny_network,
+                hide_experimental,
             } => {
                 let mut config = OkConfig::load_from_repo(&repo)?;
                 config.mcp.mode = if read_only && !allow_write {
@@ -451,6 +454,7 @@ async fn main() -> anyhow::Result<()> {
                 config.security.allow_write = allow_write;
                 config.security.approval_required = approval_required;
                 config.security.deny_network = deny_network;
+                config.mcp.hide_experimental = hide_experimental;
                 if !allow_command.is_empty() {
                     config.commands.allow = allow_command;
                 }

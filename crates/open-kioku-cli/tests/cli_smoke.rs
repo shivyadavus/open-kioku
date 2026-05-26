@@ -67,8 +67,8 @@ fn init_index_search_and_doctor_work_together() {
         command
     });
     assert!(doctor.contains("Open Kioku doctor"));
-    assert!(doctor.contains("PASS repo"));
-    assert!(doctor.contains("PASS index"));
+    assert!(doctor.contains("[ok]   repo"));
+    assert!(doctor.contains("[ok]   index"));
 }
 
 #[test]

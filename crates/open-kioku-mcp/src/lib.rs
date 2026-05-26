@@ -103,7 +103,13 @@ async fn dispatch(
                 "capabilities": {"tools": {}}
             }))
         }
-        "tools/list" => Ok(json!({"tools": tools(config)})),
+        "tools/list" => {
+            let (tool_list, unstable) = tools(config);
+            Ok(json!({
+                "tools": tool_list,
+                "_unstable_experimental_tools": unstable
+            }))
+        }
         "tools/call" => {
             let name = params
                 .get("name")
@@ -275,7 +281,7 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     )?))
 }
 
-fn tools(config: &OkConfig) -> Vec<Value> {
+fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Return the current index manifest (file count, symbol count, indexed_at)", json!({"type":"object","properties":{}})),
         ("list_files", "List all indexed files", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20, max 100)"}}})),
@@ -321,31 +327,46 @@ fn tools(config: &OkConfig) -> Vec<Value> {
         json!({"type":"object","required":["id","approved"],"properties":{"id":{"type":"string","description":"Patch plan ID"},"approved":{"type":"boolean","description":"Must be true to apply"}}}),
     )];
 
-    let mut tools: Vec<Value> = read_only_tools
-        .iter()
-        .map(|(name, description, schema)| {
-            let maturity = tool_maturity(name);
-            json!({
-                "name": name,
-                "description": description,
-                "maturity": maturity,
-                "inputSchema": schema
-            })
-        })
-        .collect();
+    let mut tools = Vec::new();
+    let mut unstable = Vec::new();
+
+    for (name, description, schema) in read_only_tools {
+        let maturity = tool_maturity(name);
+        if maturity == "experimental" {
+            unstable.push(name.to_string());
+            if config.mcp.hide_experimental {
+                continue;
+            }
+        }
+        tools.push(json!({
+            "name": name,
+            "description": description,
+            "maturity": maturity,
+            "experimental": maturity == "experimental",
+            "inputSchema": schema
+        }));
+    }
 
     if config.security.allow_write {
         for (name, description, schema) in write_tools {
             let maturity = tool_maturity(name);
+            if maturity == "experimental" {
+                unstable.push(name.to_string());
+                if config.mcp.hide_experimental {
+                    continue;
+                }
+            }
             tools.push(json!({
                 "name": name,
                 "description": description,
                 "maturity": maturity,
+                "experimental": maturity == "experimental",
                 "inputSchema": schema
             }));
         }
     }
-    tools
+    
+    (tools, unstable)
 }
 
 fn tool_maturity(name: &str) -> &'static str {
