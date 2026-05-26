@@ -47,7 +47,12 @@ pub fn parse_scip_index(path: &Path) -> Result<ScipIndex> {
             });
             symbols.push(Symbol {
                 id: symbol_id,
-                name: occurrence.symbol.split('/').last().unwrap_or(&occurrence.symbol).into(),
+                name: occurrence
+                    .symbol
+                    .split('/')
+                    .last()
+                    .unwrap_or(&occurrence.symbol)
+                    .into(),
                 kind: SymbolKind::Function,
                 file_id: file_id.clone(),
                 range: LineRange::single(occurrence.range.first().copied().unwrap_or(0) as u32 + 1),
@@ -58,7 +63,11 @@ pub fn parse_scip_index(path: &Path) -> Result<ScipIndex> {
     }
     symbols.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     symbols.dedup_by(|a, b| a.id == b.id);
-    Ok(ScipIndex { files, symbols, chunks })
+    Ok(ScipIndex {
+        files,
+        symbols,
+        chunks,
+    })
 }
 
 pub struct ScipIndex {
