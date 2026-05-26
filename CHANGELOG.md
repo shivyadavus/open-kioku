@@ -8,6 +8,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [0.1.0] — 2026-05-25
 
 ### Added
+- **Enhanced health checks** via `ok doctor` with Rust toolchain, Tree-sitter parsers, and MCP initialize checks
+- **Signed release binaries** via GitHub Actions with SHA256 checksums and cross-compilation for musl/darwin
+- **Fixture repositories** (Rust, TypeScript, Python, Go) and integration tests under `open-kioku-tests`
+- **Search evidence wiring** — search results now provide explanatory evidence strings and normalized confidence scores
+- **Experimental tool labeling** — `tools/list` differentiates stable vs experimental tools with `--hide-experimental` flag
+- **Write safety** — `apply_patch` handler gated behind `OPEN_KIOKU_ALLOW_WRITE=1` environment variable
+- **Context export formats** — `build_context_pack` supports JSON, Markdown, and PromptText formats
+- **Performance benchmarks** — `ok bench` CLI command and criterion benchmarks under `benches/`
 - **MCP server** (`ok mcp serve`) — full Model Context Protocol implementation over stdio with 35+ tools covering search, symbol navigation, impact analysis, architecture detection, and patch planning
 - **BM25 / Tantivy search index** — disk-backed full-text search across all indexed code chunks (`search_code`, `regex_search`, `semantic_search`)
 - **Tree-sitter parser** — precise symbol extraction for Rust, Java, Python, TypeScript, and Go (`get_definition`, `get_references`, `get_callers`, `get_callees`, `get_implementations`)
