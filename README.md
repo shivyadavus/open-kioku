@@ -69,6 +69,14 @@ ok doctor /path/to/your/repo
 
 The index is stored under `.ok/` in the target repo (SQLite + Tantivy). It is incremental: re-running `ok index` only processes changed files.
 
+To try Open Kioku without preparing a repo:
+
+```sh
+ok demo
+```
+
+This creates `./open-kioku-demo`, indexes it, and prints example search, symbol, impact, context, and MCP setup commands.
+
 ---
 
 ## Connect to Claude Code

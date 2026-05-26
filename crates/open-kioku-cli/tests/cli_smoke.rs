@@ -89,3 +89,30 @@ fn mcp_install_prints_client_config() {
     assert!(output.contains("\"command\": \"ok\""));
     assert!(output.contains("--read-only"));
 }
+
+#[test]
+fn demo_creates_indexed_sample_repo() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    let output = run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    assert!(output.contains("Demo repo ready"));
+    assert!(repo.join("ok.toml").exists());
+    assert!(repo.join(".ok/index.sqlite").exists());
+
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("issue_token");
+        command
+    });
+    assert!(search.contains("src/auth.rs"));
+}
