@@ -7,7 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+assert_cmd = "2.1.2"
 open-kioku-core = { path = "../open-kioku-core" }
 open-kioku-errors = { path = "../open-kioku-errors" }
 open-kioku-storage = { path = "../open-kioku-storage" }
+rusqlite.workspace = true
 

@@ -1028,6 +1028,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

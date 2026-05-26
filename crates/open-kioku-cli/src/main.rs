@@ -259,12 +259,17 @@ async fn main() -> anyhow::Result<()> {
                 println!("Open Kioku doctor for {}", report.repo.display());
                 for check in &report.checks {
                     let marker = match check.status {
-                        CheckStatus::Pass => "PASS",
-                        CheckStatus::Warn => "WARN",
-                        CheckStatus::Fail => "FAIL",
+                        CheckStatus::Pass => "[ok]",
+                        CheckStatus::Warn => "[warn]",
+                        CheckStatus::Fail => "[fail]",
                     };
-                    println!("{marker} {:<16} {}", check.name, check.message);
+                    println!("{marker:<6} {:<16} {}", check.name, check.message);
                 }
+                let passes = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Pass)).count();
+                let warns = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Warn)).count();
+                let fails = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Fail)).count();
+                println!("\n{} checks passed, {} warnings, {} failures", passes, warns, fails);
+                
                 if !report.next_steps.is_empty() {
                     println!("\nNext steps:");
                     for step in &report.next_steps {
@@ -461,40 +466,60 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
 
-    push_check(
-        &mut checks,
-        "repo",
-        repo.is_dir(),
-        format!("repository path exists: {}", repo.display()),
-        format!("repository path does not exist: {}", repo.display()),
-    );
-
-    let config_path = repo.join("ok.toml");
-    if config_path.exists() {
-        match OkConfig::load_from_repo(&repo) {
-            Ok(_) => checks.push(DoctorCheck {
-                name: "config",
-                status: CheckStatus::Pass,
-                message: format!("loaded {}", config_path.display()),
-            }),
-            Err(err) => {
+    // 1. Rust toolchain version
+    match std::process::Command::new("rustc").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version_str = String::from_utf8_lossy(&output.stdout);
+            let version = version_str.trim().split_whitespace().nth(1).unwrap_or("");
+            if let Some(minor) = version.split('.').nth(1).and_then(|s| s.parse::<u32>().ok()) {
+                if minor < 75 {
+                    checks.push(DoctorCheck {
+                        name: "rustc",
+                        status: CheckStatus::Warn,
+                        message: format!("found rustc {version}, recommend >= 1.75"),
+                    });
+                } else {
+                    checks.push(DoctorCheck {
+                        name: "rustc",
+                        status: CheckStatus::Pass,
+                        message: format!("found rustc {version}"),
+                    });
+                }
+            } else {
                 checks.push(DoctorCheck {
-                    name: "config",
-                    status: CheckStatus::Fail,
-                    message: err.to_string(),
+                    name: "rustc",
+                    status: CheckStatus::Pass,
+                    message: format!("found {version_str}"),
                 });
-                next_steps.push("Fix ok.toml or regenerate it with `ok init .`.".into());
             }
         }
-    } else {
-        checks.push(DoctorCheck {
-            name: "config",
-            status: CheckStatus::Warn,
-            message: "ok.toml is missing; defaults will be used".into(),
-        });
-        next_steps.push("Run `ok init .` to create ok.toml and .ok/.".into());
+        _ => {
+            checks.push(DoctorCheck {
+                name: "rustc",
+                status: CheckStatus::Warn,
+                message: "rustc not found in PATH".into(),
+            });
+        }
     }
 
+    // 2. .ok/ directory
+    let ok_dir = repo.join(".ok");
+    if ok_dir.is_dir() {
+        checks.push(DoctorCheck {
+            name: "repo",
+            status: CheckStatus::Pass,
+            message: format!("found .ok directory at {}", ok_dir.display()),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "repo",
+            status: CheckStatus::Fail,
+            message: format!(".ok directory missing at {}", ok_dir.display()),
+        });
+        next_steps.push("Run `ok init .` to create the configuration and data directory.".into());
+    }
+
+    // 3. .ok/index.sqlite
     let index_path = repo.join(".ok/index.sqlite");
     if index_path.exists() {
         match SqliteStore::open(&index_path).and_then(|store| store.manifest()) {
@@ -526,39 +551,129 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     } else {
         checks.push(DoctorCheck {
             name: "index",
-            status: CheckStatus::Warn,
+            status: CheckStatus::Fail,
             message: ".ok/index.sqlite is missing".into(),
         });
         next_steps.push("Run `ok index .` before connecting an MCP client.".into());
     }
 
-    let search_index = default_index_dir(&repo);
-    if TantivySearchIndex::exists(&search_index) {
+    // 4. ok.toml
+    let config_path = repo.join("ok.toml");
+    if config_path.exists() {
+        match OkConfig::load_from_repo(&repo) {
+            Ok(_) => checks.push(DoctorCheck {
+                name: "config",
+                status: CheckStatus::Pass,
+                message: format!("loaded {}", config_path.display()),
+            }),
+            Err(err) => {
+                checks.push(DoctorCheck {
+                    name: "config",
+                    status: CheckStatus::Fail,
+                    message: err.to_string(),
+                });
+                next_steps.push("Fix ok.toml or regenerate it with `ok init .`.".into());
+            }
+        }
+    } else {
         checks.push(DoctorCheck {
-            name: "search",
+            name: "config",
+            status: CheckStatus::Warn,
+            message: "ok.toml is missing; defaults will be used".into(),
+        });
+        next_steps.push("Run `ok init .` to create ok.toml.".into());
+    }
+
+    // 5. Tree-sitter grammars
+    let mut detected_languages = Vec::new();
+    let walker = walkdir::WalkDir::new(&repo)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            name != ".ok" && name != "node_modules" && name != "target"
+        });
+    for entry in walker.filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                match ext {
+                    "rs" => detected_languages.push("Rust"),
+                    "ts" | "tsx" => detected_languages.push("TypeScript"),
+                    "py" => detected_languages.push("Python"),
+                    "go" => detected_languages.push("Go"),
+                    "java" => detected_languages.push("Java"),
+                    "js" | "jsx" => detected_languages.push("JavaScript"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    detected_languages.sort();
+    detected_languages.dedup();
+    if detected_languages.is_empty() {
+        checks.push(DoctorCheck {
+            name: "grammars",
             status: CheckStatus::Pass,
-            message: format!("Tantivy index exists at {}", search_index.display()),
+            message: "no known source files detected".into(),
         });
     } else {
         checks.push(DoctorCheck {
-            name: "search",
-            status: CheckStatus::Warn,
-            message: "Tantivy index is missing; regex fallback may be used".into(),
+            name: "grammars",
+            status: CheckStatus::Pass,
+            message: format!("parsers available for {}", detected_languages.join(", ")),
         });
-        next_steps.push("Run `ok index .` to build the search index.".into());
     }
 
-    match std::env::current_exe() {
-        Ok(path) => checks.push(DoctorCheck {
-            name: "binary",
-            status: CheckStatus::Pass,
-            message: format!("running {}", path.display()),
-        }),
-        Err(err) => checks.push(DoctorCheck {
-            name: "binary",
-            status: CheckStatus::Warn,
-            message: err.to_string(),
-        }),
+    // 6. MCP server check
+    if let Ok(exe) = std::env::current_exe() {
+        use std::process::{Command, Stdio};
+        use std::io::Write;
+        let child = Command::new(&exe)
+            .args(["mcp", "serve", "--repo", repo.to_str().unwrap_or(".")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+
+        if let Ok(mut child_proc) = child {
+            let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
+            if let Some(mut stdin) = child_proc.stdin.take() {
+                let _ = writeln!(stdin, "{}", request);
+            }
+            let mut result_buf = String::new();
+            if let Some(stdout) = child_proc.stdout.take() {
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(stdout);
+                let _ = reader.read_line(&mut result_buf);
+            }
+            let _ = child_proc.kill();
+            
+            if result_buf.contains("\"name\":\"open-kioku\"") {
+                checks.push(DoctorCheck {
+                    name: "mcp",
+                    status: CheckStatus::Pass,
+                    message: "server responded to initialize request".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "mcp",
+                    status: CheckStatus::Fail,
+                    message: "server failed to respond correctly".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "mcp",
+                status: CheckStatus::Fail,
+                message: "failed to spawn mcp server process".into(),
+            });
+        }
+    } else {
+         checks.push(DoctorCheck {
+             name: "mcp",
+             status: CheckStatus::Warn,
+             message: "could not determine current executable to test server".into(),
+         });
     }
 
     next_steps.dedup();
@@ -710,23 +825,6 @@ fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     Ok(snapshot)
 }
 
-fn push_check(
-    checks: &mut Vec<DoctorCheck>,
-    name: &'static str,
-    passed: bool,
-    pass_message: String,
-    fail_message: String,
-) {
-    checks.push(DoctorCheck {
-        name,
-        status: if passed {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Fail
-        },
-        message: if passed { pass_message } else { fail_message },
-    });
-}
 
 fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
     let args = vec![

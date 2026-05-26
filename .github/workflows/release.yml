@@ -3,7 +3,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
@@ -14,43 +14,77 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: ok-linux-x86_64
-            archive: ok-linux-x86_64.tar.gz
+            target: x86_64-unknown-linux-musl
+            binary_name: ok-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            binary_name: ok-linux-arm64
           - os: macos-latest
-            artifact: ok-macos-arm64
-            archive: ok-macos-arm64.tar.gz
+            target: x86_64-apple-darwin
+            binary_name: ok-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: ok-macos-arm64
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-      - run: cargo build --release -p open-kioku-cli
+          targets: ${{ matrix.target }}
+          
+      - name: Install cross (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo install cross --locked
+        
+      - name: Build binary
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cross build --release --target ${{ matrix.target }} -p open-kioku-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
+          fi
+          
       - name: Package binary
         shell: bash
         run: |
-          mkdir -p dist/${{ matrix.artifact }}
-          cp target/release/ok dist/${{ matrix.artifact }}/ok
-          cp README.md LICENSE NOTICE dist/${{ matrix.artifact }}/
-          tar -C dist -czf dist/${{ matrix.archive }} ${{ matrix.artifact }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
+          strip dist/${{ matrix.binary_name }}
+          cd dist
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            shasum -a 256 ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.sha256
+          else
+            sha256sum ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.sha256
+          fi
+          
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}
-          path: dist/${{ matrix.archive }}
+          name: ${{ matrix.binary_name }}-artifact
+          path: dist/*
 
   publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+          
+      - name: Extract Changelog
+        id: changelog
         run: |
-          gh release create "${{ github.ref_name }}" dist/*.tar.gz \
-            --repo "${{ github.repository }}" \
-            --title "Open Kioku ${{ github.ref_name }}" \
-            --notes "Release binaries for the ok CLI."
+          # Extract the section for the current tag (e.g., v0.1.0 -> 0.1.0)
+          VERSION=${GITHUB_REF_NAME#v}
+          awk "/^## \\\[$VERSION\\\]/ {flag=1; print; next} /^## \\\[/ {if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*
