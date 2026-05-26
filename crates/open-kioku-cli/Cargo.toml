@@ -37,4 +37,11 @@ tracing-subscriber.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+criterion = "0.5.1"
 tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"
+
+[[bench]]
+name = "index"
+harness = false

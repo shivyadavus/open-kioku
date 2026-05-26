@@ -82,6 +82,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ContextPackFormat::Json)]
         format: ContextPackFormat,
     },
+    Bench {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommand,
@@ -414,6 +418,15 @@ async fn main() -> anyhow::Result<()> {
             let pack = ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?;
             let rendered = format.render(&pack)?;
             println!("{}", rendered);
+        }
+        Command::Bench { repo } => {
+            let start = std::time::Instant::now();
+            let snapshot = index_repo(&repo)?;
+            let duration = start.elapsed();
+            
+            let manifest = snapshot.manifest;
+            println!("Indexed {} files and {} symbols in {:?}", manifest.file_count, manifest.symbol_count, duration);
+            println!("{:.2} files/sec", manifest.file_count as f64 / duration.as_secs_f64());
         }
         Command::Architecture { command } => {
             let store = open_store(&repo)?;
