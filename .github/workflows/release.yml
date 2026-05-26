@@ -25,6 +25,9 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: ok-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: ok-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -51,8 +54,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
-          strip dist/${{ matrix.binary_name }}
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/ok.exe dist/${{ matrix.binary_name }}
+          else
+            cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
+            strip dist/${{ matrix.binary_name }}
+          fi
           cd dist
           if [ "${{ runner.os }}" = "macOS" ]; then
             shasum -a 256 ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.sha256
@@ -88,3 +95,51 @@ jobs:
         with:
           body_path: release_notes.md
           files: dist/*
+
+  publish-npm:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          
+      - name: Inject binaries into NPM packages
+        run: |
+          # Copy binaries to their respective npm package folders
+          cp dist/ok-macos-x86_64 packages/npm-darwin-x64/ok
+          cp dist/ok-macos-arm64 packages/npm-darwin-arm64/ok
+          cp dist/ok-linux-x86_64 packages/npm-linux-x64/ok
+          cp dist/ok-linux-arm64 packages/npm-linux-arm64/ok
+          cp dist/ok-windows-x86_64.exe packages/npm-win32-x64/ok.exe
+          
+          # Make unix binaries executable
+          chmod +x packages/npm-darwin-x64/ok
+          chmod +x packages/npm-darwin-arm64/ok
+          chmod +x packages/npm-linux-x64/ok
+          chmod +x packages/npm-linux-arm64/ok
+
+      - name: Publish optional dependency packages
+        run: |
+          for package in npm-darwin-x64 npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
+            cd packages/$package
+            npm publish --access public
+            cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main wrapper package
+        run: |
+          cd packages/npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
