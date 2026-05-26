@@ -1,0 +1,11 @@
+---
+description: Require Open Kioku search before editing unfamiliar code
+globs: ["**/*.rs", "**/*.ts", "**/*.py", "**/*.go", "**/*.java", "**/*.js"]
+alwaysApply: false
+---
+
+# Search before editing
+
+Before modifying any source file that has not been read in this session, call `search_code` or `resolve_symbol` via Open Kioku to confirm the current state of the code.
+
+Do not assume file contents based on filenames or prior context. Codebase state may have changed.
