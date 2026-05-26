@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+# Auto-syncs marketplace manifest versions to Cargo.toml before every push.
+# Install once with: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+"$ROOT/scripts/sync-version.sh"
+
+# Stage any files the sync changed
+git diff --quiet -- \
+  .cursor-plugin/plugin.json \
+  .cursor-plugin/marketplace.json \
+  claude-plugin.json 2>/dev/null || {
+  echo ""
+  echo "Manifest versions were updated by sync-version.sh."
+  echo "Please stage and commit the changes before pushing:"
+  echo "  git add .cursor-plugin/plugin.json .cursor-plugin/marketplace.json"
+  echo "  git commit --amend --no-edit  # or a new commit"
+  exit 1
+}
