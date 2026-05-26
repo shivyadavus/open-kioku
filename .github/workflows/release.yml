@@ -32,24 +32,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-          
+
       - name: Install cross (Linux only)
         if: runner.os == 'Linux'
+        shell: bash
         run: cargo install cross --locked
-        
+
       - name: Build binary
+        shell: bash
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
             cross build --release --target ${{ matrix.target }} -p open-kioku-cli
           else
             cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
           fi
-          
+
       - name: Package binary
         shell: bash
         run: |
@@ -66,7 +68,7 @@ jobs:
           else
             sha256sum ${{ matrix.binary_name }} > ${{ matrix.binary_name }}.sha256
           fi
-          
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.binary_name }}-artifact
@@ -77,19 +79,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-          
+
       - name: Extract Changelog
         id: changelog
+        shell: bash
         run: |
-          # Extract the section for the current tag (e.g., v0.1.0 -> 0.1.0)
           VERSION=${GITHUB_REF_NAME#v}
-          awk "/^## \\\[$VERSION\\\]/ {flag=1; print; next} /^## \\\[/ {if(flag) exit} flag" CHANGELOG.md > release_notes.md
-          
+          awk "/^## \\[$VERSION\\]/ {flag=1; print; next} /^## \\[/ {if(flag) exit} flag" CHANGELOG.md > release_notes.md
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -101,33 +103,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
-          
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-          
+
       - name: Inject binaries into NPM packages
+        shell: bash
         run: |
-          # Copy binaries to their respective npm package folders
           cp dist/ok-macos-x86_64 packages/npm-darwin-x64/ok
           cp dist/ok-macos-arm64 packages/npm-darwin-arm64/ok
           cp dist/ok-linux-x86_64 packages/npm-linux-x64/ok
           cp dist/ok-linux-arm64 packages/npm-linux-arm64/ok
           cp dist/ok-windows-x86_64.exe packages/npm-win32-x64/ok.exe
-          
-          # Make unix binaries executable
           chmod +x packages/npm-darwin-x64/ok
           chmod +x packages/npm-darwin-arm64/ok
           chmod +x packages/npm-linux-x64/ok
           chmod +x packages/npm-linux-arm64/ok
 
       - name: Publish optional dependency packages
+        shell: bash
         run: |
           for package in npm-darwin-x64 npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
             cd packages/$package
@@ -138,6 +139,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main wrapper package
+        shell: bash
         run: |
           cd packages/npm
           npm publish --access public
