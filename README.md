@@ -274,13 +274,16 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the product and engineering roadmap
 
 ## Roadmap Highlights
 
-Current priorities:
+**Recently Completed:**
+- Interactive first-run onboarding (`ok demo`, `ok doctor`, MCP setup helpers).
+- Comprehensive benchmark output (`ok bench`) for index time, files per second, and BM25/Regex search latency.
+- Golden MCP response snapshots and multi-language integration test fixtures.
 
-- Keep first-run onboarding sharp (`ok demo`, `ok doctor`, MCP setup helpers).
-- Improve symbol/reference quality with stronger Tree-sitter, SCIP, and LSP paths.
-- Add golden MCP response snapshots and more fixture repos.
-- Keep stable tools small and reliable while experimental tools mature.
-- Add benchmark output for index time, files per second, and search latency.
+**Current priorities:**
+- Improve symbol/reference quality with stronger Tree-sitter, SCIP, and LSP integration.
+- Advance the maturity of experimental semantic search and impact analysis tools.
+- Add `cargo binstall` and Homebrew distribution paths.
+- Support remote backend indexes (e.g., PostgreSQL / RuVector integrations).
 
 Full plan: [`docs/roadmap.md`](docs/roadmap.md).
 
