@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ok-linux-x86_64
+            archive: ok-linux-x86_64.tar.gz
+          - os: macos-latest
+            artifact: ok-macos-arm64
+            archive: ok-macos-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cargo build --release -p open-kioku-cli
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp target/release/ok dist/${{ matrix.artifact }}/ok
+          cp README.md LICENSE NOTICE dist/${{ matrix.artifact }}/
+          tar -C dist -czf dist/${{ matrix.archive }} ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.tar.gz \
+            --repo "${{ github.repository }}" \
+            --title "Open Kioku ${{ github.ref_name }}" \
+            --notes "Release binaries for the ok CLI."
