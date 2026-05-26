@@ -7,15 +7,15 @@ use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ranking::rerank;
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::OcfStore;
+use open_kioku_storage::OkStore;
 use open_kioku_tests::TestSelector;
 
 pub struct ContextPackBuilder<'a> {
-    store: &'a dyn OcfStore,
+    store: &'a dyn OkStore,
 }
 
 impl<'a> ContextPackBuilder<'a> {
-    pub fn new(store: &'a dyn OcfStore) -> Self {
+    pub fn new(store: &'a dyn OkStore) -> Self {
         Self { store }
     }
 
@@ -42,7 +42,6 @@ impl<'a> ContextPackBuilder<'a> {
             empty_impact(task)
         };
 
-        // Populate dependency_edges from graph neighbors of primary file nodes.
         let mut dependency_edges: Vec<GraphEdge> = Vec::new();
         for result in primary.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
@@ -77,7 +76,12 @@ impl<'a> ContextPackBuilder<'a> {
             risk_report: impact.risk_report,
             recommended_change_boundary: ChangeBoundary {
                 allowed_files,
-                caution_files: impact.direct_impacts.iter().take(8).map(|result| result.path.clone()).collect(),
+                caution_files: impact
+                    .direct_impacts
+                    .iter()
+                    .take(8)
+                    .map(|result| result.path.clone())
+                    .collect(),
                 forbidden_files: Vec::new(),
             },
             validation_plan: ValidationPlan {
