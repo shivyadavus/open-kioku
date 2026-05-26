@@ -28,7 +28,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all
       - run: cargo test -p open-kioku-tests
-      
+
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -45,3 +45,12 @@ jobs:
         run: cargo audit --ignore RUSTSEC-2024-0437
       - name: cargo deny check
         run: cargo deny check
+
+  manifest-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate manifest versions match Cargo.toml
+        run: |
+          chmod +x scripts/validate-versions.sh
+          scripts/validate-versions.sh
