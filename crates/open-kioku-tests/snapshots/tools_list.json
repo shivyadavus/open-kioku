@@ -1,0 +1,635 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "_unstable_experimental_tools": [
+      "semantic_search",
+      "structural_search",
+      "get_implementations",
+      "get_callers",
+      "get_callees",
+      "explain_flow",
+      "map_stacktrace_to_code",
+      "find_errors_for_symbol",
+      "find_recent_failures"
+    ],
+    "tools": [
+      {
+        "description": "Return the current index manifest (file count, symbol count, indexed_at)",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "repo_status"
+      },
+      {
+        "description": "List all indexed files",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "description": "Max results (default 20, max 100)",
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "list_files"
+      },
+      {
+        "description": "List all languages detected in the indexed repository",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "list_languages"
+      },
+      {
+        "description": "List or search indexed symbols by name",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "description": "Symbol name filter (substring match)",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "list_symbols"
+      },
+      {
+        "description": "Search indexed symbols by name",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "search_symbols"
+      },
+      {
+        "description": "Detect high-level architectural components from file paths",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "detect_architecture"
+      },
+      {
+        "description": "Show architectural component boundaries",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "architecture_boundaries"
+      },
+      {
+        "description": "Report architecture boundary violations",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "architecture_violations"
+      },
+      {
+        "description": "Lexical BM25 search across all indexed code chunks",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search query",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "search_code"
+      },
+      {
+        "description": "Search indexed files by content",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "search_files"
+      },
+      {
+        "description": "Search indexed code using a regex pattern",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "pattern": {
+              "description": "Regex pattern",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "regex_search"
+      },
+      {
+        "description": "Semantic similarity search (falls back to lexical when semantic is disabled)",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "semantic_search"
+      },
+      {
+        "description": "Structural search across symbols and chunks",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "structural_search"
+      },
+      {
+        "description": "Find the definition of a symbol by name",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "query": {
+              "description": "Symbol name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "get_definition"
+      },
+      {
+        "description": "Find all references to a symbol",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "get_references"
+      },
+      {
+        "description": "Find implementations of an interface or trait",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "get_implementations"
+      },
+      {
+        "description": "Find all callers of a symbol",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "get_callers"
+      },
+      {
+        "description": "Find all symbols called by a given symbol",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "get_callees"
+      },
+      {
+        "description": "Get full context for a symbol (definition, file, range)",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "get_symbol_context"
+      },
+      {
+        "description": "Find the dependency path between two files or symbols",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "from": {
+              "description": "Source file path or symbol name",
+              "type": "string"
+            },
+            "to": {
+              "description": "Target file path or symbol name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "dependency_path"
+      },
+      {
+        "description": "Analyse the blast radius if a file is changed",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Relative file path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "impact_analysis"
+      },
+      {
+        "description": "List direct graph neighbours of a file or symbol node",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "node": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "module_dependencies"
+      },
+      {
+        "description": "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "description": "Output format",
+              "enum": [
+                "json",
+                "markdown"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "task": {
+              "description": "Natural language task description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "build_context_pack"
+      },
+      {
+        "description": "Return chunks and metadata for a single file",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Relative file path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "explain_file"
+      },
+      {
+        "description": "Return definition and context for a symbol",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "explain_symbol"
+      },
+      {
+        "description": "Summarise the high-level architecture",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "explain_flow"
+      },
+      {
+        "description": "Return an architecture summary",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "summarize_architecture"
+      },
+      {
+        "description": "Find tests that should be run when a file changes",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "find_tests_for_change"
+      },
+      {
+        "description": "Recommend a validation plan for a file change",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "recommend_validation_plan"
+      },
+      {
+        "description": "Explain test coverage for a file",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "explain_test_coverage"
+      },
+      {
+        "description": "Propose a patch plan for a task (read-only; does not write files)",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "task": {
+              "description": "Natural language description of the change",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "propose_patch"
+      },
+      {
+        "description": "Review a patch plan",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "task": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "review_patch"
+      },
+      {
+        "description": "Validate a patch plan against the index",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "task": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "validate_patch"
+      },
+      {
+        "description": "Map a stack trace to indexed source locations",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "stacktrace": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "map_stacktrace_to_code"
+      },
+      {
+        "description": "Find runtime errors associated with a symbol",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "find_errors_for_symbol"
+      },
+      {
+        "description": "Find recent runtime failures in the indexed repository",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "find_recent_failures"
+      }
+    ]
+  }
+}
