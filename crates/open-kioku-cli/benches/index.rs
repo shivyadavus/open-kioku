@@ -7,7 +7,7 @@ use tempfile::tempdir;
 fn benchmark_indexing(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexing");
     group.sample_size(10);
-    
+
     group.bench_function("index_sample_repo", |b| {
         b.iter_with_setup(
             || {
@@ -31,7 +31,7 @@ fn benchmark_indexing(c: &mut Criterion) {
             },
         );
     });
-    
+
     group.finish();
 }
 

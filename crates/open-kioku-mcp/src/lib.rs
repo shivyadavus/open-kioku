@@ -145,10 +145,16 @@ async fn dispatch(
         "regex_search" => search_tool(repo, store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
-            let pack = ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
-            let format_arg = params.get("format").and_then(Value::as_str).unwrap_or("json");
+            let pack =
+                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            let format_arg = params
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("json");
             if format_arg == "markdown" {
-                Ok(json!(open_kioku_context::ContextPackFormat::Markdown.render(&pack)?))
+                Ok(json!(
+                    open_kioku_context::ContextPackFormat::Markdown.render(&pack)?
+                ))
             } else {
                 Ok(json!(pack))
             }
@@ -261,14 +267,16 @@ fn call_tool<'a>(
     args: Value,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send + 'a>> {
     Box::pin(async move {
-        dispatch(repo, store, config, name, args).await.map(|value| {
-            let text = if let Some(s) = value.as_str() {
-                s.to_string()
-            } else {
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
-            };
-            json!({"content": [{"type": "text", "text": text}], "structuredContent": value})
-        })
+        dispatch(repo, store, config, name, args)
+            .await
+            .map(|value| {
+                let text = if let Some(s) = value.as_str() {
+                    s.to_string()
+                } else {
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+                };
+                json!({"content": [{"type": "text", "text": text}], "structuredContent": value})
+            })
     })
 }
 
