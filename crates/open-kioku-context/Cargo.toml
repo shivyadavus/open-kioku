@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+clap = { workspace = true, features = ["derive"] }
 open-kioku-core = { path = "../open-kioku-core" }
 open-kioku-errors = { path = "../open-kioku-errors" }
 open-kioku-impact = { path = "../open-kioku-impact" }
@@ -15,4 +16,5 @@ open-kioku-ranking = { path = "../open-kioku-ranking" }
 open-kioku-search-regex = { path = "../open-kioku-search-regex" }
 open-kioku-storage = { path = "../open-kioku-storage" }
 open-kioku-tests = { path = "../open-kioku-tests" }
+serde_json.workspace = true
 

@@ -145,9 +145,13 @@ async fn dispatch(
         "regex_search" => search_tool(repo, store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
-            Ok(json!(
-                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?
-            ))
+            let pack = ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            let format_arg = params.get("format").and_then(Value::as_str).unwrap_or("json");
+            if format_arg == "markdown" {
+                Ok(json!(open_kioku_context::ContextPackFormat::Markdown.render(&pack)?))
+            } else {
+                Ok(json!(pack))
+            }
         }
         "impact_analysis" => {
             let path = required_str(&params, "path")?;
@@ -258,7 +262,12 @@ fn call_tool<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send + 'a>> {
     Box::pin(async move {
         dispatch(repo, store, config, name, args).await.map(|value| {
-            json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())}], "structuredContent": value})
+            let text = if let Some(s) = value.as_str() {
+                s.to_string()
+            } else {
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+            };
+            json!({"content": [{"type": "text", "text": text}], "structuredContent": value})
         })
     })
 }
@@ -310,7 +319,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("dependency_path", "Find the dependency path between two files or symbols", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"Source file path or symbol name"},"to":{"type":"string","description":"Target file path or symbol name"}}})),
         ("impact_analysis", "Analyse the blast radius if a file is changed", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("module_dependencies", "List direct graph neighbours of a file or symbol node", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string"},"limit":{"type":"integer"}}})),
-        ("build_context_pack", "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"}}})),
+        ("build_context_pack", "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown"],"description":"Output format"}}})),
         ("explain_file", "Return chunks and metadata for a single file", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("explain_symbol", "Return definition and context for a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"}}})),
         ("explain_flow", "Summarise the high-level architecture", json!({"type":"object","properties":{}})),
