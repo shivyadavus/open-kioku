@@ -1,6 +1,6 @@
 use globset::{Glob, GlobSetBuilder};
-use open_kioku_config::OcfConfig;
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_config::OkConfig;
+use open_kioku_errors::{OkError, Result};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,11 +13,11 @@ pub enum ActionKind {
 }
 
 pub struct PolicyGate<'a> {
-    config: &'a OcfConfig,
+    config: &'a OkConfig,
 }
 
 impl<'a> PolicyGate<'a> {
-    pub fn new(config: &'a OcfConfig) -> Self {
+    pub fn new(config: &'a OkConfig) -> Self {
         Self { config }
     }
 
@@ -25,13 +25,13 @@ impl<'a> PolicyGate<'a> {
         match action {
             ActionKind::Read => Ok(()),
             ActionKind::WriteFile | ActionKind::ApplyPatch if !self.config.security.allow_write => {
-                Err(OcfError::PolicyDenied("file writes are disabled".into()))
+                Err(OkError::PolicyDenied("file writes are disabled".into()))
             }
-            ActionKind::RunCommand => Err(OcfError::PolicyDenied(
+            ActionKind::RunCommand => Err(OkError::PolicyDenied(
                 "shell execution requires explicit allowlisted command".into(),
             )),
             ActionKind::Network if self.config.security.deny_network => {
-                Err(OcfError::PolicyDenied("network access is denied".into()))
+                Err(OkError::PolicyDenied("network access is denied".into()))
             }
             _ => Ok(()),
         }
@@ -47,16 +47,13 @@ impl<'a> PolicyGate<'a> {
         {
             Ok(())
         } else {
-            Err(OcfError::PolicyDenied(format!(
+            Err(OkError::PolicyDenied(format!(
                 "command `{command}` is not in the allowlist"
             )))
         }
     }
 
     pub fn ensure_path_readable(&self, path: &Path) -> Result<()> {
-        // Use globset for correct glob matching rather than ad-hoc string ops.
-        // This correctly handles patterns like `.env`, `.env.local`,
-        // `.aws/**`, `**/secrets/**`, etc.
         let value = path.to_string_lossy();
         let mut builder = GlobSetBuilder::new();
         let mut any_pattern = false;
@@ -71,9 +68,9 @@ impl<'a> PolicyGate<'a> {
         }
         let set = builder
             .build()
-            .map_err(|err| OcfError::Config(err.to_string()))?;
+            .map_err(|err| OkError::Config(err.to_string()))?;
         if set.is_match(value.as_ref()) {
-            Err(OcfError::PolicyDenied(format!(
+            Err(OkError::PolicyDenied(format!(
                 "path `{}` is denied by configuration",
                 path.display()
             )))
@@ -86,10 +83,10 @@ impl<'a> PolicyGate<'a> {
 #[cfg(test)]
 mod tests {
     use super::{ActionKind, PolicyGate};
-    use open_kioku_config::OcfConfig;
+    use open_kioku_config::OkConfig;
 
-    fn config_write_allowed() -> OcfConfig {
-        let mut config = OcfConfig::default();
+    fn config_write_allowed() -> OkConfig {
+        let mut config = OkConfig::default();
         config.security.allow_write = true;
         config.security.deny_network = false;
         config.mcp.mode = "write".into();
@@ -98,14 +95,14 @@ mod tests {
 
     #[test]
     fn read_is_always_allowed() {
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_allowed(ActionKind::Read).is_ok());
     }
 
     #[test]
     fn write_denied_by_default() {
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_allowed(ActionKind::WriteFile).is_err());
         assert!(gate.ensure_allowed(ActionKind::ApplyPatch).is_err());
@@ -128,14 +125,14 @@ mod tests {
 
     #[test]
     fn network_denied_by_default() {
-        let config = OcfConfig::default();
+        let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_allowed(ActionKind::Network).is_err());
     }
 
     #[test]
     fn command_allowlist_exact_match() {
-        let config = OcfConfig::default(); // allows "cargo test" etc.
+        let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_command_allowed("cargo test").is_ok());
         assert!(gate.ensure_command_allowed("rm -rf /").is_err());
@@ -143,21 +140,13 @@ mod tests {
 
     #[test]
     fn path_denial_uses_globset() {
-        let config = OcfConfig::default(); // denies .env, .aws/**, .ssh/**, **/secrets/**
+        let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         use std::path::Path;
-        // Exact deny
         assert!(gate.ensure_path_readable(Path::new(".env")).is_err());
-        // Prefix glob
-        assert!(gate
-            .ensure_path_readable(Path::new(".aws/credentials"))
-            .is_err());
+        assert!(gate.ensure_path_readable(Path::new(".aws/credentials")).is_err());
         assert!(gate.ensure_path_readable(Path::new(".ssh/id_rsa")).is_err());
-        // Recursive glob
-        assert!(gate
-            .ensure_path_readable(Path::new("infra/secrets/db.yaml"))
-            .is_err());
-        // Safe paths allowed
+        assert!(gate.ensure_path_readable(Path::new("infra/secrets/db.yaml")).is_err());
         assert!(gate.ensure_path_readable(Path::new("src/main.rs")).is_ok());
         assert!(gate.ensure_path_readable(Path::new("README.md")).is_ok());
     }

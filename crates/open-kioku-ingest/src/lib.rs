@@ -1,12 +1,12 @@
 use chrono::Utc;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
-use open_kioku_config::OcfConfig;
+use open_kioku_config::OkConfig;
 use open_kioku_core::{
     CodeChunk, Confidence, EvidenceSourceType, File, FileId, Import, IndexManifest, Repository,
     RepositoryId, Symbol, SymbolOccurrence, TestTarget,
 };
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
     detect_language, is_supported_code, likely_generated, likely_vendor_path,
 };
@@ -46,7 +46,7 @@ impl Default for Indexer {
 }
 
 impl Indexer {
-    pub fn index_repo(&self, root: impl AsRef<Path>, config: &OcfConfig) -> Result<IndexSnapshot> {
+    pub fn index_repo(&self, root: impl AsRef<Path>, config: &OkConfig) -> Result<IndexSnapshot> {
         let root = root.as_ref().canonicalize()?;
         let repo_id = RepositoryId::new(stable_id(root.to_string_lossy().as_ref()));
         let files = self.scan_files(&root, config, &repo_id)?;
@@ -116,7 +116,7 @@ impl Indexer {
     fn scan_files(
         &self,
         root: &Path,
-        config: &OcfConfig,
+        config: &OkConfig,
         repository_id: &RepositoryId,
     ) -> Result<Vec<File>> {
         let max_size = config.max_file_size_bytes()?;
@@ -127,7 +127,7 @@ impl Indexer {
         builder.git_ignore(true).git_exclude(true).parents(true);
         let mut files = Vec::new();
         for entry in builder.build() {
-            let entry = entry.map_err(|err| OcfError::Index(err.to_string()))?;
+            let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
             if !entry
                 .file_type()
                 .map(|kind| kind.is_file())
@@ -142,7 +142,7 @@ impl Indexer {
             }
             let metadata = entry
                 .metadata()
-                .map_err(|err| OcfError::Index(err.to_string()))?;
+                .map_err(|err| OkError::Index(err.to_string()))?;
             if metadata.len() > max_size {
                 continue;
             }
@@ -174,11 +174,11 @@ impl Indexer {
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        builder.add(Glob::new(pattern).map_err(|err| OcfError::Config(err.to_string()))?);
+        builder.add(Glob::new(pattern).map_err(|err| OkError::Config(err.to_string()))?);
     }
     builder
         .build()
-        .map_err(|err| OcfError::Config(err.to_string()))
+        .map_err(|err| OkError::Config(err.to_string()))
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -192,11 +192,7 @@ fn stable_id(value: &str) -> String {
 }
 
 fn derive_occurrences(chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOccurrence> {
-    // Skip very short names to avoid O(n³) false-positive explosions on common
-    // identifiers like `s`, `i`, `n`, `id`, etc.
     const MIN_HEURISTIC_NAME_LEN: usize = 4;
-    // Build a word-boundary-like check: require the name to appear as a whole
-    // word token in the chunk text (preceded and followed by non-alphanumeric).
     let is_word_match = |text: &str, name: &str| -> bool {
         let mut start = 0;
         while let Some(pos) = text[start..].find(name) {
@@ -251,13 +247,13 @@ fn derive_occurrences(chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOcc
         (
             &a.symbol_id.0,
             &a.file_id.0,
-            a.range.as_ref().map(|range| range.start),
+            a.range.as_ref().map(|r| r.start),
             a.is_definition,
         )
             .cmp(&(
                 &b.symbol_id.0,
                 &b.file_id.0,
-                b.range.as_ref().map(|range| range.start),
+                b.range.as_ref().map(|r| r.start),
                 b.is_definition,
             ))
     });

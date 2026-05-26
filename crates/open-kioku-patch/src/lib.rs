@@ -1,18 +1,18 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
-use open_kioku_config::OcfConfig;
+use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{PatchId, PatchPlan};
-use open_kioku_errors::{OcfError, Result};
-use open_kioku_storage::OcfStore;
+use open_kioku_errors::{OkError, Result};
+use open_kioku_storage::OkStore;
 use sha2::{Digest, Sha256};
 
 pub struct PatchPlanner<'a> {
-    config: &'a OcfConfig,
-    store: &'a dyn OcfStore,
+    config: &'a OkConfig,
+    store: &'a dyn OkStore,
 }
 
 impl<'a> PatchPlanner<'a> {
-    pub fn new(config: &'a OcfConfig, store: &'a dyn OcfStore) -> Self {
+    pub fn new(config: &'a OkConfig, store: &'a dyn OkStore) -> Self {
         Self { config, store }
     }
 
@@ -45,11 +45,11 @@ impl<'a> PatchPlanner<'a> {
     pub fn apply(&self, _patch: &PatchPlan, approved: bool) -> Result<()> {
         PolicyGate::new(self.config).ensure_allowed(ActionKind::ApplyPatch)?;
         if self.config.security.approval_required && !approved {
-            return Err(OcfError::PolicyDenied(
+            return Err(OkError::PolicyDenied(
                 "patch application requires explicit approval".into(),
             ));
         }
-        Err(OcfError::Unsupported(
+        Err(OkError::Unsupported(
             "patch application is intentionally not implemented without a diff applicator".into(),
         ))
     }

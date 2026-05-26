@@ -1,6 +1,6 @@
 use open_kioku_actions::PolicyGate;
-use open_kioku_config::OcfConfig;
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_config::OkConfig;
+use open_kioku_errors::{OkError, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,7 +16,7 @@ pub struct CommandOutput {
 }
 
 pub async fn run_allowlisted(
-    config: &OcfConfig,
+    config: &OkConfig,
     command: &str,
     timeout_secs: u64,
 ) -> Result<CommandOutput> {
@@ -24,7 +24,7 @@ pub async fn run_allowlisted(
     let mut parts = command.split_whitespace();
     let program = parts
         .next()
-        .ok_or_else(|| OcfError::PolicyDenied("empty command".into()))?;
+        .ok_or_else(|| OkError::PolicyDenied("empty command".into()))?;
     let args = parts.collect::<Vec<_>>();
     let child = Command::new(program)
         .args(args)
