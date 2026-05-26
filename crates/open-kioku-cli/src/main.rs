@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::OcfConfig;
+use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -8,14 +8,14 @@ use open_kioku_ingest::Indexer;
 use open_kioku_patch::PatchPlanner;
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
-use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OcfStore, SearchIndex};
+use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "ok", about = "Open Code Factory code-intelligence platform")]
+#[command(name = "ok", about = "Open Kioku code-intelligence platform")]
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
@@ -154,16 +154,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Init { repo: command_repo } => {
             let repo = resolve_repo(&repo, command_repo);
             std::fs::create_dir_all(repo.join(".ok"))?;
-            OcfConfig::write_default(repo.join("ocf.toml"))?;
+            OkConfig::write_default(repo.join("ok.toml"))?;
             print_text_or_json(
                 cli.json,
-                "initialized Open Code Factory repository",
+                "initialized Open Kioku repository",
                 &serde_json::json!({"status":"initialized"}),
             )?;
         }
         Command::Index { repo: command_repo } => {
             let repo = resolve_repo(&repo, command_repo);
-            let config = OcfConfig::load_from_repo(&repo)?;
+            let config = OkConfig::load_from_repo(&repo)?;
             let snapshot = Indexer::default().index_repo(&repo, &config)?;
             let store = open_store(&repo)?;
             store.replace_index(IndexData {
@@ -218,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
                     manifest.file_count, manifest.symbol_count, manifest.indexed_at
                 );
             } else {
-                println!("No index found. Run `ocf index .`.");
+                println!("No index found. Run `ok index .`.");
             }
         }
         Command::Search { query, limit } => {
@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
             let store = open_store(&repo)?;
             output(
                 cli.json,
-                &ContextPackBuilder::new(&store as &dyn OcfStore).build(&task, 20)?,
+                &ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?,
                 || {},
             )?;
         }
@@ -331,9 +331,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Patch { command } => {
-            let config = OcfConfig::load_from_repo(&repo)?;
+            let config = OkConfig::load_from_repo(&repo)?;
             let store = open_store(&repo)?;
-            let planner = PatchPlanner::new(&config, &store as &dyn OcfStore);
+            let planner = PatchPlanner::new(&config, &store as &dyn OkStore);
             match command {
                 PatchCommand::Plan { task } => output(cli.json, &planner.plan(&task)?, || {})?,
                 PatchCommand::Review { id } => {
@@ -353,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 allow_command,
                 deny_network,
             } => {
-                let mut config = OcfConfig::load_from_repo(&repo)?;
+                let mut config = OkConfig::load_from_repo(&repo)?;
                 config.mcp.mode = if read_only && !allow_write {
                     "read-only".into()
                 } else {
