@@ -91,40 +91,54 @@ fn test_mcp_tools_list_snapshot() {
     std::fs::create_dir_all(&temp).unwrap();
 
     // Init & Index
-    Command::cargo_bin("ok").unwrap().current_dir(&temp).args(["init", "."]).assert().success();
-    Command::cargo_bin("ok").unwrap().current_dir(&temp).args(["index", "."]).assert().success();
+    Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["init", "."])
+        .assert()
+        .success();
+    Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["index", "."])
+        .assert()
+        .success();
 
     // MCP tools/list
     let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     let mut cmd = Command::cargo_bin("ok").unwrap();
-    let assert = cmd.current_dir(&temp)
+    let assert = cmd
+        .current_dir(&temp)
         .args(["mcp", "serve", "--repo", "."])
         .write_stdin(mcp_req)
         .assert()
         .success()
         .stdout(predicate::str::contains("search_code"));
-        
+
     let output = assert.get_output();
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     let json_lines: Vec<&str> = stdout_str.lines().filter(|l| l.starts_with("{")).collect();
     let last_json = json_lines.last().expect("should output JSON");
-    
+
     // Validate snapshot
     let snapshot_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots");
     std::fs::create_dir_all(&snapshot_dir).unwrap();
     let snapshot_file = snapshot_dir.join("tools_list.json");
-    
+
     // Ensure the output parses as JSON
     let parsed: serde_json::Value = serde_json::from_str(last_json).unwrap();
     let formatted = serde_json::to_string_pretty(&parsed).unwrap();
-    
+
     if snapshot_file.exists() {
         let expected = std::fs::read_to_string(&snapshot_file).unwrap();
-        assert_eq!(expected.trim(), formatted.trim(), "tools_list.json snapshot mismatch");
+        assert_eq!(
+            expected.trim(),
+            formatted.trim(),
+            "tools_list.json snapshot mismatch"
+        );
     } else {
         std::fs::write(&snapshot_file, formatted).unwrap();
     }
 
     std::fs::remove_dir_all(&temp).unwrap();
 }
-
