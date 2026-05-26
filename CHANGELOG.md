@@ -5,6 +5,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [0.1.4] — 2026-05-26
+
+### Fixed
+- Added npm package READMEs for the main wrapper package and platform-specific binary packages.
+
 ## [0.1.3] — 2026-05-26
 
 ### Fixed
@@ -42,5 +47,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[0.1.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.4
 [0.1.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.3
 [0.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.0
