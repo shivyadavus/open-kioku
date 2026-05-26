@@ -1,7 +1,7 @@
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_errors::{OkError, Result};
 
 pub fn ensure_enabled() -> Result<()> {
-    Err(OcfError::Unsupported(
+    Err(OkError::Unsupported(
         "LSP fallback is an extension boundary and is disabled by default".into(),
     ))
 }

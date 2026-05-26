@@ -1,7 +1,7 @@
-use open_kioku_errors::{OcfError, Result};
+use open_kioku_errors::{OkError, Result};
 
 pub async fn run() -> Result<()> {
-    Err(OcfError::Unsupported(
+    Err(OkError::Unsupported(
         "daemon mode is reserved for long-running indexing and watch services".into(),
     ))
 }
