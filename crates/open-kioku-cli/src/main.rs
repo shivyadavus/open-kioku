@@ -267,11 +267,26 @@ async fn main() -> anyhow::Result<()> {
                     };
                     println!("{marker:<6} {:<16} {}", check.name, check.message);
                 }
-                let passes = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Pass)).count();
-                let warns = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Warn)).count();
-                let fails = report.checks.iter().filter(|c| matches!(c.status, CheckStatus::Fail)).count();
-                println!("\n{} checks passed, {} warnings, {} failures", passes, warns, fails);
-                
+                let passes = report
+                    .checks
+                    .iter()
+                    .filter(|c| matches!(c.status, CheckStatus::Pass))
+                    .count();
+                let warns = report
+                    .checks
+                    .iter()
+                    .filter(|c| matches!(c.status, CheckStatus::Warn))
+                    .count();
+                let fails = report
+                    .checks
+                    .iter()
+                    .filter(|c| matches!(c.status, CheckStatus::Fail))
+                    .count();
+                println!(
+                    "\n{} checks passed, {} warnings, {} failures",
+                    passes, warns, fails
+                );
+
                 if !report.next_steps.is_empty() {
                     println!("\nNext steps:");
                     for step in &report.next_steps {
@@ -471,11 +486,18 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     let mut next_steps = Vec::new();
 
     // 1. Rust toolchain version
-    match std::process::Command::new("rustc").arg("--version").output() {
+    match std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => {
             let version_str = String::from_utf8_lossy(&output.stdout);
-            let version = version_str.trim().split_whitespace().nth(1).unwrap_or("");
-            if let Some(minor) = version.split('.').nth(1).and_then(|s| s.parse::<u32>().ok()) {
+            let version = version_str.split_whitespace().nth(1).unwrap_or("");
+            if let Some(minor) = version
+                .split('.')
+                .nth(1)
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 if minor < 75 {
                     checks.push(DoctorCheck {
                         name: "rustc",
@@ -590,12 +612,10 @@ fn doctor_report(repo: &Path) -> DoctorReport {
 
     // 5. Tree-sitter grammars
     let mut detected_languages = Vec::new();
-    let walker = walkdir::WalkDir::new(&repo)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            name != ".ok" && name != "node_modules" && name != "target"
-        });
+    let walker = walkdir::WalkDir::new(&repo).into_iter().filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        name != ".ok" && name != "node_modules" && name != "target"
+    });
     for entry in walker.filter_map(|e| e.ok()) {
         if entry.file_type().is_file() {
             let path = entry.path();
@@ -630,8 +650,8 @@ fn doctor_report(repo: &Path) -> DoctorReport {
 
     // 6. MCP server check
     if let Ok(exe) = std::env::current_exe() {
-        use std::process::{Command, Stdio};
         use std::io::Write;
+        use std::process::{Command, Stdio};
         let child = Command::new(&exe)
             .args(["mcp", "serve", "--repo", repo.to_str().unwrap_or(".")])
             .stdin(Stdio::piped())
@@ -651,7 +671,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                 let _ = reader.read_line(&mut result_buf);
             }
             let _ = child_proc.kill();
-            
+
             if result_buf.contains("\"name\":\"open-kioku\"") {
                 checks.push(DoctorCheck {
                     name: "mcp",
@@ -673,11 +693,11 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             });
         }
     } else {
-         checks.push(DoctorCheck {
-             name: "mcp",
-             status: CheckStatus::Warn,
-             message: "could not determine current executable to test server".into(),
-         });
+        checks.push(DoctorCheck {
+            name: "mcp",
+            status: CheckStatus::Warn,
+            message: "could not determine current executable to test server".into(),
+        });
     }
 
     next_steps.dedup();
@@ -829,7 +849,6 @@ fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     Ok(snapshot)
 }
 
-
 fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
     let args = vec![
         "mcp".to_string(),
@@ -841,7 +860,7 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
     match client {
         McpClient::Claude => serde_json::json!({
             "client": "claude",
-            "instructions": "Add this entry to Claude Desktop's mcpServers config.",
+            "instructions": "Add this entry to Claude Desktop's mcpServers config. To enable the apply_patch tool, add an \"env\" object with \"OPEN_KIOKU_ALLOW_WRITE\": \"true\".",
             "config": {
                 "mcpServers": {
                     "open-kioku": {
@@ -853,7 +872,7 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
         }),
         McpClient::Cursor => serde_json::json!({
             "client": "cursor",
-            "instructions": "Add this entry to Cursor's MCP config.",
+            "instructions": "Add this entry to Cursor's MCP config. To enable the apply_patch tool, set the environment variable OPEN_KIOKU_ALLOW_WRITE=true.",
             "config": {
                 "open-kioku": {
                     "command": "ok",

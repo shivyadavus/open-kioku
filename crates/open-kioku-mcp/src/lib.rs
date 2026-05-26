@@ -233,6 +233,11 @@ async fn dispatch(
         }
         "apply_patch" => {
             gate.ensure_allowed(ActionKind::ApplyPatch)?;
+            if std::env::var("OPEN_KIOKU_ALLOW_WRITE").unwrap_or_default() != "true" {
+                return Ok(
+                    json!({"denied": true, "reason": "apply_patch requires OPEN_KIOKU_ALLOW_WRITE=true in the server environment"}),
+                );
+            }
             Ok(
                 json!({"denied": true, "reason": "apply_patch requires explicit stored patch approval flow"}),
             )
@@ -365,7 +370,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
             }));
         }
     }
-    
+
     (tools, unstable)
 }
 

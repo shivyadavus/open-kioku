@@ -68,7 +68,7 @@ fn test_rust_fixture_lifecycle() {
     let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     let mut cmd = Command::cargo_bin("ok").unwrap();
     cmd.current_dir(fixture_dir(fixture))
-        .args(&["mcp", "serve", "--repo", "."])
+        .args(["mcp", "serve", "--repo", "."])
         .write_stdin(mcp_req)
         .assert()
         .success()

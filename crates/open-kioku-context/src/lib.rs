@@ -61,10 +61,13 @@ impl<'a> ContextPackBuilder<'a> {
                     id: EvidenceId::new(format!("context:{}", result.path.display())),
                     source: "open-kioku-search".into(),
                     source_type: EvidenceSourceType::Lexical,
-                    file_range: result.line_range.clone().map(|lr| open_kioku_core::FileRange {
-                        path: result.path.clone(),
-                        line_range: Some(lr),
-                    }),
+                    file_range: result
+                        .line_range
+                        .clone()
+                        .map(|lr| open_kioku_core::FileRange {
+                            path: result.path.clone(),
+                            line_range: Some(lr),
+                        }),
                     symbol_id: result.symbol.as_ref().map(|s| s.id.clone()),
                     confidence: Confidence::Medium,
                     message: msg.clone(),
