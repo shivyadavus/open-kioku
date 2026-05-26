@@ -4,9 +4,17 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-**Open Kioku** (記憶, Japanese for “Memory”) is a local MCP server that gives Claude and Cursor a precise, queryable index of your codebase — built from Tree-sitter ASTs and a BM25 full-text engine, running entirely on your machine.
+**Open Kioku** (記憶, Japanese for “Memory”) is a local code-intelligence server for AI coding agents. It gives Claude, Cursor, and other MCP clients a precise, queryable index of your codebase — built from Tree-sitter symbols, a SQLite dependency graph, and a Tantivy BM25 search index, running entirely on your machine.
 
 No cloud. No embeddings API. No guessing from a context window.
+
+```sh
+# Try it in under a minute
+cargo install --path crates/open-kioku-cli
+ok demo
+```
+
+`ok demo` creates a small sample repo, indexes it, and prints commands for search, symbol lookup, impact analysis, context packs, and MCP setup.
 
 ---
 
@@ -18,19 +26,31 @@ Open Kioku inverts this: **index first, query precisely**. The agent calls a too
 
 ---
 
-## What it does
+## Why Agents Use It
+
+Open Kioku turns a repo into an evidence-backed memory layer:
+
+- **Find facts before editing**: exact symbols, snippets, files, and line ranges.
+- **Build task context**: package relevant files, symbols, tests, and graph facts for an LLM.
+- **Estimate blast radius**: inspect dependencies and likely impacted files before a change.
+- **Stay local by default**: no outbound network calls from the MCP server.
+- **Expose trust signals**: every search result carries evidence, confidence, and match reason.
+
+---
+
+## What It Does
 
 | Tool | What it returns |
 |---|---|
 | `search_code` | BM25-ranked chunks matching a query across all indexed files |
 | `get_definition` | Exact file + line range where a symbol is defined (Tree-sitter) |
-| `get_references` | Every call site for a symbol |
-| `impact_analysis` | All files that transitively depend on a given file |
-| `find_tests_for_change` | Tests that cover a file, derived from the dependency graph |
+| `get_references` | Indexed references to a symbol |
+| `impact_analysis` | Direct and indirect files likely affected by a change |
+| `find_tests_for_change` | Test candidates derived from indexed metadata and graph facts |
 | `build_context_pack` | A JSON bundle of relevant files + symbols for a described task |
 | `detect_architecture` | Inferred project structure (monorepo, service boundaries, etc.) |
 
-Full tool list: [`skills/open-kioku/SKILL.md`](skills/open-kioku/SKILL.md)
+Full MCP tool reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Tools returned by `tools/list` include a `maturity` field (`stable` or `experimental`) so agents can prefer the reliable default surface.
 
 ---
 
@@ -51,31 +71,79 @@ ok --help
 
 Requires Rust stable (1.78+).
 
-Tagged releases build Linux and macOS `ok` binaries on GitHub Actions. Download the archive for your platform from the Releases page, put `ok` on your `PATH`, then run:
+Tagged releases build Linux and macOS `ok` binaries on GitHub Actions. Download the archive for your platform from the Releases page, put `ok` on your `PATH`, then verify:
 
 ```sh
-ok doctor /path/to/your/repo
+ok --help
 ```
 
 ---
 
-## Index your repo
+## Quickstart
 
-```sh
-ok index /path/to/your/repo
-ok status
-ok doctor /path/to/your/repo
-```
-
-The index is stored under `.ok/` in the target repo (SQLite + Tantivy). It is incremental: re-running `ok index` only processes changed files.
-
-To try Open Kioku without preparing a repo:
+### 1. Try the Built-In Demo
 
 ```sh
 ok demo
 ```
 
-This creates `./open-kioku-demo`, indexes it, and prints example search, symbol, impact, context, and MCP setup commands.
+This creates `./open-kioku-demo`, writes an `ok.toml`, builds the SQLite and Tantivy indexes, and prints commands like:
+
+```sh
+ok --repo ./open-kioku-demo search token
+ok --repo ./open-kioku-demo symbol find issue_token
+ok --repo ./open-kioku-demo impact --file src/auth.rs
+ok --repo ./open-kioku-demo context "change token expiry" --json
+ok mcp install claude --repo ./open-kioku-demo
+```
+
+Use a specific location or replace an existing demo:
+
+```sh
+ok demo --path /tmp/open-kioku-demo --force
+```
+
+### 2. Index Your Repo
+
+```sh
+ok init /path/to/your/repo
+ok index /path/to/your/repo
+ok doctor /path/to/your/repo
+ok status /path/to/your/repo
+```
+
+The index is stored under `.ok/` in the target repo:
+
+- `.ok/index.sqlite` stores files, symbols, chunks, imports, occurrences, and graph facts.
+- `.ok/search/tantivy` stores the BM25 lexical search index.
+- `ok.toml` controls indexing, security, MCP mode, and command allowlists.
+
+### 3. Check Local Health
+
+```sh
+ok doctor /path/to/your/repo
+```
+
+`ok doctor` verifies the repo path, config, metadata index, search index, and running binary. It prints concrete next steps when something is missing.
+
+### 4. Query from the CLI
+
+```sh
+# Full-text search
+ok --repo /path/to/your/repo search "token expiration handler"
+
+# Symbol lookup
+ok --repo /path/to/your/repo symbol find PolicyGate
+
+# Blast radius before a change
+ok --repo /path/to/your/repo impact --file crates/open-kioku-mcp/src/lib.rs
+
+# Tests that cover a file
+ok --repo /path/to/your/repo tests --changed crates/open-kioku-core/src/lib.rs
+
+# Context bundle for an LLM
+ok --repo /path/to/your/repo context "refactor the BM25 scorer to support phrase queries" --json
+```
 
 ---
 
@@ -106,6 +174,8 @@ To print the MCP config snippet for your current repo:
 ok mcp install claude --repo /absolute/path/to/your/repo
 ```
 
+That command does not modify your Claude config. It prints a safe copy-paste JSON snippet.
+
 ---
 
 ## Connect to Cursor
@@ -129,24 +199,41 @@ ok mcp install cursor --repo /absolute/path/to/your/repo
 
 ---
 
-## CLI usage
+## Stable vs Experimental MCP Tools
 
-```sh
-# Full-text search
-ok search "token expiration handler"
+Open Kioku deliberately labels tool maturity so agents can make conservative choices.
 
-# Symbol lookup
-ok symbol find PolicyGate
+Stable tools include:
 
-# Blast radius before a change
-ok impact --file crates/open-kioku-mcp/src/lib.rs
+- `search_code`, `search_files`, `regex_search`
+- `list_files`, `list_symbols`, `search_symbols`
+- `get_definition`, `get_references`, `get_symbol_context`
+- `dependency_path`, `impact_analysis`, `module_dependencies`
+- `build_context_pack`, `explain_file`, `explain_symbol`
+- `find_tests_for_change`, `recommend_validation_plan`
+- `detect_architecture`, `architecture_boundaries`, `architecture_violations`
 
-# Tests that cover a file
-ok tests --changed crates/open-kioku-core/src/index.rs
+Experimental tools are exposed for early workflows but may use heuristic or fallback behavior:
 
-# Context bundle for a task (outputs JSON for piping to an LLM)
-ok context "refactor the BM25 scorer to support phrase queries" --json
-```
+- `semantic_search`
+- `structural_search`
+- `get_implementations`, `get_callers`, `get_callees`
+- runtime integrations such as stacktrace and recent failure mapping
+
+See [`docs/mcp-tools.md`](docs/mcp-tools.md) for the full list.
+
+---
+
+## What Was Recently Added
+
+- `ok` is now the installed binary name.
+- `ok doctor` provides local health checks.
+- `ok demo` creates and indexes a sample repo for instant evaluation.
+- `ok mcp install claude|cursor` prints copy-paste MCP config.
+- CLI smoke tests cover the first-run flow.
+- Search tests assert snippets, evidence, confidence, symbols, and match reasons.
+- MCP `tools/list` now includes `maturity`.
+- Tagged releases build Linux and macOS binary archives.
 
 ---
 
@@ -173,6 +260,20 @@ Key crates:
 
 See [`docs/architecture.md`](docs/architecture.md) for the full data flow.
 See [`docs/roadmap.md`](docs/roadmap.md) for the product and engineering roadmap.
+
+---
+
+## Roadmap Highlights
+
+Current priorities:
+
+- Keep first-run onboarding sharp (`ok demo`, `ok doctor`, MCP setup helpers).
+- Improve symbol/reference quality with stronger Tree-sitter, SCIP, and LSP paths.
+- Add golden MCP response snapshots and more fixture repos.
+- Keep stable tools small and reliable while experimental tools mature.
+- Add benchmark output for index time, files per second, and search latency.
+
+Full plan: [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
