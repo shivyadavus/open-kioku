@@ -3,447 +3,1087 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Open Kioku - The Local-First Code Intelligence MCP</title>
+    <meta name="description" content="Open Kioku is a local-first code intelligence MCP that gives AI coding agents fast search, symbol context, impact analysis, and validation plans without sending your code to a cloud service.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
+    <title>Open Kioku - Local-First Code Intelligence for AI Agents</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Outfit:wght@300;400;600;800&display=swap');
+        @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap");
 
         :root {
-            /* Premium Dark Theme Palette */
-            --bg-deep: #0B0C10;
-            --bg-panel: rgba(22, 23, 28, 0.65);
-            --border-glow: rgba(255, 255, 255, 0.08);
-            --primary-accent: #6C5CE7;
-            --secondary-accent: #00CEC9;
-            --text-main: #FFFFFF;
-            --text-muted: #A0A5B5;
-            
-            /* Terminal Syntax Colors */
-            --term-green: #00E676;
-            --term-blue: #74B9FF;
-            --term-yellow: #FDCB6E;
-            --term-red: #FF7675;
-            --term-purple: #A29BFE;
-            --term-comment: #636E72;
-            --term-bg: rgba(10, 11, 16, 0.85);
+            color-scheme: dark;
+            --bg: #080a0d;
+            --bg-raised: rgba(16, 20, 24, 0.88);
+            --bg-panel: rgba(21, 26, 31, 0.82);
+            --bg-soft: rgba(255, 255, 255, 0.055);
+            --border: rgba(233, 240, 247, 0.12);
+            --border-strong: rgba(233, 240, 247, 0.22);
+            --text: #f5f7fa;
+            --muted: #a8b0ba;
+            --subtle: #737d89;
+            --green: #22c55e;
+            --cyan: #2dd4bf;
+            --amber: #f59e0b;
+            --rose: #fb7185;
+            --ink: #101418;
+            --terminal: rgba(5, 8, 12, 0.94);
+            --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
         }
 
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
-            -webkit-font-smoothing: antialiased;
         }
 
-        body {
-            font-family: 'Outfit', sans-serif;
-            background-color: var(--bg-deep);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            overflow-x: hidden;
-            position: relative;
-        }
-
-        /* Ambient Glowing Background Grid */
-        .ambient-bg {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background-image: 
-                linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px),
-                linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px);
-            background-size: 50px 50px;
-            z-index: -2;
-            perspective: 1000px;
-        }
-
-        .ambient-glow {
-            position: fixed;
-            width: 800px;
-            height: 800px;
-            background: radial-gradient(circle, rgba(108, 92, 231, 0.15) 0%, rgba(0, 206, 201, 0.05) 40%, transparent 70%);
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            z-index: -1;
-            filter: blur(60px);
-            animation: pulseGlow 8s ease-in-out infinite alternate;
-        }
-
-        @keyframes pulseGlow {
-            0% { transform: translate(-50%, -50%) scale(1); opacity: 0.8; }
-            100% { transform: translate(-50%, -50%) scale(1.1); opacity: 1; }
-        }
-
-        .container {
-            width: 100%;
-            max-width: 1000px;
-            padding: 2rem;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            z-index: 10;
-        }
-
-        /* Hero Section */
-        .hero {
-            text-align: center;
-            margin-bottom: 3.5rem;
-            animation: fadeDown 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-            opacity: 0;
-            transform: translateY(-20px);
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 0.4rem 1.2rem;
-            background: rgba(108, 92, 231, 0.1);
-            border: 1px solid rgba(108, 92, 231, 0.3);
-            border-radius: 100px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            color: var(--term-purple);
-            margin-bottom: 1.5rem;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-
-        .hero h1 {
-            font-size: clamp(2.5rem, 6vw, 4.5rem);
-            font-weight: 800;
-            line-height: 1.1;
-            margin-bottom: 1.2rem;
-            letter-spacing: -0.03em;
-        }
-
-        .text-gradient {
-            background: linear-gradient(135deg, #FFFFFF 0%, #A0A5B5 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        
-        .text-gradient-accent {
-            background: linear-gradient(135deg, var(--secondary-accent) 0%, var(--primary-accent) 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-
-        .hero p {
-            font-size: 1.25rem;
-            color: var(--text-muted);
-            max-width: 650px;
-            margin: 0 auto;
-            font-weight: 300;
-            line-height: 1.6;
-        }
-
-        /* Ultra Premium Terminal */
-        .terminal-wrapper {
-            width: 100%;
-            height: 520px;
-            background: var(--term-bg);
-            border-radius: 16px;
-            box-shadow: 
-                0 30px 60px rgba(0, 0, 0, 0.6),
-                0 0 0 1px var(--border-glow),
-                inset 0 1px 0 rgba(255, 255, 255, 0.1);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            animation: scaleUp 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.3s forwards;
-            opacity: 0;
-            transform: scale(0.95) translateY(20px);
-        }
-
-        .terminal-header {
-            background: rgba(0, 0, 0, 0.4);
-            padding: 1.2rem 1.5rem;
-            display: flex;
-            align-items: center;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            position: relative;
-        }
-
-        .traffic-lights {
-            display: flex;
-            gap: 8px;
-        }
-
-        .traffic-light {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            box-shadow: inset 0 1px 2px rgba(255,255,255,0.1);
-        }
-
-        .red { background-color: #FF5F56; }
-        .yellow { background-color: #FFBD2E; }
-        .green { background-color: #27C93F; }
-
-        .terminal-title {
-            position: absolute;
-            left: 50%;
-            transform: translateX(-50%);
-            color: var(--text-muted);
-            font-size: 0.85rem;
-            font-family: 'Fira Code', monospace;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .terminal-title svg {
-            width: 14px; height: 14px;
-            fill: currentColor;
-        }
-
-        .terminal-body {
-            padding: 1.5rem 2rem;
-            font-family: 'Fira Code', monospace;
-            font-size: 0.95rem;
-            line-height: 1.6;
-            color: var(--text-main);
-            flex-grow: 1;
-            overflow-y: auto;
+        html {
             scroll-behavior: smooth;
         }
 
-        /* Custom Scrollbar */
-        .terminal-body::-webkit-scrollbar { width: 6px; }
-        .terminal-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-        .terminal-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
-
-        /* Terminal Typograpy & Colors */
-        .line { display: block; min-height: 1.5rem; margin-bottom: 4px; opacity: 0; animation: fadeIn 0.3s forwards; }
-        .prompt { color: var(--term-green); font-weight: 600; margin-right: 8px; }
-        .path { color: var(--term-blue); font-weight: 500; margin-right: 8px; }
-        .command { color: var(--text-main); text-shadow: 0 0 5px rgba(255,255,255,0.2); }
-        .output { color: #C0C5CE; margin-top: 6px; margin-bottom: 16px; font-size: 0.9rem; }
-        .comment { color: var(--term-comment); font-style: italic; }
-        .bold { font-weight: 600; color: #FFF; }
-        
-        /* Specialized Output Tokens */
-        .ok-badge { background: rgba(0,230,118,0.15); color: var(--term-green); padding: 1px 6px; border-radius: 4px; font-weight: bold; margin-right: 8px;}
-        .highlight { color: var(--term-purple); font-weight: 600;}
-        .time { color: var(--term-yellow); }
-
-        .cursor {
-            display: inline-block;
-            width: 9px;
-            height: 1.2em;
-            background-color: var(--secondary-accent);
-            vertical-align: middle;
-            animation: blink 1s step-end infinite;
-            box-shadow: 0 0 8px var(--secondary-accent);
+        body {
+            min-height: 100vh;
+            background:
+                linear-gradient(180deg, rgba(8, 10, 13, 0.66), var(--bg) 58%),
+                var(--bg);
+            color: var(--text);
+            font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            line-height: 1.5;
+            overflow-x: hidden;
         }
 
-        /* Action Buttons */
-        .actions {
-            margin-top: 3.5rem;
-            display: flex;
-            gap: 1.5rem;
-            animation: fadeUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.6s forwards;
-            opacity: 0;
+        a {
+            color: inherit;
         }
 
-        .btn {
-            padding: 1rem 2.5rem;
-            border-radius: 100px;
-            font-weight: 600;
-            font-size: 1.05rem;
-            text-decoration: none;
+        button,
+        a {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .hero-scene {
+            position: fixed;
+            inset: 0;
+            z-index: -2;
+            background:
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(135deg, rgba(45, 212, 191, 0.08), transparent 44%),
+                linear-gradient(315deg, rgba(245, 158, 11, 0.07), transparent 48%),
+                #080a0d;
+            background-size: 44px 44px, 44px 44px, auto, auto, auto;
+        }
+
+        #repo-map {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            opacity: 0.74;
+        }
+
+        .page {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+        }
+
+        .nav {
             display: flex;
             align-items: center;
+            justify-content: space-between;
+            min-height: 72px;
+            gap: 20px;
+        }
+
+        .brand {
+            display: inline-flex;
+            align-items: center;
             gap: 10px;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            position: relative;
+            text-decoration: none;
+            font-weight: 800;
+            font-size: 1rem;
+        }
+
+        .brand-mark {
+            width: 32px;
+            height: 32px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--border-strong);
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            color: var(--cyan);
+            font-family: "Fira Code", monospace;
+            font-weight: 700;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            color: var(--muted);
+            font-size: 0.93rem;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+        }
+
+        .nav-links a:hover {
+            color: var(--text);
+        }
+
+        .hero {
+            min-height: calc(100vh - 72px);
+            display: grid;
+            align-content: center;
+            padding: 46px 0 68px;
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(420px, 0.86fr);
+            gap: 42px;
+            align-items: center;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            width: max-content;
+            padding: 7px 10px;
+            border: 1px solid rgba(34, 197, 94, 0.32);
+            background: rgba(34, 197, 94, 0.08);
+            border-radius: 999px;
+            color: #bbf7d0;
+            font-size: 0.84rem;
+            font-weight: 700;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 999px;
+            background: var(--green);
+            box-shadow: 0 0 14px rgba(34, 197, 94, 0.8);
+        }
+
+        h1 {
+            max-width: 780px;
+            margin-top: 22px;
+            font-size: 4.35rem;
+            line-height: 1.02;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+
+        .hero-copy {
+            max-width: 690px;
+            margin-top: 22px;
+            color: #c8d0d8;
+            font-size: 1.18rem;
+        }
+
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 28px;
+        }
+
+        .button {
+            min-height: 46px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            padding: 0 18px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            font-weight: 700;
+            text-decoration: none;
+            cursor: pointer;
+            transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+        }
+
+        .button:hover {
+            transform: translateY(-1px);
+        }
+
+        .button-primary {
+            background: #f5f7fa;
+            color: #0b0f13;
+        }
+
+        .button-secondary {
+            background: rgba(255, 255, 255, 0.075);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .button-secondary:hover {
+            border-color: var(--border-strong);
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .hero-proof {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 32px;
+            max-width: 710px;
+        }
+
+        .proof-item {
+            border: 1px solid var(--border);
+            background: rgba(8, 10, 13, 0.58);
+            border-radius: 8px;
+            padding: 15px;
+            min-height: 102px;
+        }
+
+        .proof-value {
+            font-size: 1.65rem;
+            font-weight: 800;
+            line-height: 1;
+        }
+
+        .proof-label {
+            margin-top: 9px;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .install-card {
+            border: 1px solid var(--border-strong);
+            background: rgba(8, 10, 13, 0.78);
+            box-shadow: var(--shadow);
+            border-radius: 8px;
             overflow: hidden;
         }
 
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
-            color: #fff;
-            box-shadow: 0 10px 20px rgba(108, 92, 231, 0.2);
-            border: 1px solid rgba(255,255,255,0.1);
+        .install-header,
+        .terminal-header {
+            min-height: 46px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 14px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.045);
         }
 
-        .btn-primary::before {
-            content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent);
-            opacity: 0; transition: opacity 0.3s;
+        .window-controls {
+            display: flex;
+            gap: 7px;
         }
 
-        .btn-primary:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 15px 30px rgba(108, 92, 231, 0.4);
+        .window-controls span {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
         }
-        .btn-primary:hover::before { opacity: 1; }
 
-        .btn-secondary {
+        .control-red { background: #ff5f57; }
+        .control-amber { background: #ffbd2e; }
+        .control-green { background: #28c840; }
+
+        .install-title,
+        .terminal-title {
+            color: var(--muted);
+            font-family: "Fira Code", monospace;
+            font-size: 0.82rem;
+        }
+
+        .copy-button {
+            min-width: 62px;
+            min-height: 34px;
+            padding: 0 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .copy-button:hover {
+            border-color: var(--border-strong);
+        }
+
+        .install-body {
+            padding: 18px;
+        }
+
+        pre,
+        code {
+            font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .code-line {
+            display: block;
+            color: #e7edf4;
+            font-size: 0.95rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .shell-prompt {
+            color: var(--green);
+            margin-right: 9px;
+        }
+
+        .mini-note {
+            margin-top: 15px;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        .trust-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 18px;
+        }
+
+        .trust-chip {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.045);
+            color: #d7dee6;
+            font-size: 0.87rem;
+        }
+
+        section {
+            padding: 72px 0;
+        }
+
+        .section-heading {
+            max-width: 760px;
+            margin-bottom: 26px;
+        }
+
+        .section-kicker {
+            color: var(--cyan);
+            font-weight: 800;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+        }
+
+        h2 {
+            margin-top: 8px;
+            font-size: 2.45rem;
+            line-height: 1.08;
+            letter-spacing: 0;
+        }
+
+        .section-copy {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 1.03rem;
+        }
+
+        .comparison {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 18px;
+        }
+
+        .comparison-card,
+        .workflow-card,
+        .security-card {
+            border: 1px solid var(--border);
             background: var(--bg-panel);
-            color: var(--text-main);
-            border: 1px solid var(--border-glow);
-            backdrop-filter: blur(10px);
+            border-radius: 8px;
+            padding: 22px;
         }
 
-        .btn-secondary:hover {
-            background: rgba(255,255,255,0.05);
-            border-color: rgba(255,255,255,0.15);
-            transform: translateY(-3px);
+        .comparison-card h3,
+        .workflow-card h3,
+        .security-card h3 {
+            font-size: 1.02rem;
+            letter-spacing: 0;
         }
 
-        /* Animations */
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes fadeDown { from { opacity: 0; transform: translateY(-30px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes fadeUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes scaleUp { from { opacity: 0; transform: scale(0.95) translateY(20px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+        .comparison-list {
+            display: grid;
+            gap: 12px;
+            margin-top: 18px;
+            color: var(--muted);
+            list-style: none;
+        }
+
+        .comparison-list li {
+            display: grid;
+            grid-template-columns: 30px 1fr;
+            gap: 10px;
+            align-items: start;
+        }
+
+        .mark {
+            width: 28px;
+            height: 22px;
+            display: grid;
+            place-items: center;
+            border-radius: 7px;
+            font-size: 0.82rem;
+            font-weight: 800;
+        }
+
+        .mark-bad {
+            color: #fecdd3;
+            background: rgba(251, 113, 133, 0.16);
+        }
+
+        .mark-good {
+            color: #bbf7d0;
+            background: rgba(34, 197, 94, 0.16);
+        }
+
+        .terminal {
+            border: 1px solid var(--border-strong);
+            background: var(--terminal);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+
+        .terminal-body {
+            height: 520px;
+            overflow-y: auto;
+            padding: 20px;
+            color: #d8dee7;
+            font-family: "Fira Code", monospace;
+            font-size: 0.91rem;
+            line-height: 1.58;
+        }
+
+        .terminal-line {
+            min-height: 1.45rem;
+            opacity: 0;
+            animation: fade-in 220ms ease forwards;
+        }
+
+        .terminal-output {
+            margin: 7px 0 16px;
+            color: #b9c2cc;
+        }
+
+        .cmd-prompt {
+            color: var(--green);
+            font-weight: 700;
+            margin-right: 8px;
+        }
+
+        .cmd-path {
+            color: #67e8f9;
+            margin-right: 8px;
+        }
+
+        .term-muted {
+            color: #74808c;
+        }
+
+        .term-good {
+            color: #86efac;
+        }
+
+        .term-warn {
+            color: #fbbf24;
+        }
+
+        .term-hot {
+            color: #fda4af;
+        }
+
+        .term-strong {
+            color: #fff;
+            font-weight: 700;
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 1.1em;
+            margin-left: 2px;
+            vertical-align: middle;
+            background: var(--cyan);
+            animation: blink 1s steps(2, start) infinite;
+        }
+
+        .workflow-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .step-number {
+            width: 30px;
+            height: 30px;
+            display: grid;
+            place-items: center;
+            margin-bottom: 18px;
+            border-radius: 8px;
+            color: #06110b;
+            background: var(--green);
+            font-weight: 800;
+        }
+
+        .workflow-card p,
+        .security-card p {
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 0.94rem;
+        }
+
+        .setup-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 18px;
+        }
+
+        .setup-block {
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .setup-block-header {
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 14px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .setup-block-title {
+            font-weight: 800;
+        }
+
+        .setup-block pre {
+            padding: 18px;
+            overflow-x: auto;
+            color: #dbeafe;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .setup-block pre code {
+            white-space: inherit;
+            overflow-wrap: anywhere;
+        }
+
+        .security-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        footer {
+            padding: 34px 0 56px;
+            color: var(--subtle);
+            font-size: 0.92rem;
+        }
+
+        .footer-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            border-top: 1px solid var(--border);
+            padding-top: 22px;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 16px;
+        }
+
+        .footer-links a {
+            text-decoration: none;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 980px) {
+            .hero-grid,
+            .comparison,
+            .setup-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .hero {
+                min-height: auto;
+                padding-top: 36px;
+            }
+
+            h1 {
+                font-size: 3.2rem;
+            }
+
+            .install-card {
+                max-width: 640px;
+            }
+
+            .workflow-grid,
+            .security-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 680px) {
+            .page {
+                width: min(100% - 22px, 1180px);
+            }
+
+            .nav {
+                min-height: 64px;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            h1 {
+                font-size: 2.42rem;
+            }
+
+            h2 {
+                font-size: 1.9rem;
+            }
+
+            .hero-copy,
+            .section-copy {
+                font-size: 1rem;
+            }
+
+            .hero-proof,
+            .trust-row,
+            .workflow-grid,
+            .security-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .terminal-body {
+                height: 460px;
+                padding: 16px;
+                font-size: 0.82rem;
+            }
+
+            .button {
+                width: 100%;
+            }
+
+            section {
+                padding: 52px 0;
+            }
+
+            .footer-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
     </style>
 </head>
 <body>
+    <div class="hero-scene" aria-hidden="true"></div>
+    <canvas id="repo-map" aria-hidden="true"></canvas>
 
-    <div class="ambient-bg"></div>
-    <div class="ambient-glow"></div>
+    <main class="page">
+        <nav class="nav" aria-label="Primary navigation">
+            <a class="brand" href="#">
+                <span class="brand-mark">ok</span>
+                <span>Open Kioku</span>
+            </a>
+            <div class="nav-links">
+                <a href="#proof">Proof</a>
+                <a href="#demo">Demo</a>
+                <a href="#connect">Connect</a>
+                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+            </div>
+        </nav>
 
-    <div class="container">
-        <div class="hero">
-            <div class="badge">v0.1.0 Released</div>
-            <h1><span class="text-gradient">Intelligence for</span> <span class="text-gradient-accent">Your Codebase</span></h1>
-            <p>Open Kioku is a blazing fast, local-first MCP server designed to give AI assistants instantaneous semantic context, precise evidence, and powerful search capabilities across your entire repository.</p>
-        </div>
+        <section class="hero">
+            <div class="hero-grid">
+                <div>
+                    <div class="eyebrow"><span class="status-dot"></span> v0.1.4 live on npm and GitHub Releases</div>
+                    <h1>Make coding agents stop guessing.</h1>
+                    <p class="hero-copy">Open Kioku is the local-first code intelligence layer for Claude, Cursor, and other MCP clients. It indexes your repo once, then gives agents precise search, symbols, impact analysis, tests, and context packs without sending code to a cloud service.</p>
 
-        <div class="terminal-wrapper">
-            <div class="terminal-header">
-                <div class="traffic-lights">
-                    <div class="traffic-light red"></div>
-                    <div class="traffic-light yellow"></div>
-                    <div class="traffic-light green"></div>
+                    <div class="hero-actions">
+                        <a class="button button-primary" href="#demo" aria-label="Watch the Open Kioku workflow demo">
+                            <span>Watch workflow</span>
+                            <span aria-hidden="true">v</span>
+                        </a>
+                        <a class="button button-secondary" href="https://www.npmjs.com/package/open-kioku" aria-label="Open the Open Kioku npm package">
+                            <span>npm package</span>
+                            <span aria-hidden="true">open</span>
+                        </a>
+                    </div>
+
+                    <div class="hero-proof" aria-label="Open Kioku highlights">
+                        <div class="proof-item">
+                            <div class="proof-value">3 calls</div>
+                            <div class="proof-label">demo path from token question to context pack</div>
+                        </div>
+                        <div class="proof-item">
+                            <div class="proof-value">0 cloud</div>
+                            <div class="proof-label">no embeddings API or hosted code index required</div>
+                        </div>
+                        <div class="proof-item">
+                            <div class="proof-value">read-only</div>
+                            <div class="proof-label">write tools stay gated unless explicitly enabled</div>
+                        </div>
+                    </div>
                 </div>
-                <div class="terminal-title">
-                    <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-5 14H4v-4h11v4zm0-5H4V9h11v4zm5 5h-4V9h4v9z"/></svg>
-                    ok — bash
+
+                <aside class="install-card" aria-label="Install Open Kioku">
+                    <div class="install-header">
+                        <div class="window-controls" aria-hidden="true">
+                            <span class="control-red"></span>
+                            <span class="control-amber"></span>
+                            <span class="control-green"></span>
+                        </div>
+                        <div class="install-title">install.sh</div>
+                        <button class="copy-button" type="button" data-copy="npm install -g open-kioku" aria-label="Copy npm install command">Copy</button>
+                    </div>
+                    <div class="install-body">
+                        <code class="code-line"><span class="shell-prompt">$</span>npm install -g open-kioku</code>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok demo --force</code>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok mcp install claude --repo "$PWD/open-kioku-demo"</code>
+                        <p class="mini-note">The npm wrapper installs the native binary for your platform: macOS, Linux, and Windows packages are published separately.</p>
+                        <div class="trust-row" aria-label="Security guarantees">
+                            <div class="trust-chip">Local SQLite and Tantivy indexes</div>
+                            <div class="trust-chip">MCP stdio transport</div>
+                            <div class="trust-chip">No source code upload</div>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </section>
+
+        <section id="proof">
+            <div class="section-heading">
+                <div class="section-kicker">Agent Proof</div>
+                <h2>Replace blind file crawling with indexed evidence.</h2>
+                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, estimate blast radius, and pick validation targets before touching code.</p>
+            </div>
+
+            <div class="comparison">
+                <div class="comparison-card">
+                    <h3>Typical agent loop</h3>
+                    <ul class="comparison-list">
+                        <li><span class="mark mark-bad">!</span><span>Repeated grep, glob, and read calls burn context before the agent understands the repo.</span></li>
+                        <li><span class="mark mark-bad">!</span><span>References are inferred from text matches instead of symbols, imports, and persisted graph edges.</span></li>
+                        <li><span class="mark mark-bad">!</span><span>Test selection often happens after the edit, when the agent has already guessed wrong.</span></li>
+                    </ul>
+                </div>
+
+                <div class="comparison-card">
+                    <h3>Open Kioku loop</h3>
+                    <ul class="comparison-list">
+                        <li><span class="mark mark-good">OK</span><span>One indexed search returns ranked evidence and exact file ranges.</span></li>
+                        <li><span class="mark mark-good">OK</span><span>Symbol, reference, impact, and architecture tools share the same local index.</span></li>
+                        <li><span class="mark mark-good">OK</span><span>Context packs include affected files and a validation plan before edits start.</span></li>
+                    </ul>
                 </div>
             </div>
-            <div class="terminal-body" id="terminal"></div>
-        </div>
+        </section>
 
-        <div class="actions">
-            <a href="https://github.com/shivyadavus/open-kioku" class="btn btn-primary">
-                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-                View Repository
-            </a>
-            <a href="#" class="btn btn-secondary" onclick="resetDemo(event)">
-                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                Replay Demo
-            </a>
+        <section id="demo">
+            <div class="section-heading">
+                <div class="section-kicker">Live Workflow</div>
+                <h2>The pre-edit routine agents should run every time.</h2>
+                <p class="section-copy">This is the workflow to show in Cursor, Claude, and short launch videos: install, index, search, inspect impact, then hand the agent a compact context pack from real indexed output.</p>
+            </div>
+
+            <div class="terminal">
+                <div class="terminal-header">
+                    <div class="window-controls" aria-hidden="true">
+                        <span class="control-red"></span>
+                        <span class="control-amber"></span>
+                        <span class="control-green"></span>
+                    </div>
+                    <div class="terminal-title">ok agent-proof --demo</div>
+                    <button class="copy-button" type="button" data-copy="npx open-kioku demo --force" aria-label="Copy npx demo command">Copy</button>
+                </div>
+                <div class="terminal-body" id="terminal" aria-live="polite"></div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-heading">
+                <div class="section-kicker">Workflow</div>
+                <h2>One indexed path from question to validation.</h2>
+                <p class="section-copy">The strongest product story is not search alone. It is the complete loop a coding agent needs before making a change.</p>
+            </div>
+
+            <div class="workflow-grid">
+                <div class="workflow-card">
+                    <div class="step-number">1</div>
+                    <h3>Find evidence</h3>
+                    <p>Search code and files with ranked snippets, line ranges, and confidence signals.</p>
+                </div>
+                <div class="workflow-card">
+                    <div class="step-number">2</div>
+                    <h3>Resolve symbols</h3>
+                    <p>Jump to definitions and references without asking the model to infer ownership from text.</p>
+                </div>
+                <div class="workflow-card">
+                    <div class="step-number">3</div>
+                    <h3>Trace impact</h3>
+                    <p>Use local graph facts to identify changed files, affected modules, and likely callers.</p>
+                </div>
+                <div class="workflow-card">
+                    <div class="step-number">4</div>
+                    <h3>Validate edits</h3>
+                    <p>Build context packs and test plans that keep agents focused on the smallest useful surface.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="connect">
+            <div class="section-heading">
+                <div class="section-kicker">Connect</div>
+                <h2>Copy-paste setup for Claude and Cursor.</h2>
+                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. The install command prints client-specific configuration for your current repo.</p>
+            </div>
+
+            <div class="setup-grid">
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Claude Code</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install claude --repo /absolute/path/to/repo" aria-label="Copy Claude setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install claude --repo /absolute/path/to/repo</code></pre>
+                </div>
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Cursor</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy Cursor setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install cursor --repo /absolute/path/to/repo</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-heading">
+                <div class="section-kicker">Safety</div>
+                <h2>Built for codebases people cannot upload.</h2>
+                <p class="section-copy">The trust message matters as much as the speed message. Open Kioku is designed for local indexing, explicit write controls, and predictable MCP behavior.</p>
+            </div>
+
+            <div class="security-grid">
+                <div class="security-card">
+                    <h3>No hosted index</h3>
+                    <p>Metadata stays under `.ok/` in your repo. There is no hosted search service to provision or trust.</p>
+                </div>
+                <div class="security-card">
+                    <h3>No embeddings API required</h3>
+                    <p>BM25 search, symbols, and graph operations work locally without uploading code to a model provider.</p>
+                </div>
+                <div class="security-card">
+                    <h3>Write tools gated</h3>
+                    <p>Patch and command paths are opt-in, policy-controlled, and separate from read-only context tools.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="page">
+        <div class="footer-row">
+            <div>Open Kioku v0.1.4 - Local-first code intelligence MCP</div>
+            <div class="footer-links">
+                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+                <a href="https://www.npmjs.com/package/open-kioku">npm</a>
+                <a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
+            </div>
         </div>
-    </div>
+    </footer>
 
     <script>
-        const terminal = document.getElementById('terminal');
-        
-        const script = [
-            { type: 'comment', text: '# 1. Blazing Fast Semantic Indexing (Powered by Tantivy & Tree-sitter)' },
-            { type: 'command', text: 'ok init .' },
-            { type: 'output', html: '<span style="color:var(--term-green)">✓</span> Indexed <span class="bold">1,432</span> files and <span class="bold">8,291</span> symbols in <span class="time">0.43s</span><br><span style="color:var(--term-blue)">ℹ</span> Search graph and embeddings successfully built.' },
-            
-            { type: 'delay', ms: 1200 },
-            { type: 'comment', text: '\n# 2. Comprehensive System Doctor' },
-            { type: 'command', text: 'ok doctor' },
-            { type: 'output', html: '<span class="ok-badge">[OK]</span> .ok/ directory integrity<br><span class="ok-badge">[OK]</span> Tantivy index snapshot readability<br><span class="ok-badge">[OK]</span> Rust toolchain (v1.78) active<br><span class="ok-badge">[OK]</span> Tree-sitter grammars validated<br><span class="ok-badge">[OK]</span> MCP Server initializes via stdio<br><br><span class="highlight">Status:</span> 100% Healthy.' },
-
-            { type: 'delay', ms: 1200 },
-            { type: 'comment', text: '\n# 3. Generate Native Context Packs for LLMs' },
-            { type: 'command', text: 'ok context "Implement markdown export" --format markdown' },
-            { type: 'output', html: '<span style="color:var(--term-comment)">Analyzing impact radius...</span><br><br><span class="bold"># Context Pack Generated</span><br><br><span class="bold">## Affected Components</span><br>├─ crates/open-kioku-context/src/lib.rs <span class="highlight">(ContextPackFormat)</span><br>└─ crates/open-kioku-mcp/src/lib.rs <span class="highlight">(build_context_pack)</span><br><br><span class="bold">## Test Validation Plan</span><br>Run `cargo test -p open-kioku-context`' },
-
-            { type: 'delay', ms: 1400 },
-            { type: 'comment', text: '\n# 4. Search with Structural Evidence' },
-            { type: 'command', text: 'ok search "struct IndexSnapshot"' },
-            { type: 'output', html: '<span style="color:var(--term-blue)">crates/open-kioku-core/src/lib.rs</span>:142<br><span class="bold">pub struct</span> IndexSnapshot {<br>    pub manifest: IndexManifest,<br>    pub files: Vec&lt;FileInfo&gt;,<br>}<br><span style="color:var(--term-yellow)">Confidence: 98% (Exact Structural Match)</span>' },
-
-            { type: 'delay', ms: 1200 },
-            { type: 'comment', text: '\n# 5. Connect as MCP to Claude / Cursor' },
-            { type: 'command', text: 'ok mcp tools/list --hide-experimental' },
-            { type: 'output', html: '<span style="color:var(--term-green)">✓</span> Exposing 24 high-fidelity tools over stdio<br><br>→ <span class="highlight">search_code</span>: Lexical BM25 search across codebase<br>→ <span class="highlight">build_context_pack</span>: Scaffold architectural context for AI tasks<br>→ <span class="highlight">impact_analysis</span>: Trace exact blast-radius of file modifications<br>→ <span class="highlight">recommend_validation_plan</span>: Auto-resolve test targets for diffs<br><br><span style="color:var(--term-comment)">Server is listening...</span>' },
-
-            { type: 'delay', ms: 2000 }
+        const terminal = document.getElementById("terminal");
+        const steps = [
+            { kind: "note", text: "# Install once. The wrapper pulls the native binary for your OS." },
+            { kind: "cmd", text: "npx open-kioku demo --force" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> created ./open-kioku-demo<br><span class="term-good">[ok]</span> indexed files, symbols, imports, and tests<br><span class="term-muted">local indexes: .ok/index.sqlite + .ok/search/tantivy</span>' },
+            { kind: "pause", ms: 900 },
+            { kind: "note", text: "\n# Ask the repo for token evidence before editing." },
+            { kind: "cmd", text: "ok --repo ./open-kioku-demo search token --limit 5" },
+            { kind: "out", html: '<span class="term-strong">src/auth.rs</span>: validate_token(token)<br><span class="term-strong">tests/auth_flow.rs</span>: login_returns_valid_token()<br><span class="term-strong">src/auth.rs</span>: issue_token(context, ttl_seconds)<br><span class="term-warn">evidence:</span> BM25 lexical match from local Tantivy index' },
+            { kind: "pause", ms: 900 },
+            { kind: "cmd", text: "ok --repo ./open-kioku-demo impact --file src/auth.rs" },
+            { kind: "out", html: '<span class="term-good">direct</span> src/lib.rs: pub mod auth<br><span class="term-good">direct</span> src/lib.rs: handle_login calls auth::issue_token<br><span class="term-good">direct</span> tests/auth_flow.rs: auth::validate_token<br><span class="term-muted">risk: low; derived from indexed symbols and lexical references</span>' },
+            { kind: "pause", ms: 900 },
+            { kind: "cmd", text: "ok --repo ./open-kioku-demo context token --format markdown" },
+            { kind: "out", html: '<span class="term-strong">Context pack ready</span><br>1. primary context: tests/auth_flow.rs, src/auth.rs, src/lib.rs<br>2. symbols: validate_token, issue_token, handle_login<br>3. validation candidates: login_returns_valid_token, issues_token_with_user_id<br><span class="term-good">agent has indexed evidence before it edits</span>' },
+            { kind: "pause", ms: 1000 },
+            { kind: "note", text: "\n# Connect the same workflow to your coding agent." },
+            { kind: "cmd", text: "ok mcp install cursor --repo ./open-kioku-demo" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> generated Cursor MCP config<br><span class="term-good">[ok]</span> stable tools: search_code, get_definition, get_references, impact_analysis, build_context_pack<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
         ];
 
-        let isRunning = false;
+        let running = false;
         let cursor;
 
-        async function typeCommand(text, element) {
-            return new Promise(resolve => {
-                let i = 0;
-                const interval = setInterval(() => {
-                    element.innerHTML += text.charAt(i);
-                    i++;
-                    if (i === text.length) {
-                        clearInterval(interval);
-                        setTimeout(resolve, 200);
-                    }
-                }, Math.random() * 20 + 20); // Ultra-fast typing 20-40ms
-            });
+        function sleep(ms) {
+            return new Promise(resolve => window.setTimeout(resolve, ms));
         }
 
-        async function runDemo() {
-            if (isRunning) return;
-            isRunning = true;
-            terminal.innerHTML = '';
-            
-            cursor = document.createElement('span');
-            cursor.className = 'cursor';
+        async function typeText(text, target) {
+            for (const char of text) {
+                target.textContent += char;
+                await sleep(10 + Math.random() * 16);
+            }
+        }
+
+        async function runTerminal() {
+            if (running) return;
+            running = true;
+            terminal.innerHTML = "";
+            cursor = document.createElement("span");
+            cursor.className = "cursor";
             terminal.appendChild(cursor);
 
-            for (const step of script) {
-                if (step.type === 'delay') {
-                    await new Promise(r => setTimeout(r, step.ms));
+            for (const step of steps) {
+                if (step.kind === "pause") {
+                    await sleep(step.ms);
                     continue;
                 }
 
-                const lineContainer = document.createElement('div');
-                lineContainer.className = 'line';
-                terminal.insertBefore(lineContainer, cursor);
+                const line = document.createElement("div");
+                line.className = "terminal-line";
+                terminal.insertBefore(line, cursor);
 
-                if (step.type === 'comment') {
-                    lineContainer.className = 'line comment';
-                    lineContainer.textContent = step.text;
-                    await new Promise(r => setTimeout(r, 200));
-                } else if (step.type === 'command') {
-                    lineContainer.innerHTML = '<span class="prompt">❯</span><span class="path">~/open-kioku</span> ';
-                    const cmdSpan = document.createElement('span');
-                    cmdSpan.className = 'command';
-                    lineContainer.appendChild(cmdSpan);
-                    
-                    cmdSpan.appendChild(cursor);
-                    await new Promise(r => setTimeout(r, 150));
-                    
-                    cursor.remove();
-                    await typeCommand(step.text, cmdSpan);
-                    terminal.appendChild(cursor);
-                } else if (step.type === 'output') {
-                    lineContainer.className = 'line output';
-                    lineContainer.innerHTML = step.html;
+                if (step.kind === "note") {
+                    line.classList.add("term-muted");
+                    line.textContent = step.text;
+                    await sleep(180);
                 }
-                
-                // Auto scroll
+
+                if (step.kind === "cmd") {
+                    line.innerHTML = '<span class="cmd-prompt">$</span><span class="cmd-path">~/repo</span>';
+                    const command = document.createElement("span");
+                    line.appendChild(command);
+                    await typeText(step.text, command);
+                }
+
+                if (step.kind === "out") {
+                    line.classList.add("terminal-output");
+                    line.innerHTML = step.html;
+                    await sleep(160);
+                }
+
                 terminal.scrollTop = terminal.scrollHeight;
             }
-            isRunning = false;
+
+            running = false;
         }
 
-        function resetDemo(e) {
-            if (e) e.preventDefault();
-            if (!isRunning) runDemo();
+        document.querySelectorAll("[data-copy]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const value = button.getAttribute("data-copy");
+                try {
+                    await navigator.clipboard.writeText(value);
+                    button.textContent = "Done";
+                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
+                } catch {
+                    button.textContent = "!";
+                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
+                }
+            });
+        });
+
+        const canvas = document.getElementById("repo-map");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        let nodes = [];
+        let width = 0;
+        let height = 0;
+        let frame = 0;
+
+        function resizeCanvas() {
+            const ratio = Math.min(window.devicePixelRatio || 1, 2);
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = Math.floor(width * ratio);
+            canvas.height = Math.floor(height * ratio);
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+            const count = width < 720 ? 34 : 54;
+            nodes = Array.from({ length: count }, (_, index) => ({
+                x: (index * 97) % width,
+                y: 90 + ((index * 151) % Math.max(height - 180, 200)),
+                vx: ((index % 5) - 2) * 0.08,
+                vy: (((index + 2) % 5) - 2) * 0.06,
+                role: index % 9 === 0 ? "entry" : index % 5 === 0 ? "test" : "code"
+            }));
         }
 
-        // Delay initial start for the entrance animation to finish
-        setTimeout(runDemo, 1500);
+        function drawRepoMap() {
+            frame += 1;
+            ctx.clearRect(0, 0, width, height);
+
+            for (const node of nodes) {
+                node.x += node.vx;
+                node.y += node.vy;
+                if (node.x < 0 || node.x > width) node.vx *= -1;
+                if (node.y < 60 || node.y > height - 50) node.vy *= -1;
+            }
+
+            ctx.lineWidth = 1;
+            for (let i = 0; i < nodes.length; i += 1) {
+                for (let j = i + 1; j < nodes.length; j += 1) {
+                    const a = nodes[i];
+                    const b = nodes[j];
+                    const dx = a.x - b.x;
+                    const dy = a.y - b.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    if (distance < 170) {
+                        const alpha = Math.max(0, 1 - distance / 170) * 0.22;
+                        ctx.strokeStyle = `rgba(168, 176, 186, ${alpha})`;
+                        ctx.beginPath();
+                        ctx.moveTo(a.x, a.y);
+                        ctx.lineTo(b.x, b.y);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            for (const node of nodes) {
+                const pulse = 0.5 + Math.sin(frame / 42 + node.x * 0.01) * 0.5;
+                const color = node.role === "entry" ? "45, 212, 191" : node.role === "test" ? "245, 158, 11" : "148, 163, 184";
+                ctx.fillStyle = `rgba(${color}, ${0.42 + pulse * 0.28})`;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, node.role === "entry" ? 3.6 : 2.4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            window.requestAnimationFrame(drawRepoMap);
+        }
+
+        window.addEventListener("resize", resizeCanvas);
+        resizeCanvas();
+        drawRepoMap();
+        window.setTimeout(runTerminal, 700);
     </script>
 </body>
 </html>
