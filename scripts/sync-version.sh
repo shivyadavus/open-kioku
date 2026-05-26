@@ -19,29 +19,41 @@ fi
 
 echo "Syncing version $VERSION to marketplace manifests..."
 
+sync_json_version() {
+  local file="$1"
+  sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/g" "$file"
+  rm -f "${file}.bak"
+}
+
 # ── Cursor: .cursor-plugin/plugin.json ───────────────────────────────────────
 PLUGIN_JSON="$ROOT/.cursor-plugin/plugin.json"
 if [[ -f "$PLUGIN_JSON" ]]; then
-  # Replace the "version": "x.y.z" line in-place
-  sed -i.bak "s/\"version\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"version\": \"$VERSION\"/g" "$PLUGIN_JSON"
-  rm -f "${PLUGIN_JSON}.bak"
+  sync_json_version "$PLUGIN_JSON"
   echo "  ✓ .cursor-plugin/plugin.json"
 fi
 
 # ── Cursor: .cursor-plugin/marketplace.json ──────────────────────────────────
 MARKETPLACE_JSON="$ROOT/.cursor-plugin/marketplace.json"
 if [[ -f "$MARKETPLACE_JSON" ]]; then
-  sed -i.bak "s/\"version\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"version\": \"$VERSION\"/g" "$MARKETPLACE_JSON"
-  rm -f "${MARKETPLACE_JSON}.bak"
+  sync_json_version "$MARKETPLACE_JSON"
   echo "  ✓ .cursor-plugin/marketplace.json"
 fi
 
 # ── Claude: claude-plugin.json (if present) ───────────────────────────────────
 CLAUDE_JSON="$ROOT/claude-plugin.json"
 if [[ -f "$CLAUDE_JSON" ]]; then
-  sed -i.bak "s/\"version\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"version\": \"$VERSION\"/g" "$CLAUDE_JSON"
-  rm -f "${CLAUDE_JSON}.bak"
+  sync_json_version "$CLAUDE_JSON"
   echo "  ✓ claude-plugin.json"
 fi
+
+# ── NPM packages ──────────────────────────────────────────────────────────────
+shopt -s nullglob
+for NPM_JSON in "$ROOT"/packages/npm*/package.json; do
+  sync_json_version "$NPM_JSON"
+  sed -i.bak "s/\"@open-kioku\/\([^\"]*\)\": \"[^\"]*\"/\"@open-kioku\/\1\": \"$VERSION\"/g" "$NPM_JSON"
+  rm -f "${NPM_JSON}.bak"
+  echo "  ✓ ${NPM_JSON#$ROOT/}"
+done
+shopt -u nullglob
 
 echo "Done. All manifests are at $VERSION."
