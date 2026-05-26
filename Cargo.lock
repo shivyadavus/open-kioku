@@ -1298,6 +1298,7 @@ dependencies = [
  "chrono",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-evidence",
  "open-kioku-storage",
  "regex",
 ]
@@ -1309,6 +1310,7 @@ dependencies = [
  "chrono",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-evidence",
  "open-kioku-storage",
  "serde",
  "serde_json",

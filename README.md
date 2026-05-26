@@ -239,7 +239,7 @@ See [`docs/mcp-tools.md`](docs/mcp-tools.md) for the full list.
 
 ## Security
 
-- **Read-only by default.** `apply_patch` and write tools require `--allow-write` explicitly.
+- **Read-only by default.** `apply_patch` and write tools require `--allow-write` explicitly. Additionally, the `apply_patch` MCP tool requires the `OPEN_KIOKU_ALLOW_WRITE=true` environment variable to be set on the MCP server.
 - **No network calls.** The MCP server never makes outbound connections.
 - **Secret path blocking.** `.env`, `.aws/`, `.ssh/`, and similar paths are excluded from indexing at the policy layer (`PolicyGate`), not just `.gitignore`.
 

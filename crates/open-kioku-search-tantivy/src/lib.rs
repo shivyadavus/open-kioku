@@ -1,8 +1,6 @@
-use open_kioku_core::{
-    CodeChunk, File, SearchResult, Symbol,
-};
-use open_kioku_evidence::EvidenceBuilder;
+use open_kioku_core::{CodeChunk, File, SearchResult, Symbol};
 use open_kioku_errors::{OkError, Result};
+use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
 use std::fs;
 use std::path::{Path, PathBuf};
