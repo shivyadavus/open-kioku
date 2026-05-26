@@ -144,9 +144,13 @@ mod tests {
         let gate = PolicyGate::new(&config);
         use std::path::Path;
         assert!(gate.ensure_path_readable(Path::new(".env")).is_err());
-        assert!(gate.ensure_path_readable(Path::new(".aws/credentials")).is_err());
+        assert!(gate
+            .ensure_path_readable(Path::new(".aws/credentials"))
+            .is_err());
         assert!(gate.ensure_path_readable(Path::new(".ssh/id_rsa")).is_err());
-        assert!(gate.ensure_path_readable(Path::new("infra/secrets/db.yaml")).is_err());
+        assert!(gate
+            .ensure_path_readable(Path::new("infra/secrets/db.yaml"))
+            .is_err());
         assert!(gate.ensure_path_readable(Path::new("src/main.rs")).is_ok());
         assert!(gate.ensure_path_readable(Path::new("README.md")).is_ok());
     }
