@@ -32,7 +32,10 @@ impl TantivySearchIndex {
         std::fs::create_dir_all(path).map_err(|err| OkError::Storage(err.to_string()))?;
         let dir = MmapDirectory::open(path).map_err(search_err)?;
         let index = Index::open_or_create(dir, schema).map_err(search_err)?;
-        Ok(Self { index, writer: None })
+        Ok(Self {
+            index,
+            writer: None,
+        })
     }
 }
 
@@ -41,21 +44,13 @@ pub fn default_index_dir(repo: &Path) -> PathBuf {
 }
 
 impl SearchIndex for TantivySearchIndex {
-    fn rebuild(
-        &mut self,
-        chunks: &[CodeChunk],
-        files: &[File],
-        _symbols: &[Symbol],
-    ) -> Result<()> {
+    fn rebuild(&mut self, chunks: &[CodeChunk], files: &[File], _symbols: &[Symbol]) -> Result<()> {
         let schema = self.index.schema();
         let id_field = schema.get_field("id").map_err(search_err)?;
         let text_field = schema.get_field("text").map_err(search_err)?;
         let path_field = schema.get_field("path").map_err(search_err)?;
         let payload_field = schema.get_field("payload").map_err(search_err)?;
-        let mut writer: IndexWriter = self
-            .index
-            .writer(50_000_000)
-            .map_err(search_err)?;
+        let mut writer: IndexWriter = self.index.writer(50_000_000).map_err(search_err)?;
         writer.delete_all_documents().map_err(search_err)?;
         for chunk in chunks {
             let file_path = files
@@ -63,8 +58,8 @@ impl SearchIndex for TantivySearchIndex {
                 .find(|f| f.id == chunk.file_id)
                 .map(|f| f.path.display().to_string())
                 .unwrap_or_default();
-            let payload = serde_json::to_string(chunk)
-                .map_err(|err| OkError::Storage(err.to_string()))?;
+            let payload =
+                serde_json::to_string(chunk).map_err(|err| OkError::Storage(err.to_string()))?;
             writer
                 .add_document(doc!(
                     id_field => chunk.id.clone(),
@@ -84,10 +79,7 @@ impl SearchIndex for TantivySearchIndex {
         let text_field = schema.get_field("text").map_err(search_err)?;
         let path_field = schema.get_field("path").map_err(search_err)?;
         let payload_field = schema.get_field("payload").map_err(search_err)?;
-        let reader = self
-            .index
-            .reader()
-            .map_err(search_err)?;
+        let reader = self.index.reader().map_err(search_err)?;
         let searcher = reader.searcher();
         let parser = QueryParser::for_index(&self.index, vec![text_field]);
         let query = parser

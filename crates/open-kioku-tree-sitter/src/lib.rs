@@ -4,8 +4,9 @@ use tree_sitter::Parser;
 
 pub fn parse_file(file: &File, content: &str) -> Result<Vec<CodeChunk>> {
     let mut parser = Parser::new();
-    let language = ts_language(file.language)
-        .ok_or_else(|| OkError::Unsupported(format!("no tree-sitter grammar for {:?}", file.language)))?;
+    let language = ts_language(file.language).ok_or_else(|| {
+        OkError::Unsupported(format!("no tree-sitter grammar for {:?}", file.language))
+    })?;
     parser
         .set_language(&language)
         .map_err(|err| OkError::Parse {
@@ -71,12 +72,10 @@ pub fn extract_symbols(file: &File, content: &str) -> Result<Vec<Symbol>> {
             path: file.path.clone(),
             message: err.to_string(),
         })?;
-    let tree = parser
-        .parse(content, None)
-        .ok_or_else(|| OkError::Parse {
-            path: file.path.clone(),
-            message: "tree-sitter returned no tree".into(),
-        })?;
+    let tree = parser.parse(content, None).ok_or_else(|| OkError::Parse {
+        path: file.path.clone(),
+        message: "tree-sitter returned no tree".into(),
+    })?;
     let root = tree.root_node();
     let symbols = extract_symbol_nodes(file, content, &root);
     Ok(symbols)
@@ -119,7 +118,9 @@ fn ts_language(lang: Language) -> Option<tree_sitter::Language> {
     match lang {
         Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
         Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
-        Language::TypeScript | Language::TSX => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        Language::TypeScript | Language::TSX => {
+            Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        }
         Language::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
         Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
         _ => None,

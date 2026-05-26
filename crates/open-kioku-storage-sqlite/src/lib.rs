@@ -14,7 +14,9 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let conn = Connection::open(path).map_err(|err| OkError::Storage(err.to_string()))?;
-        let store = Self { conn: Mutex::new(conn) };
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
         store.initialize()?;
         Ok(store)
     }
@@ -30,7 +32,8 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        conn.execute_batch(include_str!("schema.sql")).map_err(storage_err)
+        conn.execute_batch(include_str!("schema.sql"))
+            .map_err(storage_err)
     }
 
     fn put_manifest(&self, manifest: &IndexManifest) -> Result<()> {
@@ -38,7 +41,8 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let json = serde_json::to_string(manifest).map_err(|err| OkError::Storage(err.to_string()))?;
+        let json =
+            serde_json::to_string(manifest).map_err(|err| OkError::Storage(err.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO manifest (id, data) VALUES (1, ?1)",
             params![json],
@@ -52,11 +56,9 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let result = conn.query_row(
-            "SELECT data FROM manifest WHERE id = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        );
+        let result = conn.query_row("SELECT data FROM manifest WHERE id = 1", [], |row| {
+            row.get::<_, String>(0)
+        });
         match result {
             Ok(json) => Ok(Some(
                 serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))?,
@@ -73,28 +75,58 @@ impl MetadataStore for SqliteStore {
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         conn.execute_batch("DELETE FROM files; DELETE FROM symbols; DELETE FROM chunks; DELETE FROM tests; DELETE FROM imports; DELETE FROM occurrences;").map_err(storage_err)?;
         for file in data.files {
-            let json = serde_json::to_string(file).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO files (id, data) VALUES (?1, ?2)", params![file.id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(file).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO files (id, data) VALUES (?1, ?2)",
+                params![file.id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         for symbol in data.symbols {
-            let json = serde_json::to_string(symbol).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO symbols (id, name, data) VALUES (?1, ?2, ?3)", params![symbol.id.0, symbol.name, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(symbol).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO symbols (id, name, data) VALUES (?1, ?2, ?3)",
+                params![symbol.id.0, symbol.name, json],
+            )
+            .map_err(storage_err)?;
         }
         for chunk in data.chunks {
-            let json = serde_json::to_string(chunk).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO chunks (id, file_id, data) VALUES (?1, ?2, ?3)", params![chunk.id, chunk.file_id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(chunk).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO chunks (id, file_id, data) VALUES (?1, ?2, ?3)",
+                params![chunk.id, chunk.file_id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         for test in data.tests {
-            let json = serde_json::to_string(test).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO tests (id, data) VALUES (?1, ?2)", params![test.id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(test).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO tests (id, data) VALUES (?1, ?2)",
+                params![test.id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         for import in data.imports {
-            let json = serde_json::to_string(import).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO imports (id, data) VALUES (?1, ?2)", params![import.id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(import).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO imports (id, data) VALUES (?1, ?2)",
+                params![import.id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         for occ in data.occurrences {
-            let json = serde_json::to_string(occ).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO occurrences (id, data) VALUES (?1, ?2)", params![occ.id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(occ).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO occurrences (id, data) VALUES (?1, ?2)",
+                params![occ.id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         self.put_manifest(data.manifest)
     }
@@ -113,8 +145,9 @@ impl MetadataStore for SqliteStore {
             })
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -176,8 +209,9 @@ impl MetadataStore for SqliteStore {
             })
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -213,8 +247,9 @@ impl MetadataStore for SqliteStore {
             .query_map(params![file_id.0], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -224,13 +259,16 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let mut stmt = conn.prepare("SELECT data FROM chunks").map_err(storage_err)?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM chunks")
+            .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -240,13 +278,16 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let mut stmt = conn.prepare("SELECT data FROM tests").map_err(storage_err)?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM tests")
+            .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -256,13 +297,16 @@ impl MetadataStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let mut stmt = conn.prepare("SELECT data FROM imports").map_err(storage_err)?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM imports")
+            .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -279,8 +323,9 @@ impl MetadataStore for SqliteStore {
             .query_map(params![id.0, limit as i64], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -297,8 +342,9 @@ impl MetadataStore for SqliteStore {
             .query_map(params![file_id.0], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         rows.map(|r| {
-            r.map_err(storage_err)
-                .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+            r.map_err(storage_err).and_then(|json| {
+                serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+            })
         })
         .collect()
     }
@@ -310,13 +356,20 @@ impl GraphStore for SqliteStore {
             .conn
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        conn.execute_batch("DELETE FROM graph_nodes; DELETE FROM graph_edges;").map_err(storage_err)?;
+        conn.execute_batch("DELETE FROM graph_nodes; DELETE FROM graph_edges;")
+            .map_err(storage_err)?;
         for node in nodes {
-            let json = serde_json::to_string(node).map_err(|err| OkError::Storage(err.to_string()))?;
-            conn.execute("INSERT OR REPLACE INTO graph_nodes (id, data) VALUES (?1, ?2)", params![node.id.0, json]).map_err(storage_err)?;
+            let json =
+                serde_json::to_string(node).map_err(|err| OkError::Storage(err.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_nodes (id, data) VALUES (?1, ?2)",
+                params![node.id.0, json],
+            )
+            .map_err(storage_err)?;
         }
         for edge in edges {
-            let json = serde_json::to_string(edge).map_err(|err| OkError::Storage(err.to_string()))?;
+            let json =
+                serde_json::to_string(edge).map_err(|err| OkError::Storage(err.to_string()))?;
             conn.execute("INSERT OR REPLACE INTO graph_edges (id, from_id, to_id, data) VALUES (?1, ?2, ?3, ?4)", params![edge.id.0, edge.from.0, edge.to.0, json]).map_err(storage_err)?;
         }
         Ok(())
@@ -334,8 +387,9 @@ impl GraphStore for SqliteStore {
             .query_map(params![node, limit as i64], |row| row.get::<_, String>(0))
             .map_err(storage_err)?
             .map(|r| {
-                r.map_err(storage_err)
-                    .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+                r.map_err(storage_err).and_then(|json| {
+                    serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+                })
             })
             .collect::<Result<_>>()?;
         let node_ids: std::collections::HashSet<_> = edges
@@ -374,8 +428,9 @@ impl GraphStore for SqliteStore {
             })
             .map_err(storage_err)?
             .map(|r| {
-                r.map_err(storage_err)
-                    .and_then(|json| serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string())))
+                r.map_err(storage_err).and_then(|json| {
+                    serde_json::from_str(&json).map_err(|err| OkError::Storage(err.to_string()))
+                })
             })
             .collect::<Result<_>>()?;
         Ok(edges)

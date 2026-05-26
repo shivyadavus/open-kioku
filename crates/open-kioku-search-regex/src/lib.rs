@@ -1,4 +1,4 @@
-use open_kioku_core::{File, CodeChunk, SearchResult, Symbol};
+use open_kioku_core::{CodeChunk, File, SearchResult, Symbol};
 use open_kioku_errors::{OkError, Result};
 use regex::Regex;
 use std::path::PathBuf;
@@ -54,8 +54,7 @@ pub fn search_chunks(
 fn build_pattern(query: &str) -> Result<Regex> {
     let escaped = regex::escape(query);
     // Try exact match first, fall back to word-boundary match
-    Regex::new(&format!(r"(?i){}", escaped))
-        .map_err(|err| OkError::Search(err.to_string()))
+    Regex::new(&format!(r"(?i){}", escaped)).map_err(|err| OkError::Search(err.to_string()))
 }
 
 pub fn regex_search(

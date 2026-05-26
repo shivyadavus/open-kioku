@@ -19,7 +19,11 @@ impl<'a> SymbolEngine<'a> {
             .ok_or_else(|| OkError::SymbolNotFound(query.into()))
     }
 
-    pub fn references(&self, query: &str, limit: usize) -> Result<Vec<open_kioku_core::SymbolOccurrence>> {
+    pub fn references(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<open_kioku_core::SymbolOccurrence>> {
         let symbol = self.definition(query)?;
         self.store.references_for_symbol(&symbol.id, limit)
     }
