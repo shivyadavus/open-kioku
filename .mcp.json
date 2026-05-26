@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "open-kioku": {
+      "command": "ok",
+      "args": ["mcp", "serve", "--repo", "."],
+      "env": {}
+    }
+  }
+}
