@@ -1,0 +1,31 @@
+{
+  "name": "open-kioku",
+  "version": "0.1.0",
+  "description": "A blazing-fast, language-aware codebase index and semantic search engine for AI agents (MCP)",
+  "bin": {
+    "ok": "./bin/ok.js",
+    "open-kioku": "./bin/ok.js"
+  },
+  "scripts": {
+    "postinstall": "node ./bin/install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shivyadavus/open-kioku.git"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "llm",
+    "semantic-search",
+    "tree-sitter",
+    "code-index",
+    "context"
+  ],
+  "author": "Open Kioku",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/shivyadavus/open-kioku/issues"
+  },
+  "homepage": "https://shivyadavus.github.io/open-kioku/demo/index.html"
+}
