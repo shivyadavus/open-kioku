@@ -21,7 +21,7 @@
       },
       "homepage": "https://github.com/shivyadavus/open-kioku",
       "repository": "https://github.com/shivyadavus/open-kioku",
-      "license": "Apache-2.0",
+      "license": "Elastic-2.0",
       "keywords": ["code-intelligence", "mcp", "search", "symbols", "rust", "local-first", "tree-sitter", "bm25"],
       "category": "developer-tools"
     }

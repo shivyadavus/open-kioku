@@ -5,5 +5,5 @@
   "cpu": ["arm64"],
   "main": "",
   "author": "Open Kioku",
-  "license": "Apache-2.0"
+  "license": "Elastic-2.0"
 }
