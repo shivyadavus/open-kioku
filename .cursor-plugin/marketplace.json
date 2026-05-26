@@ -1,0 +1,18 @@
+{
+  "name": "open-kioku",
+  "owner": {
+    "name": "Shiv Yadav",
+    "email": "shiv@shivyadav.us"
+  },
+  "metadata": {
+    "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search — all on your machine. No cloud. No embeddings API. No data leaves your machine.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "open-kioku",
+      "source": ".",
+      "description": "Local-first code intelligence MCP — search, symbols, impact analysis, and patch planning for Cursor."
+    }
+  ]
+}
