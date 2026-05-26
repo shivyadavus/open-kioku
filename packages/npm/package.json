@@ -1,17 +1,17 @@
 {
   "name": "open-kioku",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A blazing-fast, language-aware codebase index and semantic search engine for AI agents (MCP)",
   "bin": {
     "ok": "./bin/ok.js",
     "open-kioku": "./bin/ok.js"
   },
   "optionalDependencies": {
-    "@open-kioku/darwin-x64": "0.1.2",
-    "@open-kioku/darwin-arm64": "0.1.2",
-    "@open-kioku/linux-x64": "0.1.2",
-    "@open-kioku/linux-arm64": "0.1.2",
-    "@open-kioku/win32-x64": "0.1.2"
+    "@open-kioku/darwin-x64": "0.1.3",
+    "@open-kioku/darwin-arm64": "0.1.3",
+    "@open-kioku/linux-x64": "0.1.3",
+    "@open-kioku/linux-arm64": "0.1.3",
+    "@open-kioku/win32-x64": "0.1.3"
   },
   "repository": {
     "type": "git",

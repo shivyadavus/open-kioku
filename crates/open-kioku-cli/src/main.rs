@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "ok", about = "Open Kioku code-intelligence platform")]
+#[command(name = "ok", version, about = "Open Kioku code-intelligence platform")]
 struct Cli {
     #[arg(long, global = true)]
     json: bool,
