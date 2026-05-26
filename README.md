@@ -2,74 +2,68 @@
 
 [![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
+[![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-**Open Kioku** (記憶, Japanese for “Memory”) is a local code-intelligence server for AI coding agents. It gives Claude, Cursor, and other MCP clients a precise, queryable index of your codebase — built from Tree-sitter symbols, a SQLite dependency graph, and a Tantivy BM25 search index, running entirely on your machine.
+Open Kioku is a local-first code intelligence MCP for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, and other MCP clients fast code search, symbol lookup, impact analysis, test hints, and context packs.
 
-No cloud. No embeddings API. No guessing from a context window.
+No hosted index. No embeddings API required. No source upload.
 
 ```sh
-# Try it in under a minute
-cargo install --path crates/open-kioku-cli
-ok demo
+npm install -g open-kioku
+ok demo --force
 ```
 
-`ok demo` creates a small sample repo, indexes it, and prints commands for search, symbol lookup, impact analysis, context packs, and MCP setup.
+The fastest way to see it is the hosted demo: https://shivyadavus.github.io/open-kioku/
 
----
+## Why It Exists
 
-## The problem it solves
+AI coding agents are strongest when they can ask the codebase for facts before editing. Without indexed context, they burn tokens on repeated file crawling, infer references from text matches, and often pick tests only after a change has already gone wrong.
 
-When you drop a large codebase into an AI chat, the model has to infer architecture, symbol locations, and call graphs from raw text. It hallucinates file paths, misses callers, and proposes changes that break unrelated modules.
+Open Kioku gives agents a pre-edit routine:
 
-Open Kioku inverts this: **index first, query precisely**. The agent calls a tool instead of guessing.
-
-**Think of Open Kioku as the glasses an AI agent puts on to read your specific codebase perfectly.**
-
----
-
-## Why Agents Use It
-
-Open Kioku turns a repo into an evidence-backed memory layer:
-
-- **Find facts before editing**: exact symbols, snippets, files, and line ranges.
-- **Build task context**: package relevant files, symbols, tests, and graph facts for an LLM.
-- **Estimate blast radius**: inspect dependencies and likely impacted files before a change.
-- **Stay local by default**: no outbound network calls from the MCP server.
-- **Expose trust signals**: every search result carries evidence, confidence, and match reason.
-
----
-
-## What It Does
-
-| Tool | What it returns |
-|---|---|
-| `search_code` | BM25-ranked chunks matching a query across all indexed files |
-| `get_definition` | Exact file + line range where a symbol is defined (Tree-sitter) |
-| `get_references` | Indexed references to a symbol |
-| `impact_analysis` | Direct and indirect files likely affected by a change |
-| `find_tests_for_change` | Test candidates derived from indexed metadata and graph facts |
-| `build_context_pack` | A JSON bundle of relevant files + symbols for a described task |
-| `detect_architecture` | Inferred project structure (monorepo, service boundaries, etc.) |
-
-Full MCP tool reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Tools returned by `tools/list` include a `maturity` field (`stable` or `experimental`) so agents can prefer the reliable default surface.
-
----
-
-## 🔥 Animated Web Demo
-
-Check out our **[Animated Web Demo](https://shivyadavus.github.io/open-kioku/)** to see a hyper-realistic, blazing-fast CLI session of Open Kioku in action!
-*(Alternatively, you can generate a gorgeous terminal GIF locally by running `vhs demo.tape` using [Charmbracelet VHS](https://github.com/charmbracelet/vhs))*
-
----
-
-## Languages supported
-
-Rust, Python, TypeScript, JavaScript, Java, Go. Additional grammars can be added via the `open-kioku-tree-sitter` crate.
-
----
+1. Search indexed code and files.
+2. Resolve symbols and references.
+3. Estimate the blast radius of a file or symbol change.
+4. Build a compact context pack with likely validation targets.
+5. Serve those capabilities through MCP over local stdio.
 
 ## Install
+
+### npm
+
+```sh
+npm install -g open-kioku
+ok --version
+```
+
+The `open-kioku` npm package is a JavaScript wrapper that installs the native `ok` binary through platform-specific optional dependencies.
+
+Published platform packages:
+
+- `@open-kioku/darwin-x64`
+- `@open-kioku/darwin-arm64`
+- `@open-kioku/linux-x64`
+- `@open-kioku/linux-arm64`
+- `@open-kioku/win32-x64`
+
+### GitHub Releases
+
+Tagged releases publish native binaries and SHA-256 checksums for:
+
+- Linux x86_64 musl
+- Linux arm64 musl
+- macOS x86_64
+- macOS arm64
+- Windows x86_64
+
+Download from https://github.com/shivyadavus/open-kioku/releases, put `ok` on your `PATH`, then run:
+
+```sh
+ok --help
+```
+
+### From Source
 
 ```sh
 git clone https://github.com/shivyadavus/open-kioku.git
@@ -78,217 +72,187 @@ cargo install --path crates/open-kioku-cli
 ok --help
 ```
 
-Requires Rust stable (1.78+).
+Requires a stable Rust toolchain.
 
-Tagged releases build Linux and macOS `ok` binaries on GitHub Actions. Download the archive for your platform from the Releases page, put `ok` on your `PATH`, then verify:
+## Quick Start
+
+Create and index the built-in sample repo:
 
 ```sh
-ok --help
+ok demo --force
 ```
 
----
+This creates `./open-kioku-demo`, writes `ok.toml`, builds `.ok/index.sqlite`, builds `.ok/search/tantivy`, and prints starter commands.
 
-## Quickstart
-
-### 1. Try the Built-In Demo
+Try the same verified flow used by the hosted demo:
 
 ```sh
-ok demo
-```
-
-This creates `./open-kioku-demo`, writes an `ok.toml`, builds the SQLite and Tantivy indexes, and prints commands like:
-
-```sh
-ok --repo ./open-kioku-demo search token
+ok --repo ./open-kioku-demo search token --limit 5
 ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
-ok --repo ./open-kioku-demo context "change token expiry" --json
-ok mcp install claude --repo ./open-kioku-demo
+ok --repo ./open-kioku-demo context token --format markdown
+ok mcp install cursor --repo ./open-kioku-demo
 ```
 
-Use a specific location or replace an existing demo:
+Use a custom demo path when needed:
 
 ```sh
 ok demo --path /tmp/open-kioku-demo --force
 ```
 
-### 2. Index Your Repo
+## Index Your Repo
 
 ```sh
-ok init /path/to/your/repo
-ok index /path/to/your/repo
-ok doctor /path/to/your/repo
-ok status /path/to/your/repo
+ok init /path/to/repo
+ok index /path/to/repo
+ok doctor /path/to/repo
+ok status /path/to/repo
 ```
 
-The index is stored under `.ok/` in the target repo:
+Open Kioku stores local index data inside the target repository:
 
 - `.ok/index.sqlite` stores files, symbols, chunks, imports, occurrences, and graph facts.
-- `.ok/search/tantivy` stores the BM25 lexical search index.
+- `.ok/search/tantivy` stores the local BM25 search index.
 - `ok.toml` controls indexing, security, MCP mode, and command allowlists.
 
-### 3. Check Local Health
+`ok doctor` checks the repo path, config, SQLite index, Tantivy index, and running binary, then prints concrete next steps for anything missing.
+
+## CLI Commands
 
 ```sh
-ok doctor /path/to/your/repo
-```
-
-`ok doctor` verifies the repo path, config, metadata index, search index, and running binary. It prints concrete next steps when something is missing.
-
-### 4. Query from the CLI
-
-```sh
-# Full-text search
-ok --repo /path/to/your/repo search "token expiration handler"
+# Search indexed code
+ok --repo /path/to/repo search "token expiration handler"
 
 # Symbol lookup
-ok --repo /path/to/your/repo symbol find PolicyGate
+ok --repo /path/to/repo symbol find PolicyGate
+ok --repo /path/to/repo symbol definition PolicyGate
+ok --repo /path/to/repo symbol refs PolicyGate
 
-# Blast radius before a change
-ok --repo /path/to/your/repo impact --file crates/open-kioku-mcp/src/lib.rs
+# Impact and validation
+ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
+ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 
-# Tests that cover a file
-ok --repo /path/to/your/repo tests --changed crates/open-kioku-core/src/lib.rs
+# Context pack for an agent
+ok --repo /path/to/repo context "update MCP tool list docs" --format markdown
 
-# Context bundle for an LLM
-ok --repo /path/to/your/repo context "refactor the BM25 scorer to support phrase queries" --json
+# Benchmark indexing and search
+ok bench /path/to/repo
 ```
 
----
+Current top-level commands:
 
-## Connect to Claude Code
+`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `bench`, `architecture`, `patch`, and `mcp`.
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or equivalent:
+## MCP Setup
 
-```json
-{
-  "mcpServers": {
-    "open-kioku": {
-      "command": "ok",
-      "args": ["mcp", "serve", "--repo", "/absolute/path/to/your/repo", "--read-only"]
-    }
-  }
-}
-```
+Open Kioku runs as a local MCP server over stdio.
 
-Or install from the Claude Code plugin marketplace:
-
-```
-/plugin install open-kioku@open-kioku
-```
-
-To print the MCP config snippet for your current repo:
+Print a Claude config snippet:
 
 ```sh
-ok mcp install claude --repo /absolute/path/to/your/repo
+ok mcp install claude --repo /absolute/path/to/repo
 ```
 
-That command does not modify your Claude config. It prints a safe copy-paste JSON snippet.
-
----
-
-## Connect to Cursor
-
-Add to your Cursor MCP config:
-
-```json
-{
-  "open-kioku": {
-    "command": "ok",
-    "args": ["mcp", "serve", "--repo", "${workspaceFolder}", "--read-only"]
-  }
-}
-```
-
-To print the Cursor config snippet:
+Print a Cursor config snippet:
 
 ```sh
-ok mcp install cursor --repo /absolute/path/to/your/repo
+ok mcp install cursor --repo /absolute/path/to/repo
 ```
 
----
+Those commands print JSON. They do not modify your editor configuration.
 
-## Stable vs Experimental MCP Tools
+Example server command:
 
-Open Kioku deliberately labels tool maturity so agents can make conservative choices.
+```sh
+ok mcp serve --repo /absolute/path/to/repo --read-only
+```
+
+Write mode is disabled by default. To expose write tools, the server must be started with `--allow-write`, and patch application still requires explicit approval and `OPEN_KIOKU_ALLOW_WRITE=true`.
+
+## MCP Tools
 
 Stable tools include:
 
-- `search_code`, `search_files`, `regex_search`
-- `list_files`, `list_symbols`, `search_symbols`
-- `get_definition`, `get_references`, `get_symbol_context`
-- `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `explain_file`, `explain_symbol`
-- `find_tests_for_change`, `recommend_validation_plan`
-- `detect_architecture`, `architecture_boundaries`, `architecture_violations`
+- Repo inventory: `repo_status`, `list_files`, `list_languages`
+- Symbols: `list_symbols`, `search_symbols`, `get_definition`, `get_references`, `get_symbol_context`
+- Search: `search_code`, `search_files`, `regex_search`
+- Graph and impact: `dependency_path`, `impact_analysis`, `module_dependencies`
+- Context and explanations: `build_context_pack`, `explain_file`, `explain_symbol`, `summarize_architecture`
+- Tests: `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
+- Architecture: `detect_architecture`, `architecture_boundaries`, `architecture_violations`
+- Patch planning: `propose_patch`, `review_patch`, `validate_patch`
 
-Experimental tools are exposed for early workflows but may use heuristic or fallback behavior:
+Experimental tools are present for early workflows and may use heuristic or fallback behavior:
 
 - `semantic_search`
 - `structural_search`
 - `get_implementations`, `get_callers`, `get_callees`
-- runtime integrations such as stacktrace and recent failure mapping
+- `explain_flow`
+- Runtime mapping tools such as `map_stacktrace_to_code`, `find_errors_for_symbol`, and `find_recent_failures`
+- `apply_patch`, only when write mode is enabled
 
-See [`docs/mcp-tools.md`](docs/mcp-tools.md) for the full list.
+Every tool returned by `tools/list` includes a `maturity` field. Start the server with `--hide-experimental` when you want agents to see only the stable surface.
 
----
+Full tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md).
 
-## What Was Recently Added
+## What Is Local
 
-- `ok` is now the installed binary name.
-- `ok doctor` provides local health checks.
-- `ok demo` creates and indexes a sample repo for instant evaluation.
-- `ok mcp install claude|cursor` prints copy-paste MCP config.
-- CLI smoke tests cover the first-run flow.
-- Search tests assert snippets, evidence, confidence, symbols, and match reasons.
-- MCP `tools/list` now includes `maturity`.
-- Tagged releases build Linux and macOS binary archives.
+Open Kioku's default path is local:
 
----
+- Tree-sitter extracts symbols and chunks from supported source files.
+- SQLite stores metadata and dependency graph rows under `.ok/`.
+- Tantivy stores BM25 lexical search data under `.ok/search/tantivy`.
+- MCP uses stdio to talk to the local `ok` process.
+- Semantic search is not required for the default workflow.
 
-## Security
+The MCP server is designed to be read-only unless write mode is explicitly enabled.
 
-- **Read-only by default.** `apply_patch` and write tools require `--allow-write` explicitly. Additionally, the `apply_patch` MCP tool requires the `OPEN_KIOKU_ALLOW_WRITE=true` environment variable to be set on the MCP server.
-- **No network calls.** The MCP server never makes outbound connections.
-- **Secret path blocking.** `.env`, `.aws/`, `.ssh/`, and similar paths are excluded from indexing at the policy layer (`PolicyGate`), not just `.gitignore`.
+## Language Support
 
----
+Tree-sitter parsing currently covers Rust, Python, TypeScript, TSX, JavaScript, Go, and Java. Files in other languages can still be indexed as files/chunks where supported by the ingest pipeline, but symbol quality depends on available grammar support.
 
-## Codebase
+## Security Model
 
-34-crate Cargo workspace. CI runs `cargo fmt`, `cargo clippy -D warnings`, `cargo test --all`, `cargo audit`, and `cargo deny` on Ubuntu and macOS on every push.
+- Read-only by default.
+- No hosted index or cloud search service.
+- No embeddings API required for default search, symbol, impact, and context workflows.
+- Secret-like paths such as `.env`, `.aws/`, and `.ssh/` are blocked by policy.
+- Command execution and patch application are policy-gated.
+- Network denial is part of the MCP security config.
 
-Key crates:
+See [`docs/security-model.md`](docs/security-model.md) for more detail.
 
-- `open-kioku-core` — graph, indexer, query planner
-- `open-kioku-storage-sqlite` — metadata and dependency graph
-- `open-kioku-search-tantivy` — BM25 full-text index
-- `open-kioku-tree-sitter` — AST extraction and symbol resolution
-- `open-kioku-mcp` — MCP server (JSON-RPC 2.0 over stdio)
-- `open-kioku-cli` — the `ok` binary
+## Repository Layout
 
-See [`docs/architecture.md`](docs/architecture.md) for the full data flow.
-See [`docs/roadmap.md`](docs/roadmap.md) for the product and engineering roadmap.
+This is a 38-crate Cargo workspace. Important crates:
 
----
+- `open-kioku-cli`: the `ok` binary.
+- `open-kioku-mcp`: JSON-RPC MCP server over stdio.
+- `open-kioku-ingest`: repository indexing pipeline.
+- `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
+- `open-kioku-storage-sqlite`: SQLite metadata and graph storage.
+- `open-kioku-search-tantivy`: disk-backed BM25 search.
+- `open-kioku-context`: task context pack builder.
+- `open-kioku-impact`: file impact analysis.
+- `open-kioku-tests`: validation target selection.
 
-## Roadmap Highlights
+Architecture docs: [`docs/architecture.md`](docs/architecture.md)
 
-**Recently Completed:**
-- Interactive first-run onboarding (`ok demo`, `ok doctor`, MCP setup helpers).
-- Comprehensive benchmark output (`ok bench`) for index time, files per second, and BM25/Regex search latency.
-- Golden MCP response snapshots and multi-language integration test fixtures.
+Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
-**Current priorities:**
-- Improve symbol/reference quality with stronger Tree-sitter, SCIP, and LSP integration.
-- Advance the maturity of experimental semantic search and impact analysis tools.
-- Add `cargo binstall` and Homebrew distribution paths.
-- Support remote backend indexes (e.g., PostgreSQL / RuVector integrations).
+## Development
 
-Full plan: [`docs/roadmap.md`](docs/roadmap.md).
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+cargo test -p open-kioku-cli --test cli_smoke
+```
 
----
+CI also runs audit and dependency policy checks.
 
 ## Contributing
 
-PRs welcome, especially for new Tree-sitter grammars and SCIP indexer support. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Issues and PRs are welcome, especially for parser quality, fixture coverage, MCP tool quality, and distribution improvements.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
