@@ -6,8 +6,12 @@
     "ok": "./bin/ok.js",
     "open-kioku": "./bin/ok.js"
   },
-  "scripts": {
-    "postinstall": "node ./bin/install.js"
+  "optionalDependencies": {
+    "@open-kioku/darwin-x64": "0.1.0",
+    "@open-kioku/darwin-arm64": "0.1.0",
+    "@open-kioku/linux-x64": "0.1.0",
+    "@open-kioku/linux-arm64": "0.1.0",
+    "@open-kioku/win32-x64": "0.1.0"
   },
   "repository": {
     "type": "git",

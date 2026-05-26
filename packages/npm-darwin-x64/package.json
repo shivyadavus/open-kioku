@@ -1,0 +1,17 @@
+{
+  "name": "@open-kioku/darwin-x64",
+  "version": "0.1.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "",
+  "author": "Open Kioku",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shivyadavus/open-kioku.git"
+  }
+}
