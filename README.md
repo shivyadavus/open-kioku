@@ -1,7 +1,7 @@
 # Open Kioku (`ok`)
 
 [![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
 **Open Kioku** (記憶, Japanese for “Memory”) is a local code-intelligence server for AI coding agents. It gives Claude, Cursor, and other MCP clients a precise, queryable index of your codebase — built from Tree-sitter symbols, a SQLite dependency graph, and a Tantivy BM25 search index, running entirely on your machine.
