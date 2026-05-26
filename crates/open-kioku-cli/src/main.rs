@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::OkConfig;
-use open_kioku_context::ContextPackBuilder;
+use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::Indexer;
@@ -79,6 +79,8 @@ enum Command {
     },
     Context {
         task: String,
+        #[arg(long, value_enum, default_value_t = ContextPackFormat::Json)]
+        format: ContextPackFormat,
     },
     Architecture {
         #[command(subcommand)]
@@ -407,13 +409,11 @@ async fn main() -> anyhow::Result<()> {
                 || {},
             )?;
         }
-        Command::Context { task } => {
+        Command::Context { task, format } => {
             let store = open_store(&repo)?;
-            output(
-                cli.json,
-                &ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?,
-                || {},
-            )?;
+            let pack = ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?;
+            let rendered = format.render(&pack)?;
+            println!("{}", rendered);
         }
         Command::Architecture { command } => {
             let store = open_store(&repo)?;

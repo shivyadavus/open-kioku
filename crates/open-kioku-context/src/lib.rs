@@ -10,6 +10,46 @@ use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::OkStore;
 use open_kioku_tests::TestSelector;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ContextPackFormat {
+    Json,
+    Markdown,
+}
+
+impl ContextPackFormat {
+    pub fn render(&self, pack: &ContextPack) -> Result<String> {
+        match self {
+            Self::Json => Ok(serde_json::to_string_pretty(pack)?),
+            Self::Markdown => {
+                let mut out = String::new();
+                out.push_str(&format!("# Task: {}\n\n", pack.task));
+                out.push_str("## Primary Context\n\n");
+                for result in &pack.primary_files {
+                    out.push_str(&format!("### {}\n", result.path.display()));
+                    if let Some(range) = &result.line_range {
+                        out.push_str(&format!("Lines {}-{}\n", range.start, range.end));
+                    }
+                    out.push_str("```\n");
+                    out.push_str(&result.snippet);
+                    out.push_str("\n```\n\n");
+                }
+                
+                out.push_str("## Supporting Impact\n\n");
+                for result in &pack.supporting_files {
+                    out.push_str(&format!("- {}\n", result.path.display()));
+                }
+                
+                out.push_str("\n## Validation Plan\n\n");
+                for test in &pack.validation_plan.tests {
+                    out.push_str(&format!("- {}\n", test.name));
+                }
+                
+                Ok(out)
+            }
+        }
+    }
+}
+
 pub struct ContextPackBuilder<'a> {
     store: &'a dyn OkStore,
 }

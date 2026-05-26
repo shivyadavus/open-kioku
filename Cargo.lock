@@ -1083,6 +1083,7 @@ name = "open-kioku-context"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "clap",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-impact",
@@ -1090,6 +1091,7 @@ dependencies = [
  "open-kioku-search-regex",
  "open-kioku-storage",
  "open-kioku-tests",
+ "serde_json",
 ]
 
 [[package]]
