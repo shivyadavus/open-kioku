@@ -1,9 +1,8 @@
-use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileRange, LineRange,
-    SearchResult, Symbol,
+    CodeChunk, File, LineRange, SearchResult, Symbol,
 };
 use open_kioku_errors::{OkError, Result};
+use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
 use regex::Regex;
 use std::collections::HashMap;
@@ -47,23 +46,10 @@ impl SearchIndex for MemorySearchIndex {
                 continue;
             };
             let snippet = best_snippet(&chunk.text, query);
-            let evidence = Evidence {
-                id: EvidenceId::new(format!(
-                    "lexical:{}:{}",
-                    file.path.display(),
-                    chunk.range.start
-                )),
-                source: "open-kioku-search-regex".into(),
-                source_type: EvidenceSourceType::Lexical,
-                file_range: Some(FileRange {
-                    path: file.path.clone(),
-                    line_range: Some(chunk.range.clone()),
-                }),
-                symbol_id: chunk.symbol_id.clone(),
-                confidence: Confidence::Medium,
-                message: format!("lexical match for `{query}`"),
-                indexed_at: Utc::now(),
-            };
+            let score = lexical_score(&chunk.text, query, file.is_generated, file.is_vendor);
+            let (evidence_strings, confidence) = EvidenceBuilder::new()
+                .add(format!("lexical match for `{query}`"), score)
+                .build();
             results.push(SearchResult {
                 path: file.path.clone(),
                 line_range: Some(chunk.range.clone()),
@@ -72,9 +58,10 @@ impl SearchIndex for MemorySearchIndex {
                     .symbol_id
                     .as_ref()
                     .and_then(|id| self.symbols_by_chunk.get(&id.0).cloned()),
-                score: lexical_score(&chunk.text, query, file.is_generated, file.is_vendor),
+                score,
                 match_reason: "lexical substring match".into(),
-                evidence,
+                evidence: evidence_strings,
+                confidence,
             });
         }
         results.sort_by(|a, b| {
@@ -131,19 +118,9 @@ pub fn regex_search_file(
     for (idx, line) in content.lines().enumerate() {
         if regex.is_match(line) {
             let line_number = (idx + 1) as u32;
-            let evidence = Evidence {
-                id: EvidenceId::new(format!("regex:{}:{line_number}", path.display())),
-                source: "open-kioku-search-regex".into(),
-                source_type: EvidenceSourceType::Regex,
-                file_range: Some(FileRange {
-                    path: path.clone(),
-                    line_range: Some(LineRange::single(line_number)),
-                }),
-                symbol_id: None,
-                confidence: Confidence::High,
-                message: format!("regex match for `{pattern}`"),
-                indexed_at: Utc::now(),
-            };
+            let (evidence_strings, confidence) = EvidenceBuilder::new()
+                .add(format!("regex match for `{pattern}`"), 1.0)
+                .build();
             results.push(SearchResult {
                 path: path.clone(),
                 line_range: Some(LineRange::single(line_number)),
@@ -151,7 +128,8 @@ pub fn regex_search_file(
                 symbol: None,
                 score: 1.0,
                 match_reason: "regex match".into(),
-                evidence,
+                evidence: evidence_strings,
+                confidence,
             });
             if results.len() >= limit {
                 break;
@@ -233,7 +211,8 @@ mod tests {
         assert_eq!(results[0].snippet, "pub fn retry_import() {}");
         assert_eq!(results[0].line_range, Some(LineRange { start: 1, end: 3 }));
         assert_eq!(results[0].match_reason, "lexical substring match");
-        assert_eq!(results[0].evidence.source, "open-kioku-search-regex");
+        assert_eq!(results[0].evidence.len(), 1);
+        assert!(results[0].evidence[0].contains("lexical match"));
         assert_eq!(
             results[0].symbol.as_ref().map(|s| s.name.as_str()),
             Some("retry_import")
@@ -253,6 +232,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].line_range, Some(LineRange::single(2)));
         assert_eq!(results[0].snippet, "fn retry_import() {}");
-        assert_eq!(results[0].evidence.source_type, EvidenceSourceType::Regex);
+        assert_eq!(results[0].evidence.len(), 1);
+        assert!(results[0].evidence[0].contains("regex match"));
     }
 }

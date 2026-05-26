@@ -1,8 +1,7 @@
-use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileRange, SearchResult,
-    Symbol,
+    CodeChunk, File, SearchResult, Symbol,
 };
+use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::SearchIndex;
 use std::fs;
@@ -100,23 +99,9 @@ impl SearchIndex for TantivySearchIndex {
             let chunk: CodeChunk = required_json(&document, self.fields.chunk_json)?;
             let file: File = required_json(&document, self.fields.file_json)?;
             let symbol: Option<Symbol> = optional_json(&document, self.fields.symbol_json)?;
-            let evidence = Evidence {
-                id: EvidenceId::new(format!(
-                    "tantivy:{}:{}",
-                    file.path.display(),
-                    chunk.range.start
-                )),
-                source: "open-kioku-search-tantivy".into(),
-                source_type: EvidenceSourceType::Lexical,
-                file_range: Some(FileRange {
-                    path: file.path.clone(),
-                    line_range: Some(chunk.range.clone()),
-                }),
-                symbol_id: chunk.symbol_id.clone(),
-                confidence: Confidence::High,
-                message: "BM25 lexical match from local Tantivy index".into(),
-                indexed_at: Utc::now(),
-            };
+            let (evidence_strings, confidence) = EvidenceBuilder::new()
+                .add("BM25 lexical match from local Tantivy index", score)
+                .build();
             results.push(SearchResult {
                 path: file.path,
                 line_range: Some(chunk.range),
@@ -124,7 +109,8 @@ impl SearchIndex for TantivySearchIndex {
                 symbol,
                 score,
                 match_reason: "tantivy bm25 lexical match".into(),
-                evidence,
+                evidence: evidence_strings,
+                confidence,
             });
         }
         Ok(results)
@@ -279,7 +265,8 @@ mod tests {
         assert_eq!(results[0].snippet, "pub fn retry_import() {}");
         assert_eq!(results[0].line_range, Some(LineRange { start: 1, end: 3 }));
         assert_eq!(results[0].match_reason, "tantivy bm25 lexical match");
-        assert_eq!(results[0].evidence.source, "open-kioku-search-tantivy");
+        assert_eq!(results[0].evidence.len(), 1);
+        assert!(results[0].evidence[0].contains("BM25 lexical match"));
         assert_eq!(
             results[0].symbol.as_ref().map(|s| s.name.as_str()),
             Some("retry_import")

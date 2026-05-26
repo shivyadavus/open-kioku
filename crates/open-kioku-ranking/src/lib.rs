@@ -51,10 +51,7 @@ pub fn rerank(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
 #[cfg(test)]
 mod tests {
     use super::rerank;
-    use chrono::Utc;
-    use open_kioku_core::{
-        Confidence, Evidence, EvidenceId, EvidenceSourceType, LineRange, SearchResult,
-    };
+    use open_kioku_core::{LineRange, SearchResult};
     use std::path::{Path, PathBuf};
 
     fn make_result(path: &str, score: f32) -> SearchResult {
@@ -65,16 +62,8 @@ mod tests {
             symbol: None,
             score,
             match_reason: "test".into(),
-            evidence: Evidence {
-                id: EvidenceId::new("ev"),
-                source: "test".into(),
-                source_type: EvidenceSourceType::Lexical,
-                file_range: None,
-                symbol_id: None,
-                confidence: Confidence::Medium,
-                message: "test".into(),
-                indexed_at: Utc::now(),
-            },
+            evidence: vec!["test".into()],
+            confidence: 0.6,
         }
     }
 
