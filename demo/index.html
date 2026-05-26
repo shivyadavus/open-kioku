@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Open Kioku - The Local-First Code Intelligence MCP</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Outfit:wght@300;400;600;800&display=swap');
+
+        :root {
+            /* Premium Dark Theme Palette */
+            --bg-deep: #0B0C10;
+            --bg-panel: rgba(22, 23, 28, 0.65);
+            --border-glow: rgba(255, 255, 255, 0.08);
+            --primary-accent: #6C5CE7;
+            --secondary-accent: #00CEC9;
+            --text-main: #FFFFFF;
+            --text-muted: #A0A5B5;
+            
+            /* Terminal Syntax Colors */
+            --term-green: #00E676;
+            --term-blue: #74B9FF;
+            --term-yellow: #FDCB6E;
+            --term-red: #FF7675;
+            --term-purple: #A29BFE;
+            --term-comment: #636E72;
+            --term-bg: rgba(10, 11, 16, 0.85);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-deep);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Ambient Glowing Background Grid */
+        .ambient-bg {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: 
+                linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px);
+            background-size: 50px 50px;
+            z-index: -2;
+            perspective: 1000px;
+        }
+
+        .ambient-glow {
+            position: fixed;
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(108, 92, 231, 0.15) 0%, rgba(0, 206, 201, 0.05) 40%, transparent 70%);
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: -1;
+            filter: blur(60px);
+            animation: pulseGlow 8s ease-in-out infinite alternate;
+        }
+
+        @keyframes pulseGlow {
+            0% { transform: translate(-50%, -50%) scale(1); opacity: 0.8; }
+            100% { transform: translate(-50%, -50%) scale(1.1); opacity: 1; }
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 10;
+        }
+
+        /* Hero Section */
+        .hero {
+            text-align: center;
+            margin-bottom: 3.5rem;
+            animation: fadeDown 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.4rem 1.2rem;
+            background: rgba(108, 92, 231, 0.1);
+            border: 1px solid rgba(108, 92, 231, 0.3);
+            border-radius: 100px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--term-purple);
+            margin-bottom: 1.5rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4.5rem);
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 1.2rem;
+            letter-spacing: -0.03em;
+        }
+
+        .text-gradient {
+            background: linear-gradient(135deg, #FFFFFF 0%, #A0A5B5 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .text-gradient-accent {
+            background: linear-gradient(135deg, var(--secondary-accent) 0%, var(--primary-accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            max-width: 650px;
+            margin: 0 auto;
+            font-weight: 300;
+            line-height: 1.6;
+        }
+
+        /* Ultra Premium Terminal */
+        .terminal-wrapper {
+            width: 100%;
+            height: 520px;
+            background: var(--term-bg);
+            border-radius: 16px;
+            box-shadow: 
+                0 30px 60px rgba(0, 0, 0, 0.6),
+                0 0 0 1px var(--border-glow),
+                inset 0 1px 0 rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            animation: scaleUp 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.3s forwards;
+            opacity: 0;
+            transform: scale(0.95) translateY(20px);
+        }
+
+        .terminal-header {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1.2rem 1.5rem;
+            display: flex;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            position: relative;
+        }
+
+        .traffic-lights {
+            display: flex;
+            gap: 8px;
+        }
+
+        .traffic-light {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: inset 0 1px 2px rgba(255,255,255,0.1);
+        }
+
+        .red { background-color: #FF5F56; }
+        .yellow { background-color: #FFBD2E; }
+        .green { background-color: #27C93F; }
+
+        .terminal-title {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-family: 'Fira Code', monospace;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .terminal-title svg {
+            width: 14px; height: 14px;
+            fill: currentColor;
+        }
+
+        .terminal-body {
+            padding: 1.5rem 2rem;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: var(--text-main);
+            flex-grow: 1;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+
+        /* Custom Scrollbar */
+        .terminal-body::-webkit-scrollbar { width: 6px; }
+        .terminal-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+        .terminal-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+        /* Terminal Typograpy & Colors */
+        .line { display: block; min-height: 1.5rem; margin-bottom: 4px; opacity: 0; animation: fadeIn 0.3s forwards; }
+        .prompt { color: var(--term-green); font-weight: 600; margin-right: 8px; }
+        .path { color: var(--term-blue); font-weight: 500; margin-right: 8px; }
+        .command { color: var(--text-main); text-shadow: 0 0 5px rgba(255,255,255,0.2); }
+        .output { color: #C0C5CE; margin-top: 6px; margin-bottom: 16px; font-size: 0.9rem; }
+        .comment { color: var(--term-comment); font-style: italic; }
+        .bold { font-weight: 600; color: #FFF; }
+        
+        /* Specialized Output Tokens */
+        .ok-badge { background: rgba(0,230,118,0.15); color: var(--term-green); padding: 1px 6px; border-radius: 4px; font-weight: bold; margin-right: 8px;}
+        .highlight { color: var(--term-purple); font-weight: 600;}
+        .time { color: var(--term-yellow); }
+
+        .cursor {
+            display: inline-block;
+            width: 9px;
+            height: 1.2em;
+            background-color: var(--secondary-accent);
+            vertical-align: middle;
+            animation: blink 1s step-end infinite;
+            box-shadow: 0 0 8px var(--secondary-accent);
+        }
+
+        /* Action Buttons */
+        .actions {
+            margin-top: 3.5rem;
+            display: flex;
+            gap: 1.5rem;
+            animation: fadeUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.6s forwards;
+            opacity: 0;
+        }
+
+        .btn {
+            padding: 1rem 2.5rem;
+            border-radius: 100px;
+            font-weight: 600;
+            font-size: 1.05rem;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            color: #fff;
+            box-shadow: 0 10px 20px rgba(108, 92, 231, 0.2);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .btn-primary::before {
+            content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, rgba(255,255,255,0.2), transparent);
+            opacity: 0; transition: opacity 0.3s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 30px rgba(108, 92, 231, 0.4);
+        }
+        .btn-primary:hover::before { opacity: 1; }
+
+        .btn-secondary {
+            background: var(--bg-panel);
+            color: var(--text-main);
+            border: 1px solid var(--border-glow);
+            backdrop-filter: blur(10px);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.15);
+            transform: translateY(-3px);
+        }
+
+        /* Animations */
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes fadeDown { from { opacity: 0; transform: translateY(-30px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes scaleUp { from { opacity: 0; transform: scale(0.95) translateY(20px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div class="ambient-bg"></div>
+    <div class="ambient-glow"></div>
+
+    <div class="container">
+        <div class="hero">
+            <div class="badge">v0.1.0 Released</div>
+            <h1><span class="text-gradient">Intelligence for</span> <span class="text-gradient-accent">Your Codebase</span></h1>
+            <p>Open Kioku is a blazing fast, local-first MCP server designed to give AI assistants instantaneous semantic context, precise evidence, and powerful search capabilities across your entire repository.</p>
+        </div>
+
+        <div class="terminal-wrapper">
+            <div class="terminal-header">
+                <div class="traffic-lights">
+                    <div class="traffic-light red"></div>
+                    <div class="traffic-light yellow"></div>
+                    <div class="traffic-light green"></div>
+                </div>
+                <div class="terminal-title">
+                    <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-5 14H4v-4h11v4zm0-5H4V9h11v4zm5 5h-4V9h4v9z"/></svg>
+                    ok — bash
+                </div>
+            </div>
+            <div class="terminal-body" id="terminal"></div>
+        </div>
+
+        <div class="actions">
+            <a href="https://github.com/shivyadavus/open-kioku" class="btn btn-primary">
+                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                View Repository
+            </a>
+            <a href="#" class="btn btn-secondary" onclick="resetDemo(event)">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                Replay Demo
+            </a>
+        </div>
+    </div>
+
+    <script>
+        const terminal = document.getElementById('terminal');
+        
+        const script = [
+            { type: 'comment', text: '# 1. Blazing Fast Semantic Indexing (Powered by Tantivy & Tree-sitter)' },
+            { type: 'command', text: 'ok init .' },
+            { type: 'output', html: '<span style="color:var(--term-green)">✓</span> Indexed <span class="bold">1,432</span> files and <span class="bold">8,291</span> symbols in <span class="time">0.43s</span><br><span style="color:var(--term-blue)">ℹ</span> Search graph and embeddings successfully built.' },
+            
+            { type: 'delay', ms: 1200 },
+            { type: 'comment', text: '\n# 2. Comprehensive System Doctor' },
+            { type: 'command', text: 'ok doctor' },
+            { type: 'output', html: '<span class="ok-badge">[OK]</span> .ok/ directory integrity<br><span class="ok-badge">[OK]</span> Tantivy index snapshot readability<br><span class="ok-badge">[OK]</span> Rust toolchain (v1.78) active<br><span class="ok-badge">[OK]</span> Tree-sitter grammars validated<br><span class="ok-badge">[OK]</span> MCP Server initializes via stdio<br><br><span class="highlight">Status:</span> 100% Healthy.' },
+
+            { type: 'delay', ms: 1200 },
+            { type: 'comment', text: '\n# 3. Generate Native Context Packs for LLMs' },
+            { type: 'command', text: 'ok context "Implement markdown export" --format markdown' },
+            { type: 'output', html: '<span style="color:var(--term-comment)">Analyzing impact radius...</span><br><br><span class="bold"># Context Pack Generated</span><br><br><span class="bold">## Affected Components</span><br>├─ crates/open-kioku-context/src/lib.rs <span class="highlight">(ContextPackFormat)</span><br>└─ crates/open-kioku-mcp/src/lib.rs <span class="highlight">(build_context_pack)</span><br><br><span class="bold">## Test Validation Plan</span><br>Run `cargo test -p open-kioku-context`' },
+
+            { type: 'delay', ms: 1400 },
+            { type: 'comment', text: '\n# 4. Search with Structural Evidence' },
+            { type: 'command', text: 'ok search "struct IndexSnapshot"' },
+            { type: 'output', html: '<span style="color:var(--term-blue)">crates/open-kioku-core/src/lib.rs</span>:142<br><span class="bold">pub struct</span> IndexSnapshot {<br>    pub manifest: IndexManifest,<br>    pub files: Vec&lt;FileInfo&gt;,<br>}<br><span style="color:var(--term-yellow)">Confidence: 98% (Exact Structural Match)</span>' },
+
+            { type: 'delay', ms: 1200 },
+            { type: 'comment', text: '\n# 5. Connect as MCP to Claude / Cursor' },
+            { type: 'command', text: 'ok mcp tools/list --hide-experimental' },
+            { type: 'output', html: '<span style="color:var(--term-green)">✓</span> Exposing 24 high-fidelity tools over stdio<br><br>→ <span class="highlight">search_code</span>: Lexical BM25 search across codebase<br>→ <span class="highlight">build_context_pack</span>: Scaffold architectural context for AI tasks<br>→ <span class="highlight">impact_analysis</span>: Trace exact blast-radius of file modifications<br>→ <span class="highlight">recommend_validation_plan</span>: Auto-resolve test targets for diffs<br><br><span style="color:var(--term-comment)">Server is listening...</span>' },
+
+            { type: 'delay', ms: 2000 }
+        ];
+
+        let isRunning = false;
+        let cursor;
+
+        async function typeCommand(text, element) {
+            return new Promise(resolve => {
+                let i = 0;
+                const interval = setInterval(() => {
+                    element.innerHTML += text.charAt(i);
+                    i++;
+                    if (i === text.length) {
+                        clearInterval(interval);
+                        setTimeout(resolve, 200);
+                    }
+                }, Math.random() * 20 + 20); // Ultra-fast typing 20-40ms
+            });
+        }
+
+        async function runDemo() {
+            if (isRunning) return;
+            isRunning = true;
+            terminal.innerHTML = '';
+            
+            cursor = document.createElement('span');
+            cursor.className = 'cursor';
+            terminal.appendChild(cursor);
+
+            for (const step of script) {
+                if (step.type === 'delay') {
+                    await new Promise(r => setTimeout(r, step.ms));
+                    continue;
+                }
+
+                const lineContainer = document.createElement('div');
+                lineContainer.className = 'line';
+                terminal.insertBefore(lineContainer, cursor);
+
+                if (step.type === 'comment') {
+                    lineContainer.className = 'line comment';
+                    lineContainer.textContent = step.text;
+                    await new Promise(r => setTimeout(r, 200));
+                } else if (step.type === 'command') {
+                    lineContainer.innerHTML = '<span class="prompt">❯</span><span class="path">~/open-kioku</span> ';
+                    const cmdSpan = document.createElement('span');
+                    cmdSpan.className = 'command';
+                    lineContainer.appendChild(cmdSpan);
+                    
+                    cmdSpan.appendChild(cursor);
+                    await new Promise(r => setTimeout(r, 150));
+                    
+                    cursor.remove();
+                    await typeCommand(step.text, cmdSpan);
+                    terminal.appendChild(cursor);
+                } else if (step.type === 'output') {
+                    lineContainer.className = 'line output';
+                    lineContainer.innerHTML = step.html;
+                }
+                
+                // Auto scroll
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+            isRunning = false;
+        }
+
+        function resetDemo(e) {
+            if (e) e.preventDefault();
+            if (!isRunning) runDemo();
+        }
+
+        // Delay initial start for the entrance animation to finish
+        setTimeout(runDemo, 1500);
+    </script>
+</body>
+</html>

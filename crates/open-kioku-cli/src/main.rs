@@ -83,8 +83,8 @@ enum Command {
         format: ContextPackFormat,
     },
     Bench {
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     Architecture {
         #[command(subcommand)]
@@ -419,9 +419,9 @@ async fn main() -> anyhow::Result<()> {
             let rendered = format.render(&pack)?;
             println!("{}", rendered);
         }
-        Command::Bench { repo } => {
+        Command::Bench { path } => {
             let start = std::time::Instant::now();
-            let snapshot = index_repo(&repo)?;
+            let snapshot = index_repo(&path)?;
             let duration = start.elapsed();
             
             let manifest = snapshot.manifest;
