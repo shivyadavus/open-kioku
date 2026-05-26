@@ -6,7 +6,7 @@ use open_kioku_impact::ImpactEngine;
 use open_kioku_patch::PatchPlanner;
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
-use open_kioku_storage::{GraphStore, MetadataStore, OcfStore, SearchIndex};
+use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
@@ -140,7 +140,7 @@ async fn dispatch(
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
             Ok(json!(
-                ContextPackBuilder::new(store as &dyn OcfStore).build(task, limit(&params))?
+                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?
             ))
         }
         "impact_analysis" => {
@@ -222,7 +222,7 @@ async fn dispatch(
                 .and_then(Value::as_str)
                 .unwrap_or("review requested patch");
             Ok(json!(
-                PatchPlanner::new(config, store as &dyn OcfStore).plan(task)?
+                PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
             ))
         }
         "apply_patch" => {
