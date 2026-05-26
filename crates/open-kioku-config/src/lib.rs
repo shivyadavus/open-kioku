@@ -76,6 +76,7 @@ impl Default for OkConfig {
                 mode: "read-only".into(),
                 transport: "stdio".into(),
                 allow_write: false,
+                hide_experimental: false,
             },
             security: SecurityConfig {
                 redact_secrets: true,
@@ -152,6 +153,8 @@ pub struct McpConfig {
     pub mode: String,
     pub transport: String,
     pub allow_write: bool,
+    #[serde(default)]
+    pub hide_experimental: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
