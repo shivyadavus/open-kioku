@@ -24,6 +24,8 @@ When you drop a large codebase into an AI chat, the model has to infer architect
 
 Open Kioku inverts this: **index first, query precisely**. The agent calls a tool instead of guessing.
 
+**Think of Open Kioku as the glasses an AI agent puts on to read your specific codebase perfectly.**
+
 ---
 
 ## Why Agents Use It
