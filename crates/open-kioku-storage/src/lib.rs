@@ -49,6 +49,5 @@ pub trait ImpactStore: Send + Sync {
 }
 
 /// Combined store trait for types that implement both metadata and graph storage.
-/// Use this as `dyn OcfStore` in engines that need both capabilities.
-pub trait OcfStore: MetadataStore + GraphStore {}
-impl<T: MetadataStore + GraphStore> OcfStore for T {}
+pub trait OkStore: MetadataStore + GraphStore {}
+impl<T: MetadataStore + GraphStore> OkStore for T {}
