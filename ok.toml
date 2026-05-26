@@ -1,0 +1,82 @@
+[repo]
+name = "open-kioku-repo"
+root = "."
+
+[index]
+incremental = true
+max_file_size = "1mb"
+exclude = [
+    "**/.git/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.venv/**",
+    "**/.ok/**",
+]
+
+[languages]
+enabled = [
+    "rust",
+    "java",
+    "typescript",
+    "javascript",
+    "python",
+    "go",
+    "yaml",
+    "json",
+    "toml",
+    "sql",
+]
+
+[scip]
+enabled = true
+auto_generate = false
+paths = [
+    ".ok/indexes/java.scip",
+    ".ok/indexes/typescript.scip",
+    ".ok/indexes/python.scip",
+]
+
+[search]
+lexical = "tantivy"
+semantic = "disabled"
+structural = true
+
+[semantic]
+enabled = false
+provider = "local"
+model = ""
+
+[mcp]
+mode = "read-only"
+transport = "stdio"
+allow_write = false
+hide_experimental = false
+
+[security]
+redact_secrets = true
+deny_network = true
+allow_hidden_files = false
+allow_write = false
+approval_required = true
+
+[commands]
+allow = [
+    "cargo test",
+    "cargo check",
+    "mvn test",
+    "npm test",
+    "pytest",
+]
+
+[paths]
+deny = [
+    ".env",
+    ".aws/**",
+    ".ssh/**",
+    "**/secrets/**",
+]
+
+[architecture]
+rules = ".ok/architecture-rules.yml"

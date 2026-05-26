@@ -33,17 +33,17 @@ impl ContextPackFormat {
                     out.push_str(&result.snippet);
                     out.push_str("\n```\n\n");
                 }
-                
+
                 out.push_str("## Supporting Impact\n\n");
                 for result in &pack.supporting_files {
                     out.push_str(&format!("- {}\n", result.path.display()));
                 }
-                
+
                 out.push_str("\n## Validation Plan\n\n");
                 for test in &pack.validation_plan.tests {
                     out.push_str(&format!("- {}\n", test.name));
                 }
-                
+
                 Ok(out)
             }
         }

@@ -423,10 +423,16 @@ async fn main() -> anyhow::Result<()> {
             let start = std::time::Instant::now();
             let snapshot = index_repo(&path)?;
             let duration = start.elapsed();
-            
+
             let manifest = snapshot.manifest;
-            println!("Indexed {} files and {} symbols in {:?}", manifest.file_count, manifest.symbol_count, duration);
-            println!("{:.2} files/sec", manifest.file_count as f64 / duration.as_secs_f64());
+            println!(
+                "Indexed {} files and {} symbols in {:?}",
+                manifest.file_count, manifest.symbol_count, duration
+            );
+            println!(
+                "{:.2} files/sec",
+                manifest.file_count as f64 / duration.as_secs_f64()
+            );
         }
         Command::Architecture { command } => {
             let store = open_store(&repo)?;
