@@ -11,5 +11,6 @@ assert_cmd = "2.1.2"
 open-kioku-core = { path = "../open-kioku-core" }
 open-kioku-errors = { path = "../open-kioku-errors" }
 open-kioku-storage = { path = "../open-kioku-storage" }
+predicates = "3.1.4"
 rusqlite.workspace = true
 
