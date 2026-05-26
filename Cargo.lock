@@ -1493,6 +1493,8 @@ dependencies = [
  "open-kioku-storage",
  "predicates",
  "rusqlite",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

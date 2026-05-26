@@ -35,6 +35,7 @@ members = [
   "crates/open-kioku-cli",
   "crates/open-kioku-daemon",
 ]
+exclude = ["crates/open-kioku-tests/fixtures/rust-fixture"]
 resolver = "2"
 
 [workspace.package]
