@@ -26,10 +26,33 @@ check_version() {
   fi
 }
 
+check_open_kioku_dependencies() {
+  local file="$1"
+  local line
+  while IFS= read -r line; do
+    local package version
+    package=$(sed 's/.*"\(@open-kioku\/[^"]*\)":.*/\1/' <<<"$line")
+    version=$(sed 's/.*": "\([^"]*\)".*/\1/' <<<"$line")
+    if [[ "$version" != "$CARGO_VERSION" ]]; then
+      echo "VERSION MISMATCH: $file dependency $package has $version, Cargo.toml has $CARGO_VERSION"
+      EXIT=1
+    else
+      echo "  ✓ $file dependency $package ($version)"
+    fi
+  done < <(grep '^[[:space:]]*"@open-kioku/[^"]*"[[:space:]]*:' "$file" || true)
+}
+
 echo "Validating manifest versions against Cargo.toml ($CARGO_VERSION)..."
 check_version "$ROOT/.cursor-plugin/plugin.json"
 check_version "$ROOT/.cursor-plugin/marketplace.json"
 check_version "$ROOT/claude-plugin.json"
+
+shopt -s nullglob
+for npm_package in "$ROOT"/packages/npm*/package.json; do
+  check_version "$npm_package"
+  check_open_kioku_dependencies "$npm_package"
+done
+shopt -u nullglob
 
 if [[ $EXIT -ne 0 ]]; then
   echo ""
