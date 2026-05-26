@@ -12,7 +12,7 @@
     "type": "git",
     "url": "https://github.com/shivyadavus/open-kioku"
   },
-  "license": "Apache-2.0",
+  "license": "Elastic-2.0",
   "keywords": ["code-intelligence", "mcp", "search", "symbols", "rust", "local-first", "tree-sitter", "bm25"],
   "categories": ["Developer Tools", "Code Intelligence"],
   "mcpServers": {
