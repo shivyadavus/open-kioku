@@ -18,13 +18,13 @@ Open Kioku (`ok`) is a local-first code intelligence tool. This privacy policy d
 
 Open Kioku indexes your local codebase and stores the resulting index entirely on your own machine:
 
-- **Index location:** `.ok/` directory inside the repository you index.
+- **Index location:** `.ok/` directory inside the repository you index — specifically `.ok/index.sqlite` (metadata and dependency graph) and `.ok/search/tantivy` (BM25 full-text index).
 - **What is stored:** file paths, symbol names, BM25 search chunks, dependency graph edges, and import/reference metadata — all derived from your local source files.
 - **Where it is stored:** exclusively on your local disk. Nothing is uploaded.
 
 ## Network Activity
 
-The `ok mcp serve` process makes **zero outbound network connections**. It communicates only over local stdio with the MCP client (Claude desktop, Cursor, etc.).
+The `ok mcp serve` process makes **zero outbound network connections**. Network access is denied by default (`deny_network: true` in the default configuration). It communicates only over local stdio with the MCP client (Claude desktop, Cursor, etc.).
 
 The only network activity associated with Open Kioku is:
 
@@ -33,21 +33,27 @@ The only network activity associated with Open Kioku is:
 
 ## Secret and Sensitive Path Handling
 
-Open Kioku's `PolicyGate` layer explicitly excludes the following paths from indexing regardless of `.gitignore` settings:
+Open Kioku's `PolicyGate` layer explicitly blocks the following path patterns from being read or indexed, by default:
 
-- `.env`, `.env.*`
-- `.aws/`, `.ssh/`, `.gnupg/`
-- Files matching common secret patterns (private keys, credential files)
+- `.env`
+- `.aws/**`
+- `.ssh/**`
+- `**/secrets/**`
 
-These paths are never read into the index.
+These patterns are enforced via glob matching in code and cannot be bypassed by `.gitignore` configuration. Users may add additional deny patterns in `ok.toml` under `[paths] deny`.
 
 ## Write Access
 
-The MCP server is **read-only by default**. Write tools (`apply_patch`) require both the `--allow-write` CLI flag and the `OPEN_KIOKU_ALLOW_WRITE=true` environment variable to be explicitly set by the user.
+The MCP server is **read-only by default** (`mcp.mode = "read-only"`, `security.allow_write = false`). The `apply_patch` tool requires both:
+
+1. `security.allow_write = true` set in `ok.toml` (or via the `OK_SECURITY_MODE` environment variable), **and**
+2. The `OPEN_KIOKU_ALLOW_WRITE=true` environment variable set on the MCP server process.
+
+Both conditions must be true simultaneously. If either is missing, `apply_patch` is denied.
 
 ## Third-Party Services
 
-Open Kioku does not integrate with or transmit data to any third-party service.
+Open Kioku does not integrate with or transmit data to any third-party service. Semantic search is **disabled by default** (`search.semantic = "disabled"`); if enabled by the user, it uses a locally configured provider only.
 
 ## Changes to This Policy
 
