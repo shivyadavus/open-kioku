@@ -1,0 +1,11 @@
+---
+description: Require patch validation before applying any proposed code change
+globs: ["**/*.rs", "**/*.ts", "**/*.py", "**/*.go", "**/*.java", "**/*.js"]
+alwaysApply: false
+---
+
+# Validate patch before applying
+
+When using `propose_patch`, always follow it with `validate_patch` before writing any changes to disk.
+
+`validate_patch` confirms the patch plan is structurally sound, targets the correct symbols, and will not produce broken imports or missing references. Skipping this step risks introducing silent breakage.

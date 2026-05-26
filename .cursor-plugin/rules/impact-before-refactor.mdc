@@ -1,0 +1,11 @@
+---
+description: Require blast-radius check before any rename, deletion, or interface change
+globs: ["**/*.rs", "**/*.ts", "**/*.py", "**/*.go", "**/*.java", "**/*.js"]
+alwaysApply: false
+---
+
+# Impact analysis before refactor
+
+Before renaming a symbol, deleting a function, or changing a public interface, call `impact_analysis` via Open Kioku.
+
+This traces all downstream usages and surfaces files that will break. Do not proceed with the change until the blast radius is understood.
