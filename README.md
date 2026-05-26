@@ -56,9 +56,9 @@ Full MCP tool reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Tools returne
 
 ---
 
-## 🔥 Interactive Demo
+## 🔥 Animated Web Demo
 
-Check out our **[Interactive Web Demo](https://shivyadavus.github.io/open-kioku/)** to see a hyper-realistic, blazing-fast CLI session of Open Kioku in action!
+Check out our **[Animated Web Demo](https://shivyadavus.github.io/open-kioku/)** to see a hyper-realistic, blazing-fast CLI session of Open Kioku in action!
 *(Alternatively, you can generate a gorgeous terminal GIF locally by running `vhs demo.tape` using [Charmbracelet VHS](https://github.com/charmbracelet/vhs))*
 
 ---
