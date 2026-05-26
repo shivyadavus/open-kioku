@@ -13,6 +13,7 @@ use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -47,6 +48,12 @@ enum Command {
     Doctor {
         #[arg(default_value = ".")]
         repo: PathBuf,
+    },
+    Demo {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     Search {
         query: String,
@@ -170,6 +177,15 @@ struct DoctorReport {
 }
 
 #[derive(Serialize)]
+struct DemoReport {
+    repo: PathBuf,
+    file_count: usize,
+    symbol_count: usize,
+    chunk_count: usize,
+    commands: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct DoctorCheck {
     name: &'static str,
     status: CheckStatus,
@@ -202,34 +218,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Index { repo: command_repo } => {
             let repo = resolve_repo(&repo, command_repo);
-            let config = OkConfig::load_from_repo(&repo)?;
-            let snapshot = Indexer::default().index_repo(&repo, &config)?;
-            let store = open_store(&repo)?;
-            store.replace_index(IndexData {
-                manifest: &snapshot.manifest,
-                files: &snapshot.files,
-                symbols: &snapshot.symbols,
-                chunks: &snapshot.chunks,
-                tests: &snapshot.tests,
-                imports: &snapshot.imports,
-                occurrences: &snapshot.occurrences,
-            })?;
-            let graph = InMemoryGraph::from_index_with_occurrences(
-                &snapshot.files,
-                &snapshot.symbols,
-                &snapshot.chunks,
-                &snapshot.occurrences,
-            );
-            store.replace_graph(
-                &graph.nodes.values().cloned().collect::<Vec<_>>(),
-                &graph.edges,
-            )?;
-            rebuild_disk_index(
-                default_index_dir(&repo),
-                &snapshot.chunks,
-                &snapshot.files,
-                &snapshot.symbols,
-            )?;
+            let snapshot = index_repo(&repo)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&snapshot.manifest)?);
             } else {
@@ -285,6 +274,23 @@ async fn main() -> anyhow::Result<()> {
             }
             if !ok {
                 std::process::exit(1);
+            }
+        }
+        Command::Demo { path, force } => {
+            let repo = demo_repo_path(path)?;
+            let report = build_demo_repo(&repo, force)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Demo repo ready: {}", report.repo.display());
+                println!(
+                    "Indexed {} files, {} symbols, {} chunks",
+                    report.file_count, report.symbol_count, report.chunk_count
+                );
+                println!("\nTry:");
+                for command in &report.commands {
+                    println!("  {command}");
+                }
             }
         }
         Command::Search { query, limit } => {
@@ -565,6 +571,143 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         checks,
         next_steps,
     }
+}
+
+fn demo_repo_path(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match path {
+        Some(path) => absolutize(&path),
+        None => Ok(std::env::current_dir()?.join("open-kioku-demo")),
+    }
+}
+
+fn build_demo_repo(repo: &Path, force: bool) -> anyhow::Result<DemoReport> {
+    if repo.exists() {
+        if !force {
+            anyhow::bail!(
+                "{} already exists; pass --force to replace the demo repo",
+                repo.display()
+            );
+        }
+        fs::remove_dir_all(repo)?;
+    }
+
+    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join("tests"))?;
+    fs::write(
+        repo.join("README.md"),
+        "# Open Kioku Demo\n\nSmall repo for trying code search, symbols, impact, and MCP setup.\n",
+    )?;
+    fs::write(
+        repo.join("Cargo.toml"),
+        r#"[package]
+name = "open-kioku-demo"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )?;
+    fs::write(
+        repo.join("src/lib.rs"),
+        r#"pub mod auth;
+
+pub struct RequestContext {
+    pub user_id: String,
+}
+
+pub fn handle_login(user_id: &str) -> String {
+    let context = RequestContext {
+        user_id: user_id.to_string(),
+    };
+    auth::issue_token(&context, 3600)
+}
+"#,
+    )?;
+    fs::write(
+        repo.join("src/auth.rs"),
+        r#"use crate::RequestContext;
+
+pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String {
+    format!("token:{}:{}", context.user_id, ttl_seconds)
+}
+
+pub fn validate_token(token: &str) -> bool {
+    token.starts_with("token:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RequestContext;
+
+    #[test]
+    fn issues_token_with_user_id() {
+        let context = RequestContext {
+            user_id: "demo-user".into(),
+        };
+        assert!(issue_token(&context, 60).contains("demo-user"));
+    }
+}
+"#,
+    )?;
+    fs::write(
+        repo.join("tests/auth_flow.rs"),
+        r#"use open_kioku_demo::{auth, handle_login};
+
+#[test]
+fn login_returns_valid_token() {
+    let token = handle_login("demo-user");
+    assert!(auth::validate_token(&token));
+}
+"#,
+    )?;
+    OkConfig::write_default(repo.join("ok.toml"))?;
+
+    let snapshot = index_repo(repo)?;
+    let repo_display = repo.display().to_string();
+    Ok(DemoReport {
+        repo: repo.to_path_buf(),
+        file_count: snapshot.manifest.file_count,
+        symbol_count: snapshot.manifest.symbol_count,
+        chunk_count: snapshot.manifest.chunk_count,
+        commands: vec![
+            format!("ok --repo {repo_display} search token"),
+            format!("ok --repo {repo_display} symbol find issue_token"),
+            format!("ok --repo {repo_display} impact --file src/auth.rs"),
+            format!("ok --repo {repo_display} context \"change token expiry\" --json"),
+            format!("ok mcp install claude --repo {repo_display}"),
+        ],
+    })
+}
+
+fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
+    let config = OkConfig::load_from_repo(repo)?;
+    let snapshot = Indexer::default().index_repo(repo, &config)?;
+    let store = open_store(repo)?;
+    store.replace_index(IndexData {
+        manifest: &snapshot.manifest,
+        files: &snapshot.files,
+        symbols: &snapshot.symbols,
+        chunks: &snapshot.chunks,
+        tests: &snapshot.tests,
+        imports: &snapshot.imports,
+        occurrences: &snapshot.occurrences,
+    })?;
+    let graph = InMemoryGraph::from_index_with_occurrences(
+        &snapshot.files,
+        &snapshot.symbols,
+        &snapshot.chunks,
+        &snapshot.occurrences,
+    );
+    store.replace_graph(
+        &graph.nodes.values().cloned().collect::<Vec<_>>(),
+        &graph.edges,
+    )?;
+    rebuild_disk_index(
+        default_index_dir(repo),
+        &snapshot.chunks,
+        &snapshot.files,
+        &snapshot.symbols,
+    )?;
+    Ok(snapshot)
 }
 
 fn push_check(
