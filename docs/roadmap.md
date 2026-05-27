@@ -24,7 +24,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Improve ranked snippets for `search_code`.
 - Done: Strengthen symbol definition/reference accuracy using tree-sitter plus SCIP when available.
 - Done: Return consistent evidence, confidence, and match reasons from every result.
-- In progress: Add quality benchmarks for precision on fixture repos and real local repos.
+- Done: Add quality benchmarks for precision on fixture repos and real local repos.
 
 ## 4. Tool Surface Maturity
 

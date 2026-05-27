@@ -16,6 +16,7 @@ use open_kioku_tests::TestSelector;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "ok", version, about = "Open Kioku code-intelligence platform")]
@@ -91,10 +92,8 @@ enum Command {
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
-    Bench {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
+    Bench(BenchArgs),
+
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommand,
@@ -107,6 +106,25 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+}
+
+#[derive(Args)]
+struct BenchArgs {
+    /// Repository to index and benchmark.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Search quality expectation as QUERY=EXPECTED_PATH_SUBSTRING.
+    #[arg(long = "quality-case", value_name = "QUERY=EXPECTED_PATH")]
+    quality_cases: Vec<String>,
+
+    /// Number of search results considered for each quality case.
+    #[arg(long, default_value_t = 10)]
+    quality_limit: usize,
+
+    /// Fail when quality precision@1 is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    quality_min_precision_at_1: f64,
 }
 
 #[derive(Subcommand)]
@@ -183,6 +201,55 @@ enum McpCommand {
 enum McpClient {
     Claude,
     Cursor,
+}
+
+#[derive(Debug, Clone)]
+struct QualityCase {
+    query: String,
+    expected_path: String,
+}
+
+#[derive(Serialize)]
+struct BenchReport {
+    repo: PathBuf,
+    index: IndexBenchReport,
+    search: SearchBenchReport,
+    quality: Option<QualityBenchReport>,
+}
+
+#[derive(Serialize)]
+struct IndexBenchReport {
+    file_count: usize,
+    symbol_count: usize,
+    chunk_count: usize,
+    elapsed_ms: f64,
+    files_per_second: f64,
+}
+
+#[derive(Serialize)]
+struct SearchBenchReport {
+    bm25_median_ms: f64,
+    regex_median_ms: f64,
+}
+
+#[derive(Serialize)]
+struct QualityBenchReport {
+    case_count: usize,
+    precision_at_1: f64,
+    hit_rate_at_k: f64,
+    mean_reciprocal_rank: f64,
+    limit: usize,
+    cases: Vec<QualityCaseReport>,
+}
+
+#[derive(Serialize)]
+struct QualityCaseReport {
+    query: String,
+    expected_path: String,
+    rank: Option<usize>,
+    top_path: Option<PathBuf>,
+    matched_path: Option<PathBuf>,
+    result_count: usize,
 }
 
 #[derive(Serialize)]
@@ -438,48 +505,23 @@ async fn main() -> anyhow::Result<()> {
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
         }
-        Command::Bench { path } => {
-            let start = std::time::Instant::now();
-            let snapshot = index_repo(&path)?;
-            let duration = start.elapsed();
-
-            let manifest = snapshot.manifest;
-            println!(
-                "Indexed {} files and {} symbols in {:?}",
-                manifest.file_count, manifest.symbol_count, duration
-            );
-            println!(
-                "{:.2} files/sec",
-                manifest.file_count as f64 / duration.as_secs_f64()
-            );
-
-            let index = open_kioku_search_tantivy::TantivySearchIndex::open_or_create(
-                open_kioku_search_tantivy::default_index_dir(&path),
-            )?;
-            let mut bm25_times = Vec::new();
-            use open_kioku_storage::SearchIndex;
-            for _ in 0..10 {
-                let s = std::time::Instant::now();
-                let _ = index.search("fn", 10);
-                bm25_times.push(s.elapsed());
+        Command::Bench(args) => {
+            let min_precision = args.quality_min_precision_at_1;
+            let report = run_bench(args)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_bench_report(&report);
             }
-            bm25_times.sort();
-            let bm25_median = bm25_times[5];
-            println!("BM25 search: {:?} median", bm25_median);
-
-            let store = open_store(&path)?;
-            let files = store.list_files(usize::MAX, 0)?;
-            let chunks = store.all_chunks()?;
-            let symbols = store.list_symbols(None, usize::MAX, 0)?;
-            let mut regex_times = Vec::new();
-            for _ in 0..10 {
-                let s = std::time::Instant::now();
-                let _ = open_kioku_search_regex::search_chunks(&chunks, &files, &symbols, "fn", 10);
-                regex_times.push(s.elapsed());
+            if let Some(quality) = &report.quality {
+                if quality.precision_at_1 < min_precision {
+                    anyhow::bail!(
+                        "quality precision@1 {:.3} is below required {:.3}",
+                        quality.precision_at_1,
+                        min_precision
+                    );
+                }
             }
-            regex_times.sort();
-            let regex_median = regex_times[5];
-            println!("Regex search: {:?} median", regex_median);
         }
         Command::Architecture { command } => {
             let store = open_store(&repo)?;
@@ -882,6 +924,197 @@ fn login_returns_valid_token() {
             format!("ok mcp install claude --repo {repo_display}"),
         ],
     })
+}
+
+fn run_bench(args: BenchArgs) -> anyhow::Result<BenchReport> {
+    let path = args.path;
+    let quality_cases = parse_quality_cases(&args.quality_cases)?;
+
+    let start = Instant::now();
+    let snapshot = index_repo(&path)?;
+    let index_duration = start.elapsed();
+
+    let index = TantivySearchIndex::open_or_create(default_index_dir(&path))?;
+    let bm25_median = median_duration(time_searches(10, || index.search("fn", 10).map(|_| ()))?);
+
+    let store = open_store(&path)?;
+    let files = store.list_files(usize::MAX, 0)?;
+    let chunks = store.all_chunks()?;
+    let symbols = store.list_symbols(None, usize::MAX, 0)?;
+    let regex_median = median_duration(time_searches(10, || {
+        search_chunks(&chunks, &files, &symbols, "fn", 10).map(|_| ())
+    })?);
+
+    let quality = if quality_cases.is_empty() {
+        None
+    } else {
+        Some(evaluate_quality_cases(
+            &index,
+            &quality_cases,
+            args.quality_limit,
+        )?)
+    };
+    let manifest = snapshot.manifest;
+    let elapsed_seconds = index_duration.as_secs_f64();
+
+    Ok(BenchReport {
+        repo: path,
+        index: IndexBenchReport {
+            file_count: manifest.file_count,
+            symbol_count: manifest.symbol_count,
+            chunk_count: manifest.chunk_count,
+            elapsed_ms: duration_ms(index_duration),
+            files_per_second: if elapsed_seconds > 0.0 {
+                manifest.file_count as f64 / elapsed_seconds
+            } else {
+                0.0
+            },
+        },
+        search: SearchBenchReport {
+            bm25_median_ms: duration_ms(bm25_median),
+            regex_median_ms: duration_ms(regex_median),
+        },
+        quality,
+    })
+}
+
+fn parse_quality_cases(values: &[String]) -> anyhow::Result<Vec<QualityCase>> {
+    values
+        .iter()
+        .map(|value| {
+            let (query, expected_path) = value.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("quality case must use QUERY=EXPECTED_PATH_SUBSTRING: {value}")
+            })?;
+            let query = query.trim();
+            let expected_path = expected_path.trim();
+            if query.is_empty() || expected_path.is_empty() {
+                anyhow::bail!("quality case query and expected path must be non-empty: {value}");
+            }
+            Ok(QualityCase {
+                query: query.to_string(),
+                expected_path: expected_path.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn evaluate_quality_cases(
+    index: &TantivySearchIndex,
+    cases: &[QualityCase],
+    limit: usize,
+) -> anyhow::Result<QualityBenchReport> {
+    let limit = limit.max(1);
+    let mut reports = Vec::with_capacity(cases.len());
+    let mut top_hits = 0usize;
+    let mut any_hits = 0usize;
+    let mut reciprocal_rank = 0.0;
+
+    for case in cases {
+        let results = index.search(&case.query, limit)?;
+        let expected = normalize_path_fragment(&case.expected_path);
+        let rank = results.iter().position(|result| {
+            normalize_path_fragment(&result.path.to_string_lossy()).contains(&expected)
+        });
+        let rank = rank.map(|value| value + 1);
+        if rank == Some(1) {
+            top_hits += 1;
+        }
+        if let Some(rank) = rank {
+            any_hits += 1;
+            reciprocal_rank += 1.0 / rank as f64;
+        }
+        reports.push(QualityCaseReport {
+            query: case.query.clone(),
+            expected_path: case.expected_path.clone(),
+            rank,
+            top_path: results.first().map(|result| result.path.clone()),
+            matched_path: rank
+                .and_then(|rank| results.get(rank - 1).map(|result| result.path.clone())),
+            result_count: results.len(),
+        });
+    }
+
+    let total = cases.len() as f64;
+    Ok(QualityBenchReport {
+        case_count: cases.len(),
+        precision_at_1: top_hits as f64 / total,
+        hit_rate_at_k: any_hits as f64 / total,
+        mean_reciprocal_rank: reciprocal_rank / total,
+        limit,
+        cases: reports,
+    })
+}
+
+fn print_bench_report(report: &BenchReport) {
+    println!(
+        "Indexed {} files, {} symbols, and {} chunks in {:.2}ms",
+        report.index.file_count,
+        report.index.symbol_count,
+        report.index.chunk_count,
+        report.index.elapsed_ms
+    );
+    println!("{:.2} files/sec", report.index.files_per_second);
+    println!("BM25 search: {:.2}ms median", report.search.bm25_median_ms);
+    println!(
+        "Regex search: {:.2}ms median",
+        report.search.regex_median_ms
+    );
+
+    if let Some(quality) = &report.quality {
+        println!(
+            "Quality: precision@1 {:.3}, hit-rate@{} {:.3}, MRR {:.3}",
+            quality.precision_at_1,
+            quality.limit,
+            quality.hit_rate_at_k,
+            quality.mean_reciprocal_rank
+        );
+        for case in &quality.cases {
+            let status = match case.rank {
+                Some(1) => "pass",
+                Some(_) => "hit",
+                None => "miss",
+            };
+            let rank = case
+                .rank
+                .map(|rank| rank.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let top_path = case
+                .top_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "  {status}: query {:?}, expected {:?}, rank {}, top {}",
+                case.query, case.expected_path, rank, top_path
+            );
+        }
+    }
+}
+
+fn time_searches(
+    iterations: usize,
+    mut run: impl FnMut() -> open_kioku_errors::Result<()>,
+) -> anyhow::Result<Vec<Duration>> {
+    let mut times = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let started = Instant::now();
+        run()?;
+        times.push(started.elapsed());
+    }
+    Ok(times)
+}
+
+fn median_duration(mut values: Vec<Duration>) -> Duration {
+    values.sort();
+    values[values.len() / 2]
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn normalize_path_fragment(value: &str) -> String {
+    value.replace('\\', "/").to_ascii_lowercase()
 }
 
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {

@@ -163,6 +163,11 @@ ok --repo /path/to/repo plan "update MCP tool list docs" --format markdown
 # Benchmark indexing and search
 ok bench /path/to/repo
 
+# Add quality expectations for searches you care about
+ok bench /path/to/repo \
+  --quality-case "PolicyGate=crates/policy/src/lib.rs" \
+  --quality-min-precision-at-1 1.0
+
 # Keep the local index current while editing
 ok watch /path/to/repo
 ```

@@ -20,7 +20,7 @@ fn cleanup_ok_dir(fixture: &str) {
     }
 }
 
-fn run_lifecycle_test(fixture: &str, search_term: &str) {
+fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     cleanup_ok_dir(fixture);
 
     // 1. Init
@@ -62,27 +62,43 @@ fn run_lifecycle_test(fixture: &str, search_term: &str) {
         .success()
         .stdout(predicate::str::contains(search_term));
 
+    // 5. Quality benchmark
+    let quality_case = format!("{search_term}={expected_path}");
+    let mut cmd = Command::cargo_bin("ok").unwrap();
+    cmd.current_dir(fixture_dir(fixture))
+        .args([
+            "bench",
+            ".",
+            "--quality-case",
+            &quality_case,
+            "--quality-min-precision-at-1",
+            "1.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Quality: precision@1 1.000"));
+
     cleanup_ok_dir(fixture);
 }
 
 #[test]
 fn test_rust_fixture_lifecycle() {
-    run_lifecycle_test("rust-fixture", "add");
+    run_lifecycle_test("rust-fixture", "add", "src/main.rs");
 }
 
 #[test]
 fn test_typescript_fixture_lifecycle() {
-    run_lifecycle_test("typescript-fixture", "greet");
+    run_lifecycle_test("typescript-fixture", "greet", "index.ts");
 }
 
 #[test]
 fn test_python_fixture_lifecycle() {
-    run_lifecycle_test("python-fixture", "multiply");
+    run_lifecycle_test("python-fixture", "multiply", "app.py");
 }
 
 #[test]
 fn test_go_fixture_lifecycle() {
-    run_lifecycle_test("go-fixture", "main");
+    run_lifecycle_test("go-fixture", "main", "main.go");
 }
 
 #[test]
