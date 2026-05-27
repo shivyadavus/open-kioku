@@ -1539,7 +1539,14 @@ name = "open-kioku-watch"
 version = "0.1.4"
 dependencies = [
  "notify",
+ "open-kioku-config",
  "open-kioku-errors",
+ "open-kioku-graph",
+ "open-kioku-ingest",
+ "open-kioku-search-tantivy",
+ "open-kioku-storage",
+ "open-kioku-storage-sqlite",
+ "tempfile",
 ]
 
 [[package]]
