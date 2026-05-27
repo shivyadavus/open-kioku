@@ -115,4 +115,19 @@ fn demo_creates_indexed_sample_repo() {
         command
     });
     assert!(search.contains("src/auth.rs"));
+
+    let plan = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("plan")
+            .arg("token")
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(plan.contains("# Plan: token"));
+    assert!(plan.contains("## Primary Context"));
+    assert!(plan.contains("## Agent Tool Calls"));
 }

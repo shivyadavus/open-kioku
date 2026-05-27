@@ -12,6 +12,7 @@ No hosted index. No embeddings API required. No source upload.
 ```sh
 npm install -g open-kioku
 ok demo --force
+ok --repo ./open-kioku-demo plan token --format markdown
 ```
 
 The fastest way to see it is the hosted demo: https://shivyadavus.github.io/open-kioku/
@@ -24,9 +25,8 @@ Open Kioku gives agents a pre-edit routine:
 
 1. Search indexed code and files.
 2. Resolve symbols and references.
-3. Estimate the blast radius of a file or symbol change.
-4. Build a compact context pack with likely validation targets.
-5. Serve those capabilities through MCP over local stdio.
+3. Build an evidence-backed pre-edit plan with likely impact and validation targets.
+4. Serve those capabilities through MCP over local stdio.
 
 ## Install
 
@@ -91,6 +91,7 @@ ok --repo ./open-kioku-demo search token --limit 5
 ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
 ok --repo ./open-kioku-demo context token --format markdown
+ok --repo ./open-kioku-demo plan token --format markdown
 ok mcp install cursor --repo ./open-kioku-demo
 ```
 
@@ -135,13 +136,16 @@ ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 # Context pack for an agent
 ok --repo /path/to/repo context "update MCP tool list docs" --format markdown
 
+# Pre-edit plan for an agent
+ok --repo /path/to/repo plan "update MCP tool list docs" --format markdown
+
 # Benchmark indexing and search
 ok bench /path/to/repo
 ```
 
 Current top-level commands:
 
-`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `bench`, `architecture`, `patch`, and `mcp`.
+`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `architecture`, `patch`, and `mcp`.
 
 ## MCP Setup
 
@@ -177,7 +181,7 @@ Stable tools include:
 - Symbols: `list_symbols`, `search_symbols`, `get_definition`, `get_references`, `get_symbol_context`
 - Search: `search_code`, `search_files`, `regex_search`
 - Graph and impact: `dependency_path`, `impact_analysis`, `module_dependencies`
-- Context and explanations: `build_context_pack`, `explain_file`, `explain_symbol`, `summarize_architecture`
+- Context and planning: `build_context_pack`, `plan_change`, `explain_file`, `explain_symbol`, `summarize_architecture`
 - Tests: `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
 - Architecture: `detect_architecture`, `architecture_boundaries`, `architecture_violations`
 - Patch planning: `propose_patch`, `review_patch`, `validate_patch`
@@ -194,6 +198,10 @@ Experimental tools are present for early workflows and may use heuristic or fall
 Every tool returned by `tools/list` includes a `maturity` field. Start the server with `--hide-experimental` when you want agents to see only the stable surface.
 
 Full tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md).
+
+Verified command output: [`docs/proof.md`](docs/proof.md).
+
+Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md). The proof harness runs `ok plan` against real local repositories, scores whether the returned context, impact, validation, risk, and agent tool calls are grounded in the indexed repo, and intentionally omits source snippets from the report.
 
 ## What Is Local
 
@@ -221,6 +229,8 @@ Tree-sitter parsing currently covers Rust, Python, TypeScript, TSX, JavaScript, 
 - Network denial is part of the MCP security config.
 
 See [`docs/security-model.md`](docs/security-model.md) for more detail.
+
+Operational security notes: [`SECURITY.md`](SECURITY.md).
 
 ## Repository Layout
 

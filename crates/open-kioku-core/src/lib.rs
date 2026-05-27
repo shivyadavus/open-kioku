@@ -419,6 +419,29 @@ pub struct ContextPack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ToolCallRecommendation {
+    pub tool: String,
+    pub purpose: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PlanReport {
+    pub task: String,
+    pub summary: String,
+    pub primary_context: Vec<SearchResult>,
+    pub relevant_symbols: Vec<Symbol>,
+    pub impact: ImpactReport,
+    pub validation: Vec<TestTarget>,
+    pub risk: RiskReport,
+    pub recommended_change_boundary: ChangeBoundary,
+    pub recommended_next_steps: Vec<String>,
+    pub tool_calls: Vec<ToolCallRecommendation>,
+    pub evidence: Vec<Evidence>,
+    pub confidence_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PatchPlan {
     pub id: PatchId,
     pub task: String,

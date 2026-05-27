@@ -6,6 +6,7 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::Indexer;
 use open_kioku_patch::PatchPlanner;
+use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
 use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIndex};
@@ -81,6 +82,13 @@ enum Command {
         task: String,
         #[arg(long, value_enum, default_value_t = ContextPackFormat::Json)]
         format: ContextPackFormat,
+    },
+    Plan {
+        task: String,
+        #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
+        format: PlanFormat,
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
     },
     Bench {
         #[arg(default_value = ".")]
@@ -418,6 +426,16 @@ async fn main() -> anyhow::Result<()> {
             let pack = ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?;
             let rendered = format.render(&pack)?;
             println!("{}", rendered);
+        }
+        Command::Plan {
+            task,
+            format,
+            limit,
+        } => {
+            let store = open_store(&repo)?;
+            let report = PlanEngine::new(&store as &dyn OkStore).plan(&task, limit)?;
+            let format = if cli.json { PlanFormat::Json } else { format };
+            println!("{}", format.render(&report)?);
         }
         Command::Bench { path } => {
             let start = std::time::Instant::now();
@@ -858,7 +876,8 @@ fn login_returns_valid_token() {
             format!("ok --repo {repo_display} search token"),
             format!("ok --repo {repo_display} symbol find issue_token"),
             format!("ok --repo {repo_display} impact --file src/auth.rs"),
-            format!("ok --repo {repo_display} context \"change token expiry\" --json"),
+            format!("ok --repo {repo_display} context token --format markdown"),
+            format!("ok --repo {repo_display} plan token --format markdown"),
             format!("ok mcp install claude --repo {repo_display}"),
         ],
     })

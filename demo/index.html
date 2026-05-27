@@ -782,7 +782,7 @@
             <div class="section-heading">
                 <div class="section-kicker">Agent Proof</div>
                 <h2>Replace blind file crawling with indexed evidence.</h2>
-                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, estimate blast radius, and pick validation targets before touching code.</p>
+                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, produce an evidence-backed plan, and pick validation targets before touching code.</p>
             </div>
 
             <div class="comparison">
@@ -800,7 +800,7 @@
                     <ul class="comparison-list">
                         <li><span class="mark mark-good">OK</span><span>One indexed search returns ranked evidence and exact file ranges.</span></li>
                         <li><span class="mark mark-good">OK</span><span>Symbol, reference, impact, and architecture tools share the same local index.</span></li>
-                        <li><span class="mark mark-good">OK</span><span>Context packs include affected files and a validation plan before edits start.</span></li>
+                        <li><span class="mark mark-good">OK</span><span>Plans include affected files, edit boundaries, validation candidates, and agent tool calls before edits start.</span></li>
                     </ul>
                 </div>
             </div>
@@ -853,7 +853,7 @@
                 <div class="workflow-card">
                     <div class="step-number">4</div>
                     <h3>Validate edits</h3>
-                    <p>Build context packs and test plans that keep agents focused on the smallest useful surface.</p>
+                    <p>Build context packs and pre-edit plans that keep agents focused on the smallest useful surface.</p>
                 </div>
             </div>
         </section>
@@ -932,12 +932,12 @@
             { kind: "cmd", text: "ok --repo ./open-kioku-demo impact --file src/auth.rs" },
             { kind: "out", html: '<span class="term-good">direct</span> src/lib.rs: pub mod auth<br><span class="term-good">direct</span> src/lib.rs: handle_login calls auth::issue_token<br><span class="term-good">direct</span> tests/auth_flow.rs: auth::validate_token<br><span class="term-muted">risk: low; derived from indexed symbols and lexical references</span>' },
             { kind: "pause", ms: 900 },
-            { kind: "cmd", text: "ok --repo ./open-kioku-demo context token --format markdown" },
-            { kind: "out", html: '<span class="term-strong">Context pack ready</span><br>1. primary context: tests/auth_flow.rs, src/auth.rs, src/lib.rs<br>2. symbols: validate_token, issue_token, handle_login<br>3. validation candidates: login_returns_valid_token, issues_token_with_user_id<br><span class="term-good">agent has indexed evidence before it edits</span>' },
+            { kind: "cmd", text: "ok --repo ./open-kioku-demo plan token --format markdown" },
+            { kind: "out", html: '<span class="term-strong">Plan ready</span><br>1. primary context: tests/auth_flow.rs, src/auth.rs, src/lib.rs<br>2. impact candidates: src/lib.rs, tests/auth_flow.rs<br>3. validation candidates: login_returns_valid_token, issues_token_with_user_id<br>4. agent calls: search_code, impact_analysis, build_context_pack, find_tests_for_change<br><span class="term-good">agent has indexed evidence before it edits</span>' },
             { kind: "pause", ms: 1000 },
             { kind: "note", text: "\n# Connect the same workflow to your coding agent." },
             { kind: "cmd", text: "ok mcp install cursor --repo ./open-kioku-demo" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> generated Cursor MCP config<br><span class="term-good">[ok]</span> stable tools: search_code, get_definition, get_references, impact_analysis, build_context_pack<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
+            { kind: "out", html: '<span class="term-good">[ok]</span> generated Cursor MCP config<br><span class="term-good">[ok]</span> stable tools: search_code, plan_change, get_definition, get_references, impact_analysis, build_context_pack<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
         ];
 
         let running = false;
