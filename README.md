@@ -9,6 +9,8 @@ Open Kioku is a local-first code intelligence MCP for AI coding agents. It index
 
 No hosted index. No embeddings API required. No source upload.
 
+Semantic search is opt-in. The default MCP path stays lexical and offline; enabling `semantic.enabled = true` uses the built-in local hash provider unless another provider is explicitly supported and configured.
+
 ```sh
 npm install -g open-kioku
 ok demo --force
@@ -253,6 +255,7 @@ Tree-sitter parsing currently covers Rust, Python, TypeScript, TSX, JavaScript, 
 - Read-only by default.
 - No hosted index or cloud search service.
 - No embeddings API required for default search, symbol, impact, and context workflows.
+- Optional semantic search can run with the built-in local provider and no network calls.
 - Secret-like paths such as `.env`, `.aws/`, and `.ssh/` are blocked by policy.
 - Command execution and patch application are policy-gated.
 - Network denial is part of the MCP security config.

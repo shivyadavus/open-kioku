@@ -7,6 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+open-kioku-config = { path = "../open-kioku-config" }
 open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-embeddings = { path = "../open-kioku-embeddings" }
 open-kioku-errors = { path = "../open-kioku-errors" }
-
+open-kioku-storage = { path = "../open-kioku-storage" }

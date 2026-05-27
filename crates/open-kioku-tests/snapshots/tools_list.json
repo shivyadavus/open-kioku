@@ -177,7 +177,7 @@
         "name": "regex_search"
       },
       {
-        "description": "Semantic similarity search (falls back to lexical when semantic is disabled)",
+        "description": "Optional semantic search using configured offline providers; falls back to lexical when disabled",
         "experimental": true,
         "inputSchema": {
           "properties": {
