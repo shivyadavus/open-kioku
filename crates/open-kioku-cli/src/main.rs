@@ -38,6 +38,7 @@ enum Command {
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
+    /// Keep the local index current while repository files change.
     Watch {
         #[arg(default_value = ".")]
         repo: PathBuf,

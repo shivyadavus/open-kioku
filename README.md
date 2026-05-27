@@ -124,6 +124,7 @@ ok demo --path /tmp/open-kioku-demo --force
 ```sh
 ok init /path/to/repo
 ok index /path/to/repo
+ok watch /path/to/repo
 ok doctor /path/to/repo
 ok status /path/to/repo
 ```
@@ -135,6 +136,8 @@ Open Kioku stores local index data inside the target repository:
 - `ok.toml` controls indexing, security, MCP mode, and command allowlists.
 
 `ok doctor` checks the repo path, config, SQLite index, Tantivy index, and running binary, then prints concrete next steps for anything missing.
+
+`ok watch` performs an initial local index and then keeps `.ok/index.sqlite` and `.ok/search/tantivy` current with a debounced reindex when repository files change.
 
 ## CLI Commands
 
@@ -159,6 +162,9 @@ ok --repo /path/to/repo plan "update MCP tool list docs" --format markdown
 
 # Benchmark indexing and search
 ok bench /path/to/repo
+
+# Keep the local index current while editing
+ok watch /path/to/repo
 ```
 
 Current top-level commands:

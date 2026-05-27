@@ -8,5 +8,13 @@ rust-version.workspace = true
 
 [dependencies]
 notify.workspace = true
+open-kioku-config = { path = "../open-kioku-config" }
+open-kioku-graph = { path = "../open-kioku-graph" }
+open-kioku-ingest = { path = "../open-kioku-ingest" }
+open-kioku-search-tantivy = { path = "../open-kioku-search-tantivy" }
+open-kioku-storage = { path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
 open-kioku-errors = { path = "../open-kioku-errors" }
 
+[dev-dependencies]
+tempfile.workspace = true

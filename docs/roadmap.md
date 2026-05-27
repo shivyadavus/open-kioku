@@ -35,7 +35,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 
 ## 5. Daily Workflow
 
-- Next: Make watch mode keep `.ok/` current while editing.
+- Done: Make watch mode keep `.ok/` current while editing with debounced local reindexing.
 - Done: Keep `ok demo` useful as the fastest way to evaluate search, symbols, impact, context packs, planning, and MCP setup.
 - Done: Add context-pack export formats for JSON, Markdown, and compact prompt text.
 - Done: Add benchmark output for index time, files per second, and search latency.
