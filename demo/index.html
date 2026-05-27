@@ -766,6 +766,7 @@
                     <div class="install-body">
                         <code class="code-line"><span class="shell-prompt">$</span>npm install -g open-kioku</code>
                         <code class="code-line"><span class="shell-prompt">$</span>ok demo --force</code>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok prove ./open-kioku-demo --task token</code>
                         <code class="code-line"><span class="shell-prompt">$</span>ok mcp install claude --repo "$PWD/open-kioku-demo"</code>
                         <p class="mini-note">The npm wrapper installs the native binary for your platform: macOS, Linux, and Windows packages are published separately.</p>
                         <div class="trust-row" aria-label="Security guarantees">
@@ -782,7 +783,7 @@
             <div class="section-heading">
                 <div class="section-kicker">Agent Proof</div>
                 <h2>Replace blind file crawling with indexed evidence.</h2>
-                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, produce an evidence-backed plan, and pick validation targets before touching code.</p>
+                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, produce an evidence-backed plan, pick validation targets, and generate a shareable proof report before touching code.</p>
             </div>
 
             <div class="comparison">
@@ -820,8 +821,8 @@
                         <span class="control-amber"></span>
                         <span class="control-green"></span>
                     </div>
-                    <div class="terminal-title">ok agent-proof --demo</div>
-                    <button class="copy-button" type="button" data-copy="npx open-kioku demo --force" aria-label="Copy npx demo command">Copy</button>
+                    <div class="terminal-title">ok prove --demo</div>
+                    <button class="copy-button" type="button" data-copy="npx open-kioku demo --force && ok prove ./open-kioku-demo --task token" aria-label="Copy proof demo command">Copy</button>
                 </div>
                 <div class="terminal-body" id="terminal" aria-live="polite"></div>
             </div>
@@ -854,6 +855,31 @@
                     <div class="step-number">4</div>
                     <h3>Validate edits</h3>
                     <p>Build context packs and pre-edit plans that keep agents focused on the smallest useful surface.</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-heading">
+                <div class="section-kicker">Shareable Proof</div>
+                <h2>Show usefulness without posting source code.</h2>
+                <p class="section-copy">Run `ok prove` on a demo repo or private codebase to produce a Markdown report with indexed counts, task scores, validation signals, and redacted path shapes. The report intentionally omits source snippets.</p>
+            </div>
+
+            <div class="setup-grid">
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Demo proof</div>
+                        <button class="copy-button" type="button" data-copy="ok prove ./open-kioku-demo --task token" aria-label="Copy demo proof command">Copy</button>
+                    </div>
+                    <pre><code>ok prove ./open-kioku-demo --task token</code></pre>
+                </div>
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Private repo proof</div>
+                        <button class="copy-button" type="button" data-copy="ok prove /path/to/repo --task &quot;auth flow&quot; --task &quot;release workflow&quot;" aria-label="Copy private repo proof command">Copy</button>
+                    </div>
+                    <pre><code>ok prove /path/to/repo --task "auth flow" --task "release workflow"</code></pre>
                 </div>
             </div>
         </section>
@@ -934,6 +960,9 @@
             { kind: "pause", ms: 900 },
             { kind: "cmd", text: "ok --repo ./open-kioku-demo plan token --format markdown" },
             { kind: "out", html: '<span class="term-strong">Plan ready</span><br>1. primary context: tests/auth_flow.rs, src/auth.rs, src/lib.rs<br>2. impact candidates: src/lib.rs, tests/auth_flow.rs<br>3. validation candidates: login_returns_valid_token, issues_token_with_user_id<br>4. agent calls: search_code, impact_analysis, build_context_pack, find_tests_for_change<br><span class="term-good">agent has indexed evidence before it edits</span>' },
+            { kind: "pause", ms: 1000 },
+            { kind: "cmd", text: "ok prove ./open-kioku-demo --task token" },
+            { kind: "out", html: '<span class="term-strong">Open Kioku Proof</span><br>indexed files, symbols, and chunks<br>task score: grounded context, impact, validation, risk, and tool calls<br><span class="term-muted">source snippets included: false; path mode: redacted_shapes</span>' },
             { kind: "pause", ms: 1000 },
             { kind: "note", text: "\n# Connect the same workflow to your coding agent." },
             { kind: "cmd", text: "ok mcp install cursor --repo ./open-kioku-demo" },

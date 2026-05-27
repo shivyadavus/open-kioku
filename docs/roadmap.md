@@ -17,6 +17,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Add fixture repos for Rust, TypeScript, Python, and Go.
 - Done: Add golden snapshots for important MCP responses.
 - Done: Keep CI running format, clippy, tests, audit, and deny on Linux and macOS.
+- Done: Add `ok prove` for shareable local usefulness reports without source snippets.
 - Next: Expand golden snapshots beyond tool listing to representative tool calls.
 
 ## 3. Core Intelligence Quality
@@ -39,6 +40,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Keep `ok demo` useful as the fastest way to evaluate search, symbols, impact, context packs, planning, and MCP setup.
 - Done: Add context-pack export formats for JSON, Markdown, and compact prompt text.
 - Done: Add benchmark output for index time, files per second, and search latency.
+- Done: Add launch kit drafts and directory submission copy grounded in tested commands.
 
 ## 6. Advanced Integrations
 

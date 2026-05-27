@@ -15,6 +15,7 @@ Semantic search is opt-in. The default MCP path stays lexical and offline; enabl
 npm install -g open-kioku
 ok demo --force
 ok --repo ./open-kioku-demo plan token --format markdown
+ok prove ./open-kioku-demo --task token
 ```
 
 The fastest way to see it is the hosted demo: https://shivyadavus.github.io/open-kioku/
@@ -112,6 +113,7 @@ ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
 ok --repo ./open-kioku-demo context token --format markdown
 ok --repo ./open-kioku-demo plan token --format markdown
+ok prove ./open-kioku-demo --task token
 ok mcp install cursor --repo ./open-kioku-demo
 ```
 
@@ -165,6 +167,9 @@ ok --repo /path/to/repo plan "update MCP tool list docs" --format markdown
 # Benchmark indexing and search
 ok bench /path/to/repo
 
+# Generate a shareable proof report without source snippets
+ok prove /path/to/repo --task "authentication" --task "database"
+
 # Add quality expectations for searches you care about
 ok bench /path/to/repo \
   --quality-case "PolicyGate=crates/policy/src/lib.rs" \
@@ -176,7 +181,26 @@ ok watch /path/to/repo
 
 Current top-level commands:
 
-`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `architecture`, `patch`, and `mcp`.
+`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `prove`, `architecture`, `patch`, and `mcp`.
+
+## Shareable Proof
+
+Use `ok prove` when you want to show that Open Kioku is useful on a real repository without leaking source snippets:
+
+```sh
+ok prove /path/to/repo --task "auth flow" --task "release workflow"
+```
+
+The command indexes the repository, runs `ok plan` for each task, scores whether the result has grounded primary context, existing paths, source files, impact candidates, validation candidates, risk, and agent tool calls, then prints a Markdown report. By default it redacts local paths into path shapes such as `src/**/*.rs`.
+
+Use JSON or reveal repository-relative paths when appropriate:
+
+```sh
+ok prove /path/to/repo --format json
+ok prove /path/to/repo --reveal-paths
+```
+
+The proof report intentionally does not include source snippets. It is meant for launch posts, issue comments, internal evaluations, and directory submissions where users need reproducible evidence rather than claims.
 
 ## MCP Setup
 
