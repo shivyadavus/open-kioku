@@ -31,4 +31,8 @@ jobs:
       run: |
         cargo build --release -p open-kioku-cli
         ./target/release/ok init .
-        ./target/release/ok bench .
+        ./target/release/ok bench . \
+          --quality-case PlanEngine=crates/open-kioku-plan/src/lib.rs \
+          --quality-case TantivySearchIndex=crates/open-kioku-search-tantivy/src/lib.rs \
+          --quality-case WatchIndexStatus=crates/open-kioku-watch/src/lib.rs \
+          --quality-min-precision-at-1 1.0
