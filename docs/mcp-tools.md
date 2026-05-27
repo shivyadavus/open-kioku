@@ -37,7 +37,7 @@ Stable read-only tools:
 
 Experimental tools:
 
-- `semantic_search`: falls back to lexical search while semantic search is disabled.
+- `semantic_search`: falls back to lexical search while semantic search is disabled. With `semantic.enabled = true` and `semantic.provider = "local"` in `ok.toml`, it uses the built-in offline hash embedding provider and does not call a hosted embeddings API.
 - `structural_search`: currently searches indexed symbols and chunks, not a full structural query language.
 - `get_implementations`, `get_callers`, `get_callees`: graph-backed heuristics until language-specific call resolution is stronger.
 - `explain_flow`: currently returns architecture summary data.

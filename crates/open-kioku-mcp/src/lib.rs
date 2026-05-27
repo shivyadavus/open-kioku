@@ -7,6 +7,7 @@ use open_kioku_patch::PatchPlanner;
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
+use open_kioku_semantic::SemanticSearchEngine;
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
@@ -203,9 +204,8 @@ async fn dispatch(
             let (nodes, edges) = store.neighbors(&node, limit(&params))?;
             Ok(json!({"symbol": symbol, "nodes": nodes, "edges": edges}))
         }
-        "get_implementations" | "semantic_search" | "structural_search" => {
-            search_tool(repo, store, &params)
-        }
+        "semantic_search" => semantic_search_tool(repo, store, config, &params),
+        "get_implementations" | "structural_search" => search_tool(repo, store, &params),
         "dependency_path" => {
             let from = required_str(&params, "from")?;
             let to = required_str(&params, "to")?;
@@ -317,6 +317,19 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     )?))
 }
 
+fn semantic_search_tool(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    config: &OkConfig,
+    params: &Value,
+) -> anyhow::Result<Value> {
+    let query = required_str(params, "query")?;
+    if let Some(engine) = SemanticSearchEngine::from_config(store, &config.semantic)? {
+        return Ok(json!(engine.search(query, limit(params))?));
+    }
+    search_tool(repo, store, params)
+}
+
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Return the current index manifest (file count, symbol count, indexed_at)", json!({"type":"object","properties":{}})),
@@ -330,7 +343,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("search_code", "Lexical BM25 search across all indexed code chunks", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"integer"}}})),
         ("search_files", "Search indexed files by content", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("regex_search", "Search indexed code using a regex pattern", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"Regex pattern"},"limit":{"type":"integer"}}})),
-        ("semantic_search", "Semantic similarity search (falls back to lexical when semantic is disabled)", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
+        ("semantic_search", "Optional semantic search using configured offline providers; falls back to lexical when disabled", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("structural_search", "Structural search across symbols and chunks", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("get_definition", "Find the definition of a symbol by name", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Symbol name"}}})),
         ("get_references", "Find all references to a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
