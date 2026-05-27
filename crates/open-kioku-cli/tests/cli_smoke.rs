@@ -131,3 +131,45 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan.contains("## Primary Context"));
     assert!(plan.contains("## Agent Tool Calls"));
 }
+
+#[test]
+fn prove_generates_shareable_report_without_source_snippets() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    let markdown = run({
+        let mut command = ok();
+        command
+            .arg("prove")
+            .arg(&repo)
+            .arg("--task")
+            .arg("token")
+            .arg("--limit")
+            .arg("8");
+        command
+    });
+    assert!(markdown.contains("# Open Kioku Proof"));
+    assert!(markdown.contains("Average proof score"));
+    assert!(markdown.contains("Source snippets included: `false`"));
+    assert!(!markdown.contains("pub fn issue_token"));
+
+    let json = run({
+        let mut command = ok();
+        command
+            .arg("prove")
+            .arg(&repo)
+            .arg("--task")
+            .arg("token")
+            .arg("--format")
+            .arg("json");
+        command
+    });
+    assert!(json.contains("\"generated_by\": \"ok prove\""));
+    assert!(json.contains("\"source_snippets_included\": false"));
+    assert!(json.contains("\"tasks_scored\": 1"));
+}

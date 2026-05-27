@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "version": "0.1.4",
-  "description": "A blazing-fast, language-aware codebase index and semantic search engine for AI agents (MCP)",
+  "description": "Local-first code intelligence MCP for AI coding agents",
   "bin": {
     "ok": "./bin/ok.js",
     "open-kioku": "./bin/ok.js"
@@ -19,12 +19,17 @@
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "ai",
+    "ai-agents",
     "llm",
-    "semantic-search",
+    "claude",
+    "cursor",
+    "code-intelligence",
     "tree-sitter",
     "code-index",
-    "context"
+    "context",
+    "local-first"
   ],
   "author": "Open Kioku",
   "license": "Elastic-2.0",

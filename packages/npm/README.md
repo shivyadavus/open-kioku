@@ -31,6 +31,7 @@ ok --repo ./open-kioku-demo search token
 ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
 ok --repo ./open-kioku-demo plan token --format markdown
+ok prove ./open-kioku-demo --task token
 ```
 
 Generate MCP client configuration:
