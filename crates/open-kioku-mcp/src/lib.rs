@@ -8,6 +8,7 @@ use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticSearchEngine;
+use open_kioku_sentry::disabled_response;
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
@@ -266,9 +267,9 @@ async fn dispatch(
                 json!({"denied": true, "reason": "apply_patch requires explicit stored patch approval flow"}),
             )
         }
-        "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => Ok(
-            json!({"results": [], "evidence": [], "confidence": "low", "reason": "runtime integrations are not configured"}),
-        ),
+        "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
+            Ok(json!(disabled_response(method)))
+        }
         other => anyhow::bail!("unknown MCP method or tool `{other}`"),
     }
 }

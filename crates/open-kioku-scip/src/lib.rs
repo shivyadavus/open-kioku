@@ -7,12 +7,48 @@ use protobuf::{Enum, Message};
 use scip::types::{symbol_information, Index, SymbolRole};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScipImport {
     pub symbols: Vec<Symbol>,
     pub occurrences: Vec<SymbolOccurrence>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScipImportReport {
+    pub symbols: Vec<Symbol>,
+    pub occurrences: Vec<SymbolOccurrence>,
+    pub imported_paths: Vec<PathBuf>,
+    pub skipped_paths: Vec<PathBuf>,
+}
+
+pub fn import_configured_scip_files(
+    root: impl AsRef<Path>,
+    paths: &[PathBuf],
+    repository_id: &RepositoryId,
+) -> Result<ScipImportReport> {
+    let root = root.as_ref();
+    let mut report = ScipImportReport {
+        symbols: Vec::new(),
+        occurrences: Vec::new(),
+        imported_paths: Vec::new(),
+        skipped_paths: Vec::new(),
+    };
+
+    for relative_path in paths {
+        let absolute_path = validated_configured_path(root, relative_path)?;
+        if !absolute_path.exists() {
+            report.skipped_paths.push(relative_path.clone());
+            continue;
+        }
+        let imported = import_scip_file(&absolute_path, repository_id)?;
+        report.symbols.extend(imported.symbols);
+        report.occurrences.extend(imported.occurrences);
+        report.imported_paths.push(relative_path.clone());
+    }
+    dedup_import(&mut report.symbols, &mut report.occurrences);
+    Ok(report)
 }
 
 pub fn import_scip_file(
@@ -67,6 +103,15 @@ fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
             });
         }
     }
+    dedup_import(&mut symbols, &mut occurrences);
+    let _ = repository_id;
+    ScipImport {
+        symbols,
+        occurrences,
+    }
+}
+
+fn dedup_import(symbols: &mut Vec<Symbol>, occurrences: &mut Vec<SymbolOccurrence>) {
     symbols.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     symbols.dedup_by(|a, b| a.id == b.id);
     occurrences.sort_by(|a, b| {
@@ -89,11 +134,27 @@ fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
             && a.range == b.range
             && a.is_definition == b.is_definition
     });
-    let _ = repository_id;
-    ScipImport {
-        symbols,
-        occurrences,
+}
+
+fn validated_configured_path(root: &Path, relative_path: &Path) -> Result<PathBuf> {
+    if relative_path.is_absolute() {
+        return Err(OkError::Index(format!(
+            "SCIP index path must be relative to the repository: {}",
+            relative_path.display()
+        )));
     }
+    if relative_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(OkError::Index(format!(
+            "SCIP index path may not escape the repository: {}",
+            relative_path.display()
+        )));
+    }
+    Ok(root.join(relative_path))
 }
 
 fn display_name(info: &scip::types::SymbolInformation) -> String {
@@ -189,12 +250,13 @@ fn _project_path(root: &Path, relative: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::import_scip_file;
+    use super::{import_configured_scip_files, import_scip_file};
     use open_kioku_core::RepositoryId;
     use protobuf::Enum;
     use scip::types::{
         symbol_information, Document, Index, Occurrence, SymbolInformation, SymbolRole,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn imports_binary_scip_index() {
@@ -239,5 +301,35 @@ mod tests {
             .occurrences
             .iter()
             .any(|occurrence| !occurrence.is_definition));
+    }
+
+    #[test]
+    fn configured_scip_import_skips_missing_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = import_configured_scip_files(
+            temp.path(),
+            &[PathBuf::from(".ok/indexes/rust.scip")],
+            &RepositoryId::new("repo"),
+        )
+        .unwrap();
+
+        assert!(report.symbols.is_empty());
+        assert_eq!(
+            report.skipped_paths,
+            vec![PathBuf::from(".ok/indexes/rust.scip")]
+        );
+    }
+
+    #[test]
+    fn configured_scip_import_rejects_paths_that_escape_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = import_configured_scip_files(
+            temp.path(),
+            &[PathBuf::from("../outside.scip")],
+            &RepositoryId::new("repo"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("may not escape"));
     }
 }

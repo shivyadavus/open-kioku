@@ -21,6 +21,7 @@ members = [
   "crates/open-kioku-semantic",
   "crates/open-kioku-embeddings",
   "crates/open-kioku-qdrant",
+  "crates/open-kioku-sentry",
   "crates/open-kioku-storage",
   "crates/open-kioku-storage-sqlite",
   "crates/open-kioku-storage-kv",

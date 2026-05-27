@@ -41,7 +41,7 @@ Experimental tools:
 - `structural_search`: currently searches indexed symbols and chunks, not a full structural query language.
 - `get_implementations`, `get_callers`, `get_callees`: graph-backed heuristics until language-specific call resolution is stronger.
 - `explain_flow`: currently returns architecture summary data.
-- `map_stacktrace_to_code`, `find_errors_for_symbol`, `find_recent_failures`: return low-confidence empty results unless runtime integrations are configured.
+- `map_stacktrace_to_code`, `find_errors_for_symbol`, `find_recent_failures`: return a structured low-confidence disabled response unless a runtime provider such as Sentry is explicitly configured.
 
 ## Write Tools
 

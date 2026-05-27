@@ -1330,6 +1330,7 @@ dependencies = [
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
  "open-kioku-semantic",
+ "open-kioku-sentry",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
  "open-kioku-symbols",
@@ -1464,6 +1465,14 @@ dependencies = [
  "open-kioku-embeddings",
  "open-kioku-errors",
  "open-kioku-storage",
+]
+
+[[package]]
+name = "open-kioku-sentry"
+version = "0.1.4"
+dependencies = [
+ "open-kioku-errors",
+ "serde",
 ]
 
 [[package]]

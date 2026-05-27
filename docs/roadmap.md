@@ -42,6 +42,6 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 
 ## 6. Advanced Integrations
 
-- Next: Harden LSP and SCIP import paths.
-- Next: Add runtime error mapping for Sentry only after local code intelligence is dependable.
+- Done: Harden LSP and SCIP import paths.
+- Done: Add runtime error mapping guardrails for Sentry only after local code intelligence is dependable.
 - Done: Add optional semantic search providers without making cloud calls part of the default path.
