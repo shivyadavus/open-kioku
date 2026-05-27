@@ -18,6 +18,7 @@ open-kioku-plan = { path = "../open-kioku-plan" }
 open-kioku-search-regex = { path = "../open-kioku-search-regex" }
 open-kioku-search-tantivy = { path = "../open-kioku-search-tantivy" }
 open-kioku-semantic = { path = "../open-kioku-semantic" }
+open-kioku-sentry = { path = "../open-kioku-sentry" }
 open-kioku-storage = { path = "../open-kioku-storage" }
 open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
 open-kioku-symbols = { path = "../open-kioku-symbols" }

@@ -77,14 +77,10 @@ impl Indexer {
             .collect::<Vec<_>>();
         let mut occurrences = derive_occurrences(&chunks, &symbols);
         if config.scip.enabled {
-            for scip_path in &config.scip.paths {
-                let absolute = root.join(scip_path);
-                if absolute.exists() {
-                    let imported = open_kioku_scip::import_scip_file(&absolute, &repo_id)?;
-                    symbols.extend(imported.symbols);
-                    occurrences.extend(imported.occurrences);
-                }
-            }
+            let imported =
+                open_kioku_scip::import_configured_scip_files(&root, &config.scip.paths, &repo_id)?;
+            symbols.extend(imported.symbols);
+            occurrences.extend(imported.occurrences);
         }
         let repository = Repository {
             id: repo_id,
