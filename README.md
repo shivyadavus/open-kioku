@@ -47,6 +47,24 @@ Published platform packages:
 - `@open-kioku/linux-arm64`
 - `@open-kioku/win32-x64`
 
+### Homebrew
+
+```sh
+brew install shivyadavus/open-kioku/open-kioku
+ok --version
+```
+
+The Homebrew formula installs the native release binary for macOS or Linux from GitHub Releases.
+
+### cargo-binstall
+
+```sh
+cargo binstall open-kioku-cli
+ok --version
+```
+
+`open-kioku-cli` includes cargo-binstall metadata for the same native release binaries. If a binary is unavailable for your platform, use the source install path below.
+
 ### GitHub Releases
 
 Tagged releases publish native binaries and SHA-256 checksums for:
