@@ -14,6 +14,7 @@ open-kioku-config = { path = "../open-kioku-config" }
 open-kioku-context = { path = "../open-kioku-context" }
 open-kioku-impact = { path = "../open-kioku-impact" }
 open-kioku-patch = { path = "../open-kioku-patch" }
+open-kioku-plan = { path = "../open-kioku-plan" }
 open-kioku-search-regex = { path = "../open-kioku-search-regex" }
 open-kioku-search-tantivy = { path = "../open-kioku-search-tantivy" }
 open-kioku-storage = { path = "../open-kioku-storage" }

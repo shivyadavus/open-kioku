@@ -22,14 +22,38 @@ impl<'a> ImpactEngine<'a> {
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let file = self.store.get_file_by_path(path)?;
         let direct = if let Some(file) = &file {
-            let stem = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default();
-            search_chunks(&chunks, &files, &symbols, stem, 25)?
-                .into_iter()
-                .filter(|result| result.path != file.path)
-                .collect::<Vec<_>>()
+            let mut direct = Vec::new();
+            for term in impact_terms(path, file, &symbols).into_iter().take(8) {
+                direct.extend(
+                    search_chunks(&chunks, &files, &symbols, &term, 25)?
+                        .into_iter()
+                        .filter(|result| result.path != file.path),
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            direct.retain(|result| {
+                seen.insert(format!(
+                    "{}:{}-{}",
+                    result.path.display(),
+                    result
+                        .line_range
+                        .as_ref()
+                        .map(|range| range.start)
+                        .unwrap_or_default(),
+                    result
+                        .line_range
+                        .as_ref()
+                        .map(|range| range.end)
+                        .unwrap_or_default()
+                ))
+            });
+            direct.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            direct.truncate(25);
+            direct
         } else {
             Vec::new()
         };
@@ -109,6 +133,55 @@ impl<'a> ImpactEngine<'a> {
             evidence: vec![evidence],
         })
     }
+}
+
+fn impact_terms(
+    path: &Path,
+    file: &open_kioku_core::File,
+    symbols: &[open_kioku_core::Symbol],
+) -> Vec<String> {
+    let mut terms = symbols
+        .iter()
+        .filter(|symbol| symbol.file_id == file.id)
+        .filter(|symbol| !is_generic_symbol_name(&symbol.name))
+        .map(|symbol| symbol.name.clone())
+        .collect::<Vec<_>>();
+
+    if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+        if !is_generic_symbol_name(stem) {
+            terms.push(stem.into());
+        }
+    }
+
+    terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    terms.dedup();
+    terms
+}
+
+fn is_generic_symbol_name(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "args"
+            | "cli"
+            | "command"
+            | "commands"
+            | "config"
+            | "from"
+            | "helpers"
+            | "index"
+            | "lib"
+            | "main"
+            | "mod"
+            | "output"
+            | "path"
+            | "repo"
+            | "run"
+            | "test"
+            | "tests"
+            | "to"
+            | "types"
+            | "utils"
+    )
 }
 
 #[cfg(test)]

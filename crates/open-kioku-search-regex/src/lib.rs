@@ -28,23 +28,25 @@ impl SearchIndex for MemorySearchIndex {
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let tokens = query_tokens(query);
         let re =
             Regex::new(&regex::escape(query)).map_err(|err| OkError::Search(err.to_string()))?;
         let mut results = Vec::new();
         for chunk in &self.chunks {
-            if !re.is_match(&chunk.text.to_ascii_lowercase())
-                && !chunk
-                    .text
-                    .to_ascii_lowercase()
-                    .contains(&query.to_ascii_lowercase())
-            {
-                continue;
-            }
             let Some(file) = self.files.get(&chunk.file_id.0) else {
                 continue;
             };
-            let snippet = best_snippet(&chunk.text, query);
-            let score = lexical_score(&chunk.text, query, file.is_generated, file.is_vendor);
+            let haystack = format!("{} {}", file.path.display(), chunk.text);
+            let lower = haystack.to_ascii_lowercase();
+            let normalized = normalize_for_search(&haystack);
+            let exact_match = re.is_match(&lower) || lower.contains(&query.to_ascii_lowercase());
+            let token_match =
+                !tokens.is_empty() && tokens.iter().all(|token| normalized.contains(token));
+            if !exact_match && !token_match {
+                continue;
+            }
+            let snippet = best_snippet(&chunk.text, query, &tokens);
+            let score = lexical_score(&haystack, query, &tokens, file.is_generated, file.is_vendor);
             let (evidence_strings, confidence) = EvidenceBuilder::new()
                 .add(format!("lexical match for `{query}`"), score)
                 .build();
@@ -137,10 +139,40 @@ pub fn regex_search_file(
     Ok(results)
 }
 
-fn best_snippet(text: &str, query: &str) -> String {
+fn query_tokens(query: &str) -> Vec<String> {
+    normalize_for_search(query)
+        .split_whitespace()
+        .filter(|token| token.len() >= 2)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn normalize_for_search(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn best_snippet(text: &str, query: &str, tokens: &[String]) -> String {
     let lower = query.to_ascii_lowercase();
     text.lines()
         .find(|line| line.to_ascii_lowercase().contains(&lower))
+        .or_else(|| {
+            text.lines().max_by_key(|line| {
+                let normalized = normalize_for_search(line);
+                tokens
+                    .iter()
+                    .filter(|token| normalized.contains(token.as_str()))
+                    .count()
+            })
+        })
         .unwrap_or_else(|| text.lines().next().unwrap_or_default())
         .trim()
         .chars()
@@ -148,11 +180,16 @@ fn best_snippet(text: &str, query: &str) -> String {
         .collect()
 }
 
-fn lexical_score(text: &str, query: &str, generated: bool, vendor: bool) -> f32 {
+fn lexical_score(text: &str, query: &str, tokens: &[String], generated: bool, vendor: bool) -> f32 {
     let lower = text.to_ascii_lowercase();
+    let normalized = normalize_for_search(text);
     let q = query.to_ascii_lowercase();
-    let hits = lower.matches(&q).count() as f32;
-    let mut score = 0.4 + hits.min(5.0) * 0.12;
+    let phrase_hits = lower.matches(&q).count() as f32;
+    let token_hits = tokens
+        .iter()
+        .filter(|token| normalized.contains(token.as_str()))
+        .count() as f32;
+    let mut score = 0.35 + phrase_hits.min(5.0) * 0.12 + token_hits.min(5.0) * 0.08;
     if generated {
         score *= 0.55;
     }
@@ -215,6 +252,60 @@ mod tests {
             results[0].symbol.as_ref().map(|s| s.name.as_str()),
             Some("retry_import")
         );
+    }
+
+    #[test]
+    fn lexical_search_matches_multi_word_query_against_snake_case() {
+        let file = File {
+            id: FileId::new("file-1"),
+            repository_id: RepositoryId::new("repo-1"),
+            path: "src/mcp.rs".into(),
+            language: Language::Rust,
+            size_bytes: 42,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunk = CodeChunk {
+            id: "chunk-1".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 10, end: 12 },
+            language: Language::Rust,
+            text: "pub fn search_code(query: &str) {}\npub fn repo_status() {}\n".into(),
+            symbol_id: None,
+        };
+
+        let results = search_chunks(&[chunk], &[file], &[], "search code", 10).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].snippet, "pub fn search_code(query: &str) {}");
+    }
+
+    #[test]
+    fn lexical_search_matches_query_against_file_path() {
+        let file = File {
+            id: FileId::new("file-1"),
+            repository_id: RepositoryId::new("repo-1"),
+            path: "packages/npm/package.json".into(),
+            language: Language::Json,
+            size_bytes: 42,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunk = CodeChunk {
+            id: "chunk-1".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 1, end: 3 },
+            language: Language::Json,
+            text: r#"{ "name": "open-kioku" }"#.into(),
+            symbol_id: None,
+        };
+
+        let results = search_chunks(&[chunk], &[file], &[], "npm package", 10).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, PathBuf::from("packages/npm/package.json"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ Search and inspect the demo:
 ok --repo ./open-kioku-demo search token
 ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
+ok --repo ./open-kioku-demo plan token --format markdown
 ```
 
 Generate MCP client configuration:
@@ -55,5 +56,5 @@ Supported packages:
 
 - Repository: https://github.com/shivyadavus/open-kioku
 - Releases: https://github.com/shivyadavus/open-kioku/releases
-- Demo: https://shivyadavus.github.io/open-kioku/demo/index.html
-
+- Demo: https://shivyadavus.github.io/open-kioku/
+- Security: https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md

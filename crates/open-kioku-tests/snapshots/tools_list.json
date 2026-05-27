@@ -422,6 +422,35 @@
         "name": "build_context_pack"
       },
       {
+        "description": "Build an evidence-backed pre-edit plan with context, impact, validation, and agent tool calls",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "description": "Output format",
+              "enum": [
+                "json",
+                "markdown"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "task": {
+              "description": "Natural language task description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "plan_change"
+      },
+      {
         "description": "Return chunks and metadata for a single file",
         "experimental": false,
         "inputSchema": {

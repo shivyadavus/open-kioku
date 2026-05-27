@@ -1,0 +1,21 @@
+[package]
+name = "open-kioku-plan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+open-kioku-context = { path = "../open-kioku-context" }
+open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-impact = { path = "../open-kioku-impact" }
+open-kioku-storage = { path = "../open-kioku-storage" }
+open-kioku-tests = { path = "../open-kioku-tests" }
+serde_json.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }

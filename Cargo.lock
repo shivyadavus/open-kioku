@@ -1167,6 +1167,7 @@ dependencies = [
  "open-kioku-ingest",
  "open-kioku-mcp",
  "open-kioku-patch",
+ "open-kioku-plan",
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
  "open-kioku-storage",
@@ -1216,6 +1217,7 @@ dependencies = [
  "chrono",
  "schemars",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1324,6 +1326,7 @@ dependencies = [
  "open-kioku-context",
  "open-kioku-impact",
  "open-kioku-patch",
+ "open-kioku-plan",
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
  "open-kioku-storage",
@@ -1358,6 +1361,22 @@ dependencies = [
  "open-kioku-errors",
  "open-kioku-storage",
  "sha2",
+]
+
+[[package]]
+name = "open-kioku-plan"
+version = "0.1.4"
+dependencies = [
+ "chrono",
+ "clap",
+ "open-kioku-context",
+ "open-kioku-core",
+ "open-kioku-errors",
+ "open-kioku-impact",
+ "open-kioku-storage",
+ "open-kioku-storage-sqlite",
+ "open-kioku-tests",
+ "serde_json",
 ]
 
 [[package]]

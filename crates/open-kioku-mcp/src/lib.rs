@@ -4,6 +4,7 @@ use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_patch::PatchPlanner;
+use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
@@ -157,6 +158,19 @@ async fn dispatch(
                 ))
             } else {
                 Ok(json!(pack))
+            }
+        }
+        "plan_change" => {
+            let task = required_str(&params, "task")?;
+            let report = PlanEngine::new(store as &dyn OkStore).plan(task, limit(&params))?;
+            let format_arg = params
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("json");
+            if format_arg == "markdown" {
+                Ok(json!(PlanFormat::Markdown.render(&report)?))
+            } else {
+                Ok(json!(report))
             }
         }
         "impact_analysis" => {
@@ -328,6 +342,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("impact_analysis", "Analyse the blast radius if a file is changed", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("module_dependencies", "List direct graph neighbours of a file or symbol node", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string"},"limit":{"type":"integer"}}})),
         ("build_context_pack", "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown"],"description":"Output format"}}})),
+        ("plan_change", "Build an evidence-backed pre-edit plan with context, impact, validation, and agent tool calls", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown"],"description":"Output format"}}})),
         ("explain_file", "Return chunks and metadata for a single file", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("explain_symbol", "Return definition and context for a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"}}})),
         ("explain_flow", "Summarise the high-level architecture", json!({"type":"object","properties":{}})),

@@ -17,6 +17,7 @@ ok mcp serve --repo . --allow-write --approval-required --allow-command "cargo t
 The read-only tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
 
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, and patch boundaries for an AI task into a single compressed `ContextPack`.
+- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls.
 - `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files and an overall risk score.
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
 - `architecture_violations`: Detects and reports architecture boundary violations based on package and module heuristics.
@@ -30,7 +31,7 @@ Stable read-only tools:
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
 - `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `explain_file`, `explain_symbol`
+- `build_context_pack`, `plan_change`, `explain_file`, `explain_symbol`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
 - `propose_patch`, `review_patch`, `validate_patch`
 
