@@ -2,15 +2,19 @@
 name = "open-kioku-impact"
 version.workspace = true
 edition.workspace = true
+description = "Impact analysis for code changes in Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
-open-kioku-search-regex = { path = "../open-kioku-search-regex" }
-open-kioku-storage = { path = "../open-kioku-storage" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-search-regex = { version = "1.0.1", path = "../open-kioku-search-regex" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
 [dev-dependencies]
-open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
+open-kioku-storage-sqlite = { version = "1.0.1", path = "../open-kioku-storage-sqlite" }

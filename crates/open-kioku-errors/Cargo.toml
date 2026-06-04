@@ -2,9 +2,13 @@
 name = "open-kioku-errors"
 version.workspace = true
 edition.workspace = true
+description = "Shared error types for Open Kioku crates."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde_json.workspace = true

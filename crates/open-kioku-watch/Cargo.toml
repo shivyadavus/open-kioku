@@ -2,19 +2,23 @@
 name = "open-kioku-watch"
 version.workspace = true
 edition.workspace = true
+description = "File watching and incremental indexing support for Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 notify.workspace = true
-open-kioku-config = { path = "../open-kioku-config" }
-open-kioku-graph = { path = "../open-kioku-graph" }
-open-kioku-ingest = { path = "../open-kioku-ingest" }
-open-kioku-search-tantivy = { path = "../open-kioku-search-tantivy" }
-open-kioku-storage = { path = "../open-kioku-storage" }
-open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
-open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
+open-kioku-graph = { version = "1.0.1", path = "../open-kioku-graph" }
+open-kioku-ingest = { version = "1.0.1", path = "../open-kioku-ingest" }
+open-kioku-search-tantivy = { version = "1.0.1", path = "../open-kioku-search-tantivy" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { version = "1.0.1", path = "../open-kioku-storage-sqlite" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
 
 [dev-dependencies]
 tempfile.workspace = true

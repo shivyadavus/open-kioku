@@ -2,11 +2,15 @@
 name = "open-kioku-storage"
 version.workspace = true
 edition.workspace = true
+description = "Storage traits and index abstractions for Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
 

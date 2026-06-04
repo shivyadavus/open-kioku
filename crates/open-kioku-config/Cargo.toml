@@ -2,12 +2,16 @@
 name = "open-kioku-config"
 version.workspace = true
 edition.workspace = true
+description = "Configuration loading and validation for Open Kioku repositories."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
 serde.workspace = true
 toml.workspace = true
 

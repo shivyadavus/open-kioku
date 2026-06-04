@@ -5,6 +5,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.0.1] — 2026-06-04
+
+### Changed
+- Added crates.io publishing metadata and versioned internal workspace dependencies.
+- Reduced README duplication and focused the getting-started path on install, index, verify, and MCP setup.
+- Updated npm, Cursor, and demo package metadata for the 1.0.1 release.
+
 ## [1.0.0] — 2026-06-04
 
 ### Added
@@ -68,6 +75,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[1.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.1
 [1.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.0
 [0.1.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.4
 [0.1.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.3

@@ -1132,7 +1132,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "open-kioku-actions"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "globset",
  "open-kioku-config",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-architecture"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-config"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
  "serde",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-context"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "schemars",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-daemon"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
  "tokio",
@@ -1230,14 +1230,14 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-embeddings"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
 ]
 
 [[package]]
 name = "open-kioku-errors"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -1245,21 +1245,21 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-evidence"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
 ]
 
 [[package]]
 name = "open-kioku-git"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
 ]
 
 [[package]]
 name = "open-kioku-graph"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-impact"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-ingest"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "globset",
@@ -1303,21 +1303,21 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-languages"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
 ]
 
 [[package]]
 name = "open-kioku-lsp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
 ]
 
 [[package]]
 name = "open-kioku-mcp"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "open-kioku-actions",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-parse"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-patch"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-actions",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-plan"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1383,14 +1383,14 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-qdrant"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
 ]
 
 [[package]]
 name = "open-kioku-ranking"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-sandbox"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-actions",
  "open-kioku-config",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-scip"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-search"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "serde",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-search-regex"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-search-tantivy"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-semantic"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-config",
  "open-kioku-core",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-sentry"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-errors",
  "serde",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-storage"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-storage-kv"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-storage-sqlite"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "open-kioku-core",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-symbols"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-tests"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "assert_cmd",
  "open-kioku-core",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-tree-sitter"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "open-kioku-watch"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "notify",
  "open-kioku-config",

@@ -2,19 +2,23 @@
 name = "open-kioku-context"
 version.workspace = true
 edition.workspace = true
+description = "Context pack assembly for AI coding agents."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
-open-kioku-impact = { path = "../open-kioku-impact" }
-open-kioku-ranking = { path = "../open-kioku-ranking" }
-open-kioku-search-regex = { path = "../open-kioku-search-regex" }
-open-kioku-storage = { path = "../open-kioku-storage" }
-open-kioku-tests = { path = "../open-kioku-tests" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-impact = { version = "1.0.1", path = "../open-kioku-impact" }
+open-kioku-ranking = { version = "1.0.1", path = "../open-kioku-ranking" }
+open-kioku-search-regex = { version = "1.0.1", path = "../open-kioku-search-regex" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
+open-kioku-tests = { version = "1.0.1", path = "../open-kioku-tests" }
 serde_json.workspace = true
 

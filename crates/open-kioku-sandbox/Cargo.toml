@@ -2,14 +2,18 @@
 name = "open-kioku-sandbox"
 version.workspace = true
 edition.workspace = true
+description = "Sandbox policy checks for Open Kioku actions."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-open-kioku-actions = { path = "../open-kioku-actions" }
-open-kioku-config = { path = "../open-kioku-config" }
-open-kioku-errors = { path = "../open-kioku-errors" }
+open-kioku-actions = { version = "1.0.1", path = "../open-kioku-actions" }
+open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
 serde.workspace = true
 tokio.workspace = true
 

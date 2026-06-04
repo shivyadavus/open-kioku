@@ -2,27 +2,31 @@
 name = "open-kioku-mcp"
 version.workspace = true
 edition.workspace = true
+description = "Model Context Protocol server implementation for Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-open-kioku-actions = { path = "../open-kioku-actions" }
-open-kioku-architecture = { path = "../open-kioku-architecture" }
-open-kioku-config = { path = "../open-kioku-config" }
-open-kioku-context = { path = "../open-kioku-context" }
-open-kioku-impact = { path = "../open-kioku-impact" }
-open-kioku-patch = { path = "../open-kioku-patch" }
-open-kioku-plan = { path = "../open-kioku-plan" }
-open-kioku-search-regex = { path = "../open-kioku-search-regex" }
-open-kioku-search-tantivy = { path = "../open-kioku-search-tantivy" }
-open-kioku-semantic = { path = "../open-kioku-semantic" }
-open-kioku-sentry = { path = "../open-kioku-sentry" }
-open-kioku-storage = { path = "../open-kioku-storage" }
-open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
-open-kioku-symbols = { path = "../open-kioku-symbols" }
-open-kioku-tests = { path = "../open-kioku-tests" }
+open-kioku-actions = { version = "1.0.1", path = "../open-kioku-actions" }
+open-kioku-architecture = { version = "1.0.1", path = "../open-kioku-architecture" }
+open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
+open-kioku-context = { version = "1.0.1", path = "../open-kioku-context" }
+open-kioku-impact = { version = "1.0.1", path = "../open-kioku-impact" }
+open-kioku-patch = { version = "1.0.1", path = "../open-kioku-patch" }
+open-kioku-plan = { version = "1.0.1", path = "../open-kioku-plan" }
+open-kioku-search-regex = { version = "1.0.1", path = "../open-kioku-search-regex" }
+open-kioku-search-tantivy = { version = "1.0.1", path = "../open-kioku-search-tantivy" }
+open-kioku-semantic = { version = "1.0.1", path = "../open-kioku-semantic" }
+open-kioku-sentry = { version = "1.0.1", path = "../open-kioku-sentry" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { version = "1.0.1", path = "../open-kioku-storage-sqlite" }
+open-kioku-symbols = { version = "1.0.1", path = "../open-kioku-symbols" }
+open-kioku-tests = { version = "1.0.1", path = "../open-kioku-tests" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

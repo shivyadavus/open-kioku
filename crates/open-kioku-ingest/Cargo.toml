@@ -2,21 +2,25 @@
 name = "open-kioku-ingest"
 version.workspace = true
 edition.workspace = true
+description = "Repository indexing pipeline for Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
 globset.workspace = true
 ignore.workspace = true
-open-kioku-config = { path = "../open-kioku-config" }
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
-open-kioku-git = { path = "../open-kioku-git" }
-open-kioku-languages = { path = "../open-kioku-languages" }
-open-kioku-parse = { path = "../open-kioku-parse" }
-open-kioku-scip = { path = "../open-kioku-scip" }
+open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-git = { version = "1.0.1", path = "../open-kioku-git" }
+open-kioku-languages = { version = "1.0.1", path = "../open-kioku-languages" }
+open-kioku-parse = { version = "1.0.1", path = "../open-kioku-parse" }
+open-kioku-scip = { version = "1.0.1", path = "../open-kioku-scip" }
 rayon.workspace = true
 sha2.workspace = true
 tracing.workspace = true
