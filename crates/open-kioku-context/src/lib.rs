@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
     ChangeBoundary, Confidence, ContextPack, Evidence, EvidenceId, EvidenceSourceType, GraphEdge,
-    RiskReport, ValidationPlan,
+    RiskReport, SearchResult, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -84,6 +84,25 @@ impl<'a> ContextPackBuilder<'a> {
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let primary = rerank(search_chunks(&chunks, &files, &symbols, task, limit)?);
+        self.build_from_primary_with_impact(task, limit, primary, true)
+    }
+
+    pub fn build_from_primary(
+        &self,
+        task: &str,
+        limit: usize,
+        primary: Vec<SearchResult>,
+    ) -> Result<ContextPack> {
+        self.build_from_primary_with_impact(task, limit, rerank(primary), false)
+    }
+
+    fn build_from_primary_with_impact(
+        &self,
+        task: &str,
+        limit: usize,
+        primary: Vec<SearchResult>,
+        expand_impact: bool,
+    ) -> Result<ContextPack> {
         let primary_symbols = primary
             .iter()
             .filter_map(|result| result.symbol.clone())
@@ -92,14 +111,20 @@ impl<'a> ContextPackBuilder<'a> {
         let mut tests = Vec::new();
         let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
         for result in primary.iter().take(3) {
-            tests.extend(selector.for_changed_path(&result.path, 5)?);
+            tests.extend(selector.for_changed_path_fast(&result.path, 5)?);
         }
         tests.truncate(10);
-        let impact = if let Some(first) = primary.first() {
-            ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
-                .for_file(&first.path)?
-        } else {
+        let impact = if expand_impact {
+            if let Some(first) = primary.first() {
+                ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
+                    .for_file(&first.path)?
+            } else {
+                empty_impact(task)
+            }
+        } else if primary.is_empty() {
             empty_impact(task)
+        } else {
+            bounded_impact(task)
         };
 
         let mut dependency_edges: Vec<GraphEdge> = Vec::new();
@@ -206,6 +231,31 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
             symbol_id: None,
             confidence: Confidence::Low,
             message: "context pack search did not find indexed evidence".into(),
+            indexed_at: Utc::now(),
+        }],
+    }
+}
+
+fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
+    open_kioku_core::ImpactReport {
+        target: task.into(),
+        direct_impacts: Vec::new(),
+        indirect_impacts: Vec::new(),
+        risk_report: RiskReport {
+            level: "low".into(),
+            score: 0.1,
+            reasons: vec!["bounded context built from persisted search results".into()],
+        },
+        evidence: vec![Evidence {
+            id: EvidenceId::new("context:bounded-search"),
+            source: "open-kioku-context".into(),
+            source_type: EvidenceSourceType::Lexical,
+            file_range: None,
+            symbol_id: None,
+            confidence: Confidence::Medium,
+            message:
+                "context pack used persisted search results without full-table impact expansion"
+                    .into(),
             indexed_at: Utc::now(),
         }],
     }

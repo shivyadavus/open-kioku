@@ -145,12 +145,7 @@ fn symbol_name_node<'tree>(file: &File, node: Node<'tree>) -> Option<(Node<'tree
             }),
             _ => None,
         },
-        Language::Json | Language::Yaml => match kind {
-            "pair" | "block_mapping_pair" => node
-                .child_by_field_name("key")
-                .map(|node| (node, SymbolKind::Field)),
-            _ => None,
-        },
+        Language::Json | Language::Yaml => None,
         _ => None,
     }
 }
@@ -223,5 +218,21 @@ mod tests {
         assert!(symbols
             .iter()
             .all(|symbol| symbol.provenance == open_kioku_core::EvidenceSourceType::TreeSitter));
+    }
+
+    #[test]
+    fn does_not_emit_json_keys_as_symbols() {
+        let file = File {
+            id: FileId::new("file"),
+            repository_id: RepositoryId::new("repo"),
+            path: "config/settings.json".into(),
+            language: Language::Json,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbols = parse_symbols(&file, r#"{"cluster": {"name": "local"}}"#).unwrap();
+        assert!(symbols.is_empty());
     }
 }

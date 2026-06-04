@@ -4,7 +4,7 @@ use open_kioku_config::OkConfig;
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
-use open_kioku_ingest::Indexer;
+use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_patch::PatchPlanner;
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
@@ -17,6 +17,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -568,7 +570,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Context { task, format } => {
             let store = open_store(&repo)?;
-            let pack = ContextPackBuilder::new(&store as &dyn OkStore).build(&task, 20)?;
+            let pack = build_context_pack(&repo, &store, &task, 20)?;
             let rendered = format.render(&pack)?;
             println!("{}", rendered);
         }
@@ -578,7 +580,9 @@ async fn main() -> anyhow::Result<()> {
             limit,
         } => {
             let store = open_store(&repo)?;
-            let report = PlanEngine::new(&store as &dyn OkStore).plan(&task, limit)?;
+            let context = build_context_pack(&repo, &store, &task, limit)?;
+            let report =
+                PlanEngine::new(&store as &dyn OkStore).plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
         }
@@ -629,7 +633,16 @@ async fn main() -> anyhow::Result<()> {
             match command {
                 PatchCommand::Plan { task } => output(cli.json, &planner.plan(&task)?, || {})?,
                 PatchCommand::Review { id } => {
-                    println!("patch review requires stored patch plan id={id}")
+                    let response = serde_json::json!({
+                        "id": id,
+                        "status": "requires_stored_patch_plan",
+                        "message": "patch review requires a stored patch plan"
+                    });
+                    print_text_or_json(
+                        cli.json,
+                        &format!("patch review requires stored patch plan id={id}"),
+                        &response,
+                    )?;
                 }
                 PatchCommand::Apply { id, approved } => {
                     anyhow::bail!("patch apply is policy gated and requires a stored diff; id={id} approved={approved}");
@@ -1612,9 +1625,41 @@ fn normalize_path_fragment(value: &str) -> String {
     value.replace('\\', "/").to_ascii_lowercase()
 }
 
+fn build_context_pack(
+    repo: &Path,
+    store: &SqliteStore,
+    task: &str,
+    limit: usize,
+) -> anyhow::Result<open_kioku_core::ContextPack> {
+    let search_dir = default_index_dir(repo);
+    let builder = ContextPackBuilder::new(store as &dyn OkStore);
+    if TantivySearchIndex::exists(&search_dir) {
+        let index = TantivySearchIndex::open_or_create(&search_dir)?;
+        let primary = index.search(task, limit.max(20))?;
+        return Ok(builder.build_from_primary(task, limit, primary)?);
+    }
+    Ok(builder.build(task, limit)?)
+}
+
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let config = OkConfig::load_from_repo(repo)?;
-    let snapshot = Indexer::default().index_repo(repo, &config)?;
+    let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
+    let _lock = IndexWriteLock::acquire(repo, &reporter)?;
+    let index_reporter = Arc::clone(&reporter);
+    let snapshot = Indexer::default().index_repo_with_progress(repo, &config, move |progress| {
+        report_index_progress(&index_reporter, progress);
+    })?;
+    report_index_stage(
+        &reporter,
+        "store",
+        format!(
+            "writing {} files, {} symbols, {} chunks, {} occurrences",
+            snapshot.files.len(),
+            snapshot.symbols.len(),
+            snapshot.chunks.len(),
+            snapshot.occurrences.len()
+        ),
+    );
     let store = open_store(repo)?;
     store.replace_index(IndexData {
         manifest: &snapshot.manifest,
@@ -1625,23 +1670,168 @@ fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
     })?;
+    report_index_stage(&reporter, "graph", "building dependency graph".to_string());
     let graph = InMemoryGraph::from_index_with_occurrences(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
     );
+    report_index_stage(
+        &reporter,
+        "graph",
+        format!(
+            "writing {} graph nodes and {} graph edges",
+            graph.nodes.len(),
+            graph.edges.len()
+        ),
+    );
     store.replace_graph(
         &graph.nodes.values().cloned().collect::<Vec<_>>(),
         &graph.edges,
     )?;
+    report_index_stage(
+        &reporter,
+        "search",
+        format!(
+            "rebuilding Tantivy index for {} chunks",
+            snapshot.chunks.len()
+        ),
+    );
     rebuild_disk_index(
         default_index_dir(repo),
         &snapshot.chunks,
         &snapshot.files,
         &snapshot.symbols,
     )?;
+    report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
+}
+
+struct IndexWriteLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl IndexWriteLock {
+    fn acquire(repo: &Path, reporter: &Arc<Mutex<IndexProgressReporter>>) -> anyhow::Result<Self> {
+        let ok_dir = repo.join(".ok");
+        fs::create_dir_all(&ok_dir)?;
+        let lock_path = ok_dir.join("index.lock");
+        report_index_stage(
+            reporter,
+            "lock",
+            "waiting for exclusive index writer lock".to_string(),
+        );
+        let started_waiting = Instant::now();
+        let file = loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(file) => break file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if started_waiting.elapsed() > Duration::from_secs(30) {
+                        anyhow::bail!(
+                            "index is locked by another writer or a stale lock at {}; remove it only if no ok index process is running",
+                            lock_path.display()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
+        report_index_stage(reporter, "lock", "acquired index writer lock".to_string());
+        Ok(Self {
+            path: lock_path,
+            _file: file,
+        })
+    }
+}
+
+impl Drop for IndexWriteLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+struct IndexProgressReporter {
+    started_at: Instant,
+    last_emitted_at: Instant,
+    last_phase: &'static str,
+}
+
+impl IndexProgressReporter {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started_at: now,
+            last_emitted_at: now,
+            last_phase: "",
+        }
+    }
+
+    fn emit_progress(&mut self, progress: IndexProgress) {
+        let now = Instant::now();
+        let phase_changed = self.last_phase != progress.phase;
+        let completed = progress
+            .total_files
+            .map(|total| progress.indexed_files == total)
+            .unwrap_or(false);
+        if !phase_changed
+            && !completed
+            && now.duration_since(self.last_emitted_at) < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.last_phase = progress.phase;
+        self.last_emitted_at = now;
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        match progress.total_files {
+            Some(total) if total > 0 => {
+                let percent = (progress.indexed_files as f64 / total as f64) * 100.0;
+                eprintln!(
+                    "index[{phase}] {indexed}/{total} files ({percent:.1}%), scanned={scanned}, elapsed={elapsed:.1}s",
+                    phase = progress.phase,
+                    indexed = progress.indexed_files,
+                    scanned = progress.scanned_files,
+                );
+            }
+            _ => {
+                eprintln!(
+                    "index[{phase}] scanned={scanned}, indexed={indexed}, elapsed={elapsed:.1}s",
+                    phase = progress.phase,
+                    scanned = progress.scanned_files,
+                    indexed = progress.indexed_files,
+                );
+            }
+        }
+    }
+
+    fn emit_stage(&mut self, phase: &'static str, detail: String) {
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        self.last_phase = phase;
+        self.last_emitted_at = Instant::now();
+        eprintln!("index[{phase}] {detail}, elapsed={elapsed:.1}s");
+    }
+}
+
+fn report_index_progress(reporter: &Arc<Mutex<IndexProgressReporter>>, progress: IndexProgress) {
+    if let Ok(mut reporter) = reporter.lock() {
+        reporter.emit_progress(progress);
+    }
+}
+
+fn report_index_stage(
+    reporter: &Arc<Mutex<IndexProgressReporter>>,
+    phase: &'static str,
+    detail: String,
+) {
+    if let Ok(mut reporter) = reporter.lock() {
+        reporter.emit_stage(phase, detail);
+    }
 }
 
 fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {

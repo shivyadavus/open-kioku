@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, NodeId, Symbol, SymbolOccurrence,
+    CodeChunk, EdgeId, Evidence, EvidenceId, File, FileRange, GraphEdge, GraphEdgeType, GraphNode,
+    GraphNodeType, NodeId, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use sha2::{Digest, Sha256};
@@ -21,10 +21,18 @@ impl InMemoryGraph {
     pub fn from_index_with_occurrences(
         files: &[File],
         symbols: &[Symbol],
-        chunks: &[CodeChunk],
+        _chunks: &[CodeChunk],
         occurrences: &[SymbolOccurrence],
     ) -> Self {
         let mut graph = Self::default();
+        let files_by_id = files
+            .iter()
+            .map(|file| (file.id.0.as_str(), file))
+            .collect::<HashMap<_, _>>();
+        let symbols_by_id = symbols
+            .iter()
+            .map(|symbol| (symbol.id.0.as_str(), symbol))
+            .collect::<HashMap<_, _>>();
         for file in files {
             let node = GraphNode {
                 id: NodeId::new(format!("file:{}", file.path.display())),
@@ -43,7 +51,7 @@ impl InMemoryGraph {
                 file_id: Some(symbol.file_id.clone()),
                 symbol_id: Some(symbol.id.clone()),
             };
-            let Some(file) = files.iter().find(|file| file.id == symbol.file_id) else {
+            let Some(file) = files_by_id.get(symbol.file_id.0.as_str()) else {
                 continue;
             };
             let edge = GraphEdge {
@@ -76,13 +84,10 @@ impl InMemoryGraph {
             .iter()
             .filter(|occurrence| !occurrence.is_definition)
         {
-            let Some(file) = files.iter().find(|file| file.id == occurrence.file_id) else {
+            let Some(file) = files_by_id.get(occurrence.file_id.0.as_str()) else {
                 continue;
             };
-            let Some(symbol) = symbols
-                .iter()
-                .find(|symbol| symbol.id == occurrence.symbol_id)
-            else {
+            let Some(symbol) = symbols_by_id.get(occurrence.symbol_id.0.as_str()) else {
                 continue;
             };
             graph.edges.push(GraphEdge {
@@ -116,37 +121,6 @@ impl InMemoryGraph {
                     indexed_at: Utc::now(),
                 },
             });
-        }
-        for chunk in chunks {
-            let Some(symbol_id) = &chunk.symbol_id else {
-                continue;
-            };
-            for other in symbols {
-                if other.id == *symbol_id {
-                    continue;
-                }
-                if chunk.text.contains(&other.name) {
-                    graph.edges.push(GraphEdge {
-                        id: EdgeId::new(stable_id(&format!("ref:{}:{}", chunk.id, other.id.0))),
-                        from: NodeId::new(format!("symbol:{}", symbol_id.0)),
-                        to: NodeId::new(format!("symbol:{}", other.id.0)),
-                        edge_type: GraphEdgeType::References,
-                        evidence: Evidence {
-                            id: EvidenceId::new(stable_id(&format!(
-                                "refev:{}:{}",
-                                chunk.id, other.id.0
-                            ))),
-                            source: "open-kioku-graph".into(),
-                            source_type: EvidenceSourceType::Heuristic,
-                            file_range: None,
-                            symbol_id: Some(other.id.clone()),
-                            confidence: Confidence::Low,
-                            message: format!("symbol text references {}", other.name),
-                            indexed_at: Utc::now(),
-                        },
-                    });
-                }
-            }
         }
         graph
     }
@@ -227,7 +201,10 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{FileId, Language, LineRange, RepositoryId, SymbolId, SymbolKind};
+    use open_kioku_core::{
+        Confidence, EvidenceSourceType, FileId, Language, LineRange, RepositoryId, SymbolId,
+        SymbolKind,
+    };
 
     fn make_file(id: &str) -> File {
         File {
