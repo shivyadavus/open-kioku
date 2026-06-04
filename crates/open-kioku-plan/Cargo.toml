@@ -2,20 +2,24 @@
 name = "open-kioku-plan"
 version.workspace = true
 edition.workspace = true
+description = "Planning primitives for Open Kioku coding workflows."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 clap.workspace = true
-open-kioku-context = { path = "../open-kioku-context" }
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
-open-kioku-impact = { path = "../open-kioku-impact" }
-open-kioku-storage = { path = "../open-kioku-storage" }
-open-kioku-tests = { path = "../open-kioku-tests" }
+open-kioku-context = { version = "1.0.1", path = "../open-kioku-context" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-impact = { version = "1.0.1", path = "../open-kioku-impact" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
+open-kioku-tests = { version = "1.0.1", path = "../open-kioku-tests" }
 serde_json.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
-open-kioku-storage-sqlite = { path = "../open-kioku-storage-sqlite" }
+open-kioku-storage-sqlite = { version = "1.0.1", path = "../open-kioku-storage-sqlite" }

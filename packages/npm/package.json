@@ -1,17 +1,17 @@
 {
   "name": "open-kioku",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-first code intelligence MCP for AI coding agents",
   "bin": {
     "ok": "./bin/ok.js",
     "open-kioku": "./bin/ok.js"
   },
   "optionalDependencies": {
-    "@open-kioku/darwin-x64": "1.0.0",
-    "@open-kioku/darwin-arm64": "1.0.0",
-    "@open-kioku/linux-x64": "1.0.0",
-    "@open-kioku/linux-arm64": "1.0.0",
-    "@open-kioku/win32-x64": "1.0.0"
+    "@open-kioku/darwin-x64": "1.0.1",
+    "@open-kioku/darwin-arm64": "1.0.1",
+    "@open-kioku/linux-x64": "1.0.1",
+    "@open-kioku/linux-arm64": "1.0.1",
+    "@open-kioku/win32-x64": "1.0.1"
   },
   "repository": {
     "type": "git",

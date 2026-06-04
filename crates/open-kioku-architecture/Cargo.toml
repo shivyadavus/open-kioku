@@ -2,13 +2,17 @@
 name = "open-kioku-architecture"
 version.workspace = true
 edition.workspace = true
+description = "Architecture detection and boundary checks for Open Kioku."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-open-kioku-core = { path = "../open-kioku-core" }
-open-kioku-errors = { path = "../open-kioku-errors" }
-open-kioku-storage = { path = "../open-kioku-storage" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
 serde.workspace = true
 

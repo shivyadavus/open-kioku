@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "displayName": "Open Kioku — Code Intelligence",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search — all on your machine. Precise code search, symbol navigation, blast-radius analysis, and patch planning. No cloud. No embeddings API. No data leaves your machine. Supports Rust, TypeScript, Python, JavaScript, Go, and Java.",
   "author": {
     "name": "Shiv Yadav",

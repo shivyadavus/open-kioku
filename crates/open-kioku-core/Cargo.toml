@@ -2,9 +2,13 @@
 name = "open-kioku-core"
 version.workspace = true
 edition.workspace = true
+description = "Shared data models and schema types for Open Kioku code intelligence."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono.workspace = true

@@ -1,0 +1,94 @@
+name: crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, for example 1.0.1"
+        required: true
+        type: string
+      publish:
+        description: "Publish to crates.io instead of running publishable dry-runs"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify crates.io release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-crates-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$VERSION" != "${{ inputs.version }}" ]; then
+            echo "Workflow requested ${{ inputs.version }}, but Cargo.toml contains $VERSION" >&2
+            exit 1
+          fi
+          scripts/validate-versions.sh
+
+      - name: Verify workspace
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+
+      - name: Dry-run publishable workspace crates
+        if: ${{ !inputs.publish }}
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: scripts/publish-crates.sh --dry-run
+
+  publish:
+    name: Publish crates.io
+    if: ${{ inputs.publish }}
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-crates-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Publish workspace crates
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh --publish

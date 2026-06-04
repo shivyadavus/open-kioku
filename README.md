@@ -68,6 +68,15 @@ ok --version
 
 `open-kioku-cli` includes cargo-binstall metadata for the same native release binaries. If a binary is unavailable for your platform, use the source install path below.
 
+### crates.io
+
+```sh
+cargo install open-kioku-cli
+ok --version
+```
+
+This compiles the CLI from crates.io. Use this path when you already have Rust installed or when native release binaries are not available for your platform.
+
 ### GitHub Releases
 
 Tagged releases publish native binaries and SHA-256 checksums for:
@@ -97,32 +106,23 @@ Requires a stable Rust toolchain.
 
 ## Quick Start
 
-### Use It On Your Repository
-
-This is the normal path for Claude Code, Cursor, and other MCP clients:
+Use this path for a real repository:
 
 ```sh
-# 1. Install the local ok binary.
 npm install -g open-kioku
-
-# 2. Create ok.toml in the repo you want the agent to understand.
 ok init /absolute/path/to/repo
-
-# 3. Build the local SQLite + Tantivy index.
 ok index /absolute/path/to/repo
-
-# 4. Verify the index and local search are healthy.
 ok doctor /absolute/path/to/repo
 ok --repo /absolute/path/to/repo search "the feature or bug you care about" --limit 5
-
-# 5. Print MCP config for your editor or agent.
 ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
 ```
 
-Paste the printed MCP config snippet into Cursor, Claude Code, or any MCP-compatible agent. Open Kioku runs locally over stdio; the default server is read-only.
+`ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
-Then ask your coding agent to use the index before editing:
+Paste the printed MCP config snippet into Cursor, Claude Code, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
+
+Ask your agent to use Open Kioku before editing:
 
 ```text
 Use Open Kioku before editing. Check repo_status, search_code, get_definition,
@@ -130,215 +130,42 @@ get_references, impact_analysis, and find_tests_for_change. Build a plan first,
 then edit only after the indexed evidence is clear.
 ```
 
-For active development, keep the index fresh in another terminal:
+Keep the index fresh while editing:
 
 ```sh
 ok watch /absolute/path/to/repo
 ```
 
-### Try The Demo Repo
-
-Create and index the built-in sample repo:
+## Try The Demo
 
 ```sh
 ok demo --force
-```
-
-This creates `./open-kioku-demo`, writes `ok.toml`, builds `.ok/index.sqlite`, builds `.ok/search/tantivy`, and prints starter commands.
-
-Try the same verified flow used by the hosted demo:
-
-```sh
 ok --repo ./open-kioku-demo search token --limit 5
-ok --repo ./open-kioku-demo symbol find issue_token
-ok --repo ./open-kioku-demo impact --file src/auth.rs
-ok --repo ./open-kioku-demo context token --format markdown
 ok --repo ./open-kioku-demo plan token --format markdown
 ok prove ./open-kioku-demo --task token
 ok mcp install cursor --repo ./open-kioku-demo
 ok mcp install claude --repo ./open-kioku-demo
 ```
 
-Use a custom demo path when needed:
+`ok demo` creates `./open-kioku-demo`, writes `ok.toml`, and builds the local SQLite and Tantivy indexes. Use `ok demo --path /tmp/open-kioku-demo --force` for a custom path.
+
+## Useful Commands
 
 ```sh
-ok demo --path /tmp/open-kioku-demo --force
-```
-
-## Index Your Repo
-
-```sh
-ok init /path/to/repo
-ok index /path/to/repo
-ok watch /path/to/repo
-ok doctor /path/to/repo
-ok status /path/to/repo
-```
-
-Open Kioku stores local index data inside the target repository:
-
-- `.ok/index.sqlite` stores files, symbols, chunks, imports, occurrences, and graph facts.
-- `.ok/search/tantivy` stores the local BM25 search index.
-- `ok.toml` controls indexing, security, MCP mode, and command allowlists.
-
-`ok doctor` checks the repo path, config, SQLite index, Tantivy index, and running binary, then prints concrete next steps for anything missing.
-
-`ok watch` performs an initial local index and then keeps `.ok/index.sqlite` and `.ok/search/tantivy` current with a debounced reindex when repository files change.
-
-Large repositories should show progress on stderr while indexing. The CLI reports phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`, so a long first index is observable instead of silent.
-
-## CLI Commands
-
-```sh
-# Search indexed code
 ok --repo /path/to/repo search "token expiration handler"
-
-# Symbol lookup
-ok --repo /path/to/repo symbol find PolicyGate
 ok --repo /path/to/repo symbol definition PolicyGate
 ok --repo /path/to/repo symbol refs PolicyGate
-
-# Impact and validation
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
-
-# Context pack for an agent
-ok --repo /path/to/repo context "update MCP tool list docs" --format markdown
-
-# Pre-edit plan for an agent
-ok --repo /path/to/repo plan "update MCP tool list docs" --format markdown
-
-# Benchmark indexing and search
-ok bench /path/to/repo
-
-# Generate a shareable proof report without source snippets
-ok prove /path/to/repo --task "authentication" --task "database"
-
-# Add quality expectations for searches you care about
-ok bench /path/to/repo \
-  --quality-case "PolicyGate=crates/policy/src/lib.rs" \
-  --quality-min-precision-at-1 1.0
-
-# Keep the local index current while editing
-ok watch /path/to/repo
-```
-
-Current top-level commands:
-
-`init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `prove`, `architecture`, `patch`, and `mcp`.
-
-## Shareable Proof
-
-Use `ok prove` when you want to show that Open Kioku is useful on a real repository without leaking source snippets:
-
-```sh
+ok --repo /path/to/repo context "update MCP docs" --format markdown
+ok --repo /path/to/repo plan "update MCP docs" --format markdown
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
+ok bench /path/to/repo
 ```
 
-The command indexes the repository, runs `ok plan` for each task, scores whether the result has grounded primary context, existing paths, source files, impact candidates, validation candidates, risk, and agent tool calls, then prints a Markdown report. By default it redacts local paths into path shapes such as `src/**/*.rs`.
+Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `prove`, `architecture`, `patch`, and `mcp`.
 
-Use JSON or reveal repository-relative paths when appropriate:
-
-```sh
-ok prove /path/to/repo --format json
-ok prove /path/to/repo --reveal-paths
-```
-
-The proof report intentionally does not include source snippets. It is meant for launch posts, issue comments, internal evaluations, and directory submissions where users need reproducible evidence rather than claims.
-
-## MCP Setup
-
-Open Kioku runs as a local MCP server over stdio.
-
-Print a Claude config snippet:
-
-```sh
-ok mcp install claude --repo /absolute/path/to/repo
-```
-
-Print a Cursor config snippet:
-
-```sh
-ok mcp install cursor --repo /absolute/path/to/repo
-```
-
-Those commands print a short instruction plus the client-specific JSON snippet. They do not modify your editor configuration.
-
-Example server command:
-
-```sh
-ok mcp serve --repo /absolute/path/to/repo --read-only
-```
-
-Write mode is disabled by default. To expose write tools, the server must be started with `--allow-write`, and patch application still requires explicit approval and `OPEN_KIOKU_ALLOW_WRITE=true`.
-
-### How Claude Code and Cursor Use It
-
-After the MCP config is added, Claude Code, Cursor, or another MCP client starts `ok mcp serve` for the repository. The agent can then call Open Kioku tools while it plans work, but the default server remains read-only.
-
-The intended workflow is:
-
-1. You ask the agent to inspect the repository before editing.
-2. The agent checks `repo_status` to make sure the index is available.
-3. It uses `search_code`, `search_symbols`, `get_definition`, and `get_references` to find the relevant code.
-4. It uses `impact_analysis`, `find_tests_for_change`, and `recommend_validation_plan` to understand likely blast radius and validation targets.
-5. It uses `plan_change` or `build_context_pack` to assemble grounded context before editing.
-6. The agent edits with its normal file-editing tools. Open Kioku only modifies files if write mode is explicitly enabled.
-
-Example prompts:
-
-```text
-Use Open Kioku before editing. I want to change token expiration behavior.
-Find the relevant auth code, identify impacted files, and recommend tests first.
-```
-
-```text
-Use Open Kioku to build a pre-edit plan for replacing the billing retry logic.
-Do not edit until you have checked definitions, references, impact, and validation.
-```
-
-For long-running work, keep the local index current in another terminal:
-
-```sh
-ok watch /absolute/path/to/repo
-```
-
-If the agent reports that the index is missing or stale, run:
-
-```sh
-ok index /absolute/path/to/repo
-ok doctor /absolute/path/to/repo
-```
-
-## MCP Tools
-
-Stable tools include:
-
-- Repo inventory: `repo_status`, `list_files`, `list_languages`
-- Symbols: `list_symbols`, `search_symbols`, `get_definition`, `get_references`, `get_symbol_context`
-- Search: `search_code`, `search_files`, `regex_search`
-- Graph and impact: `dependency_path`, `impact_analysis`, `module_dependencies`
-- Context and planning: `build_context_pack`, `plan_change`, `explain_file`, `explain_symbol`, `summarize_architecture`
-- Tests: `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
-- Architecture: `detect_architecture`, `architecture_boundaries`, `architecture_violations`
-- Patch planning: `propose_patch`, `review_patch`, `validate_patch`
-
-Experimental tools are present for early workflows and may use heuristic or fallback behavior:
-
-- `semantic_search`
-- `structural_search`
-- `get_implementations`, `get_callers`, `get_callees`
-- `explain_flow`
-- Runtime mapping tools such as `map_stacktrace_to_code`, `find_errors_for_symbol`, and `find_recent_failures`
-- `apply_patch`, only when write mode is enabled
-
-Every tool returned by `tools/list` includes a `maturity` field. Start the server with `--hide-experimental` when you want agents to see only the stable surface.
-
-Full tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md).
-
-Verified command output: [`docs/proof.md`](docs/proof.md).
-
-Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md). The proof harness runs `ok plan` against real local repositories, scores whether the returned context, impact, validation, risk, and agent tool calls are grounded in the indexed repo, and intentionally omits source snippets from the report.
+Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 ## What Is Local
 

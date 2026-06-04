@@ -2,12 +2,16 @@
 name = "open-kioku-ranking"
 version.workspace = true
 edition.workspace = true
+description = "Ranking and scoring utilities for Open Kioku results."
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-open-kioku-core = { path = "../open-kioku-core" }
+open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
 
 [dev-dependencies]
 chrono.workspace = true
