@@ -401,7 +401,8 @@
               "description": "Output format",
               "enum": [
                 "json",
-                "markdown"
+                "markdown",
+                "toon"
               ],
               "type": "string"
             },
@@ -422,6 +423,53 @@
         "name": "build_context_pack"
       },
       {
+        "description": "Build a reversible compressed context pack with handles for retrieving original snippets",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "description": "Output format",
+              "enum": [
+                "json",
+                "toon"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "task": {
+              "description": "Natural language task description",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "build_compressed_context"
+      },
+      {
+        "description": "Retrieve original content for a compressed context handle",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "handle": {
+              "description": "Context handle id returned by build_compressed_context",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "retrieve_context"
+      },
+      {
         "description": "Build an evidence-backed pre-edit plan with context, impact, validation, and agent tool calls",
         "experimental": false,
         "inputSchema": {
@@ -430,7 +478,8 @@
               "description": "Output format",
               "enum": [
                 "json",
-                "markdown"
+                "markdown",
+                "toon"
               ],
               "type": "string"
             },
@@ -449,6 +498,57 @@
         },
         "maturity": "stable",
         "name": "plan_change"
+      },
+      {
+        "description": "Append a repo-scoped memory fact with entity links and provenance",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "exact"
+              ],
+              "type": "string"
+            },
+            "source": {
+              "description": "Source or tool that observed the fact",
+              "type": "string"
+            },
+            "text": {
+              "description": "Fact to remember",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "remember_fact"
+      },
+      {
+        "description": "Search append-only repo memory facts by lexical and entity matches",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "search_memory"
       },
       {
         "description": "Return chunks and metadata for a single file",

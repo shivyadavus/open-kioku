@@ -11,6 +11,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
+open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.3", path = "../open-kioku-errors" }
 

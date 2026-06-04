@@ -1,6 +1,6 @@
 {
   "name": "@open-kioku/darwin-arm64",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "main": "",

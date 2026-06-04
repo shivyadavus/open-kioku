@@ -13,12 +13,12 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
-open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
-open-kioku-impact = { version = "1.0.1", path = "../open-kioku-impact" }
-open-kioku-ranking = { version = "1.0.1", path = "../open-kioku-ranking" }
-open-kioku-search-regex = { version = "1.0.1", path = "../open-kioku-search-regex" }
-open-kioku-storage = { version = "1.0.1", path = "../open-kioku-storage" }
-open-kioku-tests = { version = "1.0.1", path = "../open-kioku-tests" }
+open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.3", path = "../open-kioku-errors" }
+open-kioku-format = { version = "1.0.3", path = "../open-kioku-format" }
+open-kioku-impact = { version = "1.0.3", path = "../open-kioku-impact" }
+open-kioku-ranking = { version = "1.0.3", path = "../open-kioku-ranking" }
+open-kioku-search-regex = { version = "1.0.3", path = "../open-kioku-search-regex" }
+open-kioku-storage = { version = "1.0.3", path = "../open-kioku-storage" }
+open-kioku-tests = { version = "1.0.3", path = "../open-kioku-tests" }
 serde_json.workspace = true
-

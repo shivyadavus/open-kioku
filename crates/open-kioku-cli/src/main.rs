@@ -2,9 +2,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::{OkConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
+use open_kioku_context_compress::ContextHandleStore;
+use open_kioku_core::{Confidence, ContextHandleId};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
+use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::PatchPlanner;
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
@@ -89,6 +92,11 @@ enum Command {
         task: String,
         #[arg(long, value_enum, default_value_t = ContextPackFormat::Json)]
         format: ContextPackFormat,
+        #[arg(long, default_value_t = false)]
+        compressed: bool,
+    },
+    RetrieveContext {
+        handle: String,
     },
     Plan {
         task: String,
@@ -109,6 +117,10 @@ enum Command {
         #[command(subcommand)]
         command: PatchCommand,
     },
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
@@ -116,6 +128,45 @@ enum Command {
     Scip {
         #[command(subcommand)]
         command: ScipCommand,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ConfidenceArg {
+    Low,
+    Medium,
+    High,
+    Exact,
+}
+
+impl From<ConfidenceArg> for Confidence {
+    fn from(value: ConfidenceArg) -> Self {
+        match value {
+            ConfidenceArg::Low => Self::Low,
+            ConfidenceArg::Medium => Self::Medium,
+            ConfidenceArg::High => Self::High,
+            ConfidenceArg::Exact => Self::Exact,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    Remember {
+        text: String,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, value_enum, default_value_t = ConfidenceArg::Medium)]
+        confidence: ConfidenceArg,
+    },
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    Recent {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -752,11 +803,40 @@ async fn main() -> anyhow::Result<()> {
                 || {},
             )?;
         }
-        Command::Context { task, format } => {
+        Command::Context {
+            task,
+            format,
+            compressed,
+        } => {
             let store = open_store(&repo)?;
             let pack = build_context_pack(&repo, &store, &task, 20)?;
-            let rendered = format.render(&pack)?;
-            println!("{}", rendered);
+            if compressed {
+                let compressed = ContextHandleStore::open_repo(&repo)?.compress_pack(&pack)?;
+                if cli.json || format == ContextPackFormat::Json {
+                    println!("{}", serde_json::to_string_pretty(&compressed)?);
+                } else if format == ContextPackFormat::Toon {
+                    println!(
+                        "{}",
+                        open_kioku_format::render_compressed_context_toon(&compressed)
+                    );
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&compressed)?);
+                }
+            } else {
+                let rendered = format.render(&pack)?;
+                println!("{}", rendered);
+            }
+        }
+        Command::RetrieveContext { handle } => {
+            let retrieved =
+                ContextHandleStore::open_repo(&repo)?.retrieve(&ContextHandleId::new(handle))?;
+            output(cli.json, &retrieved, || {
+                if let Some(retrieved) = &retrieved {
+                    println!("{}", retrieved.original);
+                } else {
+                    println!("No context handle found.");
+                }
+            })?;
         }
         Command::Plan {
             task,
@@ -773,6 +853,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let report = PlanEngine::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
@@ -862,6 +943,47 @@ async fn main() -> anyhow::Result<()> {
                 }
                 PatchCommand::Apply { id, approved } => {
                     anyhow::bail!("patch apply is policy gated and requires a stored diff; id={id} approved={approved}");
+                }
+            }
+        }
+        Command::Memory { command } => {
+            let memory = RepoMemoryStore::open_repo(&repo)?;
+            match command {
+                MemoryCommand::Remember {
+                    text,
+                    source,
+                    confidence,
+                } => {
+                    let fact = memory.remember(&text, &source, confidence.into())?;
+                    output(cli.json, &fact, || {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&fact).unwrap_or_default()
+                        );
+                    })?;
+                }
+                MemoryCommand::Search { query, limit } => {
+                    let results = memory.search(&query, limit)?;
+                    output(cli.json, &results, || {
+                        if results.is_empty() {
+                            println!("No repo memory matched.");
+                        } else {
+                            for result in &results {
+                                println!(
+                                    "{:.2} {} [{}]",
+                                    result.score, result.fact.text, result.fact.source
+                                );
+                            }
+                        }
+                    })?;
+                }
+                MemoryCommand::Recent { limit } => {
+                    let facts = memory.recent(limit)?;
+                    output(cli.json, &facts, || {
+                        for fact in &facts {
+                            println!("{} [{}]", fact.text, fact.source);
+                        }
+                    })?;
                 }
             }
         }

@@ -1,7 +1,7 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
-    ChangeBoundary, ContextPack, FileId, ImpactReport, PlanReport, RiskReport, SearchResult,
-    TestTarget, ToolCallRecommendation,
+    ChangeBoundary, ContextPack, FileId, ImpactReport, MemorySearchResult, PlanReport, RiskReport,
+    SearchResult, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -21,12 +21,14 @@ pub enum PlanFormat {
     Text,
     Markdown,
     Json,
+    Toon,
 }
 
 impl PlanFormat {
     pub fn render(&self, report: &PlanReport) -> Result<String> {
         match self {
             Self::Json => Ok(serde_json::to_string_pretty(report)?),
+            Self::Toon => Ok(open_kioku_format::render_plan_toon(report)),
             Self::Markdown => Ok(render_markdown(report)),
             Self::Text => Ok(render_text(report)),
         }
@@ -36,6 +38,7 @@ impl PlanFormat {
 pub struct PlanEngine<'a> {
     store: &'a dyn OkStore,
     search_index: Option<&'a dyn SearchIndex>,
+    memory_facts: Vec<MemorySearchResult>,
 }
 
 impl<'a> PlanEngine<'a> {
@@ -43,11 +46,17 @@ impl<'a> PlanEngine<'a> {
         Self {
             store,
             search_index: None,
+            memory_facts: Vec::new(),
         }
     }
 
     pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
         self.search_index = search_index;
+        self
+    }
+
+    pub fn with_memory_facts(mut self, memory_facts: Vec<MemorySearchResult>) -> Self {
+        self.memory_facts = memory_facts;
         self
     }
 
@@ -73,10 +82,12 @@ impl<'a> PlanEngine<'a> {
         let impact_target = impact_target(&primary_context);
         let impact = self.impact_for_primary_context(task, impact_target, &context)?;
         let validation = self.validation_for_context(&primary_context, &context)?;
+        let unmatched_anchors = unmatched_named_anchors(task, &primary_context);
         let risk = merge_risk(
             &context.risk_report,
             &impact.risk_report,
             primary_context.is_empty(),
+            &unmatched_anchors,
         );
         let relevant_symbols = context
             .primary_symbols
@@ -89,15 +100,23 @@ impl<'a> PlanEngine<'a> {
             &impact,
             &context.recommended_change_boundary,
         );
-        let recommended_next_steps = next_steps(&primary_context, &impact, &validation);
-        let tool_calls = tool_calls(task, impact_target);
+        let recommended_next_steps =
+            next_steps(&primary_context, &impact, &validation, &self.memory_facts);
+        let tool_calls = tool_calls(task, impact_target, !self.memory_facts.is_empty());
         let evidence = context
             .evidence
             .iter()
             .chain(impact.evidence.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let summary = summary(task, &primary_context, &impact, &validation, &risk);
+        let summary = summary(
+            task,
+            &primary_context,
+            &impact,
+            &validation,
+            &risk,
+            &self.memory_facts,
+        );
 
         Ok(PlanReport {
             task: task.into(),
@@ -110,9 +129,10 @@ impl<'a> PlanEngine<'a> {
             recommended_change_boundary,
             recommended_next_steps,
             tool_calls,
+            memory_facts: self.memory_facts.clone(),
             evidence,
             confidence_summary:
-                "derived from local lexical search, symbol extraction, impact analysis, and test heuristics"
+                "derived from local task-anchor search, symbol extraction, exact references when indexed, impact analysis, and test heuristics"
                     .into(),
         })
     }
@@ -169,7 +189,7 @@ impl<'a> PlanEngine<'a> {
 
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
         for result in source_results(primary_context).take(3) {
-            for test in selector.for_changed_path_fast(&result.path, MAX_VALIDATION)? {
+            for test in selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)? {
                 if is_plausible_test(&test) {
                     by_id.entry(test.id.clone()).or_insert(test);
                 }
@@ -230,6 +250,9 @@ fn is_plausible_test(test: &TestTarget) -> bool {
     if is_screaming_snake {
         return false;
     }
+    if is_generic_validation_test(name) {
+        return false;
+    }
 
     // Always keep explicit/confident test names
     let is_test_named = name.ends_with("Tests")
@@ -261,6 +284,13 @@ fn is_plausible_test(test: &TestTarget) -> bool {
     is_test_named || is_class_like || is_snake_case_func
 }
 
+fn is_generic_validation_test(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "validationtest" | "validationtests" | "validatortest" | "validatortests"
+    )
+}
+
 fn context_has_bounded_impact(context: &ContextPack) -> bool {
     context
         .evidence
@@ -268,7 +298,12 @@ fn context_has_bounded_impact(context: &ContextPack) -> bool {
         .any(|evidence| evidence.id.0 == "context:bounded-search")
 }
 
-fn merge_risk(context: &RiskReport, impact: &RiskReport, no_matches: bool) -> RiskReport {
+fn merge_risk(
+    context: &RiskReport,
+    impact: &RiskReport,
+    no_matches: bool,
+    unmatched_anchors: &[String],
+) -> RiskReport {
     if no_matches {
         return RiskReport {
             level: "unknown".into(),
@@ -283,8 +318,18 @@ fn merge_risk(context: &RiskReport, impact: &RiskReport, no_matches: bool) -> Ri
             reasons.push(reason.clone());
         }
     }
+    if !unmatched_anchors.is_empty() {
+        reasons.push(format!(
+            "low confidence: top context did not match named task anchor(s): {}",
+            unmatched_anchors.join(", ")
+        ));
+    }
 
-    let score = impact.score.max(context.score);
+    let score = if unmatched_anchors.is_empty() {
+        impact.score.max(context.score)
+    } else {
+        impact.score.max(context.score).max(0.45)
+    };
     let level = if score > 0.6 {
         "high"
     } else if score > 0.25 {
@@ -298,6 +343,91 @@ fn merge_risk(context: &RiskReport, impact: &RiskReport, no_matches: bool) -> Ri
         score,
         reasons,
     }
+}
+
+fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
+    let anchors = named_anchors(task);
+    if anchors.is_empty() || primary_context.is_empty() {
+        return Vec::new();
+    }
+    let top_context = primary_context
+        .iter()
+        .take(5)
+        .map(|result| {
+            format!(
+                "{} {} {} {}",
+                result.path.display(),
+                result.snippet,
+                result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.name.as_str())
+                    .unwrap_or_default(),
+                result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.qualified_name.as_str())
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    anchors
+        .into_iter()
+        .filter(|anchor| {
+            let lower = anchor.to_ascii_lowercase();
+            !top_context.contains(&lower) && !top_context.contains(&normalize_anchor(anchor))
+        })
+        .collect()
+}
+
+fn named_anchors(task: &str) -> Vec<String> {
+    let mut anchors = Vec::new();
+    for token in task.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
+        let token = token.trim_matches('-');
+        if token.len() < 3 || is_ticket_anchor(token) {
+            continue;
+        }
+        let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
+        let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
+        let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+        let has_separator = token.contains('_') || token.contains('-');
+        if ((has_lower && has_upper) || has_separator || (has_digit && has_upper))
+            && !anchors.iter().any(|existing| existing == token)
+        {
+            anchors.push(token.to_string());
+        }
+    }
+    anchors
+}
+
+fn is_ticket_anchor(value: &str) -> bool {
+    let Some((prefix, number)) = value.split_once('-') else {
+        return false;
+    };
+    prefix.len() >= 2
+        && prefix.chars().all(|ch| ch.is_ascii_uppercase())
+        && number.len() >= 2
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn normalize_anchor(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' {
+            out.push(' ');
+            previous_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lower_or_digit {
+            out.push(' ');
+        }
+        out.push(ch.to_ascii_lowercase());
+        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn change_boundary(
@@ -340,6 +470,7 @@ fn next_steps(
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     validation: &[TestTarget],
+    memory_facts: &[MemorySearchResult],
 ) -> Vec<String> {
     let mut steps = Vec::new();
     if primary_context.is_empty() {
@@ -350,6 +481,9 @@ fn next_steps(
     steps.push("Inspect the primary context files and symbol ranges before editing.".into());
     if !impact.direct_impacts.is_empty() {
         steps.push("Review direct impact candidates before deciding the edit boundary.".into());
+    }
+    if !memory_facts.is_empty() {
+        steps.push("Check matched repo memory facts, but verify them against indexed code before relying on them.".into());
     }
     if validation.is_empty() {
         steps.push("No indexed tests were found; choose a manual validation command.".into());
@@ -393,7 +527,11 @@ fn is_doc_path(path: &Path) -> bool {
         || lower.contains("/docs/")
 }
 
-fn tool_calls(task: &str, impact_target: Option<&SearchResult>) -> Vec<ToolCallRecommendation> {
+fn tool_calls(
+    task: &str,
+    impact_target: Option<&SearchResult>,
+    has_memory_facts: bool,
+) -> Vec<ToolCallRecommendation> {
     let mut calls = vec![
         ToolCallRecommendation {
             tool: "search_code".into(),
@@ -423,6 +561,16 @@ fn tool_calls(task: &str, impact_target: Option<&SearchResult>) -> Vec<ToolCallR
         });
     }
 
+    calls.push(ToolCallRecommendation {
+        tool: "search_memory".into(),
+        purpose: if has_memory_facts {
+            "Review matched repo memory facts and their provenance.".into()
+        } else {
+            "Check whether prior repo facts exist for this task.".into()
+        },
+        arguments: json!({"query": task, "limit": 8}),
+    });
+
     calls
 }
 
@@ -432,6 +580,7 @@ fn summary(
     impact: &ImpactReport,
     validation: &[TestTarget],
     risk: &RiskReport,
+    memory_facts: &[MemorySearchResult],
 ) -> String {
     if primary_context.is_empty() {
         return format!(
@@ -439,10 +588,11 @@ fn summary(
         );
     }
     format!(
-        "Found {} primary context item(s), {} direct impact candidate(s), {} validation candidate(s); risk is {}.",
+        "Found {} primary context item(s), {} direct impact candidate(s), {} validation candidate(s), {} repo memory fact(s); risk is {}.",
         primary_context.len(),
         impact.direct_impacts.len(),
         validation.len(),
+        memory_facts.len(),
         risk.level
     )
 }
@@ -484,6 +634,20 @@ fn render_text(report: &PlanReport) -> String {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
             out.push_str(&format!("  - {} [{}]\n", test.name, command));
+        }
+    }
+
+    out.push_str("\nRepo memory:\n");
+    if report.memory_facts.is_empty() {
+        out.push_str("  - none matched\n");
+    } else {
+        for result in &report.memory_facts {
+            out.push_str(&format!(
+                "  - {} ({:.2}, {})\n",
+                one_line(&result.fact.text),
+                result.score,
+                result.fact.source
+            ));
         }
     }
 
@@ -532,6 +696,20 @@ fn render_markdown(report: &PlanReport) -> String {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
             out.push_str(&format!("- `{}` via `{}`\n", test.name, command));
+        }
+    }
+
+    out.push_str("\n## Repo Memory\n\n");
+    if report.memory_facts.is_empty() {
+        out.push_str("- None matched\n");
+    } else {
+        for result in &report.memory_facts {
+            out.push_str(&format!(
+                "- `{}` ({:.2}, source `{}`)\n",
+                one_line(&result.fact.text),
+                result.score,
+                result.fact.source
+            ));
         }
     }
 
@@ -829,5 +1007,77 @@ mod tests {
         assert_eq!(report.impact.risk_report.level, "low");
         assert_eq!(report.impact.evidence.len(), 1);
         assert_eq!(report.impact.evidence[0].id.0, "context:bounded-search");
+    }
+
+    #[test]
+    fn named_anchor_miss_raises_low_confidence_risk() {
+        let store = test_store();
+        let evidence = Evidence {
+            id: EvidenceId::new("context:bounded-search"),
+            source: "open-kioku-context".into(),
+            source_type: EvidenceSourceType::Lexical,
+            file_range: None,
+            symbol_id: None,
+            confidence: Confidence::Medium,
+            message:
+                "context pack used persisted search results without full-table impact expansion"
+                    .into(),
+            indexed_at: Utc::now(),
+        };
+        let primary = SearchResult {
+            path: PathBuf::from("src/EnterpriseRateValidator.java"),
+            line_range: Some(LineRange { start: 1, end: 20 }),
+            snippet: "class EnterpriseRateValidator { boolean validate() { return true; } }".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "test".into(),
+            evidence: vec!["test evidence".into()],
+            confidence: 1.0,
+        };
+        let context = ContextPack {
+            task:
+                "add validation in PublishRestrictionsMutation similar to EnterpriseRateValidator"
+                    .into(),
+            intent: "code_change".into(),
+            primary_files: vec![primary],
+            primary_symbols: Vec::new(),
+            supporting_files: Vec::new(),
+            dependency_edges: Vec::new(),
+            runtime_signals: Vec::new(),
+            test_candidates: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: vec!["bounded context built from persisted search results".into()],
+            },
+            recommended_change_boundary: ChangeBoundary {
+                allowed_files: vec![PathBuf::from("src/EnterpriseRateValidator.java")],
+                caution_files: Vec::new(),
+                forbidden_files: Vec::new(),
+            },
+            validation_plan: ValidationPlan {
+                commands: Vec::new(),
+                tests: Vec::new(),
+                requires_approval: true,
+                evidence: vec![evidence.clone()],
+            },
+            evidence: vec![evidence],
+            confidence_summary: "bounded".into(),
+        };
+
+        let report = PlanEngine::new(&store)
+            .plan_from_context(
+                "add validation in PublishRestrictionsMutation similar to EnterpriseRateValidator",
+                5,
+                context,
+            )
+            .unwrap();
+
+        assert_eq!(report.risk.level, "medium");
+        assert!(report
+            .risk
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("PublishRestrictionsMutation")));
     }
 }

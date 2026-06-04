@@ -1,10 +1,12 @@
 use chrono::Utc;
 use open_kioku_core::{
-    Confidence, Evidence, EvidenceId, EvidenceSourceType, FileRange, ImpactReport, RiskReport,
+    CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileId, FileRange,
+    ImpactReport, RiskReport, SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::{MetadataStore, SearchIndex};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub struct ImpactEngine<'a> {
@@ -34,7 +36,7 @@ impl<'a> ImpactEngine<'a> {
         };
 
         let direct = if let Some(file) = &file {
-            let mut direct = Vec::new();
+            let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             for term in impact_terms(path, file, &target_symbols)
                 .into_iter()
                 .take(8)
@@ -53,23 +55,7 @@ impl<'a> ImpactEngine<'a> {
                         .filter(|result| result.path != file.path),
                 );
             }
-            let mut seen = std::collections::HashSet::new();
-            direct.retain(|result| {
-                seen.insert(format!(
-                    "{}:{}-{}",
-                    result.path.display(),
-                    result
-                        .line_range
-                        .as_ref()
-                        .map(|range| range.start)
-                        .unwrap_or_default(),
-                    result
-                        .line_range
-                        .as_ref()
-                        .map(|range| range.end)
-                        .unwrap_or_default()
-                ))
-            });
+            direct = dedupe_results(direct);
             direct.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
@@ -117,6 +103,15 @@ impl<'a> ImpactEngine<'a> {
         indirect.dedup_by(|a, b| a.path == b.path);
         indirect.truncate(15);
         let mut reasons = Vec::new();
+        let exact_reference_count = direct
+            .iter()
+            .filter(|result| result.match_reason.contains("exact symbol reference"))
+            .count();
+        if exact_reference_count > 0 {
+            reasons.push(format!(
+                "{exact_reference_count} exact indexed symbol reference(s) found"
+            ));
+        }
         if direct.len() > 10 {
             reasons.push("many lexical dependents reference this file or its symbols".into());
         }
@@ -130,18 +125,31 @@ impl<'a> ImpactEngine<'a> {
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
-            source_type: EvidenceSourceType::Lexical,
+            source_type: if exact_reference_count > 0 {
+                EvidenceSourceType::Scip
+            } else {
+                EvidenceSourceType::Lexical
+            },
             file_range: Some(FileRange {
                 path: path.to_path_buf(),
                 line_range: None,
             }),
             symbol_id: None,
             confidence: if file.is_some() {
-                Confidence::Medium
+                if exact_reference_count > 0 {
+                    Confidence::High
+                } else {
+                    Confidence::Medium
+                }
             } else {
                 Confidence::Low
             },
-            message: "impact report derived from indexed symbols and lexical references".into(),
+            message: if exact_reference_count > 0 {
+                "impact report derived from exact indexed symbol references and lexical references"
+                    .into()
+            } else {
+                "impact report derived from indexed symbols and lexical references".into()
+            },
             indexed_at: Utc::now(),
         };
         Ok(ImpactReport {
@@ -163,6 +171,147 @@ impl<'a> ImpactEngine<'a> {
             evidence: vec![evidence],
         })
     }
+}
+
+fn exact_reference_impacts(
+    store: &dyn MetadataStore,
+    target_file: &File,
+    symbols: &[Symbol],
+) -> Result<Vec<SearchResult>> {
+    if symbols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_id = files
+        .iter()
+        .map(|file| (file.id.clone(), file.clone()))
+        .collect::<HashMap<FileId, File>>();
+    let mut results = Vec::new();
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| symbol.file_id == target_file.id)
+    {
+        if is_generic_symbol_name(&symbol.name) {
+            continue;
+        }
+        for occurrence in store.references_for_symbol(&symbol.id, 100)? {
+            if occurrence.file_id == target_file.id {
+                continue;
+            }
+            if let Some(result) = occurrence_result(store, &files_by_id, symbol, &occurrence)? {
+                results.push(result);
+            }
+        }
+    }
+
+    Ok(dedupe_results(results))
+}
+
+fn occurrence_result(
+    store: &dyn MetadataStore,
+    files_by_id: &HashMap<FileId, File>,
+    symbol: &Symbol,
+    occurrence: &SymbolOccurrence,
+) -> Result<Option<SearchResult>> {
+    let Some(file) = files_by_id.get(&occurrence.file_id) else {
+        return Ok(None);
+    };
+    let chunks = store.chunks_for_file(&occurrence.file_id)?;
+    let snippet = best_occurrence_snippet(&chunks, occurrence, &symbol.name);
+    let source = match occurrence.provenance {
+        EvidenceSourceType::Scip => "SCIP",
+        EvidenceSourceType::TreeSitter => "tree-sitter",
+        EvidenceSourceType::Lsp => "LSP",
+        _ => "indexed",
+    };
+    Ok(Some(SearchResult {
+        path: file.path.clone(),
+        line_range: occurrence.range.clone(),
+        snippet,
+        symbol: None,
+        score: 1.25 + occurrence.confidence.score(),
+        match_reason: format!("exact symbol reference via {source}"),
+        evidence: vec![format!(
+            "exact reference to `{}` from `{source}` occurrence data",
+            symbol.qualified_name
+        )],
+        confidence: occurrence.confidence.score(),
+    }))
+}
+
+fn best_occurrence_snippet(
+    chunks: &[CodeChunk],
+    occurrence: &SymbolOccurrence,
+    symbol_name: &str,
+) -> String {
+    let occurrence_line = occurrence.range.as_ref().map(|range| range.start);
+    let chunk = occurrence_line
+        .and_then(|line| {
+            chunks
+                .iter()
+                .find(|chunk| chunk.range.start <= line && line <= chunk.range.end)
+        })
+        .or_else(|| chunks.iter().find(|chunk| chunk.text.contains(symbol_name)))
+        .or_else(|| chunks.first());
+
+    chunk
+        .and_then(|chunk| {
+            chunk
+                .text
+                .lines()
+                .find(|line| line.contains(symbol_name))
+                .or_else(|| chunk.text.lines().next())
+        })
+        .unwrap_or(symbol_name)
+        .trim()
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn dedupe_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
+    let mut by_path = BTreeMap::<String, SearchResult>::new();
+    for result in results {
+        let key = result_key(&result);
+        match by_path.get_mut(&key) {
+            Some(existing) => {
+                if result.score > existing.score {
+                    existing.score = result.score;
+                    existing.snippet = result.snippet.clone();
+                    existing.line_range = result.line_range.clone();
+                    existing.match_reason = result.match_reason.clone();
+                    existing.confidence = existing.confidence.max(result.confidence);
+                }
+                for evidence in result.evidence {
+                    if !existing.evidence.contains(&evidence) {
+                        existing.evidence.push(evidence);
+                    }
+                }
+            }
+            None => {
+                by_path.insert(key, result);
+            }
+        }
+    }
+    by_path.into_values().collect()
+}
+
+fn result_key(result: &SearchResult) -> String {
+    format!(
+        "{}:{}-{}",
+        result.path.display(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.start)
+            .unwrap_or_default(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    )
 }
 
 fn impact_terms(
@@ -218,7 +367,8 @@ fn is_generic_symbol_name(value: &str) -> bool {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        CodeChunk, File, FileId, IndexManifest, IndexQuality, Language, Repository, RepositoryId,
+        CodeChunk, File, FileId, IndexManifest, IndexQuality, Language, LineRange, Repository,
+        RepositoryId, SymbolId, SymbolKind,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -326,5 +476,121 @@ mod tests {
             report.indirect_impacts[0].path.display().to_string(),
             "src/main.rs"
         );
+    }
+
+    #[test]
+    fn exact_symbol_references_count_as_direct_impact() {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let source = File {
+            id: FileId::new("source"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/rates.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "source".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let caller = File {
+            id: FileId::new("caller"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/publisher.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "caller".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = Symbol {
+            id: SymbolId::new("symbol:rate_validator"),
+            name: "RateValidator".into(),
+            qualified_name: "rates::RateValidator".into(),
+            kind: SymbolKind::Class,
+            file_id: source.id.clone(),
+            range: Some(LineRange { start: 1, end: 5 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "source-chunk".into(),
+                file_id: source.id.clone(),
+                range: LineRange { start: 1, end: 5 },
+                language: Language::Rust,
+                text: "pub struct RateValidator;".into(),
+                symbol_id: Some(symbol.id.clone()),
+            },
+            CodeChunk {
+                id: "caller-chunk".into(),
+                file_id: caller.id.clone(),
+                range: LineRange { start: 10, end: 12 },
+                language: Language::Rust,
+                text: "let validator = RateValidator::new();".into(),
+                symbol_id: None,
+            },
+        ];
+        let occurrences = vec![
+            SymbolOccurrence {
+                symbol_id: symbol.id.clone(),
+                file_id: source.id.clone(),
+                range: Some(LineRange { start: 1, end: 1 }),
+                is_definition: true,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::Scip,
+            },
+            SymbolOccurrence {
+                symbol_id: symbol.id.clone(),
+                file_id: caller.id.clone(),
+                range: Some(LineRange { start: 10, end: 10 }),
+                is_definition: false,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::Scip,
+            },
+        ];
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 1,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            quality: IndexQuality::default(),
+        };
+
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source, caller],
+                symbols: &[symbol],
+                occurrences: &occurrences,
+                chunks: &chunks,
+                imports: &[],
+                tests: &[],
+            })
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/rates.rs"))
+            .unwrap();
+
+        assert!(report
+            .direct_impacts
+            .iter()
+            .any(|result| result.path == Path::new("src/publisher.rs")
+                && result.match_reason.contains("exact symbol reference")));
+        assert!(report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("exact indexed symbol reference")));
     }
 }

@@ -25,6 +25,9 @@ members = [
   "crates/open-kioku-storage",
   "crates/open-kioku-storage-sqlite",
   "crates/open-kioku-storage-kv",
+  "crates/open-kioku-memory",
+  "crates/open-kioku-context-compress",
+  "crates/open-kioku-format",
   "crates/open-kioku-context",
   "crates/open-kioku-ranking",
   "crates/open-kioku-evidence",
@@ -41,7 +44,7 @@ exclude = ["crates/open-kioku-tests/fixtures/rust-fixture"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 license = "Elastic-2.0"
 repository = "https://github.com/shivyadavus/open-kioku"

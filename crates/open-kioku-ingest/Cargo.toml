@@ -14,13 +14,13 @@ categories.workspace = true
 chrono.workspace = true
 globset.workspace = true
 ignore.workspace = true
-open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
-open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
-open-kioku-git = { version = "1.0.1", path = "../open-kioku-git" }
-open-kioku-languages = { version = "1.0.1", path = "../open-kioku-languages" }
-open-kioku-parse = { version = "1.0.1", path = "../open-kioku-parse" }
-open-kioku-scip = { version = "1.0.1", path = "../open-kioku-scip" }
+open-kioku-config = { version = "1.0.3", path = "../open-kioku-config" }
+open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.3", path = "../open-kioku-errors" }
+open-kioku-git = { version = "1.0.3", path = "../open-kioku-git" }
+open-kioku-languages = { version = "1.0.3", path = "../open-kioku-languages" }
+open-kioku-parse = { version = "1.0.3", path = "../open-kioku-parse" }
+open-kioku-scip = { version = "1.0.3", path = "../open-kioku-scip" }
 rayon.workspace = true
 sha2.workspace = true
 tracing.workspace = true
