@@ -1,3 +1,4 @@
+use open_kioku_config::{ScipConfig, ScipMode};
 use open_kioku_core::{
     Confidence, EvidenceSourceType, FileId, Language, LineRange, RepositoryId, Symbol, SymbolId,
     SymbolKind, SymbolOccurrence,
@@ -8,6 +9,8 @@ use scip::types::{symbol_information, Index, SymbolRole};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScipImport {
@@ -21,6 +24,89 @@ pub struct ScipImportReport {
     pub occurrences: Vec<SymbolOccurrence>,
     pub imported_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScipIndexReport {
+    pub mode: ScipMode,
+    pub imported_paths: Vec<PathBuf>,
+    pub skipped_paths: Vec<PathBuf>,
+    pub generated_paths: Vec<PathBuf>,
+    pub generator_attempts: Vec<ScipGeneratorAttempt>,
+    pub symbols: usize,
+    pub occurrences: usize,
+    pub exact_references: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScipGeneratorAttempt {
+    pub language: String,
+    pub command: String,
+    pub output_path: PathBuf,
+    pub status: ScipGeneratorStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScipGeneratorStatus {
+    Generated,
+    Skipped,
+    Failed,
+    TimedOut,
+}
+
+pub fn prepare_and_import_scip(
+    root: impl AsRef<Path>,
+    config: &ScipConfig,
+    repository_id: &RepositoryId,
+) -> Result<(ScipImportReport, ScipIndexReport)> {
+    let root = root.as_ref();
+    let mut generated_paths = Vec::new();
+    let mut generator_attempts = Vec::new();
+    if matches!(config.mode, ScipMode::Auto | ScipMode::Required) {
+        let generated = generate_configured_scip_files(root, config)?;
+        generated_paths = generated
+            .iter()
+            .filter(|attempt| attempt.status == ScipGeneratorStatus::Generated)
+            .map(|attempt| attempt.output_path.clone())
+            .collect();
+        generator_attempts = generated;
+    }
+
+    let imported = if matches!(config.mode, ScipMode::Off) {
+        ScipImportReport {
+            symbols: Vec::new(),
+            occurrences: Vec::new(),
+            imported_paths: Vec::new(),
+            skipped_paths: config.paths.clone(),
+        }
+    } else {
+        import_configured_scip_files(root, &config.paths, repository_id)?
+    };
+
+    if matches!(config.mode, ScipMode::Required) && imported.imported_paths.is_empty() {
+        return Err(OkError::Index(
+            "SCIP mode is required but no configured SCIP index could be imported".into(),
+        ));
+    }
+
+    let exact_references = imported
+        .occurrences
+        .iter()
+        .filter(|occurrence| !occurrence.is_definition)
+        .count();
+    let report = ScipIndexReport {
+        mode: config.mode,
+        imported_paths: imported.imported_paths.clone(),
+        skipped_paths: imported.skipped_paths.clone(),
+        generated_paths,
+        generator_attempts,
+        symbols: imported.symbols.len(),
+        occurrences: imported.occurrences.len(),
+        exact_references,
+    };
+    Ok((imported, report))
 }
 
 pub fn import_configured_scip_files(
@@ -49,6 +135,192 @@ pub fn import_configured_scip_files(
     }
     dedup_import(&mut report.symbols, &mut report.occurrences);
     Ok(report)
+}
+
+pub fn generate_configured_scip_files(
+    root: impl AsRef<Path>,
+    config: &ScipConfig,
+) -> Result<Vec<ScipGeneratorAttempt>> {
+    let root = root.as_ref();
+    fs::create_dir_all(root.join(".ok/indexes"))?;
+    let mut attempts = Vec::new();
+
+    if root.join("package.json").exists() {
+        let output = PathBuf::from(".ok/indexes/typescript.scip");
+        attempts.push(run_installed_indexer(
+            root,
+            "typescript",
+            "scip-typescript",
+            typescript_args(root, &output),
+            output,
+            config.timeout_seconds,
+        )?);
+    }
+    if root.join("go.mod").exists() {
+        let output = PathBuf::from("index.scip");
+        attempts.push(run_installed_indexer(
+            root,
+            "go",
+            "scip-go",
+            Vec::new(),
+            output,
+            config.timeout_seconds,
+        )?);
+    }
+    if root.join("pom.xml").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
+    {
+        let output = PathBuf::from(".ok/indexes/java.scip");
+        attempts.push(run_installed_indexer(
+            root,
+            "java",
+            "scip-java",
+            vec![
+                "index".into(),
+                "--output".into(),
+                output.to_string_lossy().into_owned(),
+            ],
+            output,
+            config.timeout_seconds,
+        )?);
+    }
+    if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
+        attempts.push(ScipGeneratorAttempt {
+            language: "python".into(),
+            command: "scip-python index . --project-name <repo> --project-version _".into(),
+            output_path: PathBuf::from(".ok/indexes/python.scip"),
+            status: ScipGeneratorStatus::Skipped,
+            message:
+                "Python SCIP setup is reported but not auto-run until output handling is verified"
+                    .into(),
+        });
+    }
+
+    Ok(attempts)
+}
+
+fn typescript_args(root: &Path, output: &Path) -> Vec<String> {
+    let mut args = vec![
+        "index".into(),
+        "--output".into(),
+        output.to_string_lossy().into_owned(),
+    ];
+    if !root.join("tsconfig.json").exists() && !root.join("jsconfig.json").exists() {
+        args.push("--infer-tsconfig".into());
+    }
+    if root.join("pnpm-workspace.yaml").exists() {
+        args.push("--pnpm-workspaces".into());
+    } else if root.join("yarn.lock").exists() && root.join("package.json").exists() {
+        args.push("--yarn-workspaces".into());
+    }
+    args
+}
+
+fn run_installed_indexer(
+    root: &Path,
+    language: &str,
+    binary: &str,
+    args: Vec<String>,
+    output_path: PathBuf,
+    timeout_seconds: u64,
+) -> Result<ScipGeneratorAttempt> {
+    let command_text = format!("{} {}", binary, args.join(" "));
+    if find_in_path(binary).is_none() {
+        return Ok(ScipGeneratorAttempt {
+            language: language.into(),
+            command: command_text,
+            output_path,
+            status: ScipGeneratorStatus::Skipped,
+            message: format!("{binary} is not installed or not on PATH"),
+        });
+    }
+
+    let absolute_output = root.join(&output_path);
+    if let Some(parent) = absolute_output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut child = Command::new(binary)
+        .args(&args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| OkError::Index(format!("failed to run {binary}: {err}")))?;
+    let started = Instant::now();
+    let timeout = Duration::from_secs(timeout_seconds.max(1));
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| OkError::Index(format!("failed to wait for {binary}: {err}")))?
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|err| OkError::Index(format!("failed to read {binary} output: {err}")))?;
+            let combined = summarize_process_output(&output.stdout, &output.stderr);
+            if status.success() && absolute_output.exists() {
+                return Ok(ScipGeneratorAttempt {
+                    language: language.into(),
+                    command: command_text,
+                    output_path,
+                    status: ScipGeneratorStatus::Generated,
+                    message: combined.unwrap_or_else(|| "generated SCIP index".into()),
+                });
+            }
+            return Ok(ScipGeneratorAttempt {
+                language: language.into(),
+                command: command_text,
+                output_path,
+                status: ScipGeneratorStatus::Failed,
+                message: combined.unwrap_or_else(|| format!("{binary} exited with {status}")),
+            });
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ScipGeneratorAttempt {
+                language: language.into(),
+                command: command_text,
+                output_path,
+                status: ScipGeneratorStatus::TimedOut,
+                message: format!("{binary} timed out after {}s", timeout.as_secs()),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn summarize_process_output(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(stdout));
+    if !stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(stderr));
+    }
+    let summary = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .take(300)
+        .collect::<String>();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn find_in_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 pub fn import_scip_file(

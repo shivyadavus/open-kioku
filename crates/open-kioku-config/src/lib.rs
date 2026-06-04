@@ -70,8 +70,13 @@ impl Default for OkConfig {
             },
             scip: ScipConfig {
                 enabled: true,
+                mode: ScipMode::Consume,
                 auto_generate: false,
+                allow_install: false,
+                timeout_seconds: 300,
                 paths: vec![
+                    "index.scip".into(),
+                    ".ok/indexes/go.scip".into(),
                     ".ok/indexes/java.scip".into(),
                     ".ok/indexes/typescript.scip".into(),
                     ".ok/indexes/python.scip".into(),
@@ -144,9 +149,28 @@ pub struct LanguagesConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScipConfig {
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub mode: ScipMode,
+    #[serde(default)]
     pub auto_generate: bool,
+    #[serde(default)]
+    pub allow_install: bool,
+    #[serde(default = "default_scip_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
     pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScipMode {
+    Off,
+    #[default]
+    Consume,
+    Auto,
+    Required,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +230,7 @@ impl OkConfig {
         let mut config: Self =
             toml::from_str(&raw).map_err(|err| OkError::Config(err.to_string()))?;
         config.apply_builtin_excludes();
+        config.normalize_scip();
         config.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -232,6 +257,11 @@ impl OkConfig {
         if self.mcp.allow_write && !self.security.allow_write {
             return Err(OkError::Config(
                 "mcp.allow_write cannot be true while security.allow_write is false".into(),
+            ));
+        }
+        if self.scip.allow_install && self.security.deny_network {
+            return Err(OkError::Config(
+                "scip.allow_install cannot be true while security.deny_network is true".into(),
             ));
         }
         Ok(())
@@ -275,6 +305,34 @@ impl OkConfig {
             }
         }
     }
+
+    fn normalize_scip(&mut self) {
+        if !self.scip.enabled {
+            self.scip.mode = ScipMode::Off;
+        } else if self.scip.auto_generate && self.scip.mode == ScipMode::Consume {
+            self.scip.mode = ScipMode::Auto;
+        }
+        for path in [
+            "index.scip",
+            ".ok/indexes/go.scip",
+            ".ok/indexes/java.scip",
+            ".ok/indexes/typescript.scip",
+            ".ok/indexes/python.scip",
+        ] {
+            let path = PathBuf::from(path);
+            if !self.scip.paths.iter().any(|existing| existing == &path) {
+                self.scip.paths.push(path);
+            }
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_scip_timeout_seconds() -> u64 {
+    300
 }
 
 pub fn parse_size(value: &str) -> Result<u64> {
@@ -298,6 +356,7 @@ pub fn parse_size(value: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::ScipMode;
     use super::{parse_size, OkConfig};
     use std::env;
 
@@ -314,6 +373,12 @@ mod tests {
     fn default_config_is_valid() {
         let config = OkConfig::default();
         assert!(config.validate().is_ok());
+        assert_eq!(config.scip.mode, ScipMode::Consume);
+        assert!(config
+            .scip
+            .paths
+            .iter()
+            .any(|path| path == std::path::Path::new("index.scip")));
     }
 
     #[test]
@@ -340,6 +405,68 @@ mod tests {
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
         assert_eq!(loaded.repo.name, "open-kioku-repo");
         assert!(!loaded.security.allow_write);
+        assert_eq!(loaded.scip.mode, ScipMode::Consume);
+    }
+
+    #[test]
+    fn auto_generate_upgrades_legacy_scip_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ok.toml"),
+            r#"
+[repo]
+name = "legacy"
+root = "."
+
+[index]
+incremental = true
+max_file_size = "1mb"
+exclude = []
+
+[languages]
+enabled = ["rust"]
+
+[scip]
+enabled = true
+auto_generate = true
+paths = []
+
+[search]
+lexical = "tantivy"
+semantic = "disabled"
+structural = true
+
+[semantic]
+enabled = false
+provider = "local"
+model = ""
+
+[mcp]
+mode = "read-only"
+transport = "stdio"
+allow_write = false
+hide_experimental = false
+
+[security]
+redact_secrets = true
+deny_network = true
+allow_hidden_files = false
+allow_write = false
+approval_required = true
+
+[commands]
+allow = []
+
+[paths]
+deny = []
+
+[architecture]
+rules = ".ok/architecture-rules.yml"
+"#,
+        )
+        .unwrap();
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        assert_eq!(loaded.scip.mode, ScipMode::Auto);
     }
 
     #[test]

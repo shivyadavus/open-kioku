@@ -111,7 +111,7 @@ impl<'a> ContextPackBuilder<'a> {
         let mut tests = Vec::new();
         let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
         for result in primary.iter().take(3) {
-            tests.extend(selector.for_changed_path_fast(&result.path, 5)?);
+            tests.extend(selector.for_changed_path_with_evidence(&result.path, 5)?);
         }
         tests.truncate(10);
         let impact = if expand_impact {

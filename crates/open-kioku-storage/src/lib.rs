@@ -21,6 +21,35 @@ pub trait MetadataStore: Send + Sync {
     fn imports(&self) -> Result<Vec<Import>>;
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>>;
     fn occurrences_for_file(&self, file_id: &FileId) -> Result<Vec<SymbolOccurrence>>;
+    fn symbols_for_file(&self, _file_id: &FileId) -> Result<Vec<Symbol>> {
+        Ok(Vec::new())
+    }
+    fn find_chunks_containing(&self, query: &str, limit: usize) -> Result<Vec<CodeChunk>> {
+        let chunks = self.all_chunks()?;
+        let mut results = Vec::new();
+        for chunk in chunks {
+            if chunk.text.contains(query) {
+                results.push(chunk);
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(results)
+    }
+    fn find_files_by_path_pattern(&self, pattern: &str) -> Result<Vec<File>> {
+        let files = self.list_files(usize::MAX, 0)?;
+        let lower_pattern = pattern.to_ascii_lowercase();
+        Ok(files
+            .into_iter()
+            .filter(|f| f.path.to_string_lossy().to_ascii_lowercase().contains(&lower_pattern))
+            .collect())
+    }
+    fn tests_for_files(&self, file_ids: &[FileId]) -> Result<Vec<TestTarget>> {
+        let tests = self.tests()?;
+        let set = file_ids.iter().collect::<std::collections::HashSet<_>>();
+        Ok(tests.into_iter().filter(|t| set.contains(&t.file_id)).collect())
+    }
 }
 
 pub struct IndexData<'a> {

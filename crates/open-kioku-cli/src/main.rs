@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::OkConfig;
+use open_kioku_config::{OkConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -41,6 +41,8 @@ enum Command {
     Index {
         #[arg(default_value = ".")]
         repo: PathBuf,
+        #[arg(long = "with-scip", value_parser = ["off", "consume", "auto", "required"])]
+        with_scip: Option<String>,
     },
     /// Keep the local index current while repository files change.
     Watch {
@@ -96,6 +98,7 @@ enum Command {
         limit: usize,
     },
     Bench(BenchArgs),
+    Eval(EvalArgs),
     Prove(ProveArgs),
 
     Architecture {
@@ -109,6 +112,10 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    Scip {
+        #[command(subcommand)]
+        command: ScipCommand,
     },
 }
 
@@ -152,6 +159,33 @@ struct ProveArgs {
     /// Include repository-relative paths instead of redacted path shapes.
     #[arg(long, default_value_t = false)]
     reveal_paths: bool,
+}
+
+#[derive(Args)]
+struct EvalArgs {
+    /// Repository to index and evaluate.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Golden case as TASK=EXPECTED_PATH[,EXPECTED_PATH...].
+    #[arg(long = "case", value_name = "TASK=EXPECTED_PATHS")]
+    cases: Vec<String>,
+
+    /// JSON file containing [{ "task": "...", "expected_paths": [...], "expected_tests": [...] }].
+    #[arg(long)]
+    cases_file: Option<PathBuf>,
+
+    /// Number of search/context/test results considered for each case.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+
+    /// Fail when search recall@k is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_recall_at_k: f64,
+
+    /// Fail when mean reciprocal rank is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_mrr: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -227,6 +261,18 @@ enum McpCommand {
         deny_network: bool,
         #[arg(long, default_value_t = false)]
         hide_experimental: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScipCommand {
+    Doctor {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Setup {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
     },
 }
 
@@ -331,6 +377,48 @@ struct ProofTaskReport {
     top_search_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct EvalCase {
+    task: String,
+    #[serde(default)]
+    expected_paths: Vec<String>,
+    #[serde(default)]
+    expected_tests: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct EvalReport {
+    repo: PathBuf,
+    limit: usize,
+    case_count: usize,
+    summary: EvalSummary,
+    cases: Vec<EvalCaseReport>,
+}
+
+#[derive(Serialize)]
+struct EvalSummary {
+    search_recall_at_k: f64,
+    search_mrr: f64,
+    search_ndcg_at_k: f64,
+    context_recall_at_k: f64,
+    test_recall_at_k: f64,
+    abstention_required: usize,
+}
+
+#[derive(Serialize)]
+struct EvalCaseReport {
+    task: String,
+    expected_paths: Vec<String>,
+    expected_tests: Vec<String>,
+    search_ranks: Vec<Option<usize>>,
+    context_hits: Vec<String>,
+    test_hits: Vec<String>,
+    top_search_paths: Vec<PathBuf>,
+    top_context_paths: Vec<PathBuf>,
+    confidence: &'static str,
+    notes: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct DoctorReport {
     ok: bool,
@@ -353,6 +441,27 @@ struct DoctorCheck {
     name: &'static str,
     status: CheckStatus,
     message: String,
+}
+
+#[derive(Serialize)]
+struct ScipSetupReport {
+    repo: PathBuf,
+    mode: String,
+    enabled: bool,
+    allow_install: bool,
+    timeout_seconds: u64,
+    indexers: Vec<ScipIndexerReport>,
+    configured_paths: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct ScipIndexerReport {
+    language: &'static str,
+    applicable: bool,
+    installed: bool,
+    command: String,
+    output_path: PathBuf,
+    note: String,
 }
 
 #[derive(Serialize)]
@@ -379,9 +488,12 @@ async fn main() -> anyhow::Result<()> {
                 &serde_json::json!({"status":"initialized"}),
             )?;
         }
-        Command::Index { repo: command_repo } => {
+        Command::Index {
+            repo: command_repo,
+            with_scip,
+        } => {
             let repo = resolve_repo(&repo, command_repo);
-            let snapshot = index_repo(&repo)?;
+            let snapshot = index_repo_with_scip_mode(&repo, with_scip.as_deref())?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&snapshot.manifest)?);
             } else {
@@ -391,6 +503,20 @@ async fn main() -> anyhow::Result<()> {
                     snapshot.manifest.symbol_count,
                     snapshot.manifest.chunk_count
                 );
+                if let Some(scip) = &snapshot.scip {
+                    println!(
+                        "SCIP: mode {:?}, imported {} index(es), {} exact references",
+                        scip.mode,
+                        scip.imported_paths.len(),
+                        scip.exact_references
+                    );
+                    for attempt in &scip.generator_attempts {
+                        println!(
+                            "SCIP {}: {:?} - {}",
+                            attempt.language, attempt.status, attempt.message
+                        );
+                    }
+                }
             }
         }
         Command::Watch { repo: command_repo } => {
@@ -514,11 +640,25 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         Vec::new()
                     };
+                    let symbols = if let Some(file) = &file {
+                        store.symbols_for_file(&file.id)?
+                    } else {
+                        Vec::new()
+                    };
                     output(
                         cli.json,
-                        &serde_json::json!({"file": file, "chunks": chunks}),
+                        &serde_json::json!({"file": file, "chunks": chunks, "symbols": symbols}),
                         || {
-                            println!("{} chunks indexed for {}", chunks.len(), path.display());
+                            if let Some(f) = &file {
+                                println!("{} ({:?}, {} bytes)", path.display(), f.language, f.size_bytes);
+                            }
+                            println!("{} chunks, {} symbols indexed", chunks.len(), symbols.len());
+                            for symbol in &symbols {
+                                let range = symbol.range.as_ref()
+                                    .map(|r| format!(":{}–{}", r.start, r.end))
+                                    .unwrap_or_default();
+                                println!("  {:?} {}{}", symbol.kind, symbol.name, range);
+                            }
                         },
                     )?;
                 }
@@ -530,20 +670,53 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Impact(args) => {
             let store = open_store(&repo)?;
+            let index_dir = default_index_dir(&repo);
+            let search_index = if TantivySearchIndex::exists(&index_dir) {
+                Some(TantivySearchIndex::open_or_create(&index_dir)?)
+            } else {
+                None
+            };
+            let engine = ImpactEngine::new(&store)
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+
             let report = if let Some(path) = args.file {
-                ImpactEngine::new(&store).for_file(&path)?
+                let normalized = normalize_to_repo_relative(&repo, &path);
+                engine.for_file(&normalized)?
             } else if let Some(symbol) = args.symbol {
                 let definition = SymbolEngine::new(&store).definition(&symbol)?;
                 let files = store.list_files(usize::MAX, 0)?;
                 let file = files.iter().find(|file| file.id == definition.file_id);
-                ImpactEngine::new(&store).for_file(
-                    file.map(|file| file.path.as_path())
-                        .unwrap_or(Path::new(&symbol)),
-                )?
+                let path_to_use = file.map(|file| file.path.as_path())
+                    .unwrap_or(Path::new(&symbol));
+                let normalized = normalize_to_repo_relative(&repo, path_to_use);
+                engine.for_file(&normalized)?
             } else {
                 anyhow::bail!("provide --file or --symbol");
             };
-            output(cli.json, &report, || {})?;
+            output(cli.json, &report, || {
+                println!("Impact target: {}", report.target);
+                println!("Risk: {} ({:.2})", report.risk_report.level, report.risk_report.score);
+                println!("\nDirect impacts ({}):", report.direct_impacts.len());
+                for result in &report.direct_impacts {
+                    println!(
+                        "  {}:{} ({:.2})",
+                        result.path.display(),
+                        result.line_range.as_ref().map(|r| r.start).unwrap_or(0),
+                        result.score
+                    );
+                }
+                if !report.indirect_impacts.is_empty() {
+                    println!("\nIndirect impacts ({}):", report.indirect_impacts.len());
+                    for result in report.indirect_impacts.iter().take(5) {
+                        println!(
+                            "  {}:{} ({:.2})",
+                            result.path.display(),
+                            result.line_range.as_ref().map(|r| r.start).unwrap_or(0),
+                            result.score
+                        );
+                    }
+                }
+            })?;
         }
         Command::Path { from, to } => {
             let store = open_store(&repo)?;
@@ -564,7 +737,7 @@ async fn main() -> anyhow::Result<()> {
             let store = open_store(&repo)?;
             output(
                 cli.json,
-                &TestSelector::new(&store).for_changed_path(&changed, 20)?,
+                &TestSelector::new(&store).for_changed_path_with_evidence(&changed, 20)?,
                 || {},
             )?;
         }
@@ -581,8 +754,15 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let store = open_store(&repo)?;
             let context = build_context_pack(&repo, &store, &task, limit)?;
-            let report =
-                PlanEngine::new(&store as &dyn OkStore).plan_from_context(&task, limit, context)?;
+            let index_dir = default_index_dir(&repo);
+            let search_index = if TantivySearchIndex::exists(&index_dir) {
+                Some(TantivySearchIndex::open_or_create(&index_dir)?)
+            } else {
+                None
+            };
+            let report = PlanEngine::new(&store as &dyn OkStore)
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
         }
@@ -602,6 +782,31 @@ async fn main() -> anyhow::Result<()> {
                         min_precision
                     );
                 }
+            }
+        }
+        Command::Eval(args) => {
+            let min_recall = args.min_recall_at_k;
+            let min_mrr = args.min_mrr;
+            let report = run_eval(args)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_eval_report(&report);
+            }
+            if report.summary.search_recall_at_k < min_recall {
+                anyhow::bail!(
+                    "eval search recall@{} {:.3} is below required {:.3}",
+                    report.limit,
+                    report.summary.search_recall_at_k,
+                    min_recall
+                );
+            }
+            if report.summary.search_mrr < min_mrr {
+                anyhow::bail!(
+                    "eval MRR {:.3} is below required {:.3}",
+                    report.summary.search_mrr,
+                    min_mrr
+                );
             }
         }
         Command::Prove(args) => {
@@ -685,6 +890,34 @@ async fn main() -> anyhow::Result<()> {
                     config.commands.allow = allow_command;
                 }
                 open_kioku_mcp::serve_stdio(repo, config).await?;
+            }
+        },
+        Command::Scip { command } => match command {
+            ScipCommand::Doctor { repo: command_repo } => {
+                let repo = resolve_repo(&repo, command_repo);
+                let config = OkConfig::load_from_repo(&repo)?;
+                let snapshot = scip_setup_report(&repo, &config);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                } else {
+                    print_scip_setup_report(&snapshot);
+                }
+            }
+            ScipCommand::Setup { repo: command_repo } => {
+                let repo = resolve_repo(&repo, command_repo);
+                let config = OkConfig::load_from_repo(&repo)?;
+                let snapshot = scip_setup_report(&repo, &config);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                } else {
+                    print_scip_setup_report(&snapshot);
+                    println!("\nTo generate where installed:");
+                    println!(
+                        "  ok index {} --with-scip auto",
+                        shell_quote(&repo.display().to_string())
+                    );
+                    println!("\nOpen Kioku will never install SCIP indexers unless a future explicit install flag enables it.");
+                }
             }
         },
     }
@@ -792,6 +1025,38 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             message: ".ok/index.sqlite is missing".into(),
         });
         next_steps.push("Run `ok index .` before connecting an MCP client.".into());
+    }
+
+    if index_path.exists() {
+        if let Ok(store) = SqliteStore::open(&index_path) {
+            if let Ok(Some(manifest)) = store.manifest() {
+                let quality = &manifest.quality;
+                if quality.scip_indexes_imported > 0 && quality.scip_exact_references > 0 {
+                    checks.push(DoctorCheck {
+                        name: "quality",
+                        status: CheckStatus::Pass,
+                        message: format!(
+                            "SCIP imported {} index(es), {} exact references, {} tests",
+                            quality.scip_indexes_imported,
+                            quality.scip_exact_references,
+                            quality.test_count
+                        ),
+                    });
+                } else {
+                    checks.push(DoctorCheck {
+                        name: "quality",
+                        status: CheckStatus::Warn,
+                        message: format!(
+                            "SCIP exact references unavailable; {} tests, {} imports indexed",
+                            quality.test_count, quality.import_count
+                        ),
+                    });
+                    next_steps.push(
+                    "For better references, impact, tests, and planning: run `ok scip setup .`, then `ok index . --with-scip auto`.".into(),
+                );
+                }
+            }
+        }
     }
 
     // 4. ok.toml
@@ -921,6 +1186,102 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         checks,
         next_steps,
     }
+}
+
+fn scip_setup_report(repo: &Path, config: &OkConfig) -> ScipSetupReport {
+    let repo = absolutize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let ts_args = if repo.join("tsconfig.json").exists() || repo.join("jsconfig.json").exists() {
+        "scip-typescript index --output .ok/indexes/typescript.scip"
+    } else {
+        "scip-typescript index --output .ok/indexes/typescript.scip --infer-tsconfig"
+    };
+    let indexers = vec![
+        ScipIndexerReport {
+            language: "typescript/javascript",
+            applicable: repo.join("package.json").exists(),
+            installed: command_exists("scip-typescript"),
+            command: ts_args.into(),
+            output_path: ".ok/indexes/typescript.scip".into(),
+            note: "best for TypeScript and JavaScript symbol references".into(),
+        },
+        ScipIndexerReport {
+            language: "go",
+            applicable: repo.join("go.mod").exists(),
+            installed: command_exists("scip-go"),
+            command: "scip-go".into(),
+            output_path: "index.scip".into(),
+            note: "best for Go definition/reference precision".into(),
+        },
+        ScipIndexerReport {
+            language: "java",
+            applicable: repo.join("pom.xml").exists()
+                || repo.join("build.gradle").exists()
+                || repo.join("build.gradle.kts").exists(),
+            installed: command_exists("scip-java"),
+            command: "scip-java index --output .ok/indexes/java.scip".into(),
+            output_path: ".ok/indexes/java.scip".into(),
+            note: "may run build-tool analysis and can take time".into(),
+        },
+        ScipIndexerReport {
+            language: "python",
+            applicable: repo.join("pyproject.toml").exists() || repo.join("setup.py").exists(),
+            installed: command_exists("scip-python"),
+            command: "scip-python index . --project-name <repo> --project-version _ --output .ok/indexes/python.scip".into(),
+            output_path: ".ok/indexes/python.scip".into(),
+            note: "requires project metadata for best external reference stability".into(),
+        },
+    ];
+    ScipSetupReport {
+        repo,
+        mode: format!("{:?}", config.scip.mode).to_ascii_lowercase(),
+        enabled: config.scip.enabled,
+        allow_install: config.scip.allow_install,
+        timeout_seconds: config.scip.timeout_seconds,
+        indexers,
+        configured_paths: config.scip.paths.clone(),
+    }
+}
+
+fn print_scip_setup_report(report: &ScipSetupReport) {
+    println!("SCIP setup for {}", report.repo.display());
+    println!(
+        "mode={}, enabled={}, timeout={}s",
+        report.mode, report.enabled, report.timeout_seconds
+    );
+    println!("\nConfigured SCIP paths:");
+    for path in &report.configured_paths {
+        println!("- {}", path.display());
+    }
+    println!("\nIndexers:");
+    for indexer in &report.indexers {
+        let applicability = if indexer.applicable {
+            "applicable"
+        } else {
+            "not detected"
+        };
+        let installed = if indexer.installed {
+            "installed"
+        } else {
+            "missing"
+        };
+        println!(
+            "- {}: {}, {}; {}",
+            indexer.language, applicability, installed, indexer.note
+        );
+        if indexer.applicable {
+            println!("  {}", indexer.command);
+        }
+    }
+}
+
+fn command_exists(binary: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(binary))
+                .any(|path| path.is_file())
+        })
+        .unwrap_or(false)
 }
 
 fn demo_repo_path(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
@@ -1195,6 +1556,252 @@ fn print_bench_report(report: &BenchReport) {
     }
 }
 
+fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
+    let repo = absolutize(&args.path)?;
+    let limit = args.limit.clamp(1, 100);
+    let cases = load_eval_cases(&args.cases, args.cases_file.as_ref())?;
+    if cases.is_empty() {
+        anyhow::bail!("no eval cases provided; pass --case TASK=EXPECTED_PATH or --cases-file");
+    }
+
+    index_repo(&repo)?;
+    let store = open_store(&repo)?;
+    let mut case_reports = Vec::with_capacity(cases.len());
+    let mut recall_sum = 0.0;
+    let mut mrr_sum = 0.0;
+    let mut ndcg_sum = 0.0;
+    let mut context_recall_sum = 0.0;
+    let mut test_recall_sum = 0.0;
+    let mut abstention_required = 0usize;
+
+    for case in cases {
+        let search_results = search(&repo, &store, &case.task, limit)?;
+        let context = build_context_pack(&repo, &store, &case.task, limit)?;
+        let search_paths = search_results
+            .iter()
+            .map(|result| result.path.clone())
+            .collect::<Vec<_>>();
+        let context_paths = context
+            .primary_files
+            .iter()
+            .chain(context.supporting_files.iter())
+            .map(|result| result.path.clone())
+            .collect::<Vec<_>>();
+        let selected_tests = context
+            .test_candidates
+            .iter()
+            .map(|test| test.name.clone())
+            .collect::<Vec<_>>();
+
+        let search_ranks = expected_path_ranks(&case.expected_paths, &search_paths);
+        let search_hits = search_ranks.iter().filter(|rank| rank.is_some()).count();
+        let search_recall = ratio(search_hits, case.expected_paths.len());
+        recall_sum += search_recall;
+        mrr_sum += reciprocal_rank(&search_ranks);
+        ndcg_sum += ndcg(&search_ranks, limit);
+
+        let context_hits = matching_expected_values(&case.expected_paths, &context_paths);
+        let context_recall = ratio(context_hits.len(), case.expected_paths.len());
+        context_recall_sum += context_recall;
+
+        let test_hits = matching_expected_strings(&case.expected_tests, &selected_tests);
+        let test_recall = ratio(test_hits.len(), case.expected_tests.len());
+        test_recall_sum += test_recall;
+
+        let mut notes = Vec::new();
+        if search_recall == 0.0 {
+            notes.push("expected files were not found in top search results".into());
+        }
+        if context_recall == 0.0 {
+            notes.push("expected files were not grounded in context pack".into());
+        }
+        if !case.expected_tests.is_empty() && test_recall == 0.0 {
+            notes.push("expected tests were not selected".into());
+        }
+        let confidence = if search_recall > 0.0 && context_recall > 0.0 {
+            "grounded"
+        } else if search_results.is_empty() || context.primary_files.is_empty() {
+            abstention_required += 1;
+            "abstain"
+        } else {
+            abstention_required += 1;
+            "weak"
+        };
+
+        case_reports.push(EvalCaseReport {
+            task: case.task,
+            expected_paths: case.expected_paths,
+            expected_tests: case.expected_tests,
+            search_ranks,
+            context_hits,
+            test_hits,
+            top_search_paths: search_paths.into_iter().take(limit).collect(),
+            top_context_paths: context_paths.into_iter().take(limit).collect(),
+            confidence,
+            notes,
+        });
+    }
+
+    let count = case_reports.len() as f64;
+    Ok(EvalReport {
+        repo,
+        limit,
+        case_count: case_reports.len(),
+        summary: EvalSummary {
+            search_recall_at_k: recall_sum / count,
+            search_mrr: mrr_sum / count,
+            search_ndcg_at_k: ndcg_sum / count,
+            context_recall_at_k: context_recall_sum / count,
+            test_recall_at_k: test_recall_sum / count,
+            abstention_required,
+        },
+        cases: case_reports,
+    })
+}
+
+fn load_eval_cases(
+    values: &[String],
+    cases_file: Option<&PathBuf>,
+) -> anyhow::Result<Vec<EvalCase>> {
+    let mut cases = values
+        .iter()
+        .map(|value| {
+            let (task, expected) = value.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("eval case must use TASK=EXPECTED_PATH[,EXPECTED_PATH]: {value}")
+            })?;
+            let expected_paths = expected
+                .split(',')
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if task.trim().is_empty() || expected_paths.is_empty() {
+                anyhow::bail!("eval task and expected paths must be non-empty: {value}");
+            }
+            Ok(EvalCase {
+                task: task.trim().to_string(),
+                expected_paths,
+                expected_tests: Vec::new(),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(path) = cases_file {
+        let raw = fs::read_to_string(path)?;
+        let mut from_file: Vec<EvalCase> = serde_json::from_str(&raw)?;
+        cases.append(&mut from_file);
+    }
+    Ok(cases)
+}
+
+fn expected_path_ranks(expected_paths: &[String], actual_paths: &[PathBuf]) -> Vec<Option<usize>> {
+    expected_paths
+        .iter()
+        .map(|expected| {
+            let expected = normalize_path_fragment(expected);
+            actual_paths
+                .iter()
+                .position(|path| {
+                    normalize_path_fragment(&path.to_string_lossy()).contains(&expected)
+                })
+                .map(|rank| rank + 1)
+        })
+        .collect()
+}
+
+fn matching_expected_values(expected: &[String], actual: &[PathBuf]) -> Vec<String> {
+    expected
+        .iter()
+        .filter(|expected| {
+            let expected = normalize_path_fragment(expected);
+            actual
+                .iter()
+                .any(|path| normalize_path_fragment(&path.to_string_lossy()).contains(&expected))
+        })
+        .cloned()
+        .collect()
+}
+
+fn matching_expected_strings(expected: &[String], actual: &[String]) -> Vec<String> {
+    expected
+        .iter()
+        .filter(|expected| {
+            let expected = expected.to_ascii_lowercase();
+            actual
+                .iter()
+                .any(|value| value.to_ascii_lowercase().contains(&expected))
+        })
+        .cloned()
+        .collect()
+}
+
+fn reciprocal_rank(ranks: &[Option<usize>]) -> f64 {
+    ranks
+        .iter()
+        .flatten()
+        .min()
+        .map(|rank| 1.0 / *rank as f64)
+        .unwrap_or(0.0)
+}
+
+fn ndcg(ranks: &[Option<usize>], limit: usize) -> f64 {
+    if ranks.is_empty() {
+        return 1.0;
+    }
+    let dcg = ranks
+        .iter()
+        .flatten()
+        .filter(|rank| **rank <= limit)
+        .map(|rank| 1.0 / ((*rank as f64) + 1.0).log2())
+        .sum::<f64>();
+    let ideal = (1..=ranks.len().min(limit))
+        .map(|rank| 1.0 / ((rank as f64) + 1.0).log2())
+        .sum::<f64>();
+    if ideal == 0.0 {
+        0.0
+    } else {
+        dcg / ideal
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        1.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn print_eval_report(report: &EvalReport) {
+    println!("Open Kioku eval for {}", report.repo.display());
+    println!(
+        "Search recall@{} {:.3}, MRR {:.3}, nDCG@{} {:.3}",
+        report.limit,
+        report.summary.search_recall_at_k,
+        report.summary.search_mrr,
+        report.limit,
+        report.summary.search_ndcg_at_k
+    );
+    println!(
+        "Context recall@{} {:.3}, test recall@{} {:.3}, weak/abstain {}",
+        report.limit,
+        report.summary.context_recall_at_k,
+        report.limit,
+        report.summary.test_recall_at_k,
+        report.summary.abstention_required
+    );
+    for case in &report.cases {
+        println!("\n- {} [{}]", case.task, case.confidence);
+        println!("  expected paths: {}", case.expected_paths.join(", "));
+        println!("  ranks: {:?}", case.search_ranks);
+        if !case.test_hits.is_empty() {
+            println!("  test hits: {}", case.test_hits.join(", "));
+        }
+        for note in &case.notes {
+            println!("  note: {note}");
+        }
+    }
+}
+
 const DEFAULT_PROOF_TASKS: &[&str] = &[
     "authentication",
     "configuration",
@@ -1234,7 +1841,14 @@ fn run_proof(args: ProveArgs) -> anyhow::Result<ProofReport> {
         anyhow::bail!("no proof tasks were provided or discovered");
     }
 
-    let planner = PlanEngine::new(&store as &dyn OkStore);
+    let index_dir = default_index_dir(&repo);
+    let search_index = if TantivySearchIndex::exists(&index_dir) {
+        Some(TantivySearchIndex::open_or_create(&index_dir)?)
+    } else {
+        None
+    };
+    let planner = PlanEngine::new(&store as &dyn OkStore)
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
     let mut task_reports = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let plan = planner.plan(task, limit)?;
@@ -1642,7 +2256,25 @@ fn build_context_pack(
 }
 
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
-    let config = OkConfig::load_from_repo(repo)?;
+    index_repo_with_config(repo, OkConfig::load_from_repo(repo)?)
+}
+
+fn index_repo_with_scip_mode(
+    repo: &Path,
+    with_scip: Option<&str>,
+) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
+    let mut config = OkConfig::load_from_repo(repo)?;
+    if let Some(mode) = with_scip {
+        config.scip.enabled = mode != "off";
+        config.scip.mode = parse_scip_mode(mode)?;
+    }
+    index_repo_with_config(repo, config)
+}
+
+fn index_repo_with_config(
+    repo: &Path,
+    config: OkConfig,
+) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
     let _lock = IndexWriteLock::acquire(repo, &reporter)?;
     let index_reporter = Arc::clone(&reporter);
@@ -1706,6 +2338,16 @@ fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     )?;
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
+}
+
+fn parse_scip_mode(value: &str) -> anyhow::Result<ScipMode> {
+    match value {
+        "off" => Ok(ScipMode::Off),
+        "consume" => Ok(ScipMode::Consume),
+        "auto" => Ok(ScipMode::Auto),
+        "required" => Ok(ScipMode::Required),
+        other => anyhow::bail!("unsupported SCIP mode: {other}"),
+    }
 }
 
 struct IndexWriteLock {
@@ -1906,6 +2548,41 @@ fn resolve_repo(global: &Path, command: PathBuf) -> PathBuf {
         global.to_path_buf()
     } else {
         command
+    }
+}
+
+fn normalize_to_repo_relative(repo_root: &Path, path: &Path) -> PathBuf {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let absolute_repo = std::fs::canonicalize(repo_root)
+        .or_else(|_| absolutize(repo_root))
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+
+    let absolute_path_canonical = std::fs::canonicalize(&absolute_path)
+        .or_else(|_| absolutize(&absolute_path))
+        .unwrap_or(absolute_path);
+
+    if let Ok(rel) = absolute_path_canonical.strip_prefix(&absolute_repo) {
+        rel.to_path_buf()
+    } else if let Ok(rel) = absolute_path_canonical.strip_prefix(repo_root) {
+        rel.to_path_buf()
+    } else {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            let mut components = path.components();
+            if let Some(std::path::Component::CurDir) = components.next() {
+                components.as_path().to_path_buf()
+            } else {
+                path.to_path_buf()
+            }
+        }
     }
 }
 

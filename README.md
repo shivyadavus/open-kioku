@@ -136,6 +136,28 @@ Keep the index fresh while editing:
 ok watch /absolute/path/to/repo
 ```
 
+## Quality Mode
+
+Open Kioku works without external language indexers, but exact references improve search grounding, impact analysis, test selection, and planning. Check what is available:
+
+```sh
+ok scip doctor /absolute/path/to/repo
+ok scip setup /absolute/path/to/repo
+ok index /absolute/path/to/repo --with-scip auto
+ok doctor /absolute/path/to/repo
+```
+
+Default indexing consumes existing SCIP files such as `index.scip` and `.ok/indexes/*.scip` when present. `--with-scip auto` runs installed indexers for supported repos; it does not install third-party tools. `--with-scip required` fails the index if no SCIP facts can be imported.
+
+Use `ok eval` to protect quality on real workflows:
+
+```sh
+ok eval /absolute/path/to/repo \
+  --case "fix token expiration=src/auth.rs,tests/auth_flow.rs" \
+  --min-recall-at-k 0.8 \
+  --min-mrr 0.5
+```
+
 ## Try The Demo
 
 ```sh
@@ -159,6 +181,7 @@ ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo context "update MCP docs" --format markdown
 ok --repo /path/to/repo plan "update MCP docs" --format markdown
+ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
 ```

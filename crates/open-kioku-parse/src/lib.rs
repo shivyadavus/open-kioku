@@ -16,20 +16,23 @@ pub struct ParsedFile {
 }
 
 pub trait Parser: Send + Sync {
-    fn parse(&self, file: &File, content: &str) -> ParsedFile;
+    fn parse(&self, file: &File, content: &str) -> ParsedFile {
+        self.parse_with_hint(file, content, None)
+    }
+    fn parse_with_hint(&self, file: &File, content: &str, build_hint: Option<&str>) -> ParsedFile;
 }
 
 #[derive(Default)]
 pub struct HeuristicParser;
 
 impl Parser for HeuristicParser {
-    fn parse(&self, file: &File, content: &str) -> ParsedFile {
+    fn parse_with_hint(&self, file: &File, content: &str, build_hint: Option<&str>) -> ParsedFile {
         let imports = extract_imports(file, content);
         let mut symbols = extract_symbols(file, content);
         dedupe_symbols(&mut symbols);
         let mut chunks = extract_chunks(file, content, &symbols);
         dedupe_chunks(&mut chunks);
-        let tests = extract_tests(file, content, &symbols);
+        let tests = extract_tests(file, content, &symbols, build_hint);
         ParsedFile {
             chunks,
             symbols,
@@ -326,7 +329,7 @@ pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Cod
     chunks
 }
 
-pub fn extract_tests(file: &File, content: &str, symbols: &[Symbol]) -> Vec<TestTarget> {
+pub fn extract_tests(file: &File, content: &str, symbols: &[Symbol], build_hint: Option<&str>) -> Vec<TestTarget> {
     let path = file.path.to_string_lossy().to_ascii_lowercase();
     let is_test_file = path.contains("/test/")
         || path.contains("/tests/")
@@ -351,7 +354,7 @@ pub fn extract_tests(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Test
             name: symbol.name.clone(),
             file_id: file.id.clone(),
             range: symbol.range.clone(),
-            command: recommended_command(&file.language, &file.path.to_string_lossy()),
+            command: recommended_command(&file.language, &file.path.to_string_lossy(), build_hint),
             confidence: if is_test_file {
                 Confidence::High
             } else {
@@ -377,13 +380,15 @@ fn stable_id(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn recommended_command(language: &Language, path: &str) -> Option<String> {
-    match language {
-        Language::Rust => Some("cargo test".into()),
-        Language::Java => Some("mvn test".into()),
-        Language::TypeScript | Language::JavaScript => Some("npm test".into()),
-        Language::Python => Some("pytest".into()),
-        Language::Go => Some("go test ./...".into()),
+fn recommended_command(language: &Language, path: &str, build_hint: Option<&str>) -> Option<String> {
+    match (language, build_hint) {
+        (Language::Java, Some("gradle")) => Some("./gradlew test".into()),
+        (Language::Java, Some("bazel")) => Some("bazel test //...".into()),
+        (Language::Java, Some("maven") | _) => Some("mvn test".into()),
+        (Language::Rust, _) => Some("cargo test".into()),
+        (Language::TypeScript | Language::JavaScript, _) => Some("npm test".into()),
+        (Language::Python, _) => Some("pytest".into()),
+        (Language::Go, _) => Some("go test ./...".into()),
         _ if path.contains("test") => Some("run repository test command".into()),
         _ => None,
     }
@@ -577,7 +582,7 @@ mod tests {
         let file = rust_file();
         let src = "#[test]\nfn it_works() {\n    assert!(true);\n}\n";
         let symbols = extract_symbols(&file, src);
-        let tests = extract_tests(&file, src, &symbols);
+        let tests = extract_tests(&file, src, &symbols, None);
         assert!(!tests.is_empty(), "should detect #[test] function");
         assert!(tests[0].command.as_deref() == Some("cargo test"));
     }
@@ -596,7 +601,7 @@ mod tests {
         };
         let src = "pub fn some_helper() {}\n";
         let symbols = extract_symbols(&file, src);
-        let tests = extract_tests(&file, src, &symbols);
+        let tests = extract_tests(&file, src, &symbols, None);
         // All symbols in a test file become test targets.
         assert_eq!(tests.len(), symbols.len());
     }

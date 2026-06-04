@@ -284,6 +284,21 @@ pub struct IndexManifest {
     pub chunk_count: usize,
     pub indexed_at: DateTime<Utc>,
     pub schema_version: u32,
+    #[serde(default)]
+    pub quality: IndexQuality,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct IndexQuality {
+    pub scip_enabled: bool,
+    pub scip_mode: String,
+    pub scip_indexes_imported: usize,
+    pub scip_symbols: usize,
+    pub scip_occurrences: usize,
+    pub scip_exact_references: usize,
+    pub test_count: usize,
+    pub import_count: usize,
+    pub quality_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

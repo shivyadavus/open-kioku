@@ -3,7 +3,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
-    CodeChunk, File, FileId, Import, IndexManifest, Repository, RepositoryId, Symbol,
+    CodeChunk, File, FileId, Import, IndexManifest, IndexQuality, Repository, RepositoryId, Symbol,
     SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
@@ -11,6 +11,7 @@ use open_kioku_languages::{
     detect_language, is_supported_code, likely_generated, likely_vendor_path,
 };
 use open_kioku_parse::{HeuristicParser, Parser};
+use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -27,6 +28,7 @@ pub struct IndexSnapshot {
     pub tests: Vec<TestTarget>,
     pub imports: Vec<Import>,
     pub occurrences: Vec<SymbolOccurrence>,
+    pub scip: Option<ScipIndexReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,15 @@ impl Indexer {
     {
         let root = root.as_ref().canonicalize()?;
         let repo_id = RepositoryId::new(stable_id(root.to_string_lossy().as_ref()));
+        let build_hint: Option<String> = if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
+            Some("gradle".to_string())
+        } else if root.join("pom.xml").exists() {
+            Some("maven".to_string())
+        } else if root.join("WORKSPACE").exists() || root.join("BUILD.bazel").exists() || root.join("BUILD").exists() {
+            Some("bazel".to_string())
+        } else {
+            None
+        };
         let files = self.scan_files(&root, config, &repo_id, &on_progress)?;
         on_progress(IndexProgress {
             phase: "parse",
@@ -78,7 +89,7 @@ impl Indexer {
             .map(|file| -> Result<_> {
                 let bytes = fs::read(root.join(&file.path))?;
                 let content = String::from_utf8_lossy(&bytes).into_owned();
-                let parsed = self.parser.parse(file, &content);
+                let parsed = self.parser.parse_with_hint(file, &content, build_hint.as_deref());
                 let indexed_files = parsed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if should_emit_progress(indexed_files, files.len()) {
                     on_progress(IndexProgress {
@@ -122,6 +133,7 @@ impl Indexer {
             total_files: Some(files.len()),
         });
         let mut occurrences = derive_occurrences(&chunks, &symbols);
+        let mut scip_report = None;
         if config.scip.enabled {
             on_progress(IndexProgress {
                 phase: "scip",
@@ -129,11 +141,12 @@ impl Indexer {
                 indexed_files: files.len(),
                 total_files: Some(files.len()),
             });
-            let imported =
-                open_kioku_scip::import_configured_scip_files(&root, &config.scip.paths, &repo_id)?;
+            let (imported, report) =
+                open_kioku_scip::prepare_and_import_scip(&root, &config.scip, &repo_id)?;
             symbols.extend(imported.symbols);
             dedupe_symbols(&mut symbols);
             occurrences.extend(imported.occurrences);
+            scip_report = Some(report);
         }
         let repository = Repository {
             id: repo_id,
@@ -143,6 +156,7 @@ impl Indexer {
             commit: open_kioku_git::commit(&root),
             indexed_at: Some(Utc::now()),
         };
+        let quality = index_quality(config, scip_report.as_ref(), tests.len(), imports.len());
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -150,6 +164,7 @@ impl Indexer {
             chunk_count: chunks.len(),
             indexed_at: Utc::now(),
             schema_version: 1,
+            quality,
         };
         Ok(IndexSnapshot {
             manifest,
@@ -159,6 +174,7 @@ impl Indexer {
             tests,
             imports,
             occurrences,
+            scip: scip_report,
         })
     }
 
@@ -248,6 +264,66 @@ impl Indexer {
             total_files: Some(files.len()),
         });
         Ok(files)
+    }
+}
+
+fn index_quality(
+    config: &OkConfig,
+    scip_report: Option<&ScipIndexReport>,
+    test_count: usize,
+    import_count: usize,
+) -> IndexQuality {
+    let mut quality_notes = Vec::new();
+    let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
+    if let Some(report) = scip_report {
+        if report.imported_paths.is_empty() {
+            quality_notes.push("SCIP was enabled but no SCIP index was imported".into());
+        }
+        if report.exact_references == 0 {
+            quality_notes.push(
+                "exact reference coverage is unavailable; impact and test selection are heuristic"
+                    .into(),
+            );
+        }
+        for attempt in &report.generator_attempts {
+            if !matches!(
+                attempt.status,
+                open_kioku_scip::ScipGeneratorStatus::Generated
+                    | open_kioku_scip::ScipGeneratorStatus::Skipped
+            ) {
+                quality_notes.push(format!(
+                    "SCIP {} generation {:?}: {}",
+                    attempt.language, attempt.status, attempt.message
+                ));
+            }
+        }
+        IndexQuality {
+            scip_enabled: config.scip.enabled,
+            scip_mode,
+            scip_indexes_imported: report.imported_paths.len(),
+            scip_symbols: report.symbols,
+            scip_occurrences: report.occurrences,
+            scip_exact_references: report.exact_references,
+            test_count,
+            import_count,
+            quality_notes,
+        }
+    } else {
+        if !config.scip.enabled {
+            quality_notes
+                .push("SCIP disabled; symbol references use tree-sitter/import heuristics".into());
+        }
+        IndexQuality {
+            scip_enabled: config.scip.enabled,
+            scip_mode,
+            scip_indexes_imported: 0,
+            scip_symbols: 0,
+            scip_occurrences: 0,
+            scip_exact_references: 0,
+            test_count,
+            import_count,
+            quality_notes,
+        }
     }
 }
 
