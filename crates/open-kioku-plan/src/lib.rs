@@ -1,7 +1,7 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
-    ChangeBoundary, ContextPack, FileId, ImpactReport, PlanReport, RiskReport, SearchResult, TestTarget,
-    ToolCallRecommendation,
+    ChangeBoundary, ContextPack, FileId, ImpactReport, PlanReport, RiskReport, SearchResult,
+    TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -186,14 +186,22 @@ impl<'a> PlanEngine<'a> {
         }
         for (_, mut file_tests) in by_file {
             let has_class_like = file_tests.iter().any(|t| {
-                t.name.len() > 8 
-                    && t.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                t.name.len() > 8
+                    && t.name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
                     && t.name.chars().any(|c| c.is_lowercase())
             });
             if has_class_like {
                 file_tests.retain(|t| {
-                    t.name.len() > 8 
-                        && t.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    t.name.len() > 8
+                        && t.name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_uppercase())
+                            .unwrap_or(false)
                         && t.name.chars().any(|c| c.is_lowercase())
                 });
             }
@@ -215,14 +223,16 @@ impl<'a> PlanEngine<'a> {
 fn is_plausible_test(test: &TestTarget) -> bool {
     let name = &test.name;
     // Filter out screaming snake case constants like AD_DOMAIN
-    let is_screaming_snake = name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_numeric())
+    let is_screaming_snake = name
+        .chars()
+        .all(|c| c.is_uppercase() || c == '_' || c.is_numeric())
         && name.chars().any(|c| c.is_alphabetic());
     if is_screaming_snake {
         return false;
     }
-    
+
     // Always keep explicit/confident test names
-    let is_test_named = name.ends_with("Tests") 
+    let is_test_named = name.ends_with("Tests")
         || name.ends_with("Test")
         || name.ends_with("IT")
         || name.ends_with("Spec")
@@ -232,12 +242,20 @@ fn is_plausible_test(test: &TestTarget) -> bool {
         || name.contains("test");
 
     // Keep class-like names (PascalCase with >8 chars)
-    let is_class_like = name.len() > 8 
-        && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    let is_class_like = name.len() > 8
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
         && name.chars().any(|c| c.is_lowercase());
 
     // Keep snake_case names (like login_returns_valid_token, typical in Rust/Python/Go tests)
-    let is_snake_case_func = name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+    let is_snake_case_func = name
+        .chars()
+        .next()
+        .map(|c| c.is_lowercase())
+        .unwrap_or(false)
         && name.contains('_');
 
     is_test_named || is_class_like || is_snake_case_func

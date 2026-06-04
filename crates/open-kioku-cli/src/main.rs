@@ -650,11 +650,18 @@ async fn main() -> anyhow::Result<()> {
                         &serde_json::json!({"file": file, "chunks": chunks, "symbols": symbols}),
                         || {
                             if let Some(f) = &file {
-                                println!("{} ({:?}, {} bytes)", path.display(), f.language, f.size_bytes);
+                                println!(
+                                    "{} ({:?}, {} bytes)",
+                                    path.display(),
+                                    f.language,
+                                    f.size_bytes
+                                );
                             }
                             println!("{} chunks, {} symbols indexed", chunks.len(), symbols.len());
                             for symbol in &symbols {
-                                let range = symbol.range.as_ref()
+                                let range = symbol
+                                    .range
+                                    .as_ref()
                                     .map(|r| format!(":{}–{}", r.start, r.end))
                                     .unwrap_or_default();
                                 println!("  {:?} {}{}", symbol.kind, symbol.name, range);
@@ -686,7 +693,8 @@ async fn main() -> anyhow::Result<()> {
                 let definition = SymbolEngine::new(&store).definition(&symbol)?;
                 let files = store.list_files(usize::MAX, 0)?;
                 let file = files.iter().find(|file| file.id == definition.file_id);
-                let path_to_use = file.map(|file| file.path.as_path())
+                let path_to_use = file
+                    .map(|file| file.path.as_path())
                     .unwrap_or(Path::new(&symbol));
                 let normalized = normalize_to_repo_relative(&repo, path_to_use);
                 engine.for_file(&normalized)?
@@ -695,7 +703,10 @@ async fn main() -> anyhow::Result<()> {
             };
             output(cli.json, &report, || {
                 println!("Impact target: {}", report.target);
-                println!("Risk: {} ({:.2})", report.risk_report.level, report.risk_report.score);
+                println!(
+                    "Risk: {} ({:.2})",
+                    report.risk_report.level, report.risk_report.score
+                );
                 println!("\nDirect impacts ({}):", report.direct_impacts.len());
                 for result in &report.direct_impacts {
                     println!(

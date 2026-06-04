@@ -433,7 +433,9 @@ impl MetadataStore for SqliteStore {
             .prepare("SELECT json FROM chunks WHERE text LIKE ?1 LIMIT ?2")
             .map_err(storage_err)?;
         let rows = stmt
-            .query_map(params![pattern, limit as i64], |row| row.get::<_, String>(0))
+            .query_map(params![pattern, limit as i64], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(storage_err)?;
         collect_json(rows)
     }
@@ -461,11 +463,11 @@ impl MetadataStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        
+
         let placeholders = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT json FROM tests WHERE file_id IN ({})", placeholders);
         let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
-        
+
         let params = rusqlite::params_from_iter(file_ids.iter().map(|id| &id.0));
         let rows = stmt
             .query_map(params, |row| row.get::<_, String>(0))

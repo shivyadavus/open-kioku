@@ -19,7 +19,7 @@ impl<'a> TestSelector<'a> {
         test_files_with_overlap: &std::collections::HashSet<open_kioku_core::FileId>,
     ) -> Result<Vec<TestTarget>> {
         let mut file_ids = test_files_with_overlap.clone();
-        
+
         let changed_stem = path
             .file_stem()
             .and_then(|value| value.to_str())
@@ -31,7 +31,7 @@ impl<'a> TestSelector<'a> {
                 }
             }
         }
-        
+
         if let Some(parent) = path.parent() {
             let parent_str = parent.to_string_lossy();
             if parent.components().count() >= 3 && parent_str.len() > 10 {
@@ -42,7 +42,7 @@ impl<'a> TestSelector<'a> {
                 }
             }
         }
-        
+
         let file_ids_vec = file_ids.into_iter().collect::<Vec<_>>();
         self.store.tests_for_files(&file_ids_vec)
     }
@@ -342,7 +342,12 @@ mod tests {
                 Ok(self.tests.clone())
             } else {
                 let set = file_ids.iter().collect::<std::collections::HashSet<_>>();
-                Ok(self.tests.iter().filter(|t| set.contains(&t.file_id)).cloned().collect())
+                Ok(self
+                    .tests
+                    .iter()
+                    .filter(|t| set.contains(&t.file_id))
+                    .cloned()
+                    .collect())
             }
         }
 
@@ -418,7 +423,12 @@ mod tests {
             Ok(self
                 .files
                 .iter()
-                .filter(|f| f.path.to_string_lossy().to_ascii_lowercase().contains(&lower_pattern))
+                .filter(|f| {
+                    f.path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains(&lower_pattern)
+                })
                 .cloned()
                 .collect())
         }
@@ -428,7 +438,12 @@ mod tests {
                 Ok(self.tests.clone())
             } else {
                 let set = file_ids.iter().collect::<std::collections::HashSet<_>>();
-                Ok(self.tests.iter().filter(|t| set.contains(&t.file_id)).cloned().collect())
+                Ok(self
+                    .tests
+                    .iter()
+                    .filter(|t| set.contains(&t.file_id))
+                    .cloned()
+                    .collect())
             }
         }
 

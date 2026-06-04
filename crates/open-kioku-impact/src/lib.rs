@@ -35,7 +35,10 @@ impl<'a> ImpactEngine<'a> {
 
         let direct = if let Some(file) = &file {
             let mut direct = Vec::new();
-            for term in impact_terms(path, file, &target_symbols).into_iter().take(8) {
+            for term in impact_terms(path, file, &target_symbols)
+                .into_iter()
+                .take(8)
+            {
                 let results = if let Some(index) = self.search_index {
                     index.search(&term, 25)?
                 } else {
