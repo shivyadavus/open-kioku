@@ -1,15 +1,30 @@
 # MCP Tools
 
+Index the repository before connecting an LLM client:
+
+```sh
+ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+```
+
+Then print client-specific config and paste it into the client:
+
+```sh
+ok mcp install cursor --repo /absolute/path/to/repo
+ok mcp install claude --repo /absolute/path/to/repo
+```
+
 The MCP server runs over stdio:
 
 ```sh
-ok mcp serve --repo . --read-only
+ok mcp serve --repo /absolute/path/to/repo --read-only
 ```
 
 Write mode requires explicit opt-in:
 
 ```sh
-ok mcp serve --repo . --allow-write --approval-required --allow-command "cargo test" --deny-network
+ok mcp serve --repo /absolute/path/to/repo --allow-write --approval-required --allow-command "cargo test" --deny-network
 ```
 
 ## Recommended Agent Routine
@@ -17,7 +32,9 @@ ok mcp serve --repo . --allow-write --approval-required --allow-command "cargo t
 Open Kioku is intended to give Claude Code, Cursor, and other MCP clients a repeatable pre-edit routine. Ask the agent to use Open Kioku before changing files:
 
 ```text
-Use Open Kioku before editing. Find the relevant code, check definitions and references, run impact analysis, and recommend validation first.
+Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan first,
+then edit only after the indexed evidence is clear.
 ```
 
 A good default tool sequence is:

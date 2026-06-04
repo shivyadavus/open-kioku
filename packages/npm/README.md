@@ -18,6 +18,46 @@ ok --version
 
 ## Quick Start
 
+### Index Your Repository
+
+```sh
+npm install -g open-kioku
+ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+```
+
+Verify that the local index has useful evidence:
+
+```sh
+ok --repo /absolute/path/to/repo search "auth flow" --limit 5
+ok --repo /absolute/path/to/repo plan "change auth flow" --format markdown
+```
+
+Connect the same indexed repo to your LLM client:
+
+```sh
+ok mcp install claude --repo /absolute/path/to/repo
+ok mcp install cursor --repo /absolute/path/to/repo
+```
+
+Paste the printed MCP config snippet into Claude Code, Cursor, or another MCP-compatible client. Open Kioku runs locally over stdio and is read-only by default.
+
+Ask the agent to use the index before editing:
+
+```text
+Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan first.
+```
+
+Keep the index fresh while you work:
+
+```sh
+ok watch /absolute/path/to/repo
+```
+
+### Try The Demo
+
 Create and index a sample repository:
 
 ```sh
@@ -32,13 +72,6 @@ ok --repo ./open-kioku-demo symbol find issue_token
 ok --repo ./open-kioku-demo impact --file src/auth.rs
 ok --repo ./open-kioku-demo plan token --format markdown
 ok prove ./open-kioku-demo --task token
-```
-
-Generate MCP client configuration:
-
-```sh
-ok mcp install claude --repo /absolute/path/to/repo
-ok mcp install cursor --repo /absolute/path/to/repo
 ```
 
 ## Package Layout
