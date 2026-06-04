@@ -28,6 +28,8 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all
       - run: cargo test -p open-kioku-tests
+      - name: release readiness smoke
+        run: scripts/verify-release-readiness.sh
 
   audit:
     runs-on: ubuntu-latest

@@ -69,6 +69,49 @@ fn init_index_search_and_doctor_work_together() {
     assert!(doctor.contains("Open Kioku doctor"));
     assert!(doctor.contains("[ok]   repo"));
     assert!(doctor.contains("[ok]   index"));
+
+    let status_markdown_path = repo.join("ok-status.md");
+    let status_markdown = run({
+        let mut command = ok();
+        command
+            .arg("status")
+            .arg(repo)
+            .arg("--markdown")
+            .arg("--write")
+            .arg(&status_markdown_path);
+        command
+    });
+    assert!(status_markdown.contains("Wrote Open Kioku status snapshot"));
+    let written_status = fs::read_to_string(&status_markdown_path).unwrap();
+    assert!(written_status.contains("# Open Kioku Status"));
+    assert!(written_status.contains("## Readiness Checks"));
+
+    let setup_audit = run({
+        let mut command = ok();
+        command.arg("setup").arg("audit").arg(repo);
+        command
+    });
+    assert!(setup_audit.contains("Open Kioku setup audit"));
+    assert!(setup_audit.contains("MCP clients"));
+    assert!(setup_audit.contains("Quality signals"));
+    assert!(setup_audit.contains("Advanced providers (optional)"));
+    assert!(setup_audit.contains("ok mcp install codex"));
+
+    let setup_markdown = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("audit")
+            .arg(repo)
+            .arg("--markdown");
+        command
+    });
+    assert!(setup_markdown.contains("# Open Kioku Setup Audit"));
+    assert!(setup_markdown.contains("## MCP Client Matrix"));
+    assert!(setup_markdown.contains("## Quality Signals"));
+    assert!(setup_markdown.contains("## Advanced Providers"));
+    assert!(!setup_markdown.contains("codeql CLI/database not detected"));
+    assert!(!setup_markdown.contains("0 BSP descriptor"));
 }
 
 #[test]
@@ -88,6 +131,45 @@ fn mcp_install_prints_client_config() {
     assert!(output.contains("mcpServers"));
     assert!(output.contains("\"command\": \"ok\""));
     assert!(output.contains("--read-only"));
+
+    let codex = run({
+        let mut command = ok();
+        command
+            .arg("mcp")
+            .arg("install")
+            .arg("codex")
+            .arg("--repo")
+            .arg(temp.path());
+        command
+    });
+    assert!(codex.contains("[mcp_servers.open-kioku]"));
+    assert!(codex.contains("command = \"ok\""));
+
+    let opencode = run({
+        let mut command = ok();
+        command
+            .arg("mcp")
+            .arg("install")
+            .arg("opencode")
+            .arg("--repo")
+            .arg(temp.path());
+        command
+    });
+    assert!(opencode.contains("\"mcp\""));
+    assert!(opencode.contains("\"type\": \"local\""));
+
+    let zed = run({
+        let mut command = ok();
+        command
+            .arg("mcp")
+            .arg("install")
+            .arg("zed")
+            .arg("--repo")
+            .arg(temp.path());
+        command
+    });
+    assert!(zed.contains("context_servers"));
+    assert!(zed.contains("open-kioku"));
 }
 
 #[test]

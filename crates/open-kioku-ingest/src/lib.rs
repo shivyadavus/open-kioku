@@ -3,8 +3,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
-    CodeChunk, File, FileId, Import, IndexManifest, IndexQuality, Repository, RepositoryId, Symbol,
-    SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
+    GraphNodeType, Import, IndexManifest, IndexQuality, LineRange, Repository, RepositoryId,
+    Symbol, SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -13,8 +14,9 @@ use open_kioku_languages::{
 use open_kioku_parse::{HeuristicParser, Parser};
 use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,6 +30,7 @@ pub struct IndexSnapshot {
     pub tests: Vec<TestTarget>,
     pub imports: Vec<Import>,
     pub occurrences: Vec<SymbolOccurrence>,
+    pub analysis_facts: Vec<AnalysisFact>,
     pub scip: Option<ScipIndexReport>,
 }
 
@@ -132,6 +135,20 @@ impl Indexer {
             .iter()
             .flat_map(|file| file.imports.clone())
             .collect::<Vec<_>>();
+        let mut analysis_facts = parsed
+            .iter()
+            .flat_map(|file| file.analysis_facts.clone())
+            .collect::<Vec<_>>();
+        let static_analysis_facts = analysis_facts.len();
+        on_progress(IndexProgress {
+            phase: "analysis",
+            scanned_files: files.len(),
+            indexed_files: files.len(),
+            total_files: Some(files.len()),
+        });
+        let runtime_facts = collect_runtime_analysis_facts(&root, &files)?;
+        let runtime_analysis_facts = runtime_facts.len();
+        analysis_facts.extend(runtime_facts);
         on_progress(IndexProgress {
             phase: "occurrences",
             scanned_files: files.len(),
@@ -162,7 +179,15 @@ impl Indexer {
             commit: open_kioku_git::commit(&root),
             indexed_at: Some(Utc::now()),
         };
-        let quality = index_quality(config, scip_report.as_ref(), tests.len(), imports.len());
+        let quality = index_quality(
+            &root,
+            config,
+            scip_report.as_ref(),
+            tests.len(),
+            imports.len(),
+            static_analysis_facts,
+            runtime_analysis_facts,
+        );
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -180,6 +205,7 @@ impl Indexer {
             tests,
             imports,
             occurrences,
+            analysis_facts,
             scip: scip_report,
         })
     }
@@ -274,12 +300,47 @@ impl Indexer {
 }
 
 fn index_quality(
+    root: &Path,
     config: &OkConfig,
     scip_report: Option<&ScipIndexReport>,
     test_count: usize,
     import_count: usize,
+    static_analysis_facts: usize,
+    runtime_analysis_facts: usize,
 ) -> IndexQuality {
     let mut quality_notes = Vec::new();
+    let build_systems = detect_build_systems(root);
+    let codeql_databases = detect_codeql_databases(root);
+    let coverage_reports = count_analysis_artifacts(root, &["jacoco.xml", "coverage.xml"]);
+    let junit_reports = count_analysis_artifacts(root, &["test-", "junit"]);
+    let mut semantic_provider_notes = Vec::new();
+    if !build_systems.is_empty() {
+        semantic_provider_notes.push(format!(
+            "build systems detected: {}",
+            build_systems.join(", ")
+        ));
+    }
+    if codeql_databases > 0 {
+        semantic_provider_notes.push(format!(
+            "CodeQL database artifacts detected: {codeql_databases}"
+        ));
+    }
+    if coverage_reports > 0 {
+        semantic_provider_notes.push(format!("coverage reports detected: {coverage_reports}"));
+    }
+    if junit_reports > 0 {
+        semantic_provider_notes.push(format!("JUnit-style reports detected: {junit_reports}"));
+    }
+    if static_analysis_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "language static analysis facts detected: {static_analysis_facts}"
+        ));
+    }
+    if runtime_analysis_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "runtime analysis facts detected: {runtime_analysis_facts}"
+        ));
+    }
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
     if let Some(report) = scip_report {
         if report.imported_paths.is_empty() {
@@ -312,6 +373,13 @@ fn index_quality(
             scip_exact_references: report.exact_references,
             test_count,
             import_count,
+            build_systems,
+            codeql_databases,
+            coverage_reports,
+            junit_reports,
+            static_analysis_facts,
+            runtime_analysis_facts,
+            semantic_provider_notes,
             quality_notes,
         }
     } else {
@@ -328,9 +396,360 @@ fn index_quality(
             scip_exact_references: 0,
             test_count,
             import_count,
+            build_systems,
+            codeql_databases,
+            coverage_reports,
+            junit_reports,
+            static_analysis_facts,
+            runtime_analysis_facts,
+            semantic_provider_notes,
             quality_notes,
         }
     }
+}
+
+fn detect_build_systems(root: &Path) -> Vec<String> {
+    let mut systems = Vec::new();
+    for (name, paths) in [
+        (
+            "gradle",
+            &[
+                "settings.gradle",
+                "settings.gradle.kts",
+                "build.gradle",
+                "build.gradle.kts",
+            ][..],
+        ),
+        ("maven", &["pom.xml"][..]),
+        (
+            "bazel",
+            &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"][..],
+        ),
+        ("cargo", &["Cargo.toml"][..]),
+        ("npm", &["package.json"][..]),
+        ("go", &["go.mod"][..]),
+    ] {
+        if paths.iter().any(|path| root.join(path).exists()) {
+            systems.push(name.to_string());
+        }
+    }
+    systems
+}
+
+fn detect_codeql_databases(root: &Path) -> usize {
+    [
+        ".ok/codeql",
+        "codeql-db",
+        "codeql-database",
+        ".codeql/database",
+    ]
+    .iter()
+    .filter(|path| {
+        let path = root.join(path);
+        path.is_dir()
+            && (path.join("db-java").exists()
+                || path.join("codeql-database.yml").exists()
+                || path.join("log").exists())
+    })
+    .count()
+}
+
+fn count_analysis_artifacts(root: &Path, names: &[&str]) -> usize {
+    let candidates = [
+        root.join(".ok/analysis"),
+        root.join("build/reports"),
+        root.join("target/site"),
+        root.join("coverage"),
+    ];
+    let mut count = 0;
+    for candidate in candidates {
+        if !candidate.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(candidate)
+            .max_depth(5)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if names.iter().any(|needle| file_name.contains(needle)) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn collect_runtime_analysis_facts(root: &Path, files: &[File]) -> Result<Vec<AnalysisFact>> {
+    let files_by_path = files
+        .iter()
+        .map(|file| (normalize_path(&file.path.to_string_lossy()), file))
+        .collect::<HashMap<_, _>>();
+    let mut facts = Vec::new();
+    for runtime_root in [
+        root.join(".ok/runtime"),
+        root.join(".ok/analysis/runtime"),
+        root.join(".ok/analysis"),
+    ] {
+        if !runtime_root.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(&runtime_root)
+            .max_depth(3)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let lower_name = file_name.to_ascii_lowercase();
+            if !lower_name.ends_with(".jsonl")
+                || !(lower_name.contains("span")
+                    || lower_name.contains("trace")
+                    || lower_name.contains("runtime")
+                    || lower_name.contains("otel"))
+            {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .map_err(|err| OkError::Index(err.to_string()))?;
+            if metadata.len() > 5 * 1024 * 1024 {
+                continue;
+            }
+            let content = fs::read_to_string(path)?;
+            for (idx, line) in content.lines().enumerate() {
+                if facts.len() >= 10_000 {
+                    return Ok(dedupe_analysis_facts(facts));
+                }
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                let Some(source_file) =
+                    json_string(&value, &["file", "code.filepath", "source.file"])
+                else {
+                    continue;
+                };
+                let normalized = normalize_runtime_file(root, &source_file);
+                let Some(file) = files_by_path.get(&normalized).copied() else {
+                    continue;
+                };
+                let line_number = json_u32(&value, &["line", "code.lineno", "source.line"]);
+                if let Some(fact) = runtime_endpoint_fact(file, &value, line_number, path, idx + 1)
+                {
+                    facts.push(fact);
+                }
+                if let Some(fact) = runtime_table_fact(file, &value, line_number, path, idx + 1) {
+                    facts.push(fact);
+                }
+            }
+        }
+    }
+    Ok(dedupe_analysis_facts(facts))
+}
+
+fn runtime_endpoint_fact(
+    file: &File,
+    value: &Value,
+    line_number: Option<u32>,
+    artifact: &Path,
+    artifact_line: usize,
+) -> Option<AnalysisFact> {
+    let route = json_string(
+        value,
+        &[
+            "http.route",
+            "http.target",
+            "url.path",
+            "route",
+            "name",
+            "span.name",
+        ],
+    )?;
+    if !route.contains('/') {
+        return None;
+    }
+    let method = json_string(
+        value,
+        &[
+            "http.request.method",
+            "http.method",
+            "method",
+            "request.method",
+        ],
+    )
+    .unwrap_or_else(|| "HTTP".into())
+    .to_ascii_uppercase();
+    Some(runtime_fact(
+        file,
+        GraphEdgeType::ExposesEndpoint,
+        GraphNodeType::Endpoint,
+        format!("{method} {route}"),
+        line_number,
+        RuntimeFactSource {
+            artifact,
+            artifact_line,
+            message: "runtime endpoint observed in local trace artifact",
+        },
+    ))
+}
+
+fn runtime_table_fact(
+    file: &File,
+    value: &Value,
+    line_number: Option<u32>,
+    artifact: &Path,
+    artifact_line: usize,
+) -> Option<AnalysisFact> {
+    let statement = json_string(value, &["db.statement", "sql", "database.statement"])?;
+    let table = extract_sql_table(&statement)?;
+    Some(runtime_fact(
+        file,
+        GraphEdgeType::ReadsTable,
+        GraphNodeType::DatabaseTable,
+        table,
+        line_number,
+        RuntimeFactSource {
+            artifact,
+            artifact_line,
+            message: "runtime database access observed in local trace artifact",
+        },
+    ))
+}
+
+struct RuntimeFactSource<'a> {
+    artifact: &'a Path,
+    artifact_line: usize,
+    message: &'static str,
+}
+
+fn runtime_fact(
+    file: &File,
+    edge_type: GraphEdgeType,
+    target_kind: GraphNodeType,
+    target: String,
+    line_number: Option<u32>,
+    source: RuntimeFactSource<'_>,
+) -> AnalysisFact {
+    AnalysisFact {
+        id: stable_id(&format!(
+            "runtime:{}:{:?}:{}:{}",
+            file.path.display(),
+            edge_type,
+            target,
+            source.artifact_line
+        )),
+        file_id: file.id.clone(),
+        symbol_id: None,
+        target,
+        target_kind,
+        edge_type,
+        range: line_number.map(LineRange::single),
+        confidence: Confidence::High,
+        source: format!("open-kioku-runtime:{}", source.artifact.display()),
+        source_type: EvidenceSourceType::Runtime,
+        message: source.message.into(),
+    }
+}
+
+fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = nested_json_value(value, key).and_then(Value::as_str) {
+            return Some(value.to_string());
+        }
+        if let Some(value) = value
+            .get("attributes")
+            .and_then(|attributes| nested_json_value(attributes, key))
+            .and_then(Value::as_str)
+        {
+            return Some(value.to_string());
+        }
+        if let Some(value) = value
+            .get("resource")
+            .and_then(|resource| resource.get("attributes"))
+            .and_then(|attributes| nested_json_value(attributes, key))
+            .and_then(Value::as_str)
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn json_u32(value: &Value, keys: &[&str]) -> Option<u32> {
+    for key in keys {
+        if let Some(value) = nested_json_value(value, key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            return Some(value);
+        }
+        if let Some(value) = value
+            .get("attributes")
+            .and_then(|attributes| nested_json_value(attributes, key))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn nested_json_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Some(exact) = value.get(key) {
+        return Some(exact);
+    }
+    let mut current = value;
+    for segment in key.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn normalize_runtime_file(root: &Path, value: &str) -> String {
+    let path = Path::new(value);
+    let rel = if path.is_absolute() {
+        path.strip_prefix(root).unwrap_or(path)
+    } else {
+        path
+    };
+    normalize_path(&rel.to_string_lossy())
+}
+
+fn normalize_path(value: &str) -> String {
+    value.trim_start_matches("./").replace('\\', "/")
+}
+
+fn extract_sql_table(statement: &str) -> Option<String> {
+    let lower = statement.to_ascii_lowercase();
+    for keyword in [" from ", " join ", " update ", " into "] {
+        if let Some(index) = lower.find(keyword) {
+            let start = index + keyword.len();
+            let table = statement[start..]
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.')
+                .find(|part| !part.is_empty())?;
+            return Some(table.to_string());
+        }
+    }
+    None
+}
+
+fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {
+    let mut seen = HashSet::new();
+    facts.retain(|fact| seen.insert(fact.id.clone()));
+    facts
 }
 
 fn should_emit_progress(done: usize, total: usize) -> bool {
@@ -399,7 +818,8 @@ fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOc
 
 #[cfg(test)]
 mod tests {
-    use super::derive_occurrences;
+    use super::{derive_occurrences, Indexer};
+    use open_kioku_config::OkConfig;
     use open_kioku_core::{
         CodeChunk, Confidence, EvidenceSourceType, FileId, Language, LineRange, Symbol, SymbolId,
         SymbolKind,
@@ -443,5 +863,67 @@ mod tests {
 
         assert_eq!(definitions, 2);
         assert_eq!(references, 0);
+    }
+
+    #[test]
+    fn index_manifest_records_build_and_analysis_provider_signals() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("settings.gradle"), "").unwrap();
+        std::fs::create_dir_all(root.join("src/test/java/org/example")).unwrap();
+        std::fs::write(
+            root.join("src/test/java/org/example/ExampleTests.java"),
+            r#"package org.example;
+import org.springframework.web.bind.annotation.GetMapping;
+class ExampleTests extends BaseTests {
+  @GetMapping("/example")
+  void works() {
+    System.getenv("EXAMPLE_REGION");
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ok/analysis")).unwrap();
+        std::fs::write(root.join(".ok/analysis/jacoco.xml"), "<report/>").unwrap();
+        std::fs::write(
+            root.join(".ok/analysis/TEST-org.example.ExampleTests.xml"),
+            "<testsuite/>",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ok/runtime")).unwrap();
+        std::fs::write(
+            root.join(".ok/runtime/spans.jsonl"),
+            r#"{"file":"src/test/java/org/example/ExampleTests.java","line":4,"attributes":{"http.route":"/example","http.request.method":"GET","db.statement":"select * from example_orders"}}"#,
+        )
+        .unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+
+        assert!(snapshot
+            .manifest
+            .quality
+            .build_systems
+            .contains(&"gradle".to_string()));
+        assert_eq!(snapshot.manifest.quality.coverage_reports, 1);
+        assert_eq!(snapshot.manifest.quality.junit_reports, 1);
+        assert!(snapshot.manifest.quality.static_analysis_facts >= 3);
+        assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 2);
+        assert!(snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.target == "GET /example"));
+        assert!(snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.target == "example_orders"));
+        assert!(snapshot
+            .manifest
+            .quality
+            .semantic_provider_notes
+            .iter()
+            .any(|note| note.contains("build systems detected")));
     }
 }

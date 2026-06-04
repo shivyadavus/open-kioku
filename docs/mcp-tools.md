@@ -6,6 +6,8 @@ Index the repository before connecting an LLM client:
 ok init /absolute/path/to/repo
 ok index /absolute/path/to/repo
 ok doctor /absolute/path/to/repo
+ok status /absolute/path/to/repo --markdown --write ok-status.md
+ok setup audit /absolute/path/to/repo
 ```
 
 Then print client-specific config and paste it into the client:
@@ -13,7 +15,22 @@ Then print client-specific config and paste it into the client:
 ```sh
 ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
+ok mcp install codex --repo /absolute/path/to/repo
+ok mcp install gemini --repo /absolute/path/to/repo
+ok mcp install opencode --repo /absolute/path/to/repo
+ok mcp install zed --repo /absolute/path/to/repo
 ```
+
+Supported install snippets:
+
+| Client | Config shape |
+| --- | --- |
+| Claude | `mcpServers` JSON |
+| Cursor | Cursor MCP JSON |
+| Codex | `~/.codex/config.toml` `[mcp_servers.open-kioku]` |
+| Gemini CLI | `settings.json` `mcpServers` |
+| OpenCode | `opencode.json` `mcp.open-kioku` local server |
+| Zed | `settings.json` `context_servers.open-kioku` |
 
 The MCP server runs over stdio:
 

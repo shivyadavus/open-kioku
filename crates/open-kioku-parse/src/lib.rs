@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, Confidence, EvidenceSourceType, File, Import, Language, LineRange, Symbol, SymbolId,
-    SymbolKind, TestTarget,
+    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, GraphEdgeType, GraphNodeType,
+    Import, Language, LineRange, Symbol, SymbolId, SymbolKind, TestTarget,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -12,6 +12,7 @@ pub struct ParsedFile {
     pub chunks: Vec<CodeChunk>,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
+    pub analysis_facts: Vec<AnalysisFact>,
     pub tests: Vec<TestTarget>,
 }
 
@@ -30,6 +31,7 @@ impl Parser for HeuristicParser {
         let imports = extract_imports(file, content);
         let mut symbols = extract_symbols(file, content);
         dedupe_symbols(&mut symbols);
+        let analysis_facts = extract_analysis_facts(file, content, &symbols);
         let mut chunks = extract_chunks(file, content, &symbols);
         dedupe_chunks(&mut chunks);
         let tests = extract_tests(file, content, &symbols, build_hint);
@@ -37,6 +39,7 @@ impl Parser for HeuristicParser {
             chunks,
             symbols,
             imports,
+            analysis_facts,
             tests,
         }
     }
@@ -272,6 +275,337 @@ pub fn extract_imports(file: &File, content: &str) -> Vec<Import> {
     imports
 }
 
+pub fn extract_analysis_facts(file: &File, content: &str, symbols: &[Symbol]) -> Vec<AnalysisFact> {
+    match file.language {
+        Language::Java => extract_java_analysis_facts(file, content, symbols),
+        Language::TypeScript | Language::JavaScript => {
+            extract_javascript_analysis_facts(file, content, symbols)
+        }
+        Language::Python => extract_python_analysis_facts(file, content, symbols),
+        Language::Rust => extract_rust_analysis_facts(file, content, symbols),
+        _ => Vec::new(),
+    }
+}
+
+fn extract_java_analysis_facts(
+    file: &File,
+    content: &str,
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    let mut facts = Vec::new();
+    let class_re = Regex::new(
+        r"\b(?:class|record|enum)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z0-9_.$<>]+))?(?:\s+implements\s+([A-Za-z0-9_.$<>,\s]+))?",
+    )
+    .expect("valid Java class regex");
+    let interface_re = Regex::new(
+        r"\binterface\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z0-9_.$<>,\s]+))?",
+    )
+    .expect("valid Java interface regex");
+    let mapping_re = Regex::new(
+        r#"@(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)(?:\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["'])?"#,
+    )
+    .expect("valid Spring mapping regex");
+    let env_re =
+        Regex::new(r#"System\.getenv\(\s*["']([^"']+)["']\s*\)"#).expect("valid getenv regex");
+    let value_re = Regex::new(r#"@Value\(\s*["']\$\{([^}:]+)(?::[^}]*)?\}["']\s*\)"#)
+        .expect("valid Spring value regex");
+    let table_re =
+        Regex::new(r#"@Table\(\s*name\s*=\s*["']([^"']+)["']"#).expect("valid table regex");
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        if let Some(captures) = class_re.captures(line) {
+            let source = captures.get(1).map(|value| value.as_str());
+            let source_symbol = source.and_then(|name| symbol_named(symbols, name));
+            if let Some(base) = captures.get(2) {
+                facts.push(analysis_fact(
+                    file,
+                    source_symbol,
+                    GraphEdgeType::Extends,
+                    GraphNodeType::Class,
+                    clean_java_type(base.as_str()),
+                    line_number,
+                    ("open-kioku-static/java", "Java class inheritance"),
+                ));
+            }
+            if let Some(interfaces) = captures.get(3) {
+                for interface in split_java_types(interfaces.as_str()) {
+                    facts.push(analysis_fact(
+                        file,
+                        source_symbol,
+                        GraphEdgeType::Implements,
+                        GraphNodeType::Interface,
+                        interface,
+                        line_number,
+                        ("open-kioku-static/java", "Java implemented interface"),
+                    ));
+                }
+            }
+        }
+        if let Some(captures) = interface_re.captures(line) {
+            let source = captures.get(1).map(|value| value.as_str());
+            let source_symbol = source.and_then(|name| symbol_named(symbols, name));
+            if let Some(parents) = captures.get(2) {
+                for parent in split_java_types(parents.as_str()) {
+                    facts.push(analysis_fact(
+                        file,
+                        source_symbol,
+                        GraphEdgeType::Extends,
+                        GraphNodeType::Interface,
+                        parent,
+                        line_number,
+                        ("open-kioku-static/java", "Java interface inheritance"),
+                    ));
+                }
+            }
+        }
+        if let Some(captures) = mapping_re.captures(line) {
+            let method = spring_http_method(captures.get(1).map(|value| value.as_str()));
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            let source_symbol = symbol_at_or_after(symbols, line_number, 4);
+            facts.push(analysis_fact(
+                file,
+                source_symbol,
+                GraphEdgeType::ExposesEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/java", "Spring MVC endpoint mapping"),
+            ));
+        }
+        for captures in env_re.captures_iter(line) {
+            if let Some(key) = captures.get(1) {
+                facts.push(analysis_fact(
+                    file,
+                    symbol_at_or_before(symbols, line_number),
+                    GraphEdgeType::ReadsConfig,
+                    GraphNodeType::ConfigKey,
+                    key.as_str().to_string(),
+                    line_number,
+                    ("open-kioku-static/java", "Java environment variable read"),
+                ));
+            }
+        }
+        if let Some(captures) = value_re.captures(line) {
+            if let Some(key) = captures.get(1) {
+                facts.push(analysis_fact(
+                    file,
+                    symbol_at_or_after(symbols, line_number, 3),
+                    GraphEdgeType::ReadsConfig,
+                    GraphNodeType::ConfigKey,
+                    key.as_str().to_string(),
+                    line_number,
+                    ("open-kioku-static/java", "Spring configuration value read"),
+                ));
+            }
+        }
+        if let Some(captures) = table_re.captures(line) {
+            if let Some(table) = captures.get(1) {
+                facts.push(analysis_fact(
+                    file,
+                    symbol_at_or_after(symbols, line_number, 3),
+                    GraphEdgeType::ReadsTable,
+                    GraphNodeType::DatabaseTable,
+                    table.as_str().to_string(),
+                    line_number,
+                    ("open-kioku-static/java", "JPA table mapping"),
+                ));
+            }
+        }
+    }
+    dedupe_analysis_facts(&mut facts);
+    facts
+}
+
+fn extract_javascript_analysis_facts(
+    file: &File,
+    content: &str,
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    let mut facts = Vec::new();
+    let route_re =
+        Regex::new(r#"\b(?:app|router)\.(get|post|put|delete|patch|all)\(\s*["']([^"']+)["']"#)
+            .expect("valid JavaScript route regex");
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        for captures in route_re.captures_iter(line) {
+            let method = captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_uppercase())
+                .unwrap_or_else(|| "HTTP".into());
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::ExposesEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/javascript", "JavaScript HTTP route"),
+            ));
+        }
+    }
+    facts
+}
+
+fn extract_python_analysis_facts(
+    file: &File,
+    content: &str,
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    let mut facts = Vec::new();
+    let route_re = Regex::new(
+        r#"@(?:app|router|blueprint)\.(get|post|put|delete|patch|route)\(\s*["']([^"']+)["']"#,
+    )
+    .expect("valid Python route regex");
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        for captures in route_re.captures_iter(line) {
+            let method = match captures.get(1).map(|value| value.as_str()) {
+                Some("route") => "HTTP".to_string(),
+                Some(value) => value.to_ascii_uppercase(),
+                None => "HTTP".into(),
+            };
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_after(symbols, line_number, 2),
+                GraphEdgeType::ExposesEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/python", "Python HTTP route decorator"),
+            ));
+        }
+    }
+    facts
+}
+
+fn extract_rust_analysis_facts(
+    file: &File,
+    content: &str,
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    let mut facts = Vec::new();
+    let route_re = Regex::new(r#"#\[(get|post|put|delete|patch)\(\s*["']([^"']+)["']\s*\)\]"#)
+        .expect("valid Rust route regex");
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        for captures in route_re.captures_iter(line) {
+            let method = captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_uppercase())
+                .unwrap_or_else(|| "HTTP".into());
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_after(symbols, line_number, 2),
+                GraphEdgeType::ExposesEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/rust", "Rust HTTP route attribute"),
+            ));
+        }
+    }
+    facts
+}
+
+fn analysis_fact(
+    file: &File,
+    symbol: Option<&Symbol>,
+    edge_type: GraphEdgeType,
+    target_kind: GraphNodeType,
+    target: String,
+    line_number: u32,
+    source: (&str, &str),
+) -> AnalysisFact {
+    AnalysisFact {
+        id: stable_id(&format!(
+            "analysis:{}:{}:{:?}:{}:{}",
+            file.path.display(),
+            symbol
+                .map(|symbol| symbol.id.0.as_str())
+                .unwrap_or("<file>"),
+            edge_type,
+            target,
+            line_number
+        )),
+        file_id: file.id.clone(),
+        symbol_id: symbol.map(|symbol| symbol.id.clone()),
+        target,
+        target_kind,
+        edge_type,
+        range: Some(LineRange::single(line_number)),
+        confidence: Confidence::Medium,
+        source: source.0.into(),
+        source_type: EvidenceSourceType::StaticAnalysis,
+        message: source.1.into(),
+    }
+}
+
+fn symbol_named<'a>(symbols: &'a [Symbol], name: &str) -> Option<&'a Symbol> {
+    symbols.iter().find(|symbol| symbol.name == name)
+}
+
+fn symbol_at_or_after(symbols: &[Symbol], line_number: u32, max_distance: u32) -> Option<&Symbol> {
+    symbols
+        .iter()
+        .filter_map(|symbol| {
+            let start = symbol.range.as_ref()?.start;
+            (start >= line_number && start <= line_number + max_distance).then_some((start, symbol))
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, symbol)| symbol)
+}
+
+fn symbol_at_or_before(symbols: &[Symbol], line_number: u32) -> Option<&Symbol> {
+    symbols
+        .iter()
+        .filter_map(|symbol| {
+            let start = symbol.range.as_ref()?.start;
+            (start <= line_number).then_some((start, symbol))
+        })
+        .max_by_key(|(start, _)| *start)
+        .map(|(_, symbol)| symbol)
+}
+
+fn clean_java_type(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(',')
+        .split('<')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn split_java_types(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(clean_java_type)
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn spring_http_method(annotation: Option<&str>) -> &'static str {
+    match annotation {
+        Some("GetMapping") => "GET",
+        Some("PostMapping") => "POST",
+        Some("PutMapping") => "PUT",
+        Some("DeleteMapping") => "DELETE",
+        Some("PatchMapping") => "PATCH",
+        Some("RequestMapping") => "HTTP",
+        _ => "HTTP",
+    }
+}
+
+fn dedupe_analysis_facts(facts: &mut Vec<AnalysisFact>) {
+    let mut seen = HashSet::new();
+    facts.retain(|fact| seen.insert(fact.id.clone()));
+}
+
 pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<CodeChunk> {
     if content.trim().is_empty() {
         return Vec::new();
@@ -409,10 +743,12 @@ pub fn evidence_timestamp() -> chrono::DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_chunks, extract_imports, extract_symbols, extract_tests};
+    use super::{
+        extract_analysis_facts, extract_chunks, extract_imports, extract_symbols, extract_tests,
+    };
     use open_kioku_core::{
-        Confidence, EvidenceSourceType, File, FileId, Language, LineRange, RepositoryId, Symbol,
-        SymbolId, SymbolKind,
+        Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, Language,
+        LineRange, RepositoryId, Symbol, SymbolId, SymbolKind,
     };
 
     fn rust_file() -> File {
@@ -447,6 +783,19 @@ mod tests {
             repository_id: RepositoryId::new("repo"),
             path: "src/index.ts".into(),
             language: Language::TypeScript,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    fn java_file() -> File {
+        File {
+            id: FileId::new("file-java"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/main/java/com/acme/OrderController.java".into(),
+            language: Language::Java,
             size_bytes: 0,
             content_hash: "hash".into(),
             is_generated: false,
@@ -515,6 +864,55 @@ mod tests {
         let imports = extract_imports(&file, src);
         assert!(!imports.is_empty());
         assert!(imports.iter().any(|i| i.imported.contains("foo")));
+    }
+
+    #[test]
+    fn extracts_java_static_analysis_facts() {
+        let file = java_file();
+        let src = r#"
+class OrderController extends BaseController implements OrderApi, Audited {
+    @GetMapping("/orders/{id}")
+    public Order getOrder() {
+        System.getenv("ORDER_REGION");
+        return null;
+    }
+}
+"#;
+        let symbols = extract_symbols(&file, src);
+        let facts = extract_analysis_facts(&file, src, &symbols);
+        assert!(facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::Extends
+                && fact.target == "BaseController"
+                && fact.target_kind == GraphNodeType::Class
+        }));
+        assert!(facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::Implements
+                && fact.target == "OrderApi"
+                && fact.target_kind == GraphNodeType::Interface
+        }));
+        assert!(facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "GET /orders/{id}"
+        }));
+        assert!(facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ReadsConfig && fact.target == "ORDER_REGION"
+        }));
+    }
+
+    #[test]
+    fn extracts_route_facts_for_script_languages() {
+        let ts = ts_file();
+        let ts_src = r#"router.post("/v1/orders", handler);"#;
+        let ts_facts = extract_analysis_facts(&ts, ts_src, &extract_symbols(&ts, ts_src));
+        assert!(ts_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "POST /v1/orders"
+        }));
+
+        let py = python_file();
+        let py_src = "@app.get('/health')\ndef health():\n    return {}\n";
+        let py_facts = extract_analysis_facts(&py, py_src, &extract_symbols(&py, py_src));
+        assert!(py_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "GET /health"
+        }));
     }
 
     // ─── extract_chunks ──────────────────────────────────────────────────────
