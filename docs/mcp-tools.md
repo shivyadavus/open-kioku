@@ -12,6 +12,25 @@ Write mode requires explicit opt-in:
 ok mcp serve --repo . --allow-write --approval-required --allow-command "cargo test" --deny-network
 ```
 
+## Recommended Agent Routine
+
+Open Kioku is intended to give Claude Code, Cursor, and other MCP clients a repeatable pre-edit routine. Ask the agent to use Open Kioku before changing files:
+
+```text
+Use Open Kioku before editing. Find the relevant code, check definitions and references, run impact analysis, and recommend validation first.
+```
+
+A good default tool sequence is:
+
+1. `repo_status`: confirm the repository is indexed.
+2. `search_code` and `search_symbols`: locate candidate files and symbols.
+3. `get_definition`, `get_references`, and `get_symbol_context`: resolve the important code facts.
+4. `impact_analysis`: identify direct and indirect dependents.
+5. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
+6. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing.
+
+By default these tools are read-only. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
+
 ## Read Tools
 
 The read-only tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:

@@ -30,13 +30,28 @@ impl Default for OkConfig {
                 incremental: true,
                 max_file_size: "1mb".to_string(),
                 exclude: vec![
+                    ".git/**".into(),
                     "**/.git/**".into(),
+                    "node_modules/**".into(),
                     "**/node_modules/**".into(),
+                    "target/**".into(),
                     "**/target/**".into(),
+                    "dist/**".into(),
                     "**/dist/**".into(),
+                    "build/**".into(),
                     "**/build/**".into(),
+                    ".venv/**".into(),
                     "**/.venv/**".into(),
+                    ".ok/**".into(),
                     "**/.ok/**".into(),
+                    "package-lock.json".into(),
+                    "**/package-lock.json".into(),
+                    "pnpm-lock.yaml".into(),
+                    "**/pnpm-lock.yaml".into(),
+                    "yarn.lock".into(),
+                    "**/yarn.lock".into(),
+                    "bun.lockb".into(),
+                    "**/bun.lockb".into(),
                 ],
             },
             languages: LanguagesConfig {
@@ -190,6 +205,7 @@ impl OkConfig {
         let raw = fs::read_to_string(path)?;
         let mut config: Self =
             toml::from_str(&raw).map_err(|err| OkError::Config(err.to_string()))?;
+        config.apply_builtin_excludes();
         config.apply_env_overrides();
         config.validate()?;
         Ok(config)
@@ -228,6 +244,35 @@ impl OkConfig {
         }
         if let Ok(value) = env::var("OK_DENY_NETWORK") {
             self.security.deny_network = value != "false";
+        }
+    }
+
+    fn apply_builtin_excludes(&mut self) {
+        for pattern in [
+            ".git/**",
+            "node_modules/**",
+            "target/**",
+            "dist/**",
+            "build/**",
+            ".venv/**",
+            ".ok/**",
+            "package-lock.json",
+            "**/package-lock.json",
+            "pnpm-lock.yaml",
+            "**/pnpm-lock.yaml",
+            "yarn.lock",
+            "**/yarn.lock",
+            "bun.lockb",
+            "**/bun.lockb",
+        ] {
+            if !self
+                .index
+                .exclude
+                .iter()
+                .any(|existing| existing == pattern)
+            {
+                self.index.exclude.push(pattern.into());
+            }
         }
     }
 }
@@ -295,6 +340,24 @@ mod tests {
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
         assert_eq!(loaded.repo.name, "open-kioku-repo");
         assert!(!loaded.security.allow_write);
+    }
+
+    #[test]
+    fn load_adds_root_dependency_excludes_to_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        OkConfig::write_default(&path).unwrap();
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw = raw.replace("    \"node_modules/**\",\n", "");
+        std::fs::write(&path, raw).unwrap();
+
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+
+        assert!(loaded
+            .index
+            .exclude
+            .iter()
+            .any(|pattern| pattern == "node_modules/**"));
     }
 
     #[test]

@@ -5,6 +5,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.0.0] — 2026-06-04
+
+### Added
+- Added phase-level indexing progress for CLI indexing, benchmark, and proof flows.
+- Added an index writer lock to prevent concurrent SQLite/Tantivy writers from corrupting or racing index updates.
+- Added bounded context and planning paths that reuse persisted Tantivy search results for large repositories.
+- Added fast validation-target selection for large repositories.
+
+### Changed
+- Replaced heuristic reference expansion with exact definition occurrences plus SCIP-imported occurrences when available.
+- Optimized graph construction, Tantivy rebuilds, symbol definition lookup, context building, planning, and test selection for large repositories.
+- Expanded default excludes for dependency, build, generated, and internal index paths.
+
+### Fixed
+- Fixed indexing blowups caused by highly repeated method and property names in large repositories.
+- Fixed JSON and YAML files emitting every key as a symbol.
+- Fixed duplicate chunk and symbol records around same-line symbol boundaries.
+- Fixed `patch review --json` to return structured JSON.
+- Fixed `symbol definition` ranking so exact class/interface definitions beat lower-quality prefix matches.
+- Documented the recommended MCP pre-edit routine for Claude Code, Cursor, and other MCP clients.
+
 ## [0.1.4] — 2026-05-26
 
 ### Fixed
@@ -47,6 +68,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[1.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.0
 [0.1.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.4
 [0.1.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.3
 [0.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.0

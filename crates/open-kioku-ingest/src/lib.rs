@@ -3,8 +3,8 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
-    CodeChunk, Confidence, EvidenceSourceType, File, FileId, Import, IndexManifest, Repository,
-    RepositoryId, Symbol, SymbolOccurrence, TestTarget,
+    CodeChunk, File, FileId, Import, IndexManifest, Repository, RepositoryId, Symbol,
+    SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -13,8 +13,10 @@ use open_kioku_languages::{
 use open_kioku_parse::{HeuristicParser, Parser};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct IndexSnapshot {
@@ -29,8 +31,10 @@ pub struct IndexSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct IndexProgress {
+    pub phase: &'static str,
     pub scanned_files: usize,
     pub indexed_files: usize,
+    pub total_files: Option<usize>,
 }
 
 pub struct Indexer {
@@ -47,22 +51,58 @@ impl Default for Indexer {
 
 impl Indexer {
     pub fn index_repo(&self, root: impl AsRef<Path>, config: &OkConfig) -> Result<IndexSnapshot> {
+        self.index_repo_with_progress(root, config, |_| {})
+    }
+
+    pub fn index_repo_with_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+        on_progress: F,
+    ) -> Result<IndexSnapshot>
+    where
+        F: Fn(IndexProgress) + Sync,
+    {
         let root = root.as_ref().canonicalize()?;
         let repo_id = RepositoryId::new(stable_id(root.to_string_lossy().as_ref()));
-        let files = self.scan_files(&root, config, &repo_id)?;
+        let files = self.scan_files(&root, config, &repo_id, &on_progress)?;
+        on_progress(IndexProgress {
+            phase: "parse",
+            scanned_files: files.len(),
+            indexed_files: 0,
+            total_files: Some(files.len()),
+        });
+        let parsed_count = AtomicUsize::new(0);
         let parsed = files
             .par_iter()
             .map(|file| -> Result<_> {
                 let bytes = fs::read(root.join(&file.path))?;
                 let content = String::from_utf8_lossy(&bytes).into_owned();
-                Ok(self.parser.parse(file, &content))
+                let parsed = self.parser.parse(file, &content);
+                let indexed_files = parsed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_emit_progress(indexed_files, files.len()) {
+                    on_progress(IndexProgress {
+                        phase: "parse",
+                        scanned_files: files.len(),
+                        indexed_files,
+                        total_files: Some(files.len()),
+                    });
+                }
+                Ok(parsed)
             })
             .collect::<Result<Vec<_>>>()?;
+        on_progress(IndexProgress {
+            phase: "extract",
+            scanned_files: files.len(),
+            indexed_files: files.len(),
+            total_files: Some(files.len()),
+        });
 
         let mut symbols = parsed
             .iter()
             .flat_map(|file| file.symbols.clone())
             .collect::<Vec<_>>();
+        dedupe_symbols(&mut symbols);
         let chunks = parsed
             .iter()
             .flat_map(|file| file.chunks.clone())
@@ -75,11 +115,24 @@ impl Indexer {
             .iter()
             .flat_map(|file| file.imports.clone())
             .collect::<Vec<_>>();
+        on_progress(IndexProgress {
+            phase: "occurrences",
+            scanned_files: files.len(),
+            indexed_files: files.len(),
+            total_files: Some(files.len()),
+        });
         let mut occurrences = derive_occurrences(&chunks, &symbols);
         if config.scip.enabled {
+            on_progress(IndexProgress {
+                phase: "scip",
+                scanned_files: files.len(),
+                indexed_files: files.len(),
+                total_files: Some(files.len()),
+            });
             let imported =
                 open_kioku_scip::import_configured_scip_files(&root, &config.scip.paths, &repo_id)?;
             symbols.extend(imported.symbols);
+            dedupe_symbols(&mut symbols);
             occurrences.extend(imported.occurrences);
         }
         let repository = Repository {
@@ -114,6 +167,7 @@ impl Indexer {
         root: &Path,
         config: &OkConfig,
         repository_id: &RepositoryId,
+        on_progress: &dyn Fn(IndexProgress),
     ) -> Result<Vec<File>> {
         let max_size = config.max_file_size_bytes()?;
         let excludes = compile_globs(&config.index.exclude)?;
@@ -122,6 +176,13 @@ impl Indexer {
         builder.hidden(!config.security.allow_hidden_files);
         builder.git_ignore(true).git_exclude(true).parents(true);
         let mut files = Vec::new();
+        let mut scanned_files = 0;
+        on_progress(IndexProgress {
+            phase: "scan",
+            scanned_files,
+            indexed_files: files.len(),
+            total_files: None,
+        });
         for entry in builder.build() {
             let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
             if !entry
@@ -131,9 +192,18 @@ impl Indexer {
             {
                 continue;
             }
+            scanned_files += 1;
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
             if excludes.is_match(&rel) || denied.is_match(&rel) {
+                if should_emit_progress(scanned_files, 0) {
+                    on_progress(IndexProgress {
+                        phase: "scan",
+                        scanned_files,
+                        indexed_files: files.len(),
+                        total_files: None,
+                    });
+                }
                 continue;
             }
             let metadata = entry
@@ -162,9 +232,27 @@ impl Indexer {
                 is_generated: likely_generated(&content),
                 is_vendor: likely_vendor_path(&rel),
             });
+            if should_emit_progress(scanned_files, 0) {
+                on_progress(IndexProgress {
+                    phase: "scan",
+                    scanned_files,
+                    indexed_files: files.len(),
+                    total_files: None,
+                });
+            }
         }
+        on_progress(IndexProgress {
+            phase: "scan",
+            scanned_files,
+            indexed_files: files.len(),
+            total_files: Some(files.len()),
+        });
         Ok(files)
     }
+}
+
+fn should_emit_progress(done: usize, total: usize) -> bool {
+    done == total || done % 500 == 0
 }
 
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
@@ -187,58 +275,23 @@ fn stable_id(value: &str) -> String {
     hash_bytes(value.as_bytes())
 }
 
-fn derive_occurrences(chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOccurrence> {
-    const MIN_HEURISTIC_NAME_LEN: usize = 4;
-    let is_word_match = |text: &str, name: &str| -> bool {
-        let mut start = 0;
-        while let Some(pos) = text[start..].find(name) {
-            let abs = start + pos;
-            let before_ok = abs == 0
-                || !text.as_bytes()[abs - 1].is_ascii_alphanumeric()
-                    && text.as_bytes()[abs - 1] != b'_';
-            let after = abs + name.len();
-            let after_ok = after >= text.len()
-                || !text.as_bytes()[after].is_ascii_alphanumeric()
-                    && text.as_bytes()[after] != b'_';
-            if before_ok && after_ok {
-                return true;
-            }
-            start = abs + 1;
-        }
-        false
-    };
+fn dedupe_symbols(symbols: &mut Vec<Symbol>) {
+    let mut seen = HashSet::new();
+    symbols.retain(|symbol| seen.insert(symbol.id.clone()));
+}
 
-    let mut occurrences = Vec::new();
-    for symbol in symbols {
-        occurrences.push(SymbolOccurrence {
+fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOccurrence> {
+    let mut occurrences = symbols
+        .iter()
+        .map(|symbol| SymbolOccurrence {
             symbol_id: symbol.id.clone(),
             file_id: symbol.file_id.clone(),
             range: symbol.range.clone(),
             is_definition: true,
             confidence: symbol.confidence,
             provenance: symbol.provenance.clone(),
-        });
-    }
-    for chunk in chunks {
-        for symbol in symbols {
-            if symbol.name.len() < MIN_HEURISTIC_NAME_LEN {
-                continue;
-            }
-            if chunk.symbol_id.as_ref() == Some(&symbol.id) {
-                continue;
-            }
-            if is_word_match(&chunk.text, &symbol.name) {
-                occurrences.push(SymbolOccurrence {
-                    symbol_id: symbol.id.clone(),
-                    file_id: chunk.file_id.clone(),
-                    range: Some(chunk.range.clone()),
-                    is_definition: false,
-                    confidence: Confidence::Low,
-                    provenance: EvidenceSourceType::Heuristic,
-                });
-            }
-        }
-    }
+        })
+        .collect::<Vec<_>>();
     occurrences.sort_by(|a, b| {
         (
             &a.symbol_id.0,
@@ -260,4 +313,53 @@ fn derive_occurrences(chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOcc
             && a.is_definition == b.is_definition
     });
     occurrences
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_occurrences;
+    use open_kioku_core::{
+        CodeChunk, Confidence, EvidenceSourceType, FileId, Language, LineRange, Symbol, SymbolId,
+        SymbolKind,
+    };
+
+    fn symbol(id: &str, name: &str, line: u32) -> Symbol {
+        Symbol {
+            id: SymbolId::new(id),
+            name: name.into(),
+            qualified_name: format!("src::index::{name}"),
+            kind: SymbolKind::Function,
+            file_id: FileId::new(format!("file-{id}")),
+            range: Some(LineRange::single(line)),
+            language: Language::TypeScript,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        }
+    }
+
+    #[test]
+    fn derive_occurrences_records_definitions_only_for_heuristic_indexing() {
+        let symbols = vec![symbol("retry", "retry", 1), symbol("render", "render", 2)];
+        let chunks = vec![CodeChunk {
+            id: "chunk".into(),
+            file_id: FileId::new("file-chunk"),
+            range: LineRange { start: 10, end: 12 },
+            language: Language::TypeScript,
+            text: "retry(); const retried = true;".into(),
+            symbol_id: None,
+        }];
+
+        let occurrences = derive_occurrences(&chunks, &symbols);
+        let definitions = occurrences
+            .iter()
+            .filter(|occurrence| occurrence.is_definition)
+            .count();
+        let references = occurrences
+            .iter()
+            .filter(|occurrence| !occurrence.is_definition)
+            .count();
+
+        assert_eq!(definitions, 2);
+        assert_eq!(references, 0);
+    }
 }

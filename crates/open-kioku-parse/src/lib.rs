@@ -5,6 +5,7 @@ use open_kioku_core::{
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
@@ -24,8 +25,10 @@ pub struct HeuristicParser;
 impl Parser for HeuristicParser {
     fn parse(&self, file: &File, content: &str) -> ParsedFile {
         let imports = extract_imports(file, content);
-        let symbols = extract_symbols(file, content);
-        let chunks = extract_chunks(file, content, &symbols);
+        let mut symbols = extract_symbols(file, content);
+        dedupe_symbols(&mut symbols);
+        let mut chunks = extract_chunks(file, content, &symbols);
+        dedupe_chunks(&mut chunks);
         let tests = extract_tests(file, content, &symbols);
         ParsedFile {
             chunks,
@@ -34,6 +37,16 @@ impl Parser for HeuristicParser {
             tests,
         }
     }
+}
+
+fn dedupe_symbols(symbols: &mut Vec<Symbol>) {
+    let mut seen = HashSet::new();
+    symbols.retain(|symbol| seen.insert(symbol.id.clone()));
+}
+
+fn dedupe_chunks(chunks: &mut Vec<CodeChunk>) {
+    let mut seen = HashSet::new();
+    chunks.retain(|chunk| seen.insert(chunk.id.clone()));
 }
 
 pub fn extract_symbols(file: &File, content: &str) -> Vec<Symbol> {
@@ -272,6 +285,7 @@ pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Cod
         })
         .collect::<Vec<_>>();
     starts.sort_by_key(|(line, _)| *line);
+    starts.dedup_by_key(|(line, _)| *line);
     if starts.is_empty() {
         for (idx, window) in lines.chunks(80).enumerate() {
             let start = idx * 80 + 1;
@@ -382,7 +396,10 @@ pub fn evidence_timestamp() -> chrono::DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::{extract_chunks, extract_imports, extract_symbols, extract_tests};
-    use open_kioku_core::{File, FileId, Language, RepositoryId};
+    use open_kioku_core::{
+        Confidence, EvidenceSourceType, File, FileId, Language, LineRange, RepositoryId, Symbol,
+        SymbolId, SymbolKind,
+    };
 
     fn rust_file() -> File {
         File {
@@ -515,6 +532,42 @@ mod tests {
         // Each symbol becomes a chunk boundary.
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| c.symbol_id.is_some()));
+    }
+
+    #[test]
+    fn chunks_deduplicate_symbols_starting_on_same_line() {
+        let file = ts_file();
+        let src = "export const handler = () => call();\ncall();";
+        let symbols = vec![
+            Symbol {
+                id: SymbolId::new("handler"),
+                name: "handler".into(),
+                qualified_name: "src::index::handler".into(),
+                kind: SymbolKind::Function,
+                file_id: file.id.clone(),
+                range: Some(LineRange { start: 1, end: 1 }),
+                language: Language::TypeScript,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            },
+            Symbol {
+                id: SymbolId::new("call"),
+                name: "call".into(),
+                qualified_name: "src::index::call".into(),
+                kind: SymbolKind::Function,
+                file_id: file.id.clone(),
+                range: Some(LineRange { start: 1, end: 1 }),
+                language: Language::TypeScript,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            },
+        ];
+
+        let chunks = extract_chunks(&file, src, &symbols);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].range.start, 1);
+        assert_eq!(chunks[0].range.end, 2);
     }
 
     // ─── extract_tests ────────────────────────────────────────────────────────

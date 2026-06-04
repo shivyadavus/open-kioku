@@ -228,6 +228,44 @@ ok mcp serve --repo /absolute/path/to/repo --read-only
 
 Write mode is disabled by default. To expose write tools, the server must be started with `--allow-write`, and patch application still requires explicit approval and `OPEN_KIOKU_ALLOW_WRITE=true`.
 
+### How Claude Code and Cursor Use It
+
+After the MCP config is added, Claude Code, Cursor, or another MCP client starts `ok mcp serve` for the repository. The agent can then call Open Kioku tools while it plans work, but the default server remains read-only.
+
+The intended workflow is:
+
+1. You ask the agent to inspect the repository before editing.
+2. The agent checks `repo_status` to make sure the index is available.
+3. It uses `search_code`, `search_symbols`, `get_definition`, and `get_references` to find the relevant code.
+4. It uses `impact_analysis`, `find_tests_for_change`, and `recommend_validation_plan` to understand likely blast radius and validation targets.
+5. It uses `plan_change` or `build_context_pack` to assemble grounded context before editing.
+6. The agent edits with its normal file-editing tools. Open Kioku only modifies files if write mode is explicitly enabled.
+
+Example prompts:
+
+```text
+Use Open Kioku before editing. I want to change token expiration behavior.
+Find the relevant auth code, identify impacted files, and recommend tests first.
+```
+
+```text
+Use Open Kioku to build a pre-edit plan for replacing the billing retry logic.
+Do not edit until you have checked definitions, references, impact, and validation.
+```
+
+For long-running work, keep the local index current in another terminal:
+
+```sh
+ok watch /absolute/path/to/repo
+```
+
+If the agent reports that the index is missing or stale, run:
+
+```sh
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+```
+
 ## MCP Tools
 
 Stable tools include:

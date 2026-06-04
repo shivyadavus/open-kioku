@@ -45,6 +45,16 @@ impl<'a> PlanEngine<'a> {
     pub fn plan(&self, task: &str, limit: usize) -> Result<PlanReport> {
         let context_limit = limit.clamp(1, 100);
         let context = ContextPackBuilder::new(self.store).build(task, context_limit)?;
+        self.plan_from_context(task, context_limit, context)
+    }
+
+    pub fn plan_from_context(
+        &self,
+        task: &str,
+        limit: usize,
+        context: ContextPack,
+    ) -> Result<PlanReport> {
+        let context_limit = limit.clamp(1, 100);
         let primary_context = context
             .primary_files
             .iter()
@@ -104,6 +114,23 @@ impl<'a> PlanEngine<'a> {
         impact_target: Option<&SearchResult>,
         context: &ContextPack,
     ) -> Result<ImpactReport> {
+        if context_has_bounded_impact(context) {
+            let evidence = context
+                .evidence
+                .iter()
+                .filter(|evidence| evidence.id.0 == "context:bounded-search")
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(ImpactReport {
+                target: impact_target
+                    .map(|target| target.path.display().to_string())
+                    .unwrap_or_else(|| task.into()),
+                direct_impacts: context.supporting_files.clone(),
+                indirect_impacts: Vec::new(),
+                risk_report: context.risk_report.clone(),
+                evidence,
+            });
+        }
         if let Some(target) = impact_target {
             ImpactEngine::new(self.store as &dyn MetadataStore).for_file(&target.path)
         } else {
@@ -129,7 +156,7 @@ impl<'a> PlanEngine<'a> {
 
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
         for result in source_results(primary_context).take(3) {
-            for test in selector.for_changed_path(&result.path, MAX_VALIDATION)? {
+            for test in selector.for_changed_path_fast(&result.path, MAX_VALIDATION)? {
                 by_id.entry(test.id.clone()).or_insert(test);
             }
         }
@@ -145,6 +172,13 @@ impl<'a> PlanEngine<'a> {
         tests.truncate(MAX_VALIDATION);
         Ok(tests)
     }
+}
+
+fn context_has_bounded_impact(context: &ContextPack) -> bool {
+    context
+        .evidence
+        .iter()
+        .any(|evidence| evidence.id.0 == "context:bounded-search")
 }
 
 fn merge_risk(context: &RiskReport, impact: &RiskReport, no_matches: bool) -> RiskReport {
@@ -494,8 +528,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use open_kioku_core::{
-        CodeChunk, Confidence, File, FileId, IndexManifest, Language, LineRange, Repository,
-        RepositoryId, Symbol, SymbolId, SymbolKind, TestTarget,
+        CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
+        IndexManifest, Language, LineRange, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
+        TestTarget, ValidationPlan,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -642,5 +677,69 @@ mod tests {
         assert!(markdown.contains("## Primary Context"));
         assert!(text.contains("Plan: token"));
         assert!(text.contains("Validation candidates"));
+    }
+
+    #[test]
+    fn plan_from_bounded_context_reuses_context_impact() {
+        let store = test_store();
+        let evidence = Evidence {
+            id: EvidenceId::new("context:bounded-search"),
+            source: "open-kioku-context".into(),
+            source_type: EvidenceSourceType::Lexical,
+            file_range: None,
+            symbol_id: None,
+            confidence: Confidence::Medium,
+            message:
+                "context pack used persisted search results without full-table impact expansion"
+                    .into(),
+            indexed_at: Utc::now(),
+        };
+        let primary = SearchResult {
+            path: PathBuf::from("src/auth.rs"),
+            line_range: Some(LineRange { start: 3, end: 5 }),
+            snippet: "pub fn issue_token()".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "test".into(),
+            evidence: vec!["test evidence".into()],
+            confidence: 1.0,
+        };
+        let context = ContextPack {
+            task: "token".into(),
+            intent: "understanding".into(),
+            primary_files: vec![primary],
+            primary_symbols: Vec::new(),
+            supporting_files: Vec::new(),
+            dependency_edges: Vec::new(),
+            runtime_signals: Vec::new(),
+            test_candidates: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: vec!["bounded context built from persisted search results".into()],
+            },
+            recommended_change_boundary: ChangeBoundary {
+                allowed_files: vec![PathBuf::from("src/auth.rs")],
+                caution_files: Vec::new(),
+                forbidden_files: Vec::new(),
+            },
+            validation_plan: ValidationPlan {
+                commands: Vec::new(),
+                tests: Vec::new(),
+                requires_approval: true,
+                evidence: vec![evidence.clone()],
+            },
+            evidence: vec![evidence],
+            confidence_summary: "bounded".into(),
+        };
+
+        let report = PlanEngine::new(&store)
+            .plan_from_context("token", 5, context)
+            .unwrap();
+
+        assert_eq!(report.impact.target, "src/auth.rs");
+        assert_eq!(report.impact.risk_report.level, "low");
+        assert_eq!(report.impact.evidence.len(), 1);
+        assert_eq!(report.impact.evidence[0].id.0, "context:bounded-search");
     }
 }

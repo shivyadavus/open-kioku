@@ -2,6 +2,7 @@ use open_kioku_core::{CodeChunk, File, SearchResult, Symbol};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
@@ -47,14 +48,22 @@ impl SearchIndex for TantivySearchIndex {
     fn rebuild(&mut self, chunks: &[CodeChunk], files: &[File], symbols: &[Symbol]) -> Result<()> {
         let mut writer = self.index.writer(50_000_000).map_err(search_err)?;
         writer.delete_all_documents().map_err(search_err)?;
+        let files_by_id = files
+            .iter()
+            .map(|file| (file.id.0.as_str(), file))
+            .collect::<HashMap<_, _>>();
+        let symbols_by_id = symbols
+            .iter()
+            .map(|symbol| (symbol.id.0.as_str(), symbol))
+            .collect::<HashMap<_, _>>();
         for chunk in chunks {
-            let Some(file) = files.iter().find(|file| file.id == chunk.file_id) else {
+            let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
                 continue;
             };
             let symbol = chunk
                 .symbol_id
                 .as_ref()
-                .and_then(|id| symbols.iter().find(|symbol| symbol.id == *id));
+                .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
             let symbol_json = symbol
                 .map(serde_json::to_string)
                 .transpose()?
