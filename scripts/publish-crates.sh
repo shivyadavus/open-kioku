@@ -36,7 +36,7 @@ if [[ -n "${EXPECTED_VERSION:-}" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
   exit 1
 fi
 
-if [[ "$MODE" == "--publish" && -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+if [[ "$MODE" == "--publish" && -z "${CARGO_REGISTRY_TOKEN:-}" && "${CI:-0}" == "true" ]]; then
   echo "CARGO_REGISTRY_TOKEN is required for --publish in CI." >&2
   exit 1
 fi
