@@ -12,9 +12,9 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.3", path = "../open-kioku-errors" }
-open-kioku-search-regex = { version = "1.0.3", path = "../open-kioku-search-regex" }
-open-kioku-storage = { version = "1.0.3", path = "../open-kioku-storage" }
+open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
+open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
+open-kioku-search-regex = { version = "1.0.4", path = "../open-kioku-search-regex" }
+open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
 [dev-dependencies]
-open-kioku-storage-sqlite = { version = "1.0.3", path = "../open-kioku-storage-sqlite" }
+open-kioku-storage-sqlite = { version = "1.0.4", path = "../open-kioku-storage-sqlite" }

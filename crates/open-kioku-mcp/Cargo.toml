@@ -12,25 +12,25 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-open-kioku-actions = { version = "1.0.3", path = "../open-kioku-actions" }
-open-kioku-architecture = { version = "1.0.3", path = "../open-kioku-architecture" }
-open-kioku-config = { version = "1.0.3", path = "../open-kioku-config" }
-open-kioku-context = { version = "1.0.3", path = "../open-kioku-context" }
-open-kioku-context-compress = { version = "1.0.3", path = "../open-kioku-context-compress" }
-open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
-open-kioku-format = { version = "1.0.3", path = "../open-kioku-format" }
-open-kioku-impact = { version = "1.0.3", path = "../open-kioku-impact" }
-open-kioku-memory = { version = "1.0.3", path = "../open-kioku-memory" }
-open-kioku-patch = { version = "1.0.3", path = "../open-kioku-patch" }
-open-kioku-plan = { version = "1.0.3", path = "../open-kioku-plan" }
-open-kioku-search-regex = { version = "1.0.3", path = "../open-kioku-search-regex" }
-open-kioku-search-tantivy = { version = "1.0.3", path = "../open-kioku-search-tantivy" }
-open-kioku-semantic = { version = "1.0.3", path = "../open-kioku-semantic" }
-open-kioku-sentry = { version = "1.0.3", path = "../open-kioku-sentry" }
-open-kioku-storage = { version = "1.0.3", path = "../open-kioku-storage" }
-open-kioku-storage-sqlite = { version = "1.0.3", path = "../open-kioku-storage-sqlite" }
-open-kioku-symbols = { version = "1.0.3", path = "../open-kioku-symbols" }
-open-kioku-tests = { version = "1.0.3", path = "../open-kioku-tests" }
+open-kioku-actions = { version = "1.0.4", path = "../open-kioku-actions" }
+open-kioku-architecture = { version = "1.0.4", path = "../open-kioku-architecture" }
+open-kioku-config = { version = "1.0.4", path = "../open-kioku-config" }
+open-kioku-context = { version = "1.0.4", path = "../open-kioku-context" }
+open-kioku-context-compress = { version = "1.0.4", path = "../open-kioku-context-compress" }
+open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
+open-kioku-format = { version = "1.0.4", path = "../open-kioku-format" }
+open-kioku-impact = { version = "1.0.4", path = "../open-kioku-impact" }
+open-kioku-memory = { version = "1.0.4", path = "../open-kioku-memory" }
+open-kioku-patch = { version = "1.0.4", path = "../open-kioku-patch" }
+open-kioku-plan = { version = "1.0.4", path = "../open-kioku-plan" }
+open-kioku-search-regex = { version = "1.0.4", path = "../open-kioku-search-regex" }
+open-kioku-search-tantivy = { version = "1.0.4", path = "../open-kioku-search-tantivy" }
+open-kioku-semantic = { version = "1.0.4", path = "../open-kioku-semantic" }
+open-kioku-sentry = { version = "1.0.4", path = "../open-kioku-sentry" }
+open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { version = "1.0.4", path = "../open-kioku-storage-sqlite" }
+open-kioku-symbols = { version = "1.0.4", path = "../open-kioku-symbols" }
+open-kioku-tests = { version = "1.0.4", path = "../open-kioku-tests" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

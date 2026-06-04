@@ -5,6 +5,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.0.4] — 2026-06-04
+
+### Fixed
+- Re-published the 1.0.3 release candidate as 1.0.4 so crates.io can resolve all internal Open Kioku packages against the corrected static/runtime analysis APIs.
+- Kept the GitHub release, npm packages, Cursor manifest, Claude manifest, and crates.io package versions aligned.
+
+---
+
 ## [1.0.3] — 2026-06-04
 
 ### Added
@@ -93,6 +101,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[1.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.4
 [1.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.3
 [1.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.1
 [1.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.0
