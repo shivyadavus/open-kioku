@@ -83,7 +83,10 @@ impl SearchIndex for TantivySearchIndex {
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let raw_query = query;
+        let raw_query = query.trim();
+        if raw_query.is_empty() {
+            return Ok(Vec::new());
+        }
         let reader = self.index.reader().map_err(search_err)?;
         let searcher = reader.searcher();
         let parser = QueryParser::for_index(
@@ -94,32 +97,54 @@ impl SearchIndex for TantivySearchIndex {
                 self.fields.symbol_json,
             ],
         );
-        let query = parser
-            .parse_query(query)
-            .map_err(|err| OkError::Search(err.to_string()))?;
-        let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit))
-            .map_err(search_err)?;
-        let mut results = Vec::with_capacity(top_docs.len());
-        for (score, address) in top_docs {
-            let document: TantivyDocument = searcher.doc(address).map_err(search_err)?;
-            let chunk: CodeChunk = required_json(&document, self.fields.chunk_json)?;
-            let file: File = required_json(&document, self.fields.file_json)?;
-            let symbol: Option<Symbol> = optional_json(&document, self.fields.symbol_json)?;
-            let (evidence_strings, confidence) = EvidenceBuilder::new()
-                .add("BM25 lexical match from local Tantivy index", score)
-                .build();
-            results.push(SearchResult {
-                path: file.path,
-                line_range: Some(chunk.range),
-                snippet: snippet(&chunk.text, raw_query),
-                symbol,
-                score,
-                match_reason: "tantivy bm25 lexical match".into(),
-                evidence: evidence_strings,
-                confidence,
-            });
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for variant in query_variants(raw_query) {
+            let Ok(query) = parser.parse_query(&variant) else {
+                continue;
+            };
+            let top_docs = searcher
+                .search(
+                    &query,
+                    &TopDocs::with_limit(limit.saturating_mul(2).max(limit)),
+                )
+                .map_err(search_err)?;
+            for (score, address) in top_docs {
+                let document: TantivyDocument = searcher.doc(address).map_err(search_err)?;
+                let chunk: CodeChunk = required_json(&document, self.fields.chunk_json)?;
+                let file: File = required_json(&document, self.fields.file_json)?;
+                let key = format!("{}:{}:{}", file.path.display(), chunk.range.start, chunk.id);
+                if !seen.insert(key) {
+                    continue;
+                }
+                let symbol: Option<Symbol> = optional_json(&document, self.fields.symbol_json)?;
+                let boosted_score =
+                    score + variant_boost(raw_query, &variant, &file, symbol.as_ref());
+                let (evidence_strings, confidence) = EvidenceBuilder::new()
+                    .add("BM25 lexical match from local Tantivy index", score)
+                    .add(
+                        format!("query variant `{variant}` matched local index"),
+                        boosted_score,
+                    )
+                    .build();
+                results.push(SearchResult {
+                    path: file.path,
+                    line_range: Some(chunk.range),
+                    snippet: snippet(&chunk.text, raw_query),
+                    symbol,
+                    score: boosted_score,
+                    match_reason: "tantivy hybrid lexical match".into(),
+                    evidence: evidence_strings,
+                    confidence,
+                });
+            }
         }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit);
         Ok(results)
     }
 }
@@ -160,6 +185,82 @@ fn schema() -> Schema {
     builder.add_text_field("file_json", stored_text.clone());
     builder.add_text_field("symbol_json", text.clone());
     builder.build()
+}
+
+fn query_variants(query: &str) -> Vec<String> {
+    let mut variants = vec![query.to_string()];
+    let tokens = query_tokens(query);
+    if tokens.len() > 1 {
+        variants.push(tokens.join(" OR "));
+        variants.push(tokens.join("_"));
+        variants.push(tokens.join("-"));
+    }
+    if query.contains('_') || query.contains('-') || query.chars().any(char::is_uppercase) {
+        let split = split_identifier(query);
+        if split.len() > 1 {
+            variants.push(split.join(" OR "));
+            variants.push(split.join(" "));
+        }
+    }
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 2)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn split_identifier(query: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for ch in query.chars() {
+        if ch == '_' || ch == '-' || ch == '/' || ch == '.' {
+            if !current.is_empty() {
+                out.push(current.to_ascii_lowercase());
+                current.clear();
+            }
+            previous_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lower && !current.is_empty() {
+            out.push(current.to_ascii_lowercase());
+            current.clear();
+        }
+        previous_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        out.push(current.to_ascii_lowercase());
+    }
+    out.into_iter().filter(|token| token.len() >= 2).collect()
+}
+
+fn variant_boost(query: &str, variant: &str, file: &File, symbol: Option<&Symbol>) -> f32 {
+    let mut boost = 0.0;
+    let query_lower = query.to_ascii_lowercase();
+    let path = file.path.to_string_lossy().to_ascii_lowercase();
+    if path.contains(&query_lower.replace(' ', "_"))
+        || path.contains(&query_lower.replace(' ', "-"))
+        || path.contains(&query_lower)
+    {
+        boost += 0.4;
+    }
+    if let Some(symbol) = symbol {
+        let name = symbol.name.to_ascii_lowercase();
+        if name == query_lower || name.contains(&query_lower.replace(' ', "_")) {
+            boost += 0.5;
+        }
+    }
+    if variant != query {
+        boost += 0.05;
+    }
+    boost
 }
 
 fn fields(schema: Schema) -> Result<TantivyFields> {
@@ -271,13 +372,41 @@ mod tests {
         assert_eq!(results[0].path, PathBuf::from("src/lib.rs"));
         assert_eq!(results[0].snippet, "pub fn retry_import() {}");
         assert_eq!(results[0].line_range, Some(LineRange { start: 1, end: 3 }));
-        assert_eq!(results[0].match_reason, "tantivy bm25 lexical match");
-        assert_eq!(results[0].evidence.len(), 1);
+        assert_eq!(results[0].match_reason, "tantivy hybrid lexical match");
+        assert_eq!(results[0].evidence.len(), 2);
         assert!(results[0].evidence[0].contains("BM25 lexical match"));
         assert_eq!(
             results[0].symbol.as_ref().map(|s| s.name.as_str()),
             Some("retry_import")
         );
+    }
+
+    #[test]
+    fn natural_language_query_matches_identifier_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = File {
+            id: FileId::new("file-1"),
+            repository_id: RepositoryId::new("repo-1"),
+            path: "src/auth_tokens.rs".into(),
+            language: Language::Rust,
+            size_bytes: 42,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunk = CodeChunk {
+            id: "chunk-1".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 1, end: 2 },
+            language: Language::Rust,
+            text: "pub fn issue_token() {}\n".into(),
+            symbol_id: None,
+        };
+        rebuild_disk_index(temp.path(), &[chunk], &[file], &[]).unwrap();
+        let index = TantivySearchIndex::open_or_create(temp.path()).unwrap();
+        let results = index.search("issue token", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, PathBuf::from("src/auth_tokens.rs"));
     }
 
     use std::path::PathBuf;

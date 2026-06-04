@@ -1,4 +1,4 @@
-use open_kioku_core::{Symbol, SymbolId, SymbolKind, SymbolOccurrence};
+use open_kioku_core::{Symbol, SymbolId, SymbolKind, SymbolOccurrence, Confidence, EvidenceSourceType};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
 
@@ -34,7 +34,43 @@ impl<'a> SymbolEngine<'a> {
 
     pub fn references(&self, query: &str, limit: usize) -> Result<Vec<SymbolOccurrence>> {
         let symbol = self.definition(query)?;
-        self.store.references_for_symbol(&symbol.id, limit)
+        let refs = self.store.references_for_symbol(&symbol.id, limit)?;
+        if !refs.is_empty() {
+            return Ok(refs);
+        }
+        self.lexical_references(&symbol, limit)
+    }
+
+    fn lexical_references(&self, symbol: &Symbol, limit: usize) -> Result<Vec<SymbolOccurrence>> {
+        let name = &symbol.name;
+        let mut occurrences = Vec::new();
+        let chunks = self.store.find_chunks_containing(name, limit * 4)?;
+        for chunk in chunks {
+            if let Some(idx) = chunk.text.find(name) {
+                let before_ok = idx == 0 || {
+                    let prev_char = chunk.text[..idx].chars().next_back().unwrap();
+                    !prev_char.is_alphanumeric() && prev_char != '_'
+                };
+                let after_ok = idx + name.len() == chunk.text.len() || {
+                    let next_char = chunk.text[idx + name.len()..].chars().next().unwrap();
+                    !next_char.is_alphanumeric() && next_char != '_'
+                };
+                if before_ok && after_ok {
+                    occurrences.push(SymbolOccurrence {
+                        symbol_id: symbol.id.clone(),
+                        file_id: chunk.file_id.clone(),
+                        range: Some(chunk.range.clone()),
+                        is_definition: false,
+                        confidence: Confidence::Low,
+                        provenance: EvidenceSourceType::Lexical,
+                    });
+                    if occurrences.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(occurrences)
     }
 }
 

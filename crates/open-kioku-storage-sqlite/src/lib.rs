@@ -79,6 +79,7 @@ impl MetadataStore for SqliteStore {
               file_id TEXT NOT NULL,
               json TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_tests_file ON tests(file_id);
             CREATE TABLE IF NOT EXISTS imports (
               id TEXT PRIMARY KEY,
               file_id TEXT NOT NULL,
@@ -294,7 +295,7 @@ impl MetadataStore for SqliteStore {
         let pattern = format!("%{}%", query.unwrap_or_default());
         let mut stmt = conn
             .prepare(
-                "SELECT json FROM symbols WHERE (?1 = '%%' OR name LIKE ?1 OR qualified_name LIKE ?1) ORDER BY qualified_name LIMIT ?2 OFFSET ?3",
+                "SELECT json FROM symbols WHERE (?1 = '%%' OR name LIKE ?1 COLLATE NOCASE OR qualified_name LIKE ?1 COLLATE NOCASE) ORDER BY qualified_name LIMIT ?2 OFFSET ?3",
             )
             .map_err(storage_err)?;
         let rows = stmt
@@ -404,6 +405,70 @@ impl MetadataStore for SqliteStore {
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn symbols_for_file(&self, file_id: &FileId) -> Result<Vec<Symbol>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT json FROM symbols WHERE file_id = ?1 ORDER BY name")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn find_chunks_containing(&self, query: &str, limit: usize) -> Result<Vec<CodeChunk>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn
+            .prepare("SELECT json FROM chunks WHERE text LIKE ?1 LIMIT ?2")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![pattern, limit as i64], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn find_files_by_path_pattern(&self, pattern: &str) -> Result<Vec<File>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let match_pat = format!("%{}%", pattern);
+        let mut stmt = conn
+            .prepare("SELECT json FROM files WHERE path LIKE ?1 COLLATE NOCASE")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![match_pat], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn tests_for_files(&self, file_ids: &[FileId]) -> Result<Vec<TestTarget>> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        
+        let placeholders = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT json FROM tests WHERE file_id IN ({})", placeholders);
+        let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
+        
+        let params = rusqlite::params_from_iter(file_ids.iter().map(|id| &id.0));
+        let rows = stmt
+            .query_map(params, |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         collect_json(rows)
     }
@@ -557,8 +622,8 @@ mod tests {
     use chrono::Utc;
     use open_kioku_core::{
         Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId, GraphEdge,
-        GraphEdgeType, GraphNode, GraphNodeType, IndexManifest, Language, LineRange, NodeId,
-        Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
+        GraphEdgeType, GraphNode, GraphNodeType, IndexManifest, IndexQuality, Language, LineRange,
+        NodeId, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
     };
     use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
 
@@ -621,6 +686,7 @@ mod tests {
             chunk_count: 0,
             indexed_at: Utc::now(),
             schema_version: 1,
+            quality: IndexQuality::default(),
         }
     }
 

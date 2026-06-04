@@ -1,11 +1,11 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
-    ChangeBoundary, ContextPack, ImpactReport, PlanReport, RiskReport, SearchResult, TestTarget,
+    ChangeBoundary, ContextPack, FileId, ImpactReport, PlanReport, RiskReport, SearchResult, TestTarget,
     ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
-use open_kioku_storage::{MetadataStore, OkStore};
+use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,11 +35,20 @@ impl PlanFormat {
 
 pub struct PlanEngine<'a> {
     store: &'a dyn OkStore,
+    search_index: Option<&'a dyn SearchIndex>,
 }
 
 impl<'a> PlanEngine<'a> {
     pub fn new(store: &'a dyn OkStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            search_index: None,
+        }
+    }
+
+    pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
+        self.search_index = search_index;
+        self
     }
 
     pub fn plan(&self, task: &str, limit: usize) -> Result<PlanReport> {
@@ -132,7 +141,9 @@ impl<'a> PlanEngine<'a> {
             });
         }
         if let Some(target) = impact_target {
-            ImpactEngine::new(self.store as &dyn MetadataStore).for_file(&target.path)
+            ImpactEngine::new(self.store as &dyn MetadataStore)
+                .with_search_index(self.search_index)
+                .for_file(&target.path)
         } else {
             Ok(ImpactReport {
                 target: task.into(),
@@ -151,27 +162,85 @@ impl<'a> PlanEngine<'a> {
     ) -> Result<Vec<TestTarget>> {
         let mut by_id = BTreeMap::new();
         for test in &context.validation_plan.tests {
-            by_id.insert(test.id.clone(), test.clone());
+            if is_plausible_test(test) {
+                by_id.insert(test.id.clone(), test.clone());
+            }
         }
 
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
         for result in source_results(primary_context).take(3) {
             for test in selector.for_changed_path_fast(&result.path, MAX_VALIDATION)? {
-                by_id.entry(test.id.clone()).or_insert(test);
+                if is_plausible_test(&test) {
+                    by_id.entry(test.id.clone()).or_insert(test);
+                }
             }
         }
 
-        let mut tests = by_id.into_values().collect::<Vec<_>>();
-        tests.sort_by(|a, b| {
+        let tests = by_id.into_values().collect::<Vec<_>>();
+
+        // Group by file_id to prefer class-like test targets
+        let mut filtered = Vec::new();
+        let mut by_file: BTreeMap<FileId, Vec<TestTarget>> = BTreeMap::new();
+        for test in tests {
+            by_file.entry(test.file_id.clone()).or_default().push(test);
+        }
+        for (_, mut file_tests) in by_file {
+            let has_class_like = file_tests.iter().any(|t| {
+                t.name.len() > 8 
+                    && t.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && t.name.chars().any(|c| c.is_lowercase())
+            });
+            if has_class_like {
+                file_tests.retain(|t| {
+                    t.name.len() > 8 
+                        && t.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && t.name.chars().any(|c| c.is_lowercase())
+                });
+            }
+            filtered.extend(file_tests);
+        }
+
+        filtered.sort_by(|a, b| {
             b.confidence
                 .score()
                 .partial_cmp(&a.confidence.score())
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.name.cmp(&b.name))
         });
-        tests.truncate(MAX_VALIDATION);
-        Ok(tests)
+        filtered.truncate(MAX_VALIDATION);
+        Ok(filtered)
     }
+}
+
+fn is_plausible_test(test: &TestTarget) -> bool {
+    let name = &test.name;
+    // Filter out screaming snake case constants like AD_DOMAIN
+    let is_screaming_snake = name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_numeric())
+        && name.chars().any(|c| c.is_alphabetic());
+    if is_screaming_snake {
+        return false;
+    }
+    
+    // Always keep explicit/confident test names
+    let is_test_named = name.ends_with("Tests") 
+        || name.ends_with("Test")
+        || name.ends_with("IT")
+        || name.ends_with("Spec")
+        || name.starts_with("test")
+        || name.starts_with("test_")
+        || name.contains("Test")
+        || name.contains("test");
+
+    // Keep class-like names (PascalCase with >8 chars)
+    let is_class_like = name.len() > 8 
+        && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        && name.chars().any(|c| c.is_lowercase());
+
+    // Keep snake_case names (like login_returns_valid_token, typical in Rust/Python/Go tests)
+    let is_snake_case_func = name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+        && name.contains('_');
+
+    is_test_named || is_class_like || is_snake_case_func
 }
 
 fn context_has_bounded_impact(context: &ContextPack) -> bool {
@@ -629,6 +698,7 @@ mod tests {
             chunk_count: chunks.len(),
             indexed_at: Utc::now(),
             schema_version: 1,
+            quality: open_kioku_core::IndexQuality::default(),
         };
         store
             .replace_index(IndexData {

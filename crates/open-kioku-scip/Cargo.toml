@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
+open-kioku-config = { version = "1.0.1", path = "../open-kioku-config" }
 open-kioku-core = { version = "1.0.1", path = "../open-kioku-core" }
 open-kioku-errors = { version = "1.0.1", path = "../open-kioku-errors" }
 protobuf = "3.7"

@@ -4,28 +4,48 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::MetadataStore;
+use open_kioku_storage::{MetadataStore, SearchIndex};
 use std::path::Path;
 
 pub struct ImpactEngine<'a> {
     store: &'a dyn MetadataStore,
+    search_index: Option<&'a dyn SearchIndex>,
 }
 
 impl<'a> ImpactEngine<'a> {
     pub fn new(store: &'a dyn MetadataStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            search_index: None,
+        }
+    }
+
+    pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
+        self.search_index = search_index;
+        self
     }
 
     pub fn for_file(&self, path: &Path) -> Result<ImpactReport> {
-        let files = self.store.list_files(usize::MAX, 0)?;
-        let chunks = self.store.all_chunks()?;
-        let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let file = self.store.get_file_by_path(path)?;
+        let target_symbols = if let Some(file) = &file {
+            self.store.symbols_for_file(&file.id)?
+        } else {
+            Vec::new()
+        };
+
         let direct = if let Some(file) = &file {
             let mut direct = Vec::new();
-            for term in impact_terms(path, file, &symbols).into_iter().take(8) {
-                direct.extend(
+            for term in impact_terms(path, file, &target_symbols).into_iter().take(8) {
+                let results = if let Some(index) = self.search_index {
+                    index.search(&term, 25)?
+                } else {
+                    let files = self.store.list_files(usize::MAX, 0)?;
+                    let chunks = self.store.all_chunks()?;
+                    let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
                     search_chunks(&chunks, &files, &symbols, &term, 25)?
+                };
+                direct.extend(
+                    results
                         .into_iter()
                         .filter(|result| result.path != file.path),
                 );
@@ -72,7 +92,14 @@ impl<'a> ImpactEngine<'a> {
             if indirect_stem.is_empty() || indirect_stem.len() < 3 {
                 continue;
             }
-            let second = search_chunks(&chunks, &files, &symbols, indirect_stem, 10)?;
+            let second = if let Some(index) = self.search_index {
+                index.search(indirect_stem, 10)?
+            } else {
+                let files = self.store.list_files(usize::MAX, 0)?;
+                let chunks = self.store.all_chunks()?;
+                let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
+                search_chunks(&chunks, &files, &symbols, indirect_stem, 10)?
+            };
             for result in second {
                 if result.path != path && !direct_paths.contains(&result.path) {
                     indirect.push(result);
@@ -188,7 +215,7 @@ fn is_generic_symbol_name(value: &str) -> bool {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        CodeChunk, File, FileId, IndexManifest, Language, Repository, RepositoryId,
+        CodeChunk, File, FileId, IndexManifest, IndexQuality, Language, Repository, RepositoryId,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -216,6 +243,7 @@ mod tests {
             chunk_count: 2,
             indexed_at: Utc::now(),
             schema_version: 1,
+            quality: IndexQuality::default(),
         };
 
         let f1 = File {

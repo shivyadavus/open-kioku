@@ -1412,6 +1412,7 @@ name = "open-kioku-scip"
 version = "1.0.1"
 dependencies = [
  "chrono",
+ "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
  "protobuf",
