@@ -13,9 +13,9 @@ Semantic search is opt-in. The default MCP path stays lexical and offline; enabl
 
 ```sh
 npm install -g open-kioku
-ok demo --force
-ok --repo ./open-kioku-demo plan token --format markdown
-ok prove ./open-kioku-demo --task token
+ok init /path/to/your/repo
+ok index /path/to/your/repo
+ok mcp install cursor --repo /path/to/your/repo
 ```
 
 The fastest way to see it is the hosted demo: https://shivyadavus.github.io/open-kioku/
@@ -97,6 +97,47 @@ Requires a stable Rust toolchain.
 
 ## Quick Start
 
+### Use It On Your Repository
+
+This is the normal path for Claude Code, Cursor, and other MCP clients:
+
+```sh
+# 1. Install the local ok binary.
+npm install -g open-kioku
+
+# 2. Create ok.toml in the repo you want the agent to understand.
+ok init /absolute/path/to/repo
+
+# 3. Build the local SQLite + Tantivy index.
+ok index /absolute/path/to/repo
+
+# 4. Verify the index and local search are healthy.
+ok doctor /absolute/path/to/repo
+ok --repo /absolute/path/to/repo search "the feature or bug you care about" --limit 5
+
+# 5. Print MCP config for your editor or agent.
+ok mcp install cursor --repo /absolute/path/to/repo
+ok mcp install claude --repo /absolute/path/to/repo
+```
+
+Paste the printed MCP config snippet into Cursor, Claude Code, or any MCP-compatible agent. Open Kioku runs locally over stdio; the default server is read-only.
+
+Then ask your coding agent to use the index before editing:
+
+```text
+Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan first,
+then edit only after the indexed evidence is clear.
+```
+
+For active development, keep the index fresh in another terminal:
+
+```sh
+ok watch /absolute/path/to/repo
+```
+
+### Try The Demo Repo
+
 Create and index the built-in sample repo:
 
 ```sh
@@ -115,6 +156,7 @@ ok --repo ./open-kioku-demo context token --format markdown
 ok --repo ./open-kioku-demo plan token --format markdown
 ok prove ./open-kioku-demo --task token
 ok mcp install cursor --repo ./open-kioku-demo
+ok mcp install claude --repo ./open-kioku-demo
 ```
 
 Use a custom demo path when needed:
@@ -142,6 +184,8 @@ Open Kioku stores local index data inside the target repository:
 `ok doctor` checks the repo path, config, SQLite index, Tantivy index, and running binary, then prints concrete next steps for anything missing.
 
 `ok watch` performs an initial local index and then keeps `.ok/index.sqlite` and `.ok/search/tantivy` current with a debounced reindex when repository files change.
+
+Large repositories should show progress on stderr while indexing. The CLI reports phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`, so a long first index is observable instead of silent.
 
 ## CLI Commands
 
@@ -218,7 +262,7 @@ Print a Cursor config snippet:
 ok mcp install cursor --repo /absolute/path/to/repo
 ```
 
-Those commands print JSON. They do not modify your editor configuration.
+Those commands print a short instruction plus the client-specific JSON snippet. They do not modify your editor configuration.
 
 Example server command:
 
@@ -347,7 +391,7 @@ Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 ## Development
 
 ```sh
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo test -p open-kioku-cli --test cli_smoke

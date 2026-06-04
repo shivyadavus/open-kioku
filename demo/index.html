@@ -722,7 +722,7 @@
         <section class="hero">
             <div class="hero-grid">
                 <div>
-                    <div class="eyebrow"><span class="status-dot"></span> v0.1.4 live on npm and GitHub Releases</div>
+                    <div class="eyebrow"><span class="status-dot"></span> v1.0.0 live on npm and GitHub Releases</div>
                     <h1>Make coding agents stop guessing.</h1>
                     <p class="hero-copy">Open Kioku is the local-first code intelligence layer for Claude, Cursor, and other MCP clients. It indexes your repo once, then gives agents precise search, symbols, impact analysis, tests, and context packs without sending code to a cloud service.</p>
 
@@ -739,8 +739,8 @@
 
                     <div class="hero-proof" aria-label="Open Kioku highlights">
                         <div class="proof-item">
-                            <div class="proof-value">3 calls</div>
-                            <div class="proof-label">demo path from token question to context pack</div>
+                            <div class="proof-value">1 index</div>
+                            <div class="proof-label">local SQLite and Tantivy facts for the repo</div>
                         </div>
                         <div class="proof-item">
                             <div class="proof-value">0 cloud</div>
@@ -761,14 +761,17 @@
                             <span class="control-green"></span>
                         </div>
                         <div class="install-title">install.sh</div>
-                        <button class="copy-button" type="button" data-copy="npm install -g open-kioku" aria-label="Copy npm install command">Copy</button>
+                        <button class="copy-button" type="button" data-copy="npm install -g open-kioku
+ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install and index commands">Copy</button>
                     </div>
                     <div class="install-body">
                         <code class="code-line"><span class="shell-prompt">$</span>npm install -g open-kioku</code>
-                        <code class="code-line"><span class="shell-prompt">$</span>ok demo --force</code>
-                        <code class="code-line"><span class="shell-prompt">$</span>ok prove ./open-kioku-demo --task token</code>
-                        <code class="code-line"><span class="shell-prompt">$</span>ok mcp install claude --repo "$PWD/open-kioku-demo"</code>
-                        <p class="mini-note">The npm wrapper installs the native binary for your platform: macOS, Linux, and Windows packages are published separately.</p>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok init /absolute/path/to/repo</code>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok index /absolute/path/to/repo</code>
+                        <code class="code-line"><span class="shell-prompt">$</span>ok mcp install cursor --repo /absolute/path/to/repo</code>
+                        <p class="mini-note">Paste the printed MCP config snippet into Cursor, Claude Code, or another MCP client. Open Kioku runs locally and is read-only by default.</p>
                         <div class="trust-row" aria-label="Security guarantees">
                             <div class="trust-chip">Local SQLite and Tantivy indexes</div>
                             <div class="trust-chip">MCP stdio transport</div>
@@ -811,7 +814,7 @@
             <div class="section-heading">
                 <div class="section-kicker">Live Workflow</div>
                 <h2>The pre-edit routine agents should run every time.</h2>
-                <p class="section-copy">This is the workflow to show in Cursor, Claude, and short launch videos: install, index, search, inspect impact, then hand the agent a compact context pack from real indexed output.</p>
+                <p class="section-copy">This is the workflow to show in Cursor, Claude, and short launch videos: install, index a real repo, verify the index, connect MCP, then ask the agent to plan from indexed evidence before editing.</p>
             </div>
 
             <div class="terminal">
@@ -821,8 +824,12 @@
                         <span class="control-amber"></span>
                         <span class="control-green"></span>
                     </div>
-                    <div class="terminal-title">ok prove --demo</div>
-                    <button class="copy-button" type="button" data-copy="npx open-kioku demo --force && ok prove ./open-kioku-demo --task token" aria-label="Copy proof demo command">Copy</button>
+                    <div class="terminal-title">ok setup --agent</div>
+                    <button class="copy-button" type="button" data-copy="npm install -g open-kioku
+ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy real repo setup commands">Copy</button>
                 </div>
                 <div class="terminal-body" id="terminal" aria-live="polite"></div>
             </div>
@@ -861,6 +868,39 @@
 
         <section>
             <div class="section-heading">
+                <div class="section-kicker">Real Repo Setup</div>
+                <h2>Index first, then connect your LLM.</h2>
+                <p class="section-copy">Use this path for an existing codebase. The MCP config points your agent at the same local index that the CLI verifies.</p>
+            </div>
+
+            <div class="setup-grid">
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Build and verify the index</div>
+                        <button class="copy-button" type="button" data-copy="ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+ok --repo /absolute/path/to/repo search &quot;feature or bug&quot; --limit 5" aria-label="Copy real repository indexing commands">Copy</button>
+                    </div>
+                    <pre><code>ok init /absolute/path/to/repo
+ok index /absolute/path/to/repo
+ok doctor /absolute/path/to/repo
+ok --repo /absolute/path/to/repo search "feature or bug" --limit 5</code></pre>
+                </div>
+                <div class="setup-block">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Prompt the agent</div>
+                        <button class="copy-button" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan first, then edit only after the indexed evidence is clear." aria-label="Copy recommended agent prompt">Copy</button>
+                    </div>
+                    <pre><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan first,
+then edit only after the indexed evidence is clear.</code></pre>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-heading">
                 <div class="section-kicker">Shareable Proof</div>
                 <h2>Show usefulness without posting source code.</h2>
                 <p class="section-copy">Run `ok prove` on a demo repo or private codebase to produce a Markdown report with indexed counts, task scores, validation signals, and redacted path shapes. The report intentionally omits source snippets.</p>
@@ -888,7 +928,7 @@
             <div class="section-heading">
                 <div class="section-kicker">Connect</div>
                 <h2>Copy-paste setup for Claude and Cursor.</h2>
-                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. The install command prints client-specific configuration for your current repo.</p>
+                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. These commands print client-specific configuration for the indexed repo; they do not edit your client files automatically.</p>
             </div>
 
             <div class="setup-grid">
@@ -935,7 +975,7 @@
 
     <footer class="page">
         <div class="footer-row">
-            <div>Open Kioku v0.1.4 - Local-first code intelligence MCP</div>
+            <div>Open Kioku v1.0.0 - Local-first code intelligence MCP</div>
             <div class="footer-links">
                 <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
                 <a href="https://www.npmjs.com/package/open-kioku">npm</a>
@@ -948,25 +988,24 @@
         const terminal = document.getElementById("terminal");
         const steps = [
             { kind: "note", text: "# Install once. The wrapper pulls the native binary for your OS." },
-            { kind: "cmd", text: "npx open-kioku demo --force" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> created ./open-kioku-demo<br><span class="term-good">[ok]</span> indexed files, symbols, imports, and tests<br><span class="term-muted">local indexes: .ok/index.sqlite + .ok/search/tantivy</span>' },
+            { kind: "cmd", text: "npm install -g open-kioku" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> installed ok 1.0.0<br><span class="term-muted">native packages are published for macOS, Linux, and Windows</span>' },
             { kind: "pause", ms: 900 },
-            { kind: "note", text: "\n# Ask the repo for token evidence before editing." },
-            { kind: "cmd", text: "ok --repo ./open-kioku-demo search token --limit 5" },
-            { kind: "out", html: '<span class="term-strong">src/auth.rs</span>: validate_token(token)<br><span class="term-strong">tests/auth_flow.rs</span>: login_returns_valid_token()<br><span class="term-strong">src/auth.rs</span>: issue_token(context, ttl_seconds)<br><span class="term-warn">evidence:</span> BM25 lexical match from local Tantivy index' },
+            { kind: "note", text: "\n# Initialize and index the repo your agent will edit." },
+            { kind: "cmd", text: "ok init /work/acme-api" },
+            { kind: "cmd", text: "ok index /work/acme-api" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> scan -> parse -> occurrences -> store -> graph -> search -> complete<br><span class="term-good">[ok]</span> indexed files, symbols, imports, occurrences, and tests<br><span class="term-muted">local indexes: .ok/index.sqlite + .ok/search/tantivy</span>' },
             { kind: "pause", ms: 900 },
-            { kind: "cmd", text: "ok --repo ./open-kioku-demo impact --file src/auth.rs" },
-            { kind: "out", html: '<span class="term-good">direct</span> src/lib.rs: pub mod auth<br><span class="term-good">direct</span> src/lib.rs: handle_login calls auth::issue_token<br><span class="term-good">direct</span> tests/auth_flow.rs: auth::validate_token<br><span class="term-muted">risk: low; derived from indexed symbols and lexical references</span>' },
+            { kind: "cmd", text: "ok doctor /work/acme-api" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> config found<br><span class="term-good">[ok]</span> SQLite index ready<br><span class="term-good">[ok]</span> Tantivy search index ready<br><span class="term-muted">repo is ready for CLI and MCP queries</span>' },
             { kind: "pause", ms: 900 },
-            { kind: "cmd", text: "ok --repo ./open-kioku-demo plan token --format markdown" },
-            { kind: "out", html: '<span class="term-strong">Plan ready</span><br>1. primary context: tests/auth_flow.rs, src/auth.rs, src/lib.rs<br>2. impact candidates: src/lib.rs, tests/auth_flow.rs<br>3. validation candidates: login_returns_valid_token, issues_token_with_user_id<br>4. agent calls: search_code, impact_analysis, build_context_pack, find_tests_for_change<br><span class="term-good">agent has indexed evidence before it edits</span>' },
-            { kind: "pause", ms: 1000 },
-            { kind: "cmd", text: "ok prove ./open-kioku-demo --task token" },
-            { kind: "out", html: '<span class="term-strong">Open Kioku Proof</span><br>indexed files, symbols, and chunks<br>task score: grounded context, impact, validation, risk, and tool calls<br><span class="term-muted">source snippets included: false; path mode: redacted_shapes</span>' },
+            { kind: "cmd", text: "ok --repo /work/acme-api plan \"change token expiration\" --format markdown" },
+            { kind: "out", html: '<span class="term-strong">Plan ready</span><br>1. primary context: src/auth.rs, tests/auth_flow.rs<br>2. impact candidates and edit boundary<br>3. validation candidates: auth flow tests<br>4. agent calls: search_code, get_definition, impact_analysis, build_context_pack<br><span class="term-good">agent has indexed evidence before it edits</span>' },
             { kind: "pause", ms: 1000 },
             { kind: "note", text: "\n# Connect the same workflow to your coding agent." },
-            { kind: "cmd", text: "ok mcp install cursor --repo ./open-kioku-demo" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> generated Cursor MCP config<br><span class="term-good">[ok]</span> stable tools: search_code, plan_change, get_definition, get_references, impact_analysis, build_context_pack<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
+            { kind: "cmd", text: "ok mcp install cursor --repo /work/acme-api" },
+            { kind: "cmd", text: "ok mcp install claude --repo /work/acme-api" },
+            { kind: "out", html: '<span class="term-good">[ok]</span> printed MCP config for Cursor and Claude Code<br><span class="term-good">[ok]</span> stable tools: repo_status, search_code, get_definition, get_references, impact_analysis, plan_change<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
         ];
 
         let running = false;
