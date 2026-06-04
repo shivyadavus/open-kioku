@@ -42,13 +42,21 @@ pub trait MetadataStore: Send + Sync {
         let lower_pattern = pattern.to_ascii_lowercase();
         Ok(files
             .into_iter()
-            .filter(|f| f.path.to_string_lossy().to_ascii_lowercase().contains(&lower_pattern))
+            .filter(|f| {
+                f.path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(&lower_pattern)
+            })
             .collect())
     }
     fn tests_for_files(&self, file_ids: &[FileId]) -> Result<Vec<TestTarget>> {
         let tests = self.tests()?;
         let set = file_ids.iter().collect::<std::collections::HashSet<_>>();
-        Ok(tests.into_iter().filter(|t| set.contains(&t.file_id)).collect())
+        Ok(tests
+            .into_iter()
+            .filter(|t| set.contains(&t.file_id))
+            .collect())
     }
 }
 

@@ -1,4 +1,6 @@
-use open_kioku_core::{Symbol, SymbolId, SymbolKind, SymbolOccurrence, Confidence, EvidenceSourceType};
+use open_kioku_core::{
+    Confidence, EvidenceSourceType, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
+};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
 

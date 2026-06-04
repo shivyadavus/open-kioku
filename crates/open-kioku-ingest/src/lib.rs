@@ -67,15 +67,19 @@ impl Indexer {
     {
         let root = root.as_ref().canonicalize()?;
         let repo_id = RepositoryId::new(stable_id(root.to_string_lossy().as_ref()));
-        let build_hint: Option<String> = if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
-            Some("gradle".to_string())
-        } else if root.join("pom.xml").exists() {
-            Some("maven".to_string())
-        } else if root.join("WORKSPACE").exists() || root.join("BUILD.bazel").exists() || root.join("BUILD").exists() {
-            Some("bazel".to_string())
-        } else {
-            None
-        };
+        let build_hint: Option<String> =
+            if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
+                Some("gradle".to_string())
+            } else if root.join("pom.xml").exists() {
+                Some("maven".to_string())
+            } else if root.join("WORKSPACE").exists()
+                || root.join("BUILD.bazel").exists()
+                || root.join("BUILD").exists()
+            {
+                Some("bazel".to_string())
+            } else {
+                None
+            };
         let files = self.scan_files(&root, config, &repo_id, &on_progress)?;
         on_progress(IndexProgress {
             phase: "parse",
@@ -89,7 +93,9 @@ impl Indexer {
             .map(|file| -> Result<_> {
                 let bytes = fs::read(root.join(&file.path))?;
                 let content = String::from_utf8_lossy(&bytes).into_owned();
-                let parsed = self.parser.parse_with_hint(file, &content, build_hint.as_deref());
+                let parsed = self
+                    .parser
+                    .parse_with_hint(file, &content, build_hint.as_deref());
                 let indexed_files = parsed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if should_emit_progress(indexed_files, files.len()) {
                     on_progress(IndexProgress {

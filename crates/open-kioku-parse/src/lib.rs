@@ -329,7 +329,12 @@ pub fn extract_chunks(file: &File, content: &str, symbols: &[Symbol]) -> Vec<Cod
     chunks
 }
 
-pub fn extract_tests(file: &File, content: &str, symbols: &[Symbol], build_hint: Option<&str>) -> Vec<TestTarget> {
+pub fn extract_tests(
+    file: &File,
+    content: &str,
+    symbols: &[Symbol],
+    build_hint: Option<&str>,
+) -> Vec<TestTarget> {
     let path = file.path.to_string_lossy().to_ascii_lowercase();
     let is_test_file = path.contains("/test/")
         || path.contains("/tests/")
@@ -380,7 +385,11 @@ fn stable_id(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn recommended_command(language: &Language, path: &str, build_hint: Option<&str>) -> Option<String> {
+fn recommended_command(
+    language: &Language,
+    path: &str,
+    build_hint: Option<&str>,
+) -> Option<String> {
     match (language, build_hint) {
         (Language::Java, Some("gradle")) => Some("./gradlew test".into()),
         (Language::Java, Some("bazel")) => Some("bazel test //...".into()),
