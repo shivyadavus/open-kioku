@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
-    ChangeBoundary, Confidence, ContextPack, Evidence, EvidenceId, EvidenceSourceType, GraphEdge,
-    RiskReport, SearchResult, ValidationPlan,
+    ChangeBoundary, CodeChunk, Confidence, ContextPack, Evidence, EvidenceId, EvidenceSourceType,
+    File, GraphEdge, RiskReport, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -15,12 +15,14 @@ pub enum ContextPackFormat {
     Json,
     Markdown,
     PromptText,
+    Toon,
 }
 
 impl ContextPackFormat {
     pub fn render(&self, pack: &ContextPack) -> Result<String> {
         match self {
             Self::Json => Ok(serde_json::to_string_pretty(pack)?),
+            Self::Toon => Ok(open_kioku_format::render_context_pack_toon(pack)),
             Self::Markdown => {
                 let mut out = String::new();
                 out.push_str(&format!("# Task: {}\n\n", pack.task));
@@ -83,7 +85,11 @@ impl<'a> ContextPackBuilder<'a> {
         let files = self.store.list_files(usize::MAX, 0)?;
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
-        let primary = rerank(search_chunks(&chunks, &files, &symbols, task, limit)?);
+        let intent = TaskSearchIntent::parse(task);
+        let primary = rerank_for_task(
+            search_candidates(&chunks, &files, &symbols, task, limit, &intent)?,
+            &intent,
+        );
         self.build_from_primary_with_impact(task, limit, primary, true)
     }
 
@@ -193,9 +199,288 @@ impl<'a> ContextPackBuilder<'a> {
                 evidence: evidence.clone(),
             },
             evidence,
-            confidence_summary: "ranked from lexical matches, symbol extraction, test heuristics, and impact analysis".into(),
+            confidence_summary: "ranked from lexical matches, task anchors, symbol extraction, test heuristics, and impact analysis".into(),
         })
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TaskSearchIntent {
+    primary_anchors: Vec<String>,
+    reference_anchors: Vec<String>,
+    ticket_anchors: Vec<String>,
+    path_anchors: Vec<String>,
+}
+
+impl TaskSearchIntent {
+    fn parse(task: &str) -> Self {
+        let mut intent = Self::default();
+        let lower = task.to_ascii_lowercase();
+        let reference_start = reference_marker_start(&lower).unwrap_or(task.len());
+        let edit_side = task.get(..reference_start).unwrap_or(task);
+        let reference_side = task.get(reference_start..).unwrap_or_default();
+        let all_identifiers = identifiers(task);
+
+        intent.primary_anchors = identifiers(edit_side);
+        intent.reference_anchors = identifiers(reference_side);
+        if intent.primary_anchors.is_empty() {
+            if let Some(first) = all_identifiers.first() {
+                intent.primary_anchors.push(first.clone());
+            }
+        }
+        for value in all_identifiers {
+            if !intent.primary_anchors.contains(&value)
+                && !intent.reference_anchors.contains(&value)
+            {
+                intent.reference_anchors.push(value);
+            }
+        }
+
+        for token in task.split_whitespace() {
+            let cleaned = token.trim_matches(|ch: char| {
+                !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '/' || ch == '.')
+            });
+            if is_ticket_id(cleaned) && !intent.ticket_anchors.iter().any(|v| v == cleaned) {
+                intent.ticket_anchors.push(cleaned.to_string());
+            }
+            if is_path_like(cleaned) {
+                let normalized = cleaned.trim_matches('/');
+                if !normalized.is_empty() && !intent.path_anchors.iter().any(|v| v == normalized) {
+                    intent.path_anchors.push(normalized.to_string());
+                }
+            }
+        }
+
+        intent
+    }
+
+    fn search_terms(&self, task: &str) -> Vec<String> {
+        let mut terms = vec![task.to_string()];
+        for term in self
+            .ticket_anchors
+            .iter()
+            .chain(self.path_anchors.iter())
+            .chain(self.primary_anchors.iter())
+            .chain(self.reference_anchors.iter())
+        {
+            if term.len() >= 3 && !terms.iter().any(|existing| existing == term) {
+                terms.push(term.clone());
+            }
+        }
+        terms
+    }
+}
+
+fn search_candidates(
+    chunks: &[CodeChunk],
+    files: &[File],
+    symbols: &[Symbol],
+    task: &str,
+    limit: usize,
+    intent: &TaskSearchIntent,
+) -> Result<Vec<SearchResult>> {
+    let mut merged = std::collections::BTreeMap::<String, SearchResult>::new();
+    let per_anchor_limit = limit.clamp(8, 40);
+    for term in intent.search_terms(task) {
+        for mut result in search_chunks(chunks, files, symbols, &term, per_anchor_limit)? {
+            if term != task {
+                result
+                    .evidence
+                    .push(format!("task anchor `{term}` matched"));
+                result.match_reason = format!("{}; task anchor `{term}`", result.match_reason);
+            }
+            let key = result_key(&result);
+            match merged.get_mut(&key) {
+                Some(existing) => {
+                    if result.score > existing.score {
+                        existing.score = result.score;
+                        existing.snippet = result.snippet;
+                        existing.line_range = result.line_range;
+                        existing.symbol = result.symbol;
+                    }
+                    for evidence in result.evidence {
+                        if !existing.evidence.contains(&evidence) {
+                            existing.evidence.push(evidence);
+                        }
+                    }
+                    if !existing.match_reason.contains(&term) {
+                        existing.match_reason =
+                            format!("{}; task anchor `{term}`", existing.match_reason);
+                    }
+                }
+                None => {
+                    merged.insert(key, result);
+                }
+            }
+        }
+    }
+
+    Ok(merged.into_values().collect())
+}
+
+fn rerank_for_task(results: Vec<SearchResult>, intent: &TaskSearchIntent) -> Vec<SearchResult> {
+    let mut results = rerank(results);
+    for result in &mut results {
+        let haystack = searchable_result_text(result);
+        for anchor in &intent.primary_anchors {
+            if contains_anchor(&haystack, anchor) {
+                result.score += 0.65;
+                result.confidence = result.confidence.max(0.85);
+                result
+                    .evidence
+                    .push(format!("primary task anchor `{anchor}` matched"));
+            }
+        }
+        for anchor in &intent.reference_anchors {
+            if contains_anchor(&haystack, anchor) {
+                result.score += 0.25;
+                result.confidence = result.confidence.max(0.65);
+                result
+                    .evidence
+                    .push(format!("reference task anchor `{anchor}` matched"));
+            }
+        }
+        for anchor in intent
+            .ticket_anchors
+            .iter()
+            .chain(intent.path_anchors.iter())
+        {
+            if contains_anchor(&haystack, anchor) {
+                result.score += 0.35;
+                result.confidence = result.confidence.max(0.75);
+                result
+                    .evidence
+                    .push(format!("ticket/path task anchor `{anchor}` matched"));
+            }
+        }
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results
+}
+
+fn result_key(result: &SearchResult) -> String {
+    format!(
+        "{}:{}-{}",
+        result.path.display(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.start)
+            .unwrap_or_default(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    )
+}
+
+fn searchable_result_text(result: &SearchResult) -> String {
+    format!(
+        "{} {} {} {}",
+        result.path.display(),
+        result.snippet,
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .unwrap_or_default(),
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.name.as_str())
+            .unwrap_or_default()
+    )
+    .to_ascii_lowercase()
+}
+
+fn contains_anchor(haystack: &str, anchor: &str) -> bool {
+    haystack.contains(&anchor.to_ascii_lowercase())
+        || haystack.contains(&normalize_identifier(anchor))
+}
+
+fn reference_marker_start(lower: &str) -> Option<usize> {
+    [
+        " similar to ",
+        " like ",
+        " copy from ",
+        " copied from ",
+        " mirror ",
+        " mirrored from ",
+        " based on ",
+        " reference ",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()
+}
+
+fn identifiers(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in value.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
+        let token = token.trim_matches('-');
+        if is_named_identifier(token) && !out.iter().any(|existing| existing == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+fn is_named_identifier(value: &str) -> bool {
+    if value.len() < 3 || is_ticket_id(value) {
+        return false;
+    }
+    let has_lower = value.chars().any(|ch| ch.is_ascii_lowercase());
+    let has_upper = value.chars().any(|ch| ch.is_ascii_uppercase());
+    let has_digit = value.chars().any(|ch| ch.is_ascii_digit());
+    let has_separator = value.contains('_') || value.contains('-');
+    (has_lower && has_upper) || has_separator || (has_digit && has_upper)
+}
+
+fn is_ticket_id(value: &str) -> bool {
+    let Some((prefix, number)) = value.split_once('-') else {
+        return false;
+    };
+    prefix.len() >= 2
+        && prefix.chars().all(|ch| ch.is_ascii_uppercase())
+        && number.len() >= 2
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_path_like(value: &str) -> bool {
+    value.contains('/')
+        || value.ends_with(".rs")
+        || value.ends_with(".ts")
+        || value.ends_with(".tsx")
+        || value.ends_with(".js")
+        || value.ends_with(".jsx")
+        || value.ends_with(".java")
+        || value.ends_with(".py")
+        || value.ends_with(".go")
+        || value.ends_with(".md")
+}
+
+fn normalize_identifier(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == '/' || ch == '.' {
+            out.push(' ');
+            previous_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lower_or_digit {
+            out.push(' ');
+        }
+        out.push(ch.to_ascii_lowercase());
+        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn classify_intent(task: &str) -> &'static str {
@@ -258,5 +543,96 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
                     .into(),
             indexed_at: Utc::now(),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_kioku_core::{FileId, Language, LineRange, RepositoryId, SymbolId, SymbolKind};
+    use std::path::Path;
+
+    #[test]
+    fn primary_edit_anchor_outranks_reference_pattern_anchor() {
+        let repo_id = RepositoryId::new("repo");
+        let mutation_file = File {
+            id: FileId::new("mutation"),
+            repository_id: repo_id.clone(),
+            path: "src/PublishRestrictionsMutation.java".into(),
+            language: Language::Java,
+            size_bytes: 100,
+            content_hash: "mutation".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let validator_file = File {
+            id: FileId::new("validator"),
+            repository_id: repo_id,
+            path: "src/EnterpriseRateValidator.java".into(),
+            language: Language::Java,
+            size_bytes: 100,
+            content_hash: "validator".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let mutation_symbol = Symbol {
+            id: SymbolId::new("mutation-symbol"),
+            name: "PublishRestrictionsMutation".into(),
+            qualified_name: "api.PublishRestrictionsMutation".into(),
+            kind: SymbolKind::Class,
+            file_id: mutation_file.id.clone(),
+            range: Some(LineRange { start: 1, end: 20 }),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let validator_symbol = Symbol {
+            id: SymbolId::new("validator-symbol"),
+            name: "EnterpriseRateValidator".into(),
+            qualified_name: "api.EnterpriseRateValidator".into(),
+            kind: SymbolKind::Class,
+            file_id: validator_file.id.clone(),
+            range: Some(LineRange { start: 1, end: 20 }),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "mutation-chunk".into(),
+                file_id: mutation_file.id.clone(),
+                range: LineRange { start: 1, end: 10 },
+                language: Language::Java,
+                text: "class PublishRestrictionsMutation { void mutate() {} }".into(),
+                symbol_id: Some(mutation_symbol.id.clone()),
+            },
+            CodeChunk {
+                id: "validator-chunk".into(),
+                file_id: validator_file.id.clone(),
+                range: LineRange { start: 1, end: 10 },
+                language: Language::Java,
+                text: "class EnterpriseRateValidator { boolean validate() { return true; } }"
+                    .into(),
+                symbol_id: Some(validator_symbol.id.clone()),
+            },
+        ];
+        let files = vec![mutation_file, validator_file];
+        let symbols = vec![mutation_symbol, validator_symbol];
+        let task =
+            "add validation in PublishRestrictionsMutation similar to EnterpriseRateValidator";
+        let intent = TaskSearchIntent::parse(task);
+        let results = rerank_for_task(
+            search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
+            &intent,
+        );
+
+        assert_eq!(
+            results[0].path,
+            Path::new("src/PublishRestrictionsMutation.java")
+        );
+        assert!(results[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("primary task anchor")));
     }
 }

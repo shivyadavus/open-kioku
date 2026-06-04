@@ -33,8 +33,8 @@ Open Kioku is intended to give Claude Code, Cursor, and other MCP clients a repe
 
 ```text
 Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan first,
-then edit only after the indexed evidence is clear.
+get_references, impact_analysis, search_memory, and find_tests_for_change.
+Build a plan first, then edit only after the indexed evidence is clear.
 ```
 
 A good default tool sequence is:
@@ -43,31 +43,36 @@ A good default tool sequence is:
 2. `search_code` and `search_symbols`: locate candidate files and symbols.
 3. `get_definition`, `get_references`, and `get_symbol_context`: resolve the important code facts.
 4. `impact_analysis`: identify direct and indirect dependents.
-5. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
-6. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing.
+5. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
+6. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
+7. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing. Use `format: "toon"` when the result is going straight into an LLM prompt and `format: "json"` when another tool needs structured data.
+8. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
 
-By default these tools are read-only. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
+By default these tools are source-tree read-only. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
 
-## Read Tools
+## Source-Read Tools
 
-The read-only tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
+The source-read tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
 
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, and patch boundaries for an AI task into a single compressed `ContextPack`.
-- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls.
+- `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
+- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
 - `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files and an overall risk score.
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
 - `architecture_violations`: Detects and reports architecture boundary violations based on package and module heuristics.
 
 Each tool returned by `tools/list` includes a `maturity` field. Stable tools are intended for default agent use. Experimental tools are exposed for early workflows but may rely on heuristic or fallback behavior.
 
-Stable read-only tools:
+Stable source-read tools:
 
 - `repo_status`, `list_files`, `list_languages`, `list_symbols`
 - `detect_architecture`, `architecture_boundaries`, `architecture_violations`, `summarize_architecture`
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
 - `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `plan_change`, `explain_file`, `explain_symbol`
+- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `explain_file`, `explain_symbol`
+- `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
 - `propose_patch`, `review_patch`, `validate_patch`
 

@@ -1,0 +1,423 @@
+use open_kioku_core::{
+    CompressedContextPack, ContextHandle, ContextPack, Evidence, LineRange, MemorySearchResult,
+    PlanReport, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+};
+use std::path::PathBuf;
+
+pub fn render_context_pack_toon(pack: &ContextPack) -> String {
+    let mut out = String::new();
+    push_kv(&mut out, 0, "format", "toon");
+    push_kv(&mut out, 0, "type", "context_pack");
+    push_kv(&mut out, 0, "task", &pack.task);
+    push_kv(&mut out, 0, "intent", &pack.intent);
+    push_kv(&mut out, 0, "confidence_summary", &pack.confidence_summary);
+    push_search_results(&mut out, "primary_context", &pack.primary_files);
+    push_search_results(&mut out, "supporting_impact", &pack.supporting_files);
+    push_tests(&mut out, "validation", &pack.validation_plan.tests);
+    push_path_list(
+        &mut out,
+        "allowed_files",
+        &pack.recommended_change_boundary.allowed_files,
+    );
+    push_evidence(&mut out, &pack.evidence);
+    out
+}
+
+pub fn render_compressed_context_toon(pack: &CompressedContextPack) -> String {
+    let mut out = String::new();
+    push_kv(&mut out, 0, "format", "toon");
+    push_kv(&mut out, 0, "type", "compressed_context_pack");
+    push_kv(&mut out, 0, "task", &pack.task);
+    push_kv(&mut out, 0, "summary", &pack.summary);
+    out.push_str("metrics:\n");
+    push_kv(
+        &mut out,
+        1,
+        "original_tokens_estimate",
+        pack.original_tokens_estimate,
+    );
+    push_kv(
+        &mut out,
+        1,
+        "compressed_tokens_estimate",
+        pack.compressed_tokens_estimate,
+    );
+    push_kv(
+        &mut out,
+        1,
+        "compression_ratio",
+        format!("{:.3}", pack.compression_ratio),
+    );
+    push_context_handles(&mut out, &pack.handles);
+    push_evidence(&mut out, &pack.evidence);
+    out
+}
+
+pub fn render_plan_toon(report: &PlanReport) -> String {
+    let mut out = String::new();
+    push_kv(&mut out, 0, "format", "toon");
+    push_kv(&mut out, 0, "type", "plan_report");
+    push_kv(&mut out, 0, "task", &report.task);
+    push_kv(&mut out, 0, "summary", &report.summary);
+    out.push_str("risk:\n");
+    push_kv(&mut out, 1, "level", &report.risk.level);
+    push_kv(&mut out, 1, "score", format!("{:.2}", report.risk.score));
+    push_string_list(&mut out, 1, "reasons", &report.risk.reasons);
+    push_search_results(&mut out, "primary_context", &report.primary_context);
+    push_symbols(&mut out, &report.relevant_symbols);
+    push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
+    push_search_results(&mut out, "impact_indirect", &report.impact.indirect_impacts);
+    push_tests(&mut out, "validation", &report.validation);
+    push_memory(&mut out, &report.memory_facts);
+    push_path_list(
+        &mut out,
+        "allowed_files",
+        &report.recommended_change_boundary.allowed_files,
+    );
+    push_path_list(
+        &mut out,
+        "caution_files",
+        &report.recommended_change_boundary.caution_files,
+    );
+    push_string_list(&mut out, 0, "next_steps", &report.recommended_next_steps);
+    push_tool_calls(&mut out, &report.tool_calls);
+    push_evidence(&mut out, &report.evidence);
+    push_kv(
+        &mut out,
+        0,
+        "confidence_summary",
+        &report.confidence_summary,
+    );
+    out
+}
+
+fn push_search_results(out: &mut String, name: &str, results: &[SearchResult]) {
+    out.push_str(&format!(
+        "{name}[{}]{{path,lines,score,reason,symbol,summary}}:\n",
+        results.len()
+    ));
+    for result in results {
+        let symbol = result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .unwrap_or("");
+        push_row(
+            out,
+            &[
+                result.path.display().to_string(),
+                line_range(&result.line_range),
+                format!("{:.3}", result.score),
+                result.match_reason.clone(),
+                symbol.to_string(),
+                one_line(&result.snippet),
+            ],
+        );
+    }
+}
+
+fn push_context_handles(out: &mut String, handles: &[ContextHandle]) {
+    out.push_str(&format!(
+        "handles[{}]{{id,kind,path,lines,original_tokens,compressed_tokens,entities,summary}}:\n",
+        handles.len()
+    ));
+    for handle in handles {
+        let (path, lines) = handle
+            .file_range
+            .as_ref()
+            .map(|range| {
+                (
+                    range.path.display().to_string(),
+                    line_range(&range.line_range),
+                )
+            })
+            .unwrap_or_else(|| ("".into(), "".into()));
+        let entities = handle
+            .entities
+            .iter()
+            .take(6)
+            .map(|entity| format!("{}:{}", entity.kind, entity.value))
+            .collect::<Vec<_>>()
+            .join(",");
+        push_row(
+            out,
+            &[
+                handle.id.0.clone(),
+                handle.kind.clone(),
+                path,
+                lines,
+                handle.original_tokens_estimate.to_string(),
+                handle.compressed_tokens_estimate.to_string(),
+                entities,
+                handle.summary.clone(),
+            ],
+        );
+    }
+}
+
+fn push_symbols(out: &mut String, symbols: &[Symbol]) {
+    out.push_str(&format!(
+        "relevant_symbols[{}]{{name,qualified_name,kind,file_id,lines}}:\n",
+        symbols.len()
+    ));
+    for symbol in symbols {
+        push_row(
+            out,
+            &[
+                symbol.name.clone(),
+                symbol.qualified_name.clone(),
+                format!("{:?}", symbol.kind),
+                symbol.file_id.0.clone(),
+                line_range(&symbol.range),
+            ],
+        );
+    }
+}
+
+fn push_tests(out: &mut String, name: &str, tests: &[TestTarget]) {
+    out.push_str(&format!(
+        "{name}[{}]{{name,command,confidence,reason}}:\n",
+        tests.len()
+    ));
+    for test in tests {
+        push_row(
+            out,
+            &[
+                test.name.clone(),
+                test.command
+                    .clone()
+                    .unwrap_or_else(|| "manual validation".into()),
+                format!("{:?}", test.confidence),
+                test.reason.clone(),
+            ],
+        );
+    }
+}
+
+fn push_memory(out: &mut String, facts: &[MemorySearchResult]) {
+    out.push_str(&format!(
+        "memory_facts[{}]{{id,score,source,confidence,text}}:\n",
+        facts.len()
+    ));
+    for result in facts {
+        push_row(
+            out,
+            &[
+                result.fact.id.0.clone(),
+                format!("{:.3}", result.score),
+                result.fact.source.clone(),
+                format!("{:?}", result.fact.confidence),
+                result.fact.text.clone(),
+            ],
+        );
+    }
+}
+
+fn push_tool_calls(out: &mut String, calls: &[ToolCallRecommendation]) {
+    out.push_str(&format!(
+        "tool_calls[{}]{{tool,purpose,arguments_json}}:\n",
+        calls.len()
+    ));
+    for call in calls {
+        push_row(
+            out,
+            &[
+                call.tool.clone(),
+                call.purpose.clone(),
+                serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into()),
+            ],
+        );
+    }
+}
+
+fn push_evidence(out: &mut String, evidence: &[Evidence]) {
+    out.push_str(&format!(
+        "evidence[{}]{{id,source,confidence,message}}:\n",
+        evidence.len()
+    ));
+    for item in evidence {
+        push_row(
+            out,
+            &[
+                item.id.0.clone(),
+                item.source.clone(),
+                format!("{:?}", item.confidence),
+                item.message.clone(),
+            ],
+        );
+    }
+}
+
+fn push_path_list(out: &mut String, name: &str, paths: &[PathBuf]) {
+    out.push_str(&format!("{name}[{}]{{path}}:\n", paths.len()));
+    for path in paths {
+        push_row(out, &[path.display().to_string()]);
+    }
+}
+
+fn push_string_list(out: &mut String, indent: usize, name: &str, values: &[String]) {
+    out.push_str(&format!(
+        "{}{name}[{}]{{text}}:\n",
+        "  ".repeat(indent),
+        values.len()
+    ));
+    for value in values {
+        out.push_str(&"  ".repeat(indent + 1));
+        out.push_str(&cell(value));
+        out.push('\n');
+    }
+}
+
+fn push_kv(out: &mut String, indent: usize, key: &str, value: impl ToString) {
+    out.push_str(&"  ".repeat(indent));
+    out.push_str(key);
+    out.push_str(": ");
+    out.push_str(&scalar(&value.to_string()));
+    out.push('\n');
+}
+
+fn push_row(out: &mut String, cells: &[String]) {
+    out.push_str("  ");
+    out.push_str(
+        &cells
+            .iter()
+            .map(|value| cell(value))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+    out.push('\n');
+}
+
+fn scalar(value: &str) -> String {
+    let value = clean(value);
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, ':' | '|' | ',' | '{' | '}' | '[' | ']'))
+    {
+        serde_json::to_string(&value).unwrap_or_else(|_| "\"\"".into())
+    } else {
+        value
+    }
+}
+
+fn cell(value: &str) -> String {
+    clean(value)
+        .replace('|', "\\|")
+        .replace(',', "\\,")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+}
+
+fn clean(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn one_line(value: &str) -> String {
+    let line = clean(value);
+    const MAX: usize = 220;
+    if line.len() <= MAX {
+        line
+    } else {
+        format!("{}...", line.chars().take(MAX).collect::<String>())
+    }
+}
+
+fn line_range(range: &Option<LineRange>) -> String {
+    range
+        .as_ref()
+        .map(|range| format!("{}-{}", range.start, range.end))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use open_kioku_core::{
+        ChangeBoundary, Confidence, ContextHandleId, EvidenceId, EvidenceSourceType, FileRange,
+        ImpactReport, RiskReport,
+    };
+
+    #[test]
+    fn renders_compressed_context_as_columnar_toon() {
+        let pack = CompressedContextPack {
+            task: "fix token auth".into(),
+            summary: "1 handle".into(),
+            handles: vec![ContextHandle {
+                id: ContextHandleId::new("ctx:abc"),
+                kind: "primary".into(),
+                summary: "primary auth.rs:1-3 issue_token".into(),
+                file_range: Some(FileRange {
+                    path: "src/auth.rs".into(),
+                    line_range: Some(LineRange { start: 1, end: 3 }),
+                }),
+                entities: Vec::new(),
+                original_tokens_estimate: 40,
+                compressed_tokens_estimate: 8,
+            }],
+            original_tokens_estimate: 40,
+            compressed_tokens_estimate: 8,
+            compression_ratio: 0.2,
+            evidence: Vec::new(),
+        };
+
+        let rendered = render_compressed_context_toon(&pack);
+
+        assert!(rendered.contains("type: compressed_context_pack"));
+        assert!(rendered.contains("handles[1]{id,kind,path,lines"));
+        assert!(rendered.contains("ctx:abc | primary | src/auth.rs | 1-3"));
+    }
+
+    #[test]
+    fn renders_plan_without_repeating_record_keys() {
+        let report = PlanReport {
+            task: "fix token auth".into(),
+            summary: "Found context".into(),
+            primary_context: Vec::new(),
+            relevant_symbols: Vec::new(),
+            impact: ImpactReport {
+                target: "src/auth.rs".into(),
+                direct_impacts: Vec::new(),
+                indirect_impacts: Vec::new(),
+                risk_report: RiskReport {
+                    level: "low".into(),
+                    score: 0.1,
+                    reasons: Vec::new(),
+                },
+                evidence: Vec::new(),
+            },
+            validation: Vec::new(),
+            risk: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: vec!["bounded".into()],
+            },
+            recommended_change_boundary: ChangeBoundary {
+                allowed_files: vec!["src/auth.rs".into()],
+                caution_files: Vec::new(),
+                forbidden_files: Vec::new(),
+            },
+            recommended_next_steps: vec!["Inspect context".into()],
+            tool_calls: Vec::new(),
+            memory_facts: Vec::new(),
+            evidence: vec![Evidence {
+                id: EvidenceId::new("ev"),
+                source: "test".into(),
+                source_type: EvidenceSourceType::Heuristic,
+                file_range: None,
+                symbol_id: None,
+                confidence: Confidence::Medium,
+                message: "rendered".into(),
+                indexed_at: Utc::now(),
+            }],
+            confidence_summary: "test".into(),
+        };
+
+        let rendered = render_plan_toon(&report);
+
+        assert!(rendered.contains("type: plan_report"));
+        assert!(rendered.contains("primary_context[0]{path,lines,score,reason,symbol,summary}:"));
+        assert!(rendered.contains("allowed_files[1]{path}:"));
+    }
+}

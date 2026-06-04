@@ -1,8 +1,8 @@
 [package]
-name = "open-kioku-languages"
+name = "open-kioku-format"
 version.workspace = true
 edition.workspace = true
-description = "Language detection and metadata for Open Kioku."
+description = "Prompt-oriented renderers for Open Kioku reports."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -12,4 +12,7 @@ categories.workspace = true
 
 [dependencies]
 open-kioku-core = { version = "1.0.3", path = "../open-kioku-core" }
+serde_json.workspace = true
 
+[dev-dependencies]
+chrono.workspace = true

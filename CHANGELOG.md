@@ -5,6 +5,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [1.0.3] — 2026-06-04
+
+### Added
+- Added repo-scoped memory facts with local append-only storage and MCP/CLI recall.
+- Added reversible compressed context handles with local original retrieval.
+- Added optional TOON output for context packs, compressed context packs, and pre-edit plans.
+
+### Changed
+- Improved task-anchor planning, impact evidence, test selection, and low-confidence risk reporting.
+- Updated MCP tool schemas and docs for memory, compressed context, and TOON prompt handoff.
+
+---
+
 ## [1.0.1] — 2026-06-04
 
 ### Changed
@@ -75,6 +88,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[1.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.3
 [1.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.1
 [1.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.0
 [0.1.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.4

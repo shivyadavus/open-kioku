@@ -33,6 +33,8 @@ id_type!(NodeId);
 id_type!(EdgeId);
 id_type!(PatchId);
 id_type!(EvidenceId);
+id_type!(MemoryFactId);
+id_type!(ContextHandleId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -386,6 +388,54 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EntityLink {
+    pub kind: String,
+    pub value: String,
+    pub file_range: Option<FileRange>,
+    pub confidence: Confidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryFact {
+    pub id: MemoryFactId,
+    pub text: String,
+    pub source: String,
+    pub confidence: Confidence,
+    pub entities: Vec<EntityLink>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MemorySearchResult {
+    pub fact: MemoryFact,
+    pub score: f32,
+    pub match_reason: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextHandle {
+    pub id: ContextHandleId,
+    pub kind: String,
+    pub summary: String,
+    pub file_range: Option<FileRange>,
+    pub entities: Vec<EntityLink>,
+    pub original_tokens_estimate: usize,
+    pub compressed_tokens_estimate: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompressedContextPack {
+    pub task: String,
+    pub summary: String,
+    pub handles: Vec<ContextHandle>,
+    pub original_tokens_estimate: usize,
+    pub compressed_tokens_estimate: usize,
+    pub compression_ratio: f32,
+    pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RiskReport {
     pub level: String,
     pub score: f32,
@@ -452,6 +502,7 @@ pub struct PlanReport {
     pub recommended_change_boundary: ChangeBoundary,
     pub recommended_next_steps: Vec<String>,
     pub tool_calls: Vec<ToolCallRecommendation>,
+    pub memory_facts: Vec<MemorySearchResult>,
     pub evidence: Vec<Evidence>,
     pub confidence_summary: String,
 }

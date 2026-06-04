@@ -133,6 +133,104 @@ fn demo_creates_indexed_sample_repo() {
 }
 
 #[test]
+fn memory_and_compressed_context_are_available() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    let remembered = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("memory")
+            .arg("remember")
+            .arg("RATE-7031 maps issue_token to tests/auth_flow.rs")
+            .arg("--source")
+            .arg("cli-smoke")
+            .arg("--confidence")
+            .arg("high");
+        command
+    });
+    assert!(remembered.contains("RATE-7031"));
+
+    let memory = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("memory")
+            .arg("search")
+            .arg("RATE-7031 issue_token");
+        command
+    });
+    assert!(memory.contains("entity link"));
+
+    let compressed = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("context")
+            .arg("token")
+            .arg("--compressed");
+        command
+    });
+    assert!(compressed.contains("\"handles\""));
+    assert!(compressed.contains("ctx:"));
+
+    let compressed_toon = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("context")
+            .arg("token")
+            .arg("--compressed")
+            .arg("--format")
+            .arg("toon");
+        command
+    });
+    assert!(compressed_toon.contains("type: compressed_context_pack"));
+    assert!(compressed_toon.contains("handles["));
+    assert!(compressed_toon.contains("ctx:"));
+
+    let parsed: serde_json::Value = serde_json::from_str(&compressed).unwrap();
+    let handle = parsed["handles"][0]["id"].as_str().unwrap();
+    let retrieved = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("retrieve-context")
+            .arg(handle);
+        command
+    });
+    assert!(retrieved.contains("token"));
+
+    let plan_toon = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("plan")
+            .arg("token")
+            .arg("--format")
+            .arg("toon");
+        command
+    });
+    assert!(plan_toon.contains("type: plan_report"));
+    assert!(plan_toon.contains("primary_context["));
+}
+
+#[test]
 fn prove_generates_shareable_report_without_source_snippets() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("demo");

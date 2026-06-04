@@ -2,7 +2,10 @@ use open_kioku_actions::{ActionKind, PolicyGate};
 use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
+use open_kioku_context_compress::ContextHandleStore;
+use open_kioku_core::{Confidence, ContextHandleId};
 use open_kioku_impact::ImpactEngine;
+use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::PatchPlanner;
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
@@ -154,26 +157,69 @@ async fn dispatch(
                 .get("format")
                 .and_then(Value::as_str)
                 .unwrap_or("json");
-            if format_arg == "markdown" {
-                Ok(json!(
+            match format_arg {
+                "markdown" => Ok(json!(
                     open_kioku_context::ContextPackFormat::Markdown.render(&pack)?
-                ))
-            } else {
-                Ok(json!(pack))
+                )),
+                "toon" => Ok(json!(open_kioku_format::render_context_pack_toon(&pack))),
+                _ => Ok(json!(pack)),
             }
         }
-        "plan_change" => {
+        "build_compressed_context" => {
             let task = required_str(&params, "task")?;
-            let report = PlanEngine::new(store as &dyn OkStore).plan(task, limit(&params))?;
+            let pack =
+                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
             let format_arg = params
                 .get("format")
                 .and_then(Value::as_str)
                 .unwrap_or("json");
-            if format_arg == "markdown" {
-                Ok(json!(PlanFormat::Markdown.render(&report)?))
+            if format_arg == "toon" {
+                Ok(json!(open_kioku_format::render_compressed_context_toon(
+                    &compressed
+                )))
             } else {
-                Ok(json!(report))
+                Ok(json!(compressed))
             }
+        }
+        "retrieve_context" => {
+            let handle = required_str(&params, "handle")?;
+            let retrieved =
+                ContextHandleStore::open_repo(repo)?.retrieve(&ContextHandleId::new(handle))?;
+            Ok(json!(retrieved))
+        }
+        "plan_change" => {
+            let task = required_str(&params, "task")?;
+            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(task, 8)?;
+            let report = PlanEngine::new(store as &dyn OkStore)
+                .with_memory_facts(memory_facts)
+                .plan(task, limit(&params))?;
+            let format_arg = params
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("json");
+            match format_arg {
+                "markdown" => Ok(json!(PlanFormat::Markdown.render(&report)?)),
+                "toon" => Ok(json!(PlanFormat::Toon.render(&report)?)),
+                _ => Ok(json!(report)),
+            }
+        }
+        "remember_fact" => {
+            let text = required_str(&params, "text")?;
+            let source = params
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("mcp");
+            let confidence = confidence_arg(&params);
+            Ok(json!(
+                RepoMemoryStore::open_repo(repo)?.remember(text, source, confidence)?
+            ))
+        }
+        "search_memory" => {
+            let query = required_str(&params, "query")?;
+            Ok(json!(
+                RepoMemoryStore::open_repo(repo)?.search(query, limit(&params))?
+            ))
         }
         "impact_analysis" => {
             let path = required_str(&params, "path")?;
@@ -355,8 +401,12 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("dependency_path", "Find the dependency path between two files or symbols", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"Source file path or symbol name"},"to":{"type":"string","description":"Target file path or symbol name"}}})),
         ("impact_analysis", "Analyse the blast radius if a file is changed", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("module_dependencies", "List direct graph neighbours of a file or symbol node", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string"},"limit":{"type":"integer"}}})),
-        ("build_context_pack", "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown"],"description":"Output format"}}})),
-        ("plan_change", "Build an evidence-backed pre-edit plan with context, impact, validation, and agent tool calls", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown"],"description":"Output format"}}})),
+        ("build_context_pack", "Build a full context pack (primary files, symbols, tests, patch boundaries) for an AI task", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format"}}})),
+        ("build_compressed_context", "Build a reversible compressed context pack with handles for retrieving original snippets", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","toon"],"description":"Output format"}}})),
+        ("retrieve_context", "Retrieve original content for a compressed context handle", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"Context handle id returned by build_compressed_context"}}})),
+        ("plan_change", "Build an evidence-backed pre-edit plan with context, impact, validation, and agent tool calls", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language task description"},"limit":{"type":"integer"},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format"}}})),
+        ("remember_fact", "Append a repo-scoped memory fact with entity links and provenance", json!({"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"Fact to remember"},"source":{"type":"string","description":"Source or tool that observed the fact"},"confidence":{"type":"string","enum":["low","medium","high","exact"]}}})),
+        ("search_memory", "Search append-only repo memory facts by lexical and entity matches", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("explain_file", "Return chunks and metadata for a single file", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Relative file path"}}})),
         ("explain_symbol", "Return definition and context for a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"}}})),
         ("explain_flow", "Summarise the high-level architecture", json!({"type":"object","properties":{}})),
@@ -449,6 +499,21 @@ fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required string argument `{key}`"))
+}
+
+fn confidence_arg(params: &Value) -> Confidence {
+    match params
+        .get("confidence")
+        .and_then(Value::as_str)
+        .unwrap_or("medium")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "low" => Confidence::Low,
+        "high" => Confidence::High,
+        "exact" => Confidence::Exact,
+        _ => Confidence::Medium,
+    }
 }
 
 fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<String> {

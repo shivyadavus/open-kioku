@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-Open Kioku is a local-first code intelligence MCP for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, and other MCP clients fast code search, symbol lookup, impact analysis, test hints, and context packs.
+Open Kioku is a local-first code intelligence MCP for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, and other MCP clients fast code search, symbol lookup, impact analysis, test hints, context packs, repo-scoped memory, and reversible compressed context handles.
 
 No hosted index. No embeddings API required. No source upload.
 
@@ -29,7 +29,9 @@ Open Kioku gives agents a pre-edit routine:
 1. Search indexed code and files.
 2. Resolve symbols and references.
 3. Build an evidence-backed pre-edit plan with likely impact and validation targets.
-4. Serve those capabilities through MCP over local stdio.
+4. Recall prior repo facts without letting memory outrank indexed code evidence.
+5. Compress context into handles that can retrieve the original snippets later.
+6. Serve those capabilities through MCP over local stdio.
 
 ## Install
 
@@ -118,7 +120,7 @@ ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
 ```
 
-`ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
+`ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
 Paste the printed MCP config snippet into Cursor, Claude Code, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
 
@@ -164,6 +166,10 @@ ok eval /absolute/path/to/repo \
 ok demo --force
 ok --repo ./open-kioku-demo search token --limit 5
 ok --repo ./open-kioku-demo plan token --format markdown
+ok --repo ./open-kioku-demo plan token --format toon
+ok --repo ./open-kioku-demo memory remember "auth flow maps issue_token to tests/auth_flow.rs" --source demo
+ok --repo ./open-kioku-demo --json context token --compressed
+ok --repo ./open-kioku-demo context token --compressed --format toon
 ok prove ./open-kioku-demo --task token
 ok mcp install cursor --repo ./open-kioku-demo
 ok mcp install claude --repo ./open-kioku-demo
@@ -180,13 +186,18 @@ ok --repo /path/to/repo symbol refs PolicyGate
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo context "update MCP docs" --format markdown
+ok --repo /path/to/repo --json context "update MCP docs" --compressed
+ok --repo /path/to/repo context "update MCP docs" --compressed --format toon
+ok --repo /path/to/repo memory remember "release workflow uses scripts/publish-crates.sh" --source human
+ok --repo /path/to/repo memory search "release workflow"
 ok --repo /path/to/repo plan "update MCP docs" --format markdown
+ok --repo /path/to/repo plan "update MCP docs" --format toon
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
 ```
 
-Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `plan`, `bench`, `prove`, `architecture`, `patch`, and `mcp`.
+Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
 
 Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
@@ -197,10 +208,13 @@ Open Kioku's default path is local:
 - Tree-sitter extracts symbols and chunks from supported source files.
 - SQLite stores metadata and dependency graph rows under `.ok/`.
 - Tantivy stores BM25 lexical search data under `.ok/search/tantivy`.
+- Repo memory facts are append-only and local under `.ok/memory.sqlite`.
+- Reversible compressed context handles store originals locally under `.ok/context.sqlite`.
+- TOON is an optional prompt-rendering format for compact LLM handoff; JSON remains the internal and MCP structured data format.
 - MCP uses stdio to talk to the local `ok` process.
 - Semantic search is not required for the default workflow.
 
-The MCP server is designed to be read-only unless write mode is explicitly enabled.
+The MCP server is designed to be source-tree read-only unless write mode is explicitly enabled. Memory and compressed-context tools may write local `.ok/` artifacts so their results can be recalled or expanded later.
 
 ## Language Support
 
@@ -222,7 +236,7 @@ Operational security notes: [`SECURITY.md`](SECURITY.md).
 
 ## Repository Layout
 
-This is a 38-crate Cargo workspace. Important crates:
+This is a 41-crate Cargo workspace. Important crates:
 
 - `open-kioku-cli`: the `ok` binary.
 - `open-kioku-mcp`: JSON-RPC MCP server over stdio.
@@ -231,6 +245,9 @@ This is a 38-crate Cargo workspace. Important crates:
 - `open-kioku-storage-sqlite`: SQLite metadata and graph storage.
 - `open-kioku-search-tantivy`: disk-backed BM25 search.
 - `open-kioku-context`: task context pack builder.
+- `open-kioku-context-compress`: reversible context handle compression.
+- `open-kioku-format`: prompt-oriented renderers, including TOON.
+- `open-kioku-memory`: append-only repo memory and entity-linked recall.
 - `open-kioku-impact`: file impact analysis.
 - `open-kioku-tests`: validation target selection.
 
