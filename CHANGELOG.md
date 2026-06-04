@@ -11,10 +11,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Added repo-scoped memory facts with local append-only storage and MCP/CLI recall.
 - Added reversible compressed context handles with local original retrieval.
 - Added optional TOON output for context packs, compressed context packs, and pre-edit plans.
+- Added language-specific static analysis facts for imports, inheritance, implementations, routes, config reads, and table mappings.
+- Added optional local runtime evidence ingestion from repository-owned JSONL artifacts under `.ok/runtime/` or `.ok/analysis/runtime/`.
+- Added release-readiness smoke coverage for status, setup audit, TOON planning, proof reports, and MCP installer output.
+- Added large-repo proof documentation for a local Elasticsearch validation run.
 
 ### Changed
 - Improved task-anchor planning, impact evidence, test selection, and low-confidence risk reporting.
 - Updated MCP tool schemas and docs for memory, compressed context, and TOON prompt handoff.
+- Strengthened Gradle Java validation command selection and setup/status quality reporting.
 
 ---
 

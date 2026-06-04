@@ -18,5 +18,5 @@ open-kioku-storage = { version = "1.0.3", path = "../open-kioku-storage" }
 predicates = "3.1.4"
 rusqlite.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 uuid = { version = "1.20.0", features = ["v4"] }
-

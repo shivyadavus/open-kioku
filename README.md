@@ -5,20 +5,52 @@
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-Open Kioku is a local-first code intelligence MCP for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, and other MCP clients fast code search, symbol lookup, impact analysis, test hints, context packs, repo-scoped memory, and reversible compressed context handles.
+Open Kioku is local code intelligence for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, Codex, and other MCP clients the facts they need before editing: code search, symbols, impact, validation commands, context packs, repo memory, and static/runtime graph evidence.
 
-No hosted index. No embeddings API required. No source upload.
+No hosted index. No source upload. No embeddings API required.
 
-Semantic search is opt-in. The default MCP path stays lexical and offline; enabling `semantic.enabled = true` uses the built-in local hash provider unless another provider is explicitly supported and configured.
+The default path is offline and lexical. SCIP exact references, semantic search, and runtime evidence are optional local upgrades.
+
+## The 60-Second Pitch
+
+Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:
+
+```text
+search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change
+```
+
+The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
+
+Verified on a local Elasticsearch checkout:
+
+```text
+36,640 files
+495,919 symbols
+509,665 chunks
+159,483 indexed tests
+483,296 imports
+36,363 language-specific static analysis facts
+1,015,502 graph edges
+```
+
+For a Java/Gradle task, Open Kioku returned scoped validation commands such as:
+
+```text
+./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests
+```
 
 ```sh
 npm install -g open-kioku
 ok init /path/to/your/repo
 ok index /path/to/your/repo
+ok status /path/to/your/repo --markdown --write ok-status.md
+ok setup audit /path/to/your/repo
 ok mcp install cursor --repo /path/to/your/repo
 ```
 
-The fastest way to see it is the hosted demo: https://shivyadavus.github.io/open-kioku/
+Proof: [`docs/large-repo-proof.md`](docs/large-repo-proof.md), [`docs/proof.md`](docs/proof.md), and [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+
+Hosted demo: https://shivyadavus.github.io/open-kioku/
 
 ## Why It Exists
 
@@ -115,14 +147,22 @@ npm install -g open-kioku
 ok init /absolute/path/to/repo
 ok index /absolute/path/to/repo
 ok doctor /absolute/path/to/repo
+ok status /absolute/path/to/repo --markdown --write ok-status.md
+ok setup audit /absolute/path/to/repo
 ok --repo /absolute/path/to/repo search "the feature or bug you care about" --limit 5
 ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
+ok mcp install codex --repo /absolute/path/to/repo
+ok mcp install gemini --repo /absolute/path/to/repo
+ok mcp install opencode --repo /absolute/path/to/repo
+ok mcp install zed --repo /absolute/path/to/repo
 ```
 
 `ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
-Paste the printed MCP config snippet into Cursor, Claude Code, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
+Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
+
+`ok status --markdown --write ok-status.md` creates a portable handoff with index counts, SCIP quality, readiness checks, and next steps. `ok setup audit` checks the index, security posture, MCP server health, plugin metadata, and the supported client install matrix.
 
 Ask your agent to use Open Kioku before editing:
 
@@ -143,6 +183,7 @@ ok watch /absolute/path/to/repo
 Open Kioku works without external language indexers, but exact references improve search grounding, impact analysis, test selection, and planning. Check what is available:
 
 ```sh
+ok setup audit /absolute/path/to/repo --markdown --write ok-setup.md
 ok scip doctor /absolute/path/to/repo
 ok scip setup /absolute/path/to/repo
 ok index /absolute/path/to/repo --with-scip auto
@@ -150,6 +191,12 @@ ok doctor /absolute/path/to/repo
 ```
 
 Default indexing consumes existing SCIP files such as `index.scip` and `.ok/indexes/*.scip` when present. `--with-scip auto` runs installed indexers for supported repos; it does not install third-party tools. `--with-scip required` fails the index if no SCIP facts can be imported.
+
+SCIP is the primary precision provider. The default quality model stays local and free: indexed symbols/chunks/imports, language-specific static facts, indexed tests, build-system detection, and SCIP exact references when an `index.scip` is available. Java/Gradle repositories get scoped validation commands when the test file path is known, for example `./gradlew :x-pack:plugin:ml:test --tests org.example.SomeTests` instead of a generic repository-wide test command.
+
+Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Runtime analysis is opt-in evidence ingestion only: place local JSONL trace/span artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths, routes, methods, or SQL statements, then re-run `ok index`. Open Kioku does not install or run a runtime agent by default.
+
+`ok setup audit` keeps CodeQL, BSP, LSP, coverage, and JUnit artifacts in an optional advanced section only when those artifacts are actually present.
 
 Use `ok eval` to protect quality on real workflows:
 
@@ -171,8 +218,11 @@ ok --repo ./open-kioku-demo memory remember "auth flow maps issue_token to tests
 ok --repo ./open-kioku-demo --json context token --compressed
 ok --repo ./open-kioku-demo context token --compressed --format toon
 ok prove ./open-kioku-demo --task token
+ok status ./open-kioku-demo --markdown --write ok-status.md
+ok setup audit ./open-kioku-demo --markdown
 ok mcp install cursor --repo ./open-kioku-demo
 ok mcp install claude --repo ./open-kioku-demo
+ok mcp install codex --repo ./open-kioku-demo
 ```
 
 `ok demo` creates `./open-kioku-demo`, writes `ok.toml`, and builds the local SQLite and Tantivy indexes. Use `ok demo --path /tmp/open-kioku-demo --force` for a custom path.
@@ -192,20 +242,26 @@ ok --repo /path/to/repo memory remember "release workflow uses scripts/publish-c
 ok --repo /path/to/repo memory search "release workflow"
 ok --repo /path/to/repo plan "update MCP docs" --format markdown
 ok --repo /path/to/repo plan "update MCP docs" --format toon
+ok status /path/to/repo --markdown --write ok-status.md
+ok setup audit /path/to/repo --markdown --write ok-setup.md
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
 ```
 
-Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
 
 Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+
+Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
 ## What Is Local
 
 Open Kioku's default path is local:
 
 - Tree-sitter extracts symbols and chunks from supported source files.
+- Built-in static analyzers add language/framework graph facts from source text.
+- Runtime trace/span artifacts are consumed only when local files are provided under `.ok/runtime/` or `.ok/analysis/runtime/`.
 - SQLite stores metadata and dependency graph rows under `.ok/`.
 - Tantivy stores BM25 lexical search data under `.ok/search/tantivy`.
 - Repo memory facts are append-only and local under `.ok/memory.sqlite`.
@@ -232,7 +288,7 @@ Tree-sitter parsing currently covers Rust, Python, TypeScript, TSX, JavaScript, 
 
 See [`docs/security-model.md`](docs/security-model.md) for more detail.
 
-Operational security notes: [`SECURITY.md`](SECURITY.md).
+Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat posture: [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md).
 
 ## Repository Layout
 

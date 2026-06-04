@@ -18,6 +18,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Add golden snapshots for important MCP responses.
 - Done: Keep CI running format, clippy, tests, audit, and deny on Linux and macOS.
 - Done: Add `ok prove` for shareable local usefulness reports without source snippets.
+- Done: Add release-readiness smoke coverage for demo setup, status, setup audit, TOON planning, proof generation, and MCP installer output.
 - Next: Expand golden snapshots beyond tool listing to representative tool calls.
 
 ## 3. Core Intelligence Quality
@@ -26,6 +27,8 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Strengthen symbol definition/reference accuracy using tree-sitter plus SCIP when available.
 - Done: Return consistent evidence, confidence, and match reasons from every result.
 - Done: Add quality benchmarks for precision on fixture repos and real local repos.
+- Done: Add language-specific static facts and optional runtime facts to the graph so plans can reason about routes, config keys, tables, inheritance, and implementations.
+- Next: Add a SCIP Java installation proof path so exact Java refs are as easy to validate as tree-sitter static facts.
 
 ## 4. Tool Surface Maturity
 

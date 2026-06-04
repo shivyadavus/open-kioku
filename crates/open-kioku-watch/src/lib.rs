@@ -91,11 +91,13 @@ pub fn reindex_repo(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         occurrences: &snapshot.occurrences,
     })?;
 
-    let graph = InMemoryGraph::from_index_with_occurrences(
+    let graph = InMemoryGraph::from_index_with_analysis(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
+        &snapshot.imports,
+        &snapshot.analysis_facts,
     );
     store.replace_graph(
         &graph.nodes.values().cloned().collect::<Vec<_>>(),

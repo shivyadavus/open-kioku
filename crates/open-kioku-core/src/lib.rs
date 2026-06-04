@@ -87,6 +87,7 @@ pub enum EvidenceSourceType {
     Lexical,
     Semantic,
     Runtime,
+    StaticAnalysis,
     ExternalIntegration,
     Heuristic,
 }
@@ -219,6 +220,21 @@ pub struct Import {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AnalysisFact {
+    pub id: String,
+    pub file_id: FileId,
+    pub symbol_id: Option<SymbolId>,
+    pub target: String,
+    pub target_kind: GraphNodeType,
+    pub edge_type: GraphEdgeType,
+    pub range: Option<LineRange>,
+    pub confidence: Confidence,
+    pub source: String,
+    pub source_type: EvidenceSourceType,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CodeChunk {
     pub id: String,
     pub file_id: FileId,
@@ -300,6 +316,20 @@ pub struct IndexQuality {
     pub scip_exact_references: usize,
     pub test_count: usize,
     pub import_count: usize,
+    #[serde(default)]
+    pub build_systems: Vec<String>,
+    #[serde(default)]
+    pub codeql_databases: usize,
+    #[serde(default)]
+    pub coverage_reports: usize,
+    #[serde(default)]
+    pub junit_reports: usize,
+    #[serde(default)]
+    pub static_analysis_facts: usize,
+    #[serde(default)]
+    pub runtime_analysis_facts: usize,
+    #[serde(default)]
+    pub semantic_provider_notes: Vec<String>,
     pub quality_notes: Vec<String>,
 }
 

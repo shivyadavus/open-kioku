@@ -1324,9 +1324,11 @@ dependencies = [
  "open-kioku-parse",
  "open-kioku-scip",
  "rayon",
+ "serde_json",
  "sha2",
  "tempfile",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]
@@ -1573,6 +1575,7 @@ dependencies = [
  "predicates",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 

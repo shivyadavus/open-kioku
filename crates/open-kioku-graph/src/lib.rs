@@ -1,11 +1,11 @@
 use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, EdgeId, Evidence, EvidenceId, File, FileRange, GraphEdge, GraphEdgeType, GraphNode,
-    GraphNodeType, NodeId, Symbol, SymbolOccurrence,
+    AnalysisFact, CodeChunk, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
+    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, NodeId, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
@@ -15,7 +15,7 @@ pub struct InMemoryGraph {
 
 impl InMemoryGraph {
     pub fn from_index(files: &[File], symbols: &[Symbol], chunks: &[CodeChunk]) -> Self {
-        Self::from_index_with_occurrences(files, symbols, chunks, &[])
+        Self::from_index_with_analysis(files, symbols, chunks, &[], &[], &[])
     }
 
     pub fn from_index_with_occurrences(
@@ -23,6 +23,17 @@ impl InMemoryGraph {
         symbols: &[Symbol],
         _chunks: &[CodeChunk],
         occurrences: &[SymbolOccurrence],
+    ) -> Self {
+        Self::from_index_with_analysis(files, symbols, _chunks, occurrences, &[], &[])
+    }
+
+    pub fn from_index_with_analysis(
+        files: &[File],
+        symbols: &[Symbol],
+        _chunks: &[CodeChunk],
+        occurrences: &[SymbolOccurrence],
+        imports: &[Import],
+        analysis_facts: &[AnalysisFact],
     ) -> Self {
         let mut graph = Self::default();
         let files_by_id = files
@@ -122,6 +133,103 @@ impl InMemoryGraph {
                 },
             });
         }
+        let mut edge_ids = graph
+            .edges
+            .iter()
+            .map(|edge| edge.id.0.clone())
+            .collect::<HashSet<_>>();
+        for import in imports {
+            let Some(file) = files_by_id.get(import.file_id.0.as_str()) else {
+                continue;
+            };
+            let target_node = GraphNode {
+                id: analysis_node_id(GraphNodeType::Module, &import.imported),
+                node_type: GraphNodeType::Module,
+                label: import.imported.clone(),
+                file_id: None,
+                symbol_id: None,
+            };
+            graph
+                .nodes
+                .entry(target_node.id.0.clone())
+                .or_insert(target_node.clone());
+            let edge_id = EdgeId::new(stable_id(&format!(
+                "import:{}:{}",
+                file.id.0, import.imported
+            )));
+            if edge_ids.insert(edge_id.0.clone()) {
+                graph.edges.push(GraphEdge {
+                    id: edge_id.clone(),
+                    from: NodeId::new(format!("file:{}", file.path.display())),
+                    to: target_node.id,
+                    edge_type: GraphEdgeType::Imports,
+                    evidence: Evidence {
+                        id: EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0))),
+                        source: "open-kioku-static/imports".into(),
+                        source_type: EvidenceSourceType::StaticAnalysis,
+                        file_range: Some(FileRange {
+                            path: file.path.clone(),
+                            line_range: import.range.clone(),
+                        }),
+                        symbol_id: None,
+                        confidence: import.confidence,
+                        message: format!("{} imports {}", file.path.display(), import.imported),
+                        indexed_at: Utc::now(),
+                    },
+                });
+            }
+        }
+        for fact in analysis_facts {
+            let Some(file) = files_by_id.get(fact.file_id.0.as_str()) else {
+                continue;
+            };
+            let source_node = fact
+                .symbol_id
+                .as_ref()
+                .and_then(|symbol_id| {
+                    graph
+                        .nodes
+                        .get(&format!("symbol:{}", symbol_id.0))
+                        .map(|node| node.id.clone())
+                })
+                .unwrap_or_else(|| NodeId::new(format!("file:{}", file.path.display())));
+            let target_node = GraphNode {
+                id: analysis_node_id(fact.target_kind.clone(), &fact.target),
+                node_type: fact.target_kind.clone(),
+                label: fact.target.clone(),
+                file_id: None,
+                symbol_id: None,
+            };
+            graph
+                .nodes
+                .entry(target_node.id.0.clone())
+                .or_insert(target_node.clone());
+            let edge_id = EdgeId::new(stable_id(&format!(
+                "analysis:{}:{}:{}",
+                source_node.0, target_node.id.0, fact.id
+            )));
+            if edge_ids.insert(edge_id.0.clone()) {
+                graph.edges.push(GraphEdge {
+                    id: edge_id.clone(),
+                    from: source_node,
+                    to: target_node.id,
+                    edge_type: fact.edge_type.clone(),
+                    evidence: Evidence {
+                        id: EvidenceId::new(stable_id(&format!("analysis-evidence:{}", fact.id))),
+                        source: fact.source.clone(),
+                        source_type: fact.source_type.clone(),
+                        file_range: Some(FileRange {
+                            path: file.path.clone(),
+                            line_range: fact.range.clone(),
+                        }),
+                        symbol_id: fact.symbol_id.clone(),
+                        confidence: fact.confidence,
+                        message: fact.message.clone(),
+                        indexed_at: Utc::now(),
+                    },
+                });
+            }
+        }
         graph
     }
 
@@ -178,6 +286,13 @@ fn symbol_node_type(symbol: &Symbol) -> GraphNodeType {
     }
 }
 
+fn analysis_node_id(node_type: GraphNodeType, label: &str) -> NodeId {
+    NodeId::new(format!(
+        "analysis:{node_type:?}:{}",
+        stable_id(&label.to_ascii_lowercase())
+    ))
+}
+
 fn stable_id(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
@@ -202,8 +317,8 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        Confidence, EvidenceSourceType, FileId, Language, LineRange, RepositoryId, SymbolId,
-        SymbolKind,
+        AnalysisFact, Confidence, EvidenceSourceType, FileId, Import, Language, LineRange,
+        RepositoryId, SymbolId, SymbolKind,
     };
 
     fn make_file(id: &str) -> File {
@@ -314,5 +429,51 @@ mod tests {
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].id.0, "e1");
         assert_eq!(path[1].id.0, "e2");
+    }
+
+    #[test]
+    fn graph_includes_imports_and_language_analysis_facts() {
+        let file = make_file("src/service");
+        let symbol = make_symbol("sym-service", "src/service", "Service");
+        let import = Import {
+            file_id: file.id.clone(),
+            imported: "com.acme.Client".into(),
+            range: Some(LineRange::single(1)),
+            confidence: Confidence::Medium,
+        };
+        let fact = AnalysisFact {
+            id: "endpoint-fact".into(),
+            file_id: file.id.clone(),
+            symbol_id: Some(symbol.id.clone()),
+            target: "GET /orders".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: Some(LineRange::single(3)),
+            confidence: Confidence::Medium,
+            source: "test-static".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "test endpoint".into(),
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[file],
+            &[symbol],
+            &[],
+            &[],
+            &[import],
+            &[fact],
+        );
+
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.edge_type == GraphEdgeType::Imports));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.edge_type == GraphEdgeType::ExposesEndpoint
+                && graph
+                    .nodes
+                    .get(&edge.to.0)
+                    .is_some_and(|node| node.label == "GET /orders")
+        }));
     }
 }

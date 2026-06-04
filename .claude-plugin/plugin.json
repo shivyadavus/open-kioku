@@ -1,6 +1,6 @@
 {
   "name": "open-kioku",
-  "version": "0.1.0",
+  "version": "1.0.3",
   "description": "Local-first code intelligence for AI agents — instant code search, symbol resolution, impact analysis, dependency graphs, and context packs across any codebase. Works offline. No data leaves your machine.",
   "author": {
     "name": "Shiv Yadav",

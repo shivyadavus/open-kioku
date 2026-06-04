@@ -1,8 +1,8 @@
-use open_kioku_core::{Confidence, TestTarget};
+use open_kioku_core::{Confidence, File, FileId, TestTarget};
 use open_kioku_errors::Result;
 use open_kioku_storage::MetadataStore;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct TestSelector<'a> {
     store: &'a dyn MetadataStore,
@@ -53,6 +53,7 @@ impl<'a> TestSelector<'a> {
             .iter()
             .map(|file| (&file.id, file))
             .collect::<HashMap<_, _>>();
+        let repo_root = self.repo_root()?;
         let tests = self.get_tests_for_path(path, &std::collections::HashSet::new())?;
         let changed_stem = path
             .file_stem()
@@ -63,6 +64,8 @@ impl<'a> TestSelector<'a> {
         for test in tests {
             let test_file = files_by_id.get(&test.file_id);
             let mut candidate = test;
+            let test_path = test_file.map(|file| file.path.as_path());
+            enhance_test_command(&repo_root, path, &mut candidate, test_path);
             let mut score = candidate.confidence.score();
             if let Some(file) = test_file {
                 let test_path = file.path.to_string_lossy().to_ascii_lowercase();
@@ -94,6 +97,12 @@ impl<'a> TestSelector<'a> {
     }
 
     pub fn for_changed_path_fast(&self, path: &Path, limit: usize) -> Result<Vec<TestTarget>> {
+        let repo_root = self.repo_root()?;
+        let files_by_id = if repo_root.is_some() {
+            self.files_by_id().unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         let changed_stem = path
             .file_stem()
             .and_then(|value| value.to_str())
@@ -103,6 +112,10 @@ impl<'a> TestSelector<'a> {
         let path_tokens = path_tokens(&changed_path);
         let mut scored = Vec::new();
         for mut test in self.get_tests_for_path(path, &std::collections::HashSet::new())? {
+            let test_path = files_by_id
+                .get(&test.file_id)
+                .map(|file| file.path.as_path());
+            enhance_test_command(&repo_root, path, &mut test, test_path);
             let searchable = format!(
                 "{} {} {} {}",
                 test.id,
@@ -147,6 +160,8 @@ impl<'a> TestSelector<'a> {
         limit: usize,
     ) -> Result<Vec<TestTarget>> {
         let changed_file = self.store.get_file_by_path(path)?;
+        let repo_root = self.repo_root()?;
+        let files_by_id = self.files_by_id().unwrap_or_default();
         let changed_symbols = if let Some(file) = &changed_file {
             self.store
                 .occurrences_for_file(&file.id)?
@@ -191,6 +206,10 @@ impl<'a> TestSelector<'a> {
 
         let mut scored = Vec::new();
         for mut test in self.get_tests_for_path(path, &test_files_with_overlap)? {
+            let test_path = files_by_id
+                .get(&test.file_id)
+                .map(|file| file.path.as_path());
+            enhance_test_command(&repo_root, path, &mut test, test_path);
             let overlap = if let Some(test_symbols) = test_symbols_by_file.get(&test.file_id) {
                 test_symbols
                     .iter()
@@ -243,6 +262,22 @@ impl<'a> TestSelector<'a> {
             .take(limit)
             .collect())
     }
+
+    fn repo_root(&self) -> Result<Option<PathBuf>> {
+        Ok(self
+            .store
+            .manifest()?
+            .map(|manifest| manifest.repository.root))
+    }
+
+    fn files_by_id(&self) -> Result<HashMap<FileId, File>> {
+        Ok(self
+            .store
+            .list_files(usize::MAX, 0)?
+            .into_iter()
+            .map(|file| (file.id.clone(), file))
+            .collect())
+    }
 }
 
 fn same_parent(left: &Path, right: &Path) -> bool {
@@ -255,6 +290,105 @@ fn path_tokens(path: &str) -> Vec<String> {
         .take(8)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn enhance_test_command(
+    repo_root: &Option<PathBuf>,
+    changed_path: &Path,
+    test: &mut TestTarget,
+    test_path: Option<&Path>,
+) {
+    let Some(root) = repo_root else {
+        return;
+    };
+    let candidate_path = test_path.unwrap_or(changed_path);
+    if let Some(command) = gradle_test_command(root, candidate_path, &test.name) {
+        if test.command.as_deref() != Some(command.as_str()) {
+            test.command = Some(command);
+            if !test.reason.contains("Gradle-scoped") {
+                test.reason = format!("{}; Gradle-scoped test command", test.reason);
+            }
+        }
+    }
+}
+
+fn gradle_test_command(root: &Path, test_path: &Path, test_name: &str) -> Option<String> {
+    if !(root.join("settings.gradle").exists()
+        || root.join("settings.gradle.kts").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists())
+    {
+        return None;
+    }
+    let path = test_path.to_string_lossy().replace('\\', "/");
+    if !path.ends_with(".java") {
+        return None;
+    }
+    let project_dir = nearest_gradle_project(root, test_path)?;
+    let task = gradle_task_for_path(&path);
+    let project = gradle_project_path(&project_dir);
+    let class_filter = java_class_filter(&path).unwrap_or_else(|| test_name.to_string());
+    let task_path = if project == ":" {
+        format!(":{task}")
+    } else {
+        format!("{project}:{task}")
+    };
+    Some(format!("./gradlew {task_path} --tests {class_filter}"))
+}
+
+fn nearest_gradle_project(root: &Path, test_path: &Path) -> Option<PathBuf> {
+    let absolute_path = if test_path.is_absolute() {
+        test_path.to_path_buf()
+    } else {
+        root.join(test_path)
+    };
+    let mut current = absolute_path.parent()?.to_path_buf();
+    while current.starts_with(root) {
+        if current.join("build.gradle").exists() || current.join("build.gradle.kts").exists() {
+            return current.strip_prefix(root).ok().map(Path::to_path_buf);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+    None
+}
+
+fn gradle_project_path(project_dir: &Path) -> String {
+    let mut project = String::new();
+    for component in project_dir.components() {
+        let value = component.as_os_str().to_string_lossy();
+        if !value.is_empty() {
+            project.push(':');
+            project.push_str(&value);
+        }
+    }
+    if project.is_empty() {
+        ":".into()
+    } else {
+        project
+    }
+}
+
+fn gradle_task_for_path(path: &str) -> &'static str {
+    if path.contains("/src/internalClusterTest/") {
+        "internalClusterTest"
+    } else if path.contains("/src/javaRestTest/") {
+        "javaRestTest"
+    } else if path.contains("/src/yamlRestTest/") {
+        "yamlRestTest"
+    } else if path.contains("/src/qa/") || path.ends_with("IT.java") {
+        "internalClusterTest"
+    } else {
+        "test"
+    }
+}
+
+fn java_class_filter(path: &str) -> Option<String> {
+    let marker = "/java/";
+    let start = path.find(marker)? + marker.len();
+    let rel = path[start..]
+        .strip_suffix(".java")
+        .unwrap_or(&path[start..]);
+    Some(rel.replace('/', "."))
 }
 
 #[cfg(test)]
@@ -534,6 +668,27 @@ mod tests {
         assert!(selected[0]
             .reason
             .contains("exact symbol-reference overlap"));
+    }
+
+    #[test]
+    fn gradle_command_scopes_elasticsearch_java_tests() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("settings.gradle"), "").unwrap();
+        std::fs::create_dir_all(root.join("x-pack/plugin/ml")).unwrap();
+        std::fs::write(root.join("x-pack/plugin/ml/build.gradle"), "").unwrap();
+
+        let command = super::gradle_test_command(
+            root,
+            Path::new("x-pack/plugin/ml/src/test/java/org/elasticsearch/xpack/ml/inference/assignment/planning/AssignmentPlannerTests.java"),
+            "AssignmentPlannerTests",
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            "./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests"
+        );
     }
 
     fn file(id: &str, path: &str) -> File {

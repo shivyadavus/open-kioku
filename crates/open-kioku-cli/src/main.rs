@@ -3,7 +3,7 @@ use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::{OkConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_core::{Confidence, ContextHandleId};
+use open_kioku_core::{Confidence, ContextHandleId, IndexManifest};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
@@ -55,10 +55,23 @@ enum Command {
     Status {
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// Render a portable Markdown status snapshot.
+        #[arg(long, default_value_t = false)]
+        markdown: bool,
+        /// Write the Markdown status snapshot to a file.
+        #[arg(long, value_name = "PATH")]
+        write: Option<PathBuf>,
+        /// Exit non-zero when readiness checks fail.
+        #[arg(long, default_value_t = false)]
+        exit_code: bool,
     },
     Doctor {
         #[arg(default_value = ".")]
         repo: PathBuf,
+    },
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommand,
     },
     Demo {
         #[arg(long)]
@@ -167,6 +180,24 @@ enum MemoryCommand {
     Recent {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    /// Audit install readiness across index, security, MCP, and client surfaces.
+    Audit {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Render a portable Markdown setup report.
+        #[arg(long, default_value_t = false)]
+        markdown: bool,
+        /// Write the Markdown setup report to a file.
+        #[arg(long, value_name = "PATH")]
+        write: Option<PathBuf>,
+        /// Exit non-zero when required setup checks fail.
+        #[arg(long, default_value_t = false)]
+        exit_code: bool,
     },
 }
 
@@ -327,10 +358,34 @@ enum ScipCommand {
     },
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum McpClient {
     Claude,
     Cursor,
+    Codex,
+    Gemini,
+    Opencode,
+    Zed,
+}
+
+impl McpClient {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+            Self::Zed => "zed",
+        }
+    }
+
+    fn config_format(self) -> &'static str {
+        match self {
+            Self::Codex => "toml",
+            _ => "json",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +534,51 @@ struct DoctorReport {
 }
 
 #[derive(Serialize)]
+struct SetupAuditReport {
+    ok: bool,
+    repo: PathBuf,
+    generated_by: &'static str,
+    checks: Vec<SetupAuditCheck>,
+    providers: Vec<QualityProviderReport>,
+    advanced_providers: Vec<QualityProviderReport>,
+    clients: Vec<ClientInstallReport>,
+    plugin_surfaces: Vec<PluginSurfaceReport>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SetupAuditCheck {
+    name: String,
+    status: CheckStatus,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ClientInstallReport {
+    client: &'static str,
+    config_format: &'static str,
+    install_command: String,
+    verify: String,
+    note: &'static str,
+}
+
+#[derive(Serialize)]
+struct PluginSurfaceReport {
+    name: &'static str,
+    path: PathBuf,
+    present: bool,
+    note: &'static str,
+}
+
+#[derive(Serialize)]
+struct QualityProviderReport {
+    name: &'static str,
+    status: CheckStatus,
+    evidence: String,
+    next_step: Option<String>,
+}
+
+#[derive(Serialize)]
 struct DemoReport {
     repo: PathBuf,
     file_count: usize,
@@ -515,12 +615,30 @@ struct ScipIndexerReport {
     note: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CheckStatus {
     Pass,
     Warn,
     Fail,
+}
+
+impl CheckStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Pass => "[ok]",
+            Self::Warn => "[warn]",
+            Self::Fail => "[fail]",
+        }
+    }
 }
 
 #[tokio::main]
@@ -574,11 +692,41 @@ async fn main() -> anyhow::Result<()> {
             let repo = resolve_repo(&repo, command_repo);
             open_kioku_watch::watch_repo(&repo)?;
         }
-        Command::Status { repo: command_repo } => {
+        Command::Status {
+            repo: command_repo,
+            markdown,
+            write,
+            exit_code,
+        } => {
             let repo = resolve_repo(&repo, command_repo);
-            let store = open_store(&repo)?;
-            let manifest = store.manifest()?;
-            if cli.json {
+            let manifest = load_index_manifest(&repo)?;
+            let doctor = if markdown || write.is_some() || exit_code {
+                Some(doctor_report(&repo))
+            } else {
+                None
+            };
+            if markdown || write.is_some() {
+                let doctor_ref = doctor
+                    .as_ref()
+                    .expect("doctor report should be available for status snapshot");
+                let rendered = render_status_markdown(&repo, manifest.as_ref(), doctor_ref);
+                if let Some(path) = write {
+                    fs::write(&path, rendered)?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": doctor_ref.ok,
+                                "path": path,
+                            }))?
+                        );
+                    } else {
+                        println!("Wrote Open Kioku status snapshot to {}", path.display());
+                    }
+                } else {
+                    println!("{rendered}");
+                }
+            } else if cli.json {
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             } else if let Some(manifest) = manifest {
                 println!(
@@ -587,6 +735,9 @@ async fn main() -> anyhow::Result<()> {
                 );
             } else {
                 println!("No index found. Run `ok index .`.");
+            }
+            if exit_code && !doctor.as_ref().map(|report| report.ok).unwrap_or(true) {
+                anyhow::bail!("Open Kioku status has failing readiness checks");
             }
         }
         Command::Doctor { repo: command_repo } => {
@@ -636,6 +787,43 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Setup { command } => match command {
+            SetupCommand::Audit {
+                repo: command_repo,
+                markdown,
+                write,
+                exit_code,
+            } => {
+                let repo = resolve_repo(&repo, command_repo);
+                let report = setup_audit_report(&repo);
+                if markdown || write.is_some() {
+                    let rendered = render_setup_audit_markdown(&report);
+                    if let Some(path) = write {
+                        fs::write(&path, rendered)?;
+                        if cli.json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "ok": report.ok,
+                                    "path": path,
+                                }))?
+                            );
+                        } else {
+                            println!("Wrote Open Kioku setup audit to {}", path.display());
+                        }
+                    } else {
+                        println!("{rendered}");
+                    }
+                } else if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_setup_audit_report(&report);
+                }
+                if exit_code && !report.ok {
+                    anyhow::bail!("Open Kioku setup audit has failing checks");
+                }
+            }
+        },
         Command::Demo { path, force } => {
             let repo = demo_repo_path(path)?;
             let report = build_demo_repo(&repo, force)?;
@@ -995,7 +1183,9 @@ async fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&snippet)?);
                 } else {
                     println!("{}", snippet["instructions"].as_str().unwrap_or_default());
-                    if let Ok(config) = serde_json::to_string_pretty(&snippet["config"]) {
+                    if let Some(config_text) = snippet["config_text"].as_str() {
+                        println!("{config_text}");
+                    } else if let Ok(config) = serde_json::to_string_pretty(&snippet["config"]) {
                         println!("{config}");
                     }
                 }
@@ -1055,6 +1245,794 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
+    let index_path = repo.join(".ok/index.sqlite");
+    if !index_path.exists() {
+        return Ok(None);
+    }
+    Ok(SqliteStore::open(&index_path)?.manifest()?)
+}
+
+fn render_status_markdown(
+    repo: &Path,
+    manifest: Option<&IndexManifest>,
+    doctor: &DoctorReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Open Kioku Status\n\n");
+    out.push_str("| Field | Value |\n| --- | --- |\n");
+    out.push_str(&format!("| Repo | `{}` |\n", repo.display()));
+    out.push_str(&format!("| Ready | `{}` |\n", doctor.ok));
+    out.push_str("| Generated by | `ok status --markdown` |\n");
+
+    out.push_str("\n## Index\n\n");
+    if let Some(manifest) = manifest {
+        out.push_str("| Metric | Value |\n| --- | ---: |\n");
+        out.push_str(&format!("| Files | {} |\n", manifest.file_count));
+        out.push_str(&format!("| Symbols | {} |\n", manifest.symbol_count));
+        out.push_str(&format!("| Chunks | {} |\n", manifest.chunk_count));
+        out.push_str(&format!("| Tests | {} |\n", manifest.quality.test_count));
+        out.push_str(&format!(
+            "| Imports | {} |\n",
+            manifest.quality.import_count
+        ));
+        out.push_str(&format!(
+            "| SCIP indexes imported | {} |\n",
+            manifest.quality.scip_indexes_imported
+        ));
+        out.push_str(&format!(
+            "| SCIP exact references | {} |\n",
+            manifest.quality.scip_exact_references
+        ));
+        out.push_str(&format!(
+            "| Static analysis facts | {} |\n",
+            manifest.quality.static_analysis_facts
+        ));
+        if manifest.quality.runtime_analysis_facts > 0 {
+            out.push_str(&format!(
+                "| Runtime analysis facts | {} |\n",
+                manifest.quality.runtime_analysis_facts
+            ));
+        }
+        if manifest.quality.codeql_databases > 0 {
+            out.push_str(&format!(
+                "| CodeQL databases | {} |\n",
+                manifest.quality.codeql_databases
+            ));
+        }
+        if manifest.quality.coverage_reports > 0 {
+            out.push_str(&format!(
+                "| Coverage reports | {} |\n",
+                manifest.quality.coverage_reports
+            ));
+        }
+        if manifest.quality.junit_reports > 0 {
+            out.push_str(&format!(
+                "| JUnit reports | {} |\n",
+                manifest.quality.junit_reports
+            ));
+        }
+        out.push_str(&format!("\nIndexed at `{}`.\n", manifest.indexed_at));
+        if !manifest.quality.build_systems.is_empty() {
+            out.push_str(&format!(
+                "\nBuild systems: `{}`.\n",
+                manifest.quality.build_systems.join(", ")
+            ));
+        }
+        if !manifest.quality.semantic_provider_notes.is_empty() {
+            out.push_str("\nLocal signal notes:\n");
+            for note in &manifest.quality.semantic_provider_notes {
+                out.push_str(&format!("- {}\n", note));
+            }
+        }
+        if !manifest.quality.quality_notes.is_empty() {
+            out.push_str("\nQuality notes:\n");
+            for note in &manifest.quality.quality_notes {
+                out.push_str(&format!("- {}\n", note));
+            }
+        }
+    } else {
+        out.push_str(
+            "No index manifest was found. Run `ok index .` before handing this repo to an agent.\n",
+        );
+    }
+
+    out.push_str("\n## Readiness Checks\n\n");
+    out.push_str("| Status | Check | Evidence |\n| --- | --- | --- |\n");
+    for check in &doctor.checks {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} |\n",
+            check.status.label(),
+            check.name,
+            markdown_cell(&check.message)
+        ));
+    }
+
+    out.push_str("\n## Next Steps\n\n");
+    if doctor.next_steps.is_empty() {
+        out.push_str("- No required next steps.\n");
+    } else {
+        for step in &doctor.next_steps {
+            out.push_str(&format!("- {step}\n"));
+        }
+    }
+
+    out.push_str("\n## Handoff Commands\n\n");
+    out.push_str(&format!(
+        "- `ok setup audit --repo {}`\n",
+        shell_quote(&repo.display().to_string())
+    ));
+    out.push_str(&format!(
+        "- `ok prove {}`\n",
+        shell_quote(&repo.display().to_string())
+    ));
+    out
+}
+
+fn setup_audit_report(repo: &Path) -> SetupAuditReport {
+    let repo = absolutize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let doctor = doctor_report(&repo);
+    let manifest = load_index_manifest(&repo).ok().flatten();
+    let config = OkConfig::load_from_repo(&repo).ok();
+    let providers = quality_provider_report(&repo, manifest.as_ref());
+    let advanced_providers = advanced_quality_provider_report(&repo, manifest.as_ref());
+    let mut checks = Vec::new();
+    let mut next_steps = doctor.next_steps.clone();
+
+    if let Some(manifest) = &manifest {
+        checks.push(SetupAuditCheck {
+            name: "index".into(),
+            status: CheckStatus::Pass,
+            message: format!(
+                "{} files, {} symbols, {} chunks",
+                manifest.file_count, manifest.symbol_count, manifest.chunk_count
+            ),
+        });
+        if manifest.quality.scip_exact_references > 0 {
+            checks.push(SetupAuditCheck {
+                name: "scip".into(),
+                status: CheckStatus::Pass,
+                message: format!(
+                    "{} exact references imported",
+                    manifest.quality.scip_exact_references
+                ),
+            });
+        } else {
+            checks.push(SetupAuditCheck {
+                name: "scip".into(),
+                status: CheckStatus::Warn,
+                message:
+                    "SCIP exact references are unavailable; impact and plan quality are reduced"
+                        .into(),
+            });
+        }
+    } else {
+        checks.push(SetupAuditCheck {
+            name: "index".into(),
+            status: CheckStatus::Fail,
+            message: "missing .ok/index.sqlite manifest".into(),
+        });
+        next_steps.push("Run `ok index .` before relying on Open Kioku in an agent.".into());
+    }
+
+    match config {
+        Some(config) => {
+            if !config.security.allow_write
+                && config.security.deny_network
+                && config.security.approval_required
+            {
+                checks.push(SetupAuditCheck {
+                    name: "security".into(),
+                    status: CheckStatus::Pass,
+                    message: "read-only source access, network denied, approvals required".into(),
+                });
+            } else {
+                checks.push(SetupAuditCheck {
+                    name: "security".into(),
+                    status: CheckStatus::Warn,
+                    message: format!(
+                        "allow_write={}, deny_network={}, approval_required={}",
+                        config.security.allow_write,
+                        config.security.deny_network,
+                        config.security.approval_required
+                    ),
+                });
+                next_steps.push(
+                    "Review ok.toml before exposing write, command, or network access to agents."
+                        .into(),
+                );
+            }
+        }
+        None => {
+            checks.push(SetupAuditCheck {
+                name: "config".into(),
+                status: CheckStatus::Warn,
+                message: "ok.toml is missing or invalid; defaults will be used".into(),
+            });
+            next_steps.push("Run `ok init .` to create an explicit ok.toml.".into());
+        }
+    }
+
+    let mcp_check = doctor.checks.iter().find(|check| check.name == "mcp");
+    checks.push(SetupAuditCheck {
+        name: "mcp".into(),
+        status: mcp_check
+            .map(|check| check.status)
+            .unwrap_or(CheckStatus::Warn),
+        message: mcp_check
+            .map(|check| check.message.clone())
+            .unwrap_or_else(|| "MCP server check was not available".into()),
+    });
+
+    let plugin_surfaces = plugin_surfaces(&repo);
+
+    next_steps.sort();
+    next_steps.dedup();
+    let ok = checks
+        .iter()
+        .all(|check| !matches!(check.status, CheckStatus::Fail));
+    SetupAuditReport {
+        ok,
+        repo: repo.clone(),
+        generated_by: "ok setup audit",
+        checks,
+        providers,
+        advanced_providers,
+        clients: all_mcp_clients()
+            .into_iter()
+            .map(|client| ClientInstallReport {
+                client: client.as_str(),
+                config_format: client.config_format(),
+                install_command: format!(
+                    "ok mcp install {} --repo {}",
+                    client.as_str(),
+                    shell_quote(&repo.display().to_string())
+                ),
+                verify: client_verify_command(client),
+                note: client_install_note(client),
+            })
+            .collect(),
+        plugin_surfaces,
+        next_steps,
+    }
+}
+
+fn print_setup_audit_report(report: &SetupAuditReport) {
+    println!("Open Kioku setup audit for {}", report.repo.display());
+    for check in &report.checks {
+        println!(
+            "{:<6} {:<12} {}",
+            check.status.marker(),
+            check.name,
+            check.message
+        );
+    }
+    println!("\nMCP clients:");
+    for client in &report.clients {
+        println!(
+            "- {:<8} {:<5} {}",
+            client.client, client.config_format, client.install_command
+        );
+    }
+    println!("\nQuality signals:");
+    for provider in &report.providers {
+        println!(
+            "{:<6} {:<12} {}",
+            provider.status.marker(),
+            provider.name,
+            provider.evidence
+        );
+    }
+    println!("\nAdvanced providers (optional):");
+    if report.advanced_providers.is_empty() {
+        println!("- none detected; not required for default SCIP/indexed-facts workflow");
+    } else {
+        for provider in &report.advanced_providers {
+            println!(
+                "{:<6} {:<12} {}",
+                provider.status.marker(),
+                provider.name,
+                provider.evidence
+            );
+        }
+    }
+    println!("\nSource checkout surfaces (optional):");
+    for surface in &report.plugin_surfaces {
+        let status = if surface.present {
+            "present"
+        } else {
+            "missing"
+        };
+        println!(
+            "- {:<14} {:<7} {}",
+            surface.name,
+            status,
+            surface.path.display()
+        );
+    }
+    if !report.next_steps.is_empty() {
+        println!("\nNext steps:");
+        for step in &report.next_steps {
+            println!("- {step}");
+        }
+    }
+}
+
+fn render_setup_audit_markdown(report: &SetupAuditReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Open Kioku Setup Audit\n\n");
+    out.push_str("| Field | Value |\n| --- | --- |\n");
+    out.push_str(&format!("| Repo | `{}` |\n", report.repo.display()));
+    out.push_str(&format!("| Ready | `{}` |\n", report.ok));
+    out.push_str(&format!("| Generated by | `{}` |\n", report.generated_by));
+
+    out.push_str("\n## Checks\n\n");
+    out.push_str("| Status | Check | Evidence |\n| --- | --- | --- |\n");
+    for check in &report.checks {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} |\n",
+            check.status.label(),
+            check.name,
+            markdown_cell(&check.message)
+        ));
+    }
+
+    out.push_str("\n## MCP Client Matrix\n\n");
+    out.push_str("| Client | Config | Install command | Verify |\n| --- | --- | --- | --- |\n");
+    for client in &report.clients {
+        out.push_str(&format!(
+            "| `{}` | `{}` | `{}` | `{}` |\n",
+            client.client, client.config_format, client.install_command, client.verify
+        ));
+    }
+
+    out.push_str("\n## Quality Signals\n\n");
+    out.push_str("| Status | Signal | Evidence | Next step |\n| --- | --- | --- | --- |\n");
+    for provider in &report.providers {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} |\n",
+            provider.status.label(),
+            provider.name,
+            markdown_cell(&provider.evidence),
+            markdown_cell(provider.next_step.as_deref().unwrap_or("None"))
+        ));
+    }
+
+    out.push_str("\n## Advanced Providers\n\n");
+    out.push_str("Optional only. Missing entries do not reduce default readiness; Open Kioku's primary precision path is local indexed facts plus SCIP when available.\n\n");
+    if report.advanced_providers.is_empty() {
+        out.push_str("No advanced provider artifacts detected.\n");
+    } else {
+        out.push_str("| Status | Provider | Evidence | Next step |\n| --- | --- | --- | --- |\n");
+        for provider in &report.advanced_providers {
+            out.push_str(&format!(
+                "| `{}` | `{}` | {} | {} |\n",
+                provider.status.label(),
+                provider.name,
+                markdown_cell(&provider.evidence),
+                markdown_cell(provider.next_step.as_deref().unwrap_or("None"))
+            ));
+        }
+    }
+
+    out.push_str("\n## Source Checkout Surfaces\n\n");
+    out.push_str("These are expected only when auditing the Open Kioku source checkout, not every indexed target repository.\n\n");
+    out.push_str("| Surface | Status | Path | Note |\n| --- | --- | --- | --- |\n");
+    for surface in &report.plugin_surfaces {
+        out.push_str(&format!(
+            "| `{}` | `{}` | `{}` | {} |\n",
+            surface.name,
+            if surface.present {
+                "present"
+            } else {
+                "missing"
+            },
+            surface.path.display(),
+            surface.note
+        ));
+    }
+
+    out.push_str("\n## Next Steps\n\n");
+    if report.next_steps.is_empty() {
+        out.push_str("- No required next steps.\n");
+    } else {
+        for step in &report.next_steps {
+            out.push_str(&format!("- {step}\n"));
+        }
+    }
+    out
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
+fn all_mcp_clients() -> [McpClient; 6] {
+    [
+        McpClient::Claude,
+        McpClient::Cursor,
+        McpClient::Codex,
+        McpClient::Gemini,
+        McpClient::Opencode,
+        McpClient::Zed,
+    ]
+}
+
+fn client_verify_command(client: McpClient) -> String {
+    match client {
+        McpClient::Claude => "restart Claude, then inspect MCP server logs".into(),
+        McpClient::Cursor => "open Cursor MCP settings and confirm open-kioku is enabled".into(),
+        McpClient::Codex => "run /mcp in Codex and confirm open-kioku is listed".into(),
+        McpClient::Gemini => "run gemini /mcp and confirm open-kioku is connected".into(),
+        McpClient::Opencode => "run opencode and ask it to use the open-kioku MCP tools".into(),
+        McpClient::Zed => "open Agent Panel settings and confirm the server is active".into(),
+    }
+}
+
+fn client_install_note(client: McpClient) -> &'static str {
+    match client {
+        McpClient::Claude => "Claude-style mcpServers JSON.",
+        McpClient::Cursor => "Cursor MCP JSON entry.",
+        McpClient::Codex => "Codex config.toml mcp_servers entry.",
+        McpClient::Gemini => "Gemini CLI settings.json mcpServers entry.",
+        McpClient::Opencode => "OpenCode opencode.json mcp local server entry.",
+        McpClient::Zed => "Zed settings.json context_servers entry.",
+    }
+}
+
+fn plugin_surfaces(repo: &Path) -> Vec<PluginSurfaceReport> {
+    vec![
+        PluginSurfaceReport {
+            name: "cursor-plugin",
+            path: repo.join(".cursor-plugin/plugin.json"),
+            present: repo.join(".cursor-plugin/plugin.json").exists(),
+            note: "Cursor plugin manifest.",
+        },
+        PluginSurfaceReport {
+            name: "claude-plugin",
+            path: repo.join(".claude-plugin/plugin.json"),
+            present: repo.join(".claude-plugin/plugin.json").exists(),
+            note: "Claude plugin manifest.",
+        },
+        PluginSurfaceReport {
+            name: "github-workflows",
+            path: repo.join(".github/workflows"),
+            present: repo.join(".github/workflows").is_dir(),
+            note: "CI and release automation.",
+        },
+    ]
+}
+
+fn quality_provider_report(
+    repo: &Path,
+    manifest: Option<&IndexManifest>,
+) -> Vec<QualityProviderReport> {
+    let build_systems = detect_build_systems(repo);
+    let test_count = manifest
+        .map(|manifest| manifest.quality.test_count)
+        .unwrap_or(0);
+    let import_count = manifest
+        .map(|manifest| manifest.quality.import_count)
+        .unwrap_or(0);
+    let static_analysis_facts = manifest
+        .map(|manifest| manifest.quality.static_analysis_facts)
+        .unwrap_or(0);
+    let runtime_analysis_facts = manifest
+        .map(|manifest| manifest.quality.runtime_analysis_facts)
+        .unwrap_or(0);
+    let mut providers = Vec::new();
+
+    providers.push(QualityProviderReport {
+        name: "build",
+        status: if build_systems.is_empty() {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Pass
+        },
+        evidence: if build_systems.is_empty() {
+            "no build system files detected".into()
+        } else {
+            format!("detected {}", build_systems.join(", "))
+        },
+        next_step: if build_systems.is_empty() {
+            Some("Run from the repository root or add ok.toml with the intended root.".into())
+        } else {
+            None
+        },
+    });
+    providers.push(QualityProviderReport {
+        name: "tests",
+        status: if test_count > 0 {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        evidence: format!("{test_count} indexed test target(s)"),
+        next_step: if test_count == 0 {
+            Some("Index test files before relying on validation recommendations.".into())
+        } else {
+            None
+        },
+    });
+    providers.push(QualityProviderReport {
+        name: "imports",
+        status: if import_count > 0 {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        evidence: format!("{import_count} indexed import edge(s)"),
+        next_step: if import_count == 0 {
+            Some("Index source files with imports to improve local dependency evidence.".into())
+        } else {
+            None
+        },
+    });
+    providers.push(QualityProviderReport {
+        name: "static",
+        status: if manifest.is_some() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        evidence: format!("{static_analysis_facts} language-specific static analysis fact(s)"),
+        next_step: if manifest.is_none() {
+            Some("Run `ok index .` to collect language-specific static analysis facts.".into())
+        } else {
+            None
+        },
+    });
+    if runtime_analysis_facts > 0 {
+        providers.push(QualityProviderReport {
+            name: "runtime",
+            status: CheckStatus::Pass,
+            evidence: format!(
+                "{runtime_analysis_facts} runtime analysis fact(s) from local artifacts"
+            ),
+            next_step: None,
+        });
+    }
+    providers.push(QualityProviderReport {
+        name: "validation",
+        status: if test_count > 0 {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        evidence: if build_systems.iter().any(|system| system == "gradle") && test_count > 0 {
+            "Gradle-scoped validation commands enabled for indexed Java test paths".into()
+        } else if test_count > 0 {
+            "indexed validation candidates available".into()
+        } else {
+            "no indexed validation candidates".into()
+        },
+        next_step: if test_count == 0 {
+            Some("Add or index tests so plans can return concrete validation commands.".into())
+        } else {
+            None
+        },
+    });
+    providers
+}
+
+fn advanced_quality_provider_report(
+    repo: &Path,
+    manifest: Option<&IndexManifest>,
+) -> Vec<QualityProviderReport> {
+    let codeql_dbs = detect_codeql_databases(repo);
+    let bsp_descriptors = count_named_artifacts(&[repo.join(".bsp")], &[".json"], 2);
+    let coverage_reports = manifest
+        .map(|manifest| manifest.quality.coverage_reports)
+        .unwrap_or_else(|| {
+            count_named_artifacts(&analysis_roots(repo), &["jacoco.xml", "coverage.xml"], 5)
+        });
+    let junit_reports = manifest
+        .map(|manifest| manifest.quality.junit_reports)
+        .unwrap_or_else(|| count_named_artifacts(&analysis_roots(repo), &["test-", "junit"], 5));
+    let lsp = relevant_lsp_servers(repo);
+    let mut providers = Vec::new();
+
+    if bsp_descriptors > 0 {
+        providers.push(QualityProviderReport {
+            name: "bsp",
+            status: CheckStatus::Pass,
+            evidence: format!("{bsp_descriptors} BSP descriptor(s) under .bsp"),
+            next_step: None,
+        });
+    }
+    if codeql_dbs > 0 {
+        providers.push(QualityProviderReport {
+            name: "codeql",
+            status: CheckStatus::Pass,
+            evidence: format!("{codeql_dbs} local CodeQL database artifact(s) detected"),
+            next_step: None,
+        });
+    }
+    if !lsp.present.is_empty() && lsp.missing.is_empty() {
+        providers.push(QualityProviderReport {
+            name: "lsp",
+            status: CheckStatus::Pass,
+            evidence: format!(
+                "detected matching language servers: {}",
+                lsp.present.join(", ")
+            ),
+            next_step: None,
+        });
+    }
+    if coverage_reports > 0 {
+        providers.push(QualityProviderReport {
+            name: "coverage",
+            status: CheckStatus::Pass,
+            evidence: format!("{coverage_reports} coverage report artifact(s) detected"),
+            next_step: None,
+        });
+    }
+    if junit_reports > 0 {
+        providers.push(QualityProviderReport {
+            name: "junit",
+            status: CheckStatus::Pass,
+            evidence: format!("{junit_reports} JUnit-style report artifact(s) detected"),
+            next_step: None,
+        });
+    }
+    providers
+}
+
+fn detect_build_systems(repo: &Path) -> Vec<String> {
+    let mut systems = Vec::new();
+    for (name, paths) in [
+        (
+            "gradle",
+            &[
+                "settings.gradle",
+                "settings.gradle.kts",
+                "build.gradle",
+                "build.gradle.kts",
+            ][..],
+        ),
+        ("maven", &["pom.xml"][..]),
+        (
+            "bazel",
+            &["WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"][..],
+        ),
+        ("cargo", &["Cargo.toml"][..]),
+        ("npm", &["package.json"][..]),
+        ("go", &["go.mod"][..]),
+    ] {
+        if paths.iter().any(|path| repo.join(path).exists()) {
+            systems.push(name.to_string());
+        }
+    }
+    systems
+}
+
+fn detect_codeql_databases(repo: &Path) -> usize {
+    [
+        ".ok/codeql",
+        "codeql-db",
+        "codeql-database",
+        ".codeql/database",
+    ]
+    .iter()
+    .filter(|path| {
+        let path = repo.join(path);
+        path.is_dir()
+            && (path.join("db-java").exists()
+                || path.join("codeql-database.yml").exists()
+                || path.join("log").exists())
+    })
+    .count()
+}
+
+fn analysis_roots(repo: &Path) -> Vec<PathBuf> {
+    vec![
+        repo.join(".ok/analysis"),
+        repo.join("build/reports"),
+        repo.join("target/site"),
+        repo.join("coverage"),
+    ]
+}
+
+fn count_named_artifacts(roots: &[PathBuf], needles: &[&str], max_depth: usize) -> usize {
+    let mut count = 0;
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path().to_string_lossy().to_ascii_lowercase();
+            let file_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if needles
+                .iter()
+                .any(|needle| file_name.contains(needle) || path.ends_with(needle))
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+struct LspProviderInventory {
+    present: Vec<String>,
+    missing: Vec<String>,
+}
+
+fn relevant_lsp_servers(repo: &Path) -> LspProviderInventory {
+    let languages = sample_lsp_languages(repo);
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
+    for language in &languages {
+        let candidates: &[&str] = match language.as_str() {
+            "java" => &["jdtls", "java-language-server"],
+            "rust" => &["rust-analyzer"],
+            "go" => &["gopls"],
+            "python" => &["pyright-langserver", "pylsp"],
+            "typescript" | "javascript" => &["typescript-language-server"],
+            _ => &[],
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+        if let Some(found) = candidates.iter().find(|binary| command_exists(binary)) {
+            present.push(format!("{language}:{found}"));
+        } else {
+            missing.push(format!("{} ({})", language, candidates.join(" or ")));
+        }
+    }
+    present.sort();
+    present.dedup();
+    missing.sort();
+    missing.dedup();
+    LspProviderInventory { present, missing }
+}
+
+fn sample_lsp_languages(repo: &Path) -> Vec<String> {
+    let mut languages = Vec::new();
+    for entry in walkdir::WalkDir::new(repo)
+        .max_depth(6)
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            name != ".git"
+                && name != ".ok"
+                && name != "build"
+                && name != "target"
+                && name != "node_modules"
+        })
+        .filter_map(|entry| entry.ok())
+        .take(5000)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(ext) = entry.path().extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        let language = match ext {
+            "java" => "java",
+            "rs" => "rust",
+            "go" => "go",
+            "py" => "python",
+            "ts" | "tsx" => "typescript",
+            "js" | "jsx" => "javascript",
+            _ => continue,
+        };
+        if !languages.iter().any(|existing| existing == language) {
+            languages.push(language.to_string());
+        }
+    }
+    languages.sort();
+    languages
 }
 
 fn doctor_report(repo: &Path) -> DoctorReport {
@@ -2418,11 +3396,12 @@ fn index_repo_with_config(
         &reporter,
         "store",
         format!(
-            "writing {} files, {} symbols, {} chunks, {} occurrences",
+            "writing {} files, {} symbols, {} chunks, {} occurrences, {} analysis facts",
             snapshot.files.len(),
             snapshot.symbols.len(),
             snapshot.chunks.len(),
-            snapshot.occurrences.len()
+            snapshot.occurrences.len(),
+            snapshot.analysis_facts.len()
         ),
     );
     let store = open_store(repo)?;
@@ -2436,11 +3415,13 @@ fn index_repo_with_config(
         occurrences: &snapshot.occurrences,
     })?;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
-    let graph = InMemoryGraph::from_index_with_occurrences(
+    let graph = InMemoryGraph::from_index_with_analysis(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
+        &snapshot.imports,
+        &snapshot.analysis_facts,
     );
     report_index_stage(
         &reporter,
@@ -2617,6 +3598,9 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
         repo.display().to_string(),
         "--read-only".to_string(),
     ];
+    let command_array: Vec<String> = std::iter::once("ok".to_string())
+        .chain(args.iter().cloned())
+        .collect();
     match client {
         McpClient::Claude => serde_json::json!({
             "client": "claude",
@@ -2640,7 +3624,71 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
                 }
             }
         }),
+        McpClient::Codex => serde_json::json!({
+            "client": "codex",
+            "instructions": "Add this entry to ~/.codex/config.toml or your trusted project .codex/config.toml.",
+            "config_text": format!(
+                "[mcp_servers.open-kioku]\ncommand = \"ok\"\nargs = [{}]\nenabled = true\n",
+                args.iter()
+                    .map(|arg| format!("\"{}\"", toml_escape(arg)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "config": {
+                "mcp_servers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args,
+                        "enabled": true
+                    }
+                }
+            }
+        }),
+        McpClient::Gemini => serde_json::json!({
+            "client": "gemini",
+            "instructions": "Add this entry to .gemini/settings.json or ~/.gemini/settings.json under mcpServers.",
+            "config": {
+                "mcpServers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args,
+                        "trust": false
+                    }
+                }
+            }
+        }),
+        McpClient::Opencode => serde_json::json!({
+            "client": "opencode",
+            "instructions": "Add this entry to opencode.json or opencode.jsonc.",
+            "config": {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "open-kioku": {
+                        "type": "local",
+                        "command": command_array,
+                        "enabled": true
+                    }
+                }
+            }
+        }),
+        McpClient::Zed => serde_json::json!({
+            "client": "zed",
+            "instructions": "Add this entry to Zed settings.json under context_servers.",
+            "config": {
+                "context_servers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args,
+                        "env": {}
+                    }
+                }
+            }
+        }),
     }
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {
