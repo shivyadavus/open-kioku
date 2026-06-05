@@ -13,5 +13,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/shivyadavus/open-kioku.git"
-  }
+  },
+  "bugs": {
+    "url": "https://github.com/shivyadavus/open-kioku/issues"
+  },
+  "homepage": "https://openkioku.com"
 }

@@ -2,6 +2,9 @@
 
 Local-first code intelligence for AI coding agents.
 
+If Open Kioku helps your AI coding workflow, please consider starring the repo:
+https://github.com/shivyadavus/open-kioku
+
 Open Kioku indexes a repository on your machine and exposes fast code search, symbol navigation, impact analysis, context packs, and MCP tools through the `ok` CLI.
 
 ## Install

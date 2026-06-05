@@ -85,7 +85,7 @@ fn init_index_search_and_doctor_work_together() {
         command.arg("init").arg(repo);
         command
     });
-    assert!(init.contains("initialized Open Kioku repository"));
+    assert!(init.contains("Open Kioku is ready"));
     assert!(repo.join("ok.toml").exists());
 
     let index = run({
@@ -235,7 +235,7 @@ fn demo_creates_indexed_sample_repo() {
         command
     });
 
-    assert!(output.contains("Demo repo ready"));
+    assert!(output.contains("Open Kioku is ready"));
     assert!(repo.join("ok.toml").exists());
     assert!(repo.join(".ok/index.sqlite").exists());
 

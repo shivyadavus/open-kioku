@@ -883,7 +883,7 @@ async fn main() -> anyhow::Result<()> {
             OkConfig::write_default(repo.join("ok.toml"))?;
             print_text_or_json(
                 cli.json,
-                "initialized Open Kioku repository",
+                "Open Kioku is ready.\n\nNext:\n  ok index\n  ok doctor\n  ok mcp install cursor\n\nIf this is useful, star the repo:\nhttps://github.com/shivyadavus/open-kioku",
                 &serde_json::json!({"status":"initialized"}),
             )?;
         }
@@ -1058,20 +1058,22 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Demo { path, force } => {
-            let repo = demo_repo_path(path)?;
+            let repo = demo_repo_path(path.clone())?;
             let report = build_demo_repo(&repo, force)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("Demo repo ready: {}", report.repo.display());
-                println!(
-                    "Indexed {} files, {} symbols, {} chunks",
-                    report.file_count, report.symbol_count, report.chunk_count
-                );
-                println!("\nTry:");
-                for command in &report.commands {
-                    println!("  {command}");
-                }
+                let rel_path = if let Some(ref p) = path {
+                    p.display().to_string()
+                } else {
+                    "./open-kioku-demo".to_string()
+                };
+                println!("Open Kioku is ready.\n");
+                println!("Next:");
+                println!("  ok demo --force");
+                println!("  ok --repo {} plan token --format markdown\n", rel_path);
+                println!("If this is useful, star the repo:");
+                println!("https://github.com/shivyadavus/open-kioku");
             }
         }
         Command::Search {
@@ -1497,6 +1499,8 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{}", render_proof_markdown(&report));
+                println!("\nShareable proof generated.");
+                println!("Repo: https://github.com/shivyadavus/open-kioku");
             }
         }
         Command::Architecture { command } => {
@@ -4561,6 +4565,7 @@ fn render_proof_markdown(report: &ProofReport) -> String {
         report.privacy.local_root_included
     ));
     out.push_str(&format!("- Path mode: `{}`\n", report.privacy.path_mode));
+    out.push_str("\n---\n\nIf Open Kioku helps your AI coding workflow, please consider starring the repository:\nhttps://github.com/shivyadavus/open-kioku\n");
     out
 }
 
