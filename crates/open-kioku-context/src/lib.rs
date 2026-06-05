@@ -1,7 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    ChangeBoundary, CodeChunk, Confidence, ContextPack, Evidence, EvidenceId, EvidenceSourceType,
-    File, GraphEdge, RiskReport, ScoreComponent, SearchResult, Symbol, ValidationPlan,
+    ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
+    Evidence, EvidenceId, EvidenceSourceType, File, GraphEdge, RiskReport, ScoreComponent,
+    SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -26,6 +27,13 @@ impl ContextPackFormat {
             Self::Markdown => {
                 let mut out = String::new();
                 out.push_str(&format!("# Task: {}\n\n", pack.task));
+                out.push_str("## Confidence\n\n");
+                out.push_str(&format!(
+                    "- Overall: `{:?}` (`{:.2}`)\n",
+                    pack.confidence_breakdown.overall_enum, pack.confidence_breakdown.overall_score
+                ));
+                write_markdown_confidence_breakdown(&mut out, &pack.confidence_breakdown);
+                out.push('\n');
                 out.push_str("## Primary Context\n\n");
                 for result in &pack.primary_files {
                     out.push_str(&format!("### {}\n", result.path.display()));
@@ -69,6 +77,28 @@ impl ContextPackFormat {
                 Ok(out)
             }
         }
+    }
+}
+
+fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceBreakdown) {
+    if !breakdown.blockers.is_empty() {
+        out.push_str("- Blockers:\n");
+        for blocker in &breakdown.blockers {
+            out.push_str(&format!("  - {blocker}\n"));
+        }
+    }
+    if !breakdown.caveats.is_empty() {
+        out.push_str("- Caveats:\n");
+        for caveat in &breakdown.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+    out.push_str("- Components:\n");
+    for component in &breakdown.components {
+        out.push_str(&format!(
+            "  - `{}` score `{:.2}`, weight `{:.2}`, contribution `{:.2}`\n",
+            component.signal, component.normalized_value, component.weight, component.contribution
+        ));
     }
 }
 
@@ -186,13 +216,29 @@ impl<'a> ContextPackBuilder<'a> {
             .iter()
             .take(8)
             .map(|result| result.path.clone())
-            .collect();
+            .collect::<Vec<_>>();
+        let primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();
+        let supporting_files = impact
+            .direct_impacts
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        let confidence_breakdown = confidence_for_context(
+            &primary_files,
+            &supporting_files,
+            &tests,
+            &impact.risk_report,
+            allowed_files.len(),
+            evidence.len(),
+        );
+        let confidence_summary = confidence_summary(&confidence_breakdown);
         Ok(ContextPack {
             task: task.into(),
             intent: classify_intent(task).into(),
-            primary_files: primary.iter().take(limit).cloned().collect(),
+            primary_files,
             primary_symbols,
-            supporting_files: impact.direct_impacts.iter().take(10).cloned().collect(),
+            supporting_files,
             dependency_edges,
             runtime_signals: Vec::new(),
             test_candidates: tests.clone(),
@@ -208,15 +254,113 @@ impl<'a> ContextPackBuilder<'a> {
                 forbidden_files: Vec::new(),
             },
             validation_plan: ValidationPlan {
-                commands: tests.iter().filter_map(|test| test.command.clone()).collect(),
+                commands: tests
+                    .iter()
+                    .filter_map(|test| test.command.clone())
+                    .collect(),
                 tests,
                 requires_approval: true,
                 evidence: evidence.clone(),
             },
             evidence,
-            confidence_summary: "ranked from lexical matches, task anchors, symbol extraction, test heuristics, and impact analysis".into(),
+            confidence_summary,
+            confidence_breakdown,
         })
     }
+}
+
+fn confidence_for_context(
+    primary_files: &[SearchResult],
+    supporting_files: &[SearchResult],
+    tests: &[open_kioku_core::TestTarget],
+    risk: &RiskReport,
+    allowed_file_count: usize,
+    evidence_count: usize,
+) -> ConfidenceBreakdown {
+    ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+        primary_file_count: primary_files.len(),
+        evidence_count,
+        exact_reference_count: exact_reference_count(primary_files, supporting_files),
+        validation_count: tests.len(),
+        validation_with_command_count: tests.iter().filter(|test| test.command.is_some()).count(),
+        negative_evidence_count: negative_evidence_count(risk),
+        allowed_file_count,
+        runtime_signal_count: runtime_signal_count(primary_files, supporting_files),
+    })
+}
+
+fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
+    let mut parts = vec![format!(
+        "overall {:?} ({:.2}) from explainable evidence signals",
+        breakdown.overall_enum, breakdown.overall_score
+    )];
+    if let Some(blocker) = breakdown.blockers.first() {
+        parts.push(format!("blocker: {blocker}"));
+    }
+    if let Some(caveat) = breakdown.caveats.first() {
+        parts.push(format!("caveat: {caveat}"));
+    }
+    parts.join("; ")
+}
+
+fn exact_reference_count(
+    primary_files: &[SearchResult],
+    supporting_files: &[SearchResult],
+) -> usize {
+    primary_files
+        .iter()
+        .chain(supporting_files.iter())
+        .filter(|result| has_exact_reference_signal(result))
+        .count()
+}
+
+fn has_exact_reference_signal(result: &SearchResult) -> bool {
+    result
+        .evidence
+        .iter()
+        .any(|evidence| contains_exact_reference(evidence))
+        || contains_exact_reference(&result.match_reason)
+}
+
+fn contains_exact_reference(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("exact reference")
+        || lower.contains("exact symbol reference")
+        || lower.contains("scip")
+}
+
+fn runtime_signal_count(
+    primary_files: &[SearchResult],
+    supporting_files: &[SearchResult],
+) -> usize {
+    primary_files
+        .iter()
+        .chain(supporting_files.iter())
+        .filter(|result| {
+            result.score_breakdown.iter().any(|component| {
+                component.signal == "runtime_corroboration" && component.contribution > 0.0
+            }) || result
+                .evidence
+                .iter()
+                .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
+        })
+        .count()
+}
+
+fn negative_evidence_count(risk: &RiskReport) -> usize {
+    risk.reasons
+        .iter()
+        .filter(|reason| {
+            let lower = reason.to_ascii_lowercase();
+            lower.contains("low confidence")
+                || lower.contains("no matching")
+                || lower.contains("missing")
+                || lower.contains("absent")
+                || lower.contains("unavailable")
+                || lower.contains("weak")
+                || lower.contains("unknown")
+        })
+        .count()
 }
 
 #[derive(Debug, Clone, Default)]
