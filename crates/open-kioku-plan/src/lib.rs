@@ -1,8 +1,9 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
+    BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
     ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
     MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, ScoreComponent, SearchResult,
-    TestTarget, ToolCallRecommendation,
+    Symbol, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -105,6 +106,7 @@ impl<'a> PlanEngine<'a> {
             .collect::<Vec<_>>();
         let recommended_change_boundary = change_boundary(
             &primary_context,
+            &relevant_symbols,
             &impact,
             &context.recommended_change_boundary,
         );
@@ -760,6 +762,7 @@ fn normalize_anchor(value: &str) -> String {
 
 fn change_boundary(
     primary_context: &[SearchResult],
+    relevant_symbols: &[Symbol],
     impact: &ImpactReport,
     context_boundary: &ChangeBoundary,
 ) -> ChangeBoundary {
@@ -787,12 +790,210 @@ fn change_boundary(
         }
     }
 
-    ChangeBoundary {
-        allowed_files: allowed.into_iter().collect(),
-        caution_files: caution.into_iter().collect(),
-        forbidden_files: context_boundary.forbidden_files.clone(),
-        evidence_refs: boundary_evidence_refs(primary_context, &impact.direct_impacts),
+    let mut forbidden_rules = context_boundary.forbidden_rules.clone();
+    for path in &context_boundary.forbidden_files {
+        forbidden_rules.push(BoundaryForbiddenRule {
+            pattern: path.display().to_string(),
+            reason: "forbidden by upstream context boundary".into(),
+            evidence_refs: context_boundary.evidence_refs.clone(),
+        });
     }
+    forbidden_rules.extend(default_forbidden_boundary_rules());
+    forbidden_rules.sort_by(|left, right| left.pattern.cmp(&right.pattern));
+    forbidden_rules.dedup_by(|left, right| left.pattern == right.pattern);
+    let forbidden_files = forbidden_rules
+        .iter()
+        .map(|rule| PathBuf::from(rule.pattern.clone()))
+        .collect::<Vec<_>>();
+    let allowed_files = allowed.into_iter().collect::<Vec<_>>();
+    let caution_files = caution.into_iter().collect::<Vec<_>>();
+    let allowed_symbols = allowed_symbols_for_boundary(relevant_symbols, &allowed_files);
+    let allowed_rules = boundary_file_rules(
+        &allowed_files,
+        primary_context,
+        &context_boundary.allowed_rules,
+        "primary context matched the requested edit intent",
+        &context_boundary.evidence_refs,
+    );
+    let caution_rules = caution_file_rules(
+        &caution_files,
+        impact,
+        &context_boundary.caution_rules,
+        "downstream impact candidate should be reviewed before editing",
+        &context_boundary.evidence_refs,
+    );
+    let evidence_refs = boundary_evidence_refs(primary_context, &impact.direct_impacts);
+
+    ChangeBoundary {
+        allowed_files,
+        caution_files,
+        forbidden_files,
+        evidence_refs: evidence_refs.clone(),
+        allowed_symbols,
+        allowed_rules,
+        caution_rules,
+        forbidden_rules,
+        expansion_requirements: vec![BoundaryExpansionRequirement {
+            reason: "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or co-change analysis.".into(),
+            required_evidence_refs: evidence_refs,
+        }],
+        signal_hooks: BoundarySignalHooks {
+            architecture_components: vec![
+                "architecture_boundaries".into(),
+                "architecture_violations".into(),
+            ],
+            ownership_sources: vec!["CODEOWNERS".into(), "git_history".into()],
+            cochange_sources: vec!["git_cochange".into(), "historical_prs".into()],
+        },
+    }
+}
+
+fn allowed_symbols_for_boundary(symbols: &[Symbol], allowed_files: &[PathBuf]) -> Vec<String> {
+    stable_refs(symbols.iter().filter_map(|symbol| {
+        if allowed_files
+            .iter()
+            .any(|path| path.to_string_lossy() == symbol.file_id.0)
+        {
+            Some(symbol.qualified_name.clone())
+        } else {
+            None
+        }
+    }))
+}
+
+fn boundary_file_rules(
+    paths: &[PathBuf],
+    evidence_results: &[SearchResult],
+    upstream_rules: &[BoundaryFileRule],
+    fallback_reason: &str,
+    fallback_evidence_refs: &[String],
+) -> Vec<BoundaryFileRule> {
+    paths
+        .iter()
+        .map(|path| {
+            if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
+                return rule.clone();
+            }
+            let mut evidence_refs = stable_refs(
+                evidence_results
+                    .iter()
+                    .filter(|result| result.path == *path)
+                    .flat_map(|result| result.derived_evidence_ids()),
+            );
+            if evidence_refs.is_empty() {
+                evidence_refs = stable_refs(fallback_evidence_refs.iter().cloned());
+            }
+            let symbols = evidence_results
+                .iter()
+                .filter(|result| result.path == *path)
+                .filter_map(|result| result.symbol.as_ref())
+                .map(|symbol| symbol.qualified_name.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            BoundaryFileRule {
+                path: path.clone(),
+                reason: fallback_reason.into(),
+                evidence_refs,
+                symbols,
+            }
+        })
+        .collect()
+}
+
+fn caution_file_rules(
+    paths: &[PathBuf],
+    impact: &ImpactReport,
+    upstream_rules: &[BoundaryFileRule],
+    fallback_reason: &str,
+    fallback_evidence_refs: &[String],
+) -> Vec<BoundaryFileRule> {
+    paths
+        .iter()
+        .map(|path| {
+            if let Some(rule) = upstream_rules.iter().find(|rule| rule.path == *path) {
+                return rule.clone();
+            }
+            let impact_results = impact
+                .direct_impacts
+                .iter()
+                .chain(impact.indirect_impacts.iter())
+                .filter(|result| result.path == *path)
+                .collect::<Vec<_>>();
+            let mut evidence_refs = stable_refs(
+                impact_results
+                    .iter()
+                    .flat_map(|result| result.derived_evidence_ids()),
+            );
+            if evidence_refs.is_empty() {
+                evidence_refs = stable_refs(fallback_evidence_refs.iter().cloned());
+            }
+            BoundaryFileRule {
+                path: path.clone(),
+                reason: if impact_results.is_empty() {
+                    fallback_reason.into()
+                } else {
+                    "impact analysis linked this file to the primary edit candidates".into()
+                },
+                evidence_refs,
+                symbols: impact_results
+                    .iter()
+                    .filter_map(|result| result.symbol.as_ref())
+                    .map(|symbol| symbol.qualified_name.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn default_forbidden_boundary_rules() -> Vec<BoundaryForbiddenRule> {
+    [
+        (".git/**", "git internals are never part of product edits"),
+        (
+            ".ok/**",
+            "Open Kioku local index artifacts are generated state",
+        ),
+        ("target/**", "Rust build output is generated state"),
+        ("build/**", "build output is generated state"),
+        ("dist/**", "distribution output is generated state"),
+        (
+            "node_modules/**",
+            "vendored package dependencies are out of scope",
+        ),
+        (
+            "vendor/**",
+            "vendored dependencies require a separate explicit change",
+        ),
+        (
+            "third_party/**",
+            "third-party dependencies require a separate explicit change",
+        ),
+        (
+            "generated/**",
+            "generated sources should be changed through their source generator",
+        ),
+        (
+            "**/generated/**",
+            "generated sources should be changed through their source generator",
+        ),
+        (
+            "**/*Generated*",
+            "generated sources should be changed through their source generator",
+        ),
+        (
+            "**/secrets/**",
+            "security-sensitive secret paths are outside normal edit boundaries",
+        ),
+    ]
+    .into_iter()
+    .map(|(pattern, reason)| BoundaryForbiddenRule {
+        pattern: pattern.into(),
+        reason: reason.into(),
+        evidence_refs: vec!["boundary:default-forbidden".into()],
+    })
+    .collect()
 }
 
 fn boundary_evidence_refs(primary: &[SearchResult], impacts: &[SearchResult]) -> Vec<String> {
@@ -1084,6 +1285,8 @@ fn render_text(report: &PlanReport) -> String {
         }
     }
 
+    write_boundary_text(&mut out, &report.recommended_change_boundary);
+
     out.push_str("\nRecommended next steps:\n");
     for step in &report.recommended_next_steps {
         out.push_str(&format!("  - {step}\n"));
@@ -1168,14 +1371,7 @@ fn render_markdown(report: &PlanReport) -> String {
     }
 
     out.push_str("\n## Edit Boundary\n\n");
-    out.push_str("Allowed files:\n");
-    write_paths(&mut out, &report.recommended_change_boundary.allowed_files);
-    out.push_str("\nCaution files:\n");
-    write_paths(&mut out, &report.recommended_change_boundary.caution_files);
-    out.push_str(&format!(
-        "\nBoundary evidence: `{}`\n",
-        evidence_refs_text(&report.recommended_change_boundary.evidence_refs)
-    ));
+    write_markdown_boundary(&mut out, &report.recommended_change_boundary);
 
     out.push_str("\n## Recommended Next Steps\n\n");
     for step in &report.recommended_next_steps {
@@ -1382,6 +1578,131 @@ fn evidence_refs_text(refs: &[String]) -> String {
     } else {
         refs.join(", ")
     }
+}
+
+fn write_boundary_text(out: &mut String, boundary: &ChangeBoundary) {
+    out.push_str("\nEdit boundary:\n");
+    out.push_str("  allowed files:\n");
+    if boundary.allowed_rules.is_empty() {
+        write_paths(out, &boundary.allowed_files);
+    } else {
+        for rule in &boundary.allowed_rules {
+            out.push_str(&format!(
+                "  - {} [{}; evidence {}]\n",
+                rule.path.display(),
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+        }
+    }
+    out.push_str("  caution files:\n");
+    if boundary.caution_rules.is_empty() {
+        write_paths(out, &boundary.caution_files);
+    } else {
+        for rule in &boundary.caution_rules {
+            out.push_str(&format!(
+                "  - {} [{}; evidence {}]\n",
+                rule.path.display(),
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+        }
+    }
+    out.push_str("  forbidden patterns:\n");
+    if boundary.forbidden_rules.is_empty() {
+        write_paths(out, &boundary.forbidden_files);
+    } else {
+        for rule in &boundary.forbidden_rules {
+            out.push_str(&format!(
+                "  - {} [{}; evidence {}]\n",
+                rule.pattern,
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+        }
+    }
+    for requirement in &boundary.expansion_requirements {
+        out.push_str(&format!(
+            "  expansion requires evidence: {} [{}]\n",
+            one_line(&requirement.reason),
+            evidence_refs_text(&requirement.required_evidence_refs)
+        ));
+    }
+    out.push_str(&format!(
+        "  boundary evidence: {}\n",
+        evidence_refs_text(&boundary.evidence_refs)
+    ));
+}
+
+fn write_markdown_boundary(out: &mut String, boundary: &ChangeBoundary) {
+    out.push_str("Allowed files:\n");
+    if boundary.allowed_rules.is_empty() {
+        write_paths(out, &boundary.allowed_files);
+    } else {
+        for rule in &boundary.allowed_rules {
+            out.push_str(&format!(
+                "- `{}`\n  - reason: {}\n  - evidence: `{}`\n",
+                rule.path.display(),
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+            if !rule.symbols.is_empty() {
+                out.push_str(&format!(
+                    "  - symbols: `{}`\n",
+                    evidence_refs_text(&rule.symbols)
+                ));
+            }
+        }
+    }
+    out.push_str("\nCaution files:\n");
+    if boundary.caution_rules.is_empty() {
+        write_paths(out, &boundary.caution_files);
+    } else {
+        for rule in &boundary.caution_rules {
+            out.push_str(&format!(
+                "- `{}`\n  - reason: {}\n  - evidence: `{}`\n",
+                rule.path.display(),
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+        }
+    }
+    out.push_str("\nForbidden patterns:\n");
+    if boundary.forbidden_rules.is_empty() {
+        write_paths(out, &boundary.forbidden_files);
+    } else {
+        for rule in &boundary.forbidden_rules {
+            out.push_str(&format!(
+                "- `{}`\n  - reason: {}\n  - evidence: `{}`\n",
+                rule.pattern,
+                one_line(&rule.reason),
+                evidence_refs_text(&rule.evidence_refs)
+            ));
+        }
+    }
+    out.push_str("\nBoundary expansion:\n");
+    if boundary.expansion_requirements.is_empty() {
+        out.push_str("- Requires explicit evidence for any file outside `allowed_files`.\n");
+    } else {
+        for requirement in &boundary.expansion_requirements {
+            out.push_str(&format!(
+                "- {}\n  - required evidence refs: `{}`\n",
+                one_line(&requirement.reason),
+                evidence_refs_text(&requirement.required_evidence_refs)
+            ));
+        }
+    }
+    out.push_str("\nSignal hooks:\n");
+    out.push_str(&format!(
+        "- architecture: `{}`\n- ownership: `{}`\n- co-change: `{}`\n",
+        evidence_refs_text(&boundary.signal_hooks.architecture_components),
+        evidence_refs_text(&boundary.signal_hooks.ownership_sources),
+        evidence_refs_text(&boundary.signal_hooks.cochange_sources)
+    ));
+    out.push_str(&format!(
+        "\nBoundary evidence: `{}`\n",
+        evidence_refs_text(&boundary.evidence_refs)
+    ));
 }
 
 fn top_score_signals(components: &[ScoreComponent]) -> String {
@@ -1591,6 +1912,7 @@ mod tests {
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 evidence_refs: Vec::new(),
+                ..Default::default()
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
@@ -1670,6 +1992,22 @@ mod tests {
             .iter()
             .all(|test| !test.evidence_refs.is_empty()));
         assert!(!report.recommended_change_boundary.evidence_refs.is_empty());
+        assert!(report
+            .recommended_change_boundary
+            .allowed_rules
+            .iter()
+            .any(|rule| rule.path == Path::new("src/auth.rs")
+                && !rule.reason.is_empty()
+                && !rule.evidence_refs.is_empty()));
+        assert!(report
+            .recommended_change_boundary
+            .forbidden_rules
+            .iter()
+            .any(|rule| rule.pattern == "vendor/**" && !rule.reason.is_empty()));
+        assert!(!report
+            .recommended_change_boundary
+            .expansion_requirements
+            .is_empty());
     }
 
     #[test]
@@ -1681,8 +2019,51 @@ mod tests {
 
         assert!(markdown.contains("# Plan: token"));
         assert!(markdown.contains("## Primary Context"));
+        assert!(markdown.contains("Forbidden patterns:"));
+        assert!(markdown.contains("Boundary expansion:"));
         assert!(text.contains("Plan: token"));
         assert!(text.contains("Validation candidates"));
+        assert!(text.contains("Edit boundary:"));
+    }
+
+    #[test]
+    fn boundary_rules_keep_primary_allowed_and_impact_caution() {
+        let mut primary = test_search_result("src/auth.rs");
+        primary.reconcile_score_breakdown();
+        let mut impact_result = test_search_result("src/lib.rs");
+        impact_result.reconcile_score_breakdown();
+        let impact = ImpactReport {
+            target: "src/auth.rs".into(),
+            direct_impacts: vec![impact_result],
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            score_breakdown: Vec::new(),
+        };
+
+        let boundary = change_boundary(&[primary], &[], &impact, &ChangeBoundary::default());
+
+        assert!(boundary
+            .allowed_rules
+            .iter()
+            .any(|rule| rule.path == Path::new("src/auth.rs")
+                && !rule.reason.is_empty()
+                && !rule.evidence_refs.is_empty()));
+        assert!(boundary
+            .caution_rules
+            .iter()
+            .any(|rule| rule.path == Path::new("src/lib.rs")
+                && !rule.reason.is_empty()
+                && !rule.evidence_refs.is_empty()));
+        assert!(boundary
+            .forbidden_rules
+            .iter()
+            .any(|rule| rule.pattern == "vendor/**" && !rule.reason.is_empty()));
+        assert!(!boundary.expansion_requirements.is_empty());
     }
 
     #[test]
@@ -1736,6 +2117,7 @@ mod tests {
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 evidence_refs: Vec::new(),
+                ..Default::default()
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
@@ -1827,6 +2209,7 @@ mod tests {
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 evidence_refs: Vec::new(),
+                ..Default::default()
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),

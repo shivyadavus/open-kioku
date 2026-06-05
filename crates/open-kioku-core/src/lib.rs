@@ -869,13 +869,60 @@ pub struct RiskReport {
     pub reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BoundaryFileRule {
+    pub path: PathBuf,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BoundaryForbiddenRule {
+    pub pattern: String,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BoundaryExpansionRequirement {
+    pub reason: String,
+    #[serde(default)]
+    pub required_evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BoundarySignalHooks {
+    #[serde(default)]
+    pub architecture_components: Vec<String>,
+    #[serde(default)]
+    pub ownership_sources: Vec<String>,
+    #[serde(default)]
+    pub cochange_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ChangeBoundary {
     pub allowed_files: Vec<PathBuf>,
     pub caution_files: Vec<PathBuf>,
     pub forbidden_files: Vec<PathBuf>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub allowed_symbols: Vec<String>,
+    #[serde(default)]
+    pub allowed_rules: Vec<BoundaryFileRule>,
+    #[serde(default)]
+    pub caution_rules: Vec<BoundaryFileRule>,
+    #[serde(default)]
+    pub forbidden_rules: Vec<BoundaryForbiddenRule>,
+    #[serde(default)]
+    pub expansion_requirements: Vec<BoundaryExpansionRequirement>,
+    #[serde(default)]
+    pub signal_hooks: BoundarySignalHooks,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

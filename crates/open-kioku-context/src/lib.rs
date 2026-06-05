@@ -264,6 +264,7 @@ impl<'a> ContextPackBuilder<'a> {
                     .collect(),
                 forbidden_files: Vec::new(),
                 evidence_refs: boundary_evidence_refs,
+                ..Default::default()
             },
             validation_plan: ValidationPlan {
                 commands: tests
