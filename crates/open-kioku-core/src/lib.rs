@@ -77,6 +77,16 @@ pub struct ConfidenceBreakdown {
     pub caveats: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NegativeEvidence {
+    pub query: String,
+    pub scope: String,
+    pub inspected_sources: Vec<String>,
+    pub reason: String,
+    pub confidence: f32,
+    pub suggested_next_probe: Option<String>,
+}
+
 impl Default for ConfidenceBreakdown {
     fn default() -> Self {
         Self {
@@ -905,6 +915,8 @@ pub struct ContextPack {
     pub recommended_change_boundary: ChangeBoundary,
     pub validation_plan: ValidationPlan,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub negative_evidence: Vec<NegativeEvidence>,
     pub confidence_summary: String,
     #[serde(default)]
     pub confidence_breakdown: ConfidenceBreakdown,
@@ -931,6 +943,8 @@ pub struct PlanReport {
     pub tool_calls: Vec<ToolCallRecommendation>,
     pub memory_facts: Vec<MemorySearchResult>,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub negative_evidence: Vec<NegativeEvidence>,
     pub confidence_summary: String,
     #[serde(default)]
     pub confidence_breakdown: ConfidenceBreakdown,

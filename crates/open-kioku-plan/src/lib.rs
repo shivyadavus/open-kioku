@@ -1,8 +1,8 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
-    MemorySearchResult, PlanReport, RiskReport, ScoreComponent, SearchResult, TestTarget,
-    ToolCallRecommendation,
+    MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, ScoreComponent, SearchResult,
+    TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -117,6 +117,14 @@ impl<'a> PlanEngine<'a> {
             .chain(impact.evidence.iter())
             .cloned()
             .collect::<Vec<_>>();
+        let negative_evidence = negative_evidence_for_plan(
+            task,
+            &context,
+            &primary_context,
+            &impact,
+            &validation,
+            &risk,
+        );
         let summary = summary(
             task,
             &primary_context,
@@ -150,6 +158,7 @@ impl<'a> PlanEngine<'a> {
             tool_calls,
             memory_facts: self.memory_facts.clone(),
             evidence,
+            negative_evidence,
             confidence_summary,
             confidence_breakdown,
             score_breakdown,
@@ -433,6 +442,140 @@ fn confidence_for_plan(
     })
 }
 
+fn negative_evidence_for_plan(
+    task: &str,
+    context: &ContextPack,
+    primary_context: &[SearchResult],
+    impact: &ImpactReport,
+    validation: &[TestTarget],
+    risk: &RiskReport,
+) -> Vec<NegativeEvidence> {
+    let mut items = context.negative_evidence.clone();
+    push_unique_negative_evidence(
+        &mut items,
+        NegativeEvidence {
+            query: task.into(),
+            scope: "git_history".into(),
+            inspected_sources: vec!["plan.evidence".into(), "search_result.evidence".into()],
+            reason: "no git co-change or historical validation evidence was available".into(),
+            confidence: 0.70,
+            suggested_next_probe: primary_context.first().map(|result| {
+                format!(
+                    "Run `git log --name-only -- {}` to inspect historical co-change manually.",
+                    result.path.display()
+                )
+            }),
+        },
+    );
+    if exact_reference_count(primary_context, impact) == 0 {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: "exact_references".into(),
+                inspected_sources: vec![
+                    "primary_context.evidence".into(),
+                    "impact.evidence".into(),
+                    "match_reason".into(),
+                ],
+                reason: "plan has no explicit exact symbol reference or SCIP evidence".into(),
+                confidence: 0.85,
+                suggested_next_probe: Some(
+                    "Run `ok scip setup .` and re-index with `ok index . --with-scip auto`.".into(),
+                ),
+            },
+        );
+    }
+    if validation.is_empty() {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: "validation".into(),
+                inspected_sources: vec!["validation".into(), "indexed_tests".into()],
+                reason: "plan has no selected validation target".into(),
+                confidence: 0.80,
+                suggested_next_probe: primary_context.first().map(|result| {
+                    format!(
+                        "Run `ok tests {}` to inspect test proximity.",
+                        result.path.display()
+                    )
+                }),
+            },
+        );
+    }
+    if runtime_signal_count(primary_context)
+        + runtime_signal_count(&impact.direct_impacts)
+        + runtime_signal_count(&impact.indirect_impacts)
+        == 0
+    {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: "runtime".into(),
+                inspected_sources: vec![
+                    "runtime_signals".into(),
+                    "primary_context.evidence".into(),
+                    "impact.evidence".into(),
+                ],
+                reason: "plan has no runtime trace, incident, or error corroboration".into(),
+                confidence: 0.75,
+                suggested_next_probe: Some(
+                    "Attach a runtime trace, Sentry issue, or failure artifact and rerun `ok plan`."
+                        .into(),
+                ),
+            },
+        );
+    }
+    if docs_or_tests_only(primary_context) {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: "boundary".into(),
+                inspected_sources: vec!["primary_context.paths".into()],
+                reason: "all selected primary context paths are docs or tests".into(),
+                confidence: 0.90,
+                suggested_next_probe: Some(
+                    "Search for the production source symbol before editing.".into(),
+                ),
+            },
+        );
+    }
+    for reason in &risk.reasons {
+        let lower = reason.to_ascii_lowercase();
+        if lower.contains("low confidence") || lower.contains("no matching") {
+            push_unique_negative_evidence(
+                &mut items,
+                NegativeEvidence {
+                    query: task.into(),
+                    scope: "risk".into(),
+                    inspected_sources: vec!["risk.reasons".into()],
+                    reason: reason.clone(),
+                    confidence: 0.85,
+                    suggested_next_probe: Some(
+                        "Resolve missing named anchors before editing.".into(),
+                    ),
+                },
+            );
+        }
+    }
+    items.sort_by(|a, b| {
+        a.scope
+            .cmp(&b.scope)
+            .then_with(|| a.reason.cmp(&b.reason))
+            .then_with(|| a.query.cmp(&b.query))
+    });
+    items
+}
+
+fn push_unique_negative_evidence(items: &mut Vec<NegativeEvidence>, item: NegativeEvidence) {
+    if !items.iter().any(|existing| existing.scope == item.scope) {
+        items.push(item);
+    }
+}
+
 fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
     let mut parts = vec![format!(
         "overall {:?} ({:.2}) from evidence density, references, validation, boundaries, runtime, and negative evidence",
@@ -499,6 +642,27 @@ fn negative_evidence_count(risk: &RiskReport) -> usize {
                 || lower.contains("unknown")
         })
         .count()
+}
+
+fn docs_or_tests_only(results: &[SearchResult]) -> bool {
+    !results.is_empty()
+        && results
+            .iter()
+            .all(|result| is_docs_or_test_path(&result.path.to_string_lossy()))
+}
+
+fn is_docs_or_test_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.starts_with("docs/")
+        || path.starts_with("test/")
+        || path.starts_with("tests/")
+        || path.contains("/docs/")
+        || path.ends_with(".md")
+        || path.ends_with(".mdx")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("_test.")
+        || path.contains("test_")
 }
 
 fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
@@ -769,6 +933,7 @@ fn render_text(report: &PlanReport) -> String {
         out.push_str(&format!("  - {reason}\n"));
     }
     write_confidence_text(&mut out, &report.confidence_breakdown);
+    write_negative_evidence_text(&mut out, &report.negative_evidence);
 
     out.push_str("\nPrimary context:\n");
     write_results(&mut out, &report.primary_context);
@@ -845,6 +1010,9 @@ fn render_markdown(report: &PlanReport) -> String {
         report.confidence_breakdown.overall_enum, report.confidence_breakdown.overall_score
     ));
     write_markdown_confidence_breakdown(&mut out, &report.confidence_breakdown);
+
+    out.push_str("\n## Negative Evidence\n\n");
+    write_markdown_negative_evidence(&mut out, &report.negative_evidence);
 
     out.push_str("\n## Primary Context\n\n");
     write_markdown_results(&mut out, &report.primary_context);
@@ -1013,6 +1181,46 @@ fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceB
     }
 }
 
+fn write_negative_evidence_text(out: &mut String, items: &[NegativeEvidence]) {
+    out.push_str("Negative evidence:\n");
+    if items.is_empty() {
+        out.push_str("  - none\n");
+        return;
+    }
+    for item in items {
+        out.push_str(&format!(
+            "  - [{}] {} ({:.2})\n",
+            item.scope, item.reason, item.confidence
+        ));
+        if let Some(probe) = &item.suggested_next_probe {
+            out.push_str(&format!("    next probe: {probe}\n"));
+        }
+    }
+}
+
+fn write_markdown_negative_evidence(out: &mut String, items: &[NegativeEvidence]) {
+    if items.is_empty() {
+        out.push_str("- None\n");
+        return;
+    }
+    for item in items {
+        out.push_str(&format!(
+            "- `{}`: {} (`{:.2}`)\n",
+            item.scope,
+            one_line(&item.reason),
+            item.confidence
+        ));
+        out.push_str(&format!(
+            "  - query: `{}`; inspected: `{}`\n",
+            one_line(&item.query),
+            item.inspected_sources.join(", ")
+        ));
+        if let Some(probe) = &item.suggested_next_probe {
+            out.push_str(&format!("  - next probe: `{}`\n", one_line(probe)));
+        }
+    }
+}
+
 fn top_score_signals(components: &[ScoreComponent]) -> String {
     if components.is_empty() {
         return "no score signals".into();
@@ -1053,9 +1261,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use open_kioku_core::{
-        CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
-        IndexManifest, Language, LineRange, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
-        TestTarget, ValidationPlan,
+        CodeChunk, Confidence, ConfidenceBreakdown, Evidence, EvidenceId, EvidenceSourceType, File,
+        FileId, IndexManifest, Language, LineRange, Repository, RepositoryId, Symbol, SymbolId,
+        SymbolKind, TestTarget, ValidationPlan,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -1176,6 +1384,95 @@ mod tests {
         store
     }
 
+    fn test_search_result(path: &str) -> SearchResult {
+        SearchResult {
+            path: PathBuf::from(path),
+            line_range: Some(LineRange { start: 1, end: 3 }),
+            snippet: "test fixture".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "lexical match".into(),
+            evidence: vec!["lexical evidence".into()],
+            confidence: 0.6,
+            score_breakdown: vec![ScoreComponent::single(
+                "test_score",
+                1.0,
+                vec!["test evidence".into()],
+                "test fixture",
+            )],
+        }
+    }
+
+    #[test]
+    fn negative_evidence_covers_missing_required_signals() {
+        let primary_context = vec![test_search_result("tests/auth_flow.rs")];
+        let risk = RiskReport {
+            level: "medium".into(),
+            score: 0.45,
+            reasons: vec!["low confidence: top context did not match named task anchor".into()],
+        };
+        let context = ContextPack {
+            task: "token".into(),
+            intent: "code_change".into(),
+            primary_files: primary_context.clone(),
+            primary_symbols: Vec::new(),
+            supporting_files: Vec::new(),
+            dependency_edges: Vec::new(),
+            runtime_signals: Vec::new(),
+            test_candidates: Vec::new(),
+            risk_report: risk.clone(),
+            recommended_change_boundary: ChangeBoundary {
+                allowed_files: vec![PathBuf::from("tests/auth_flow.rs")],
+                caution_files: Vec::new(),
+                forbidden_files: Vec::new(),
+            },
+            validation_plan: ValidationPlan {
+                commands: Vec::new(),
+                tests: Vec::new(),
+                requires_approval: true,
+                evidence: Vec::new(),
+            },
+            evidence: Vec::new(),
+            negative_evidence: Vec::new(),
+            confidence_summary: "fixture".into(),
+            confidence_breakdown: ConfidenceBreakdown::default(),
+        };
+        let impact = ImpactReport {
+            target: "tests/auth_flow.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: risk.clone(),
+            evidence: Vec::new(),
+            score_breakdown: Vec::new(),
+        };
+
+        let items =
+            negative_evidence_for_plan("token", &context, &primary_context, &impact, &[], &risk);
+        let scopes = items
+            .iter()
+            .map(|item| item.scope.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for expected in [
+            "boundary",
+            "exact_references",
+            "git_history",
+            "risk",
+            "runtime",
+            "validation",
+        ] {
+            assert!(scopes.contains(expected), "missing scope {expected}");
+        }
+        assert!(items.iter().all(|item| item.confidence >= 0.70));
+        assert!(
+            items
+                .iter()
+                .filter(|item| item.suggested_next_probe.is_some())
+                .count()
+                >= 5
+        );
+    }
+
     #[test]
     fn builds_evidence_backed_plan() {
         let store = test_store();
@@ -1268,6 +1565,7 @@ mod tests {
                 evidence: vec![evidence.clone()],
             },
             evidence: vec![evidence],
+            negative_evidence: Vec::new(),
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
         };
@@ -1356,6 +1654,7 @@ mod tests {
                 evidence: vec![evidence.clone()],
             },
             evidence: vec![evidence],
+            negative_evidence: Vec::new(),
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
         };

@@ -1,7 +1,7 @@
 use open_kioku_core::{
     CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack, Evidence, LineRange,
-    MemorySearchResult, PlanReport, ScoreComponent, SearchResult, Symbol, TestTarget,
-    ToolCallRecommendation,
+    MemorySearchResult, NegativeEvidence, PlanReport, ScoreComponent, SearchResult, Symbol,
+    TestTarget, ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -71,6 +71,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
     push_search_results(&mut out, "impact_indirect", &report.impact.indirect_impacts);
     push_tests(&mut out, "validation", &report.validation);
+    push_negative_evidence(&mut out, &report.negative_evidence);
     push_score_components(&mut out, "plan_score_breakdown", &report.score_breakdown);
     push_score_components(
         &mut out,
@@ -221,6 +222,26 @@ fn push_score_components(out: &mut String, name: &str, components: &[ScoreCompon
                 format!("{:.3}", component.contribution),
                 component.evidence_ids.join(","),
                 component.rationale.clone(),
+            ],
+        );
+    }
+}
+
+fn push_negative_evidence(out: &mut String, items: &[NegativeEvidence]) {
+    out.push_str(&format!(
+        "negative_evidence[{}]{{scope,query,confidence,inspected_sources,reason,next_probe}}:\n",
+        items.len()
+    ));
+    for item in items {
+        push_row(
+            out,
+            &[
+                item.scope.clone(),
+                item.query.clone(),
+                format!("{:.3}", item.confidence),
+                item.inspected_sources.join(","),
+                item.reason.clone(),
+                item.suggested_next_probe.clone().unwrap_or_default(),
             ],
         );
     }
@@ -482,6 +503,7 @@ mod tests {
                 message: "rendered".into(),
                 indexed_at: Utc::now(),
             }],
+            negative_evidence: Vec::new(),
             confidence_summary: "test".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
             score_breakdown: vec![ScoreComponent::single(
