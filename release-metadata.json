@@ -1,0 +1,68 @@
+{
+  "version": "1.0.4",
+  "tag": "v1.0.4",
+  "repository": "https://github.com/shivyadavus/open-kioku",
+  "cli_crate": "open-kioku-cli",
+  "npm": {
+    "wrapper": "open-kioku",
+    "platform_packages": [
+      "@open-kioku/darwin-x64",
+      "@open-kioku/darwin-arm64",
+      "@open-kioku/linux-x64",
+      "@open-kioku/linux-arm64",
+      "@open-kioku/win32-x64"
+    ]
+  },
+  "homebrew": {
+    "formula": "Formula/open-kioku.rb",
+    "tap": "shivyadavus/open-kioku",
+    "install": "brew install shivyadavus/open-kioku/open-kioku"
+  },
+  "artifacts": [
+    {
+      "name": "ok-linux-x86_64",
+      "sha256": "ecc4c75971333587cb8fb662783f3623fd659ce03f29c153692ec231b2c62cd4",
+      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+    },
+    {
+      "name": "ok-linux-x86_64.sha256",
+      "channels": ["github-release"]
+    },
+    {
+      "name": "ok-linux-arm64",
+      "sha256": "1a88a5031ef0c66a704c2c7f5469c0ed5f1a808da2baea305083e3237b9619b3",
+      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+    },
+    {
+      "name": "ok-linux-arm64.sha256",
+      "channels": ["github-release"]
+    },
+    {
+      "name": "ok-macos-x86_64",
+      "sha256": "5bbcd44ccfee2fd304fc1887939e6374830c365802684cf46af79e9453ccc4a7",
+      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+    },
+    {
+      "name": "ok-macos-x86_64.sha256",
+      "channels": ["github-release"]
+    },
+    {
+      "name": "ok-macos-arm64",
+      "sha256": "2db7ab0b77293988349b27da72cbdde2f37ddf5d897ef13ec3020cadc3fb90e0",
+      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+    },
+    {
+      "name": "ok-macos-arm64.sha256",
+      "channels": ["github-release"]
+    },
+    {
+      "name": "ok-windows-x86_64.exe",
+      "sha256": "6c5dbc9e40626e91d10a65e2661127750638bf49d17e83cb646efe4966489bac",
+      "channels": ["github-release", "npm"]
+    },
+    {
+      "name": "ok-windows-x86_64.exe.sha256",
+      "channels": ["github-release"]
+    }
+  ]
+}
