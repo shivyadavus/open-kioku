@@ -102,6 +102,11 @@ fn test_go_fixture_lifecycle() {
 }
 
 #[test]
+fn test_java_fixture_lifecycle() {
+    run_lifecycle_test("java-fixture", "hello", "App.java");
+}
+
+#[test]
 fn test_mcp_tools_list_snapshot() {
     let temp = std::env::temp_dir().join(format!("kioku-test-mcp-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp).unwrap();

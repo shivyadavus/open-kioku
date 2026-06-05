@@ -45,11 +45,11 @@ exclude = ["crates/open-kioku-tests/fixtures/rust-fixture"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.4"
+version = "2.0.0"
 edition = "2021"
 license = "Elastic-2.0"
 repository = "https://github.com/shivyadavus/open-kioku"
-homepage = "https://shivyadavus.github.io/open-kioku/"
+homepage = "https://openkioku.com"
 description = "Local-first code intelligence MCP for AI coding agents"
 keywords = ["mcp", "code-search", "code-intelligence", "local-first", "ai"]
 categories = ["development-tools"]

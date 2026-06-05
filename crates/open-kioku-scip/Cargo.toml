@@ -12,9 +12,9 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-config = { version = "1.0.4", path = "../open-kioku-config" }
-open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
+open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
+open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 protobuf = "3.7"
 scip = "0.5.2"
 serde.workspace = true

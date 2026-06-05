@@ -11,9 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
-open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
+open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
+open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

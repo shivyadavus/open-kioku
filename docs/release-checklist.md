@@ -15,10 +15,10 @@ scripts/verify-release-readiness.sh
 
 ## Version And Tag
 
-- Confirm `Cargo.toml` `[workspace.package]` version is `1.0.4`.
-- Confirm `release-metadata.json` uses tag `v1.0.4`.
-- Confirm the GitHub release tag is exactly `v1.0.4`.
-- Confirm `CHANGELOG.md` has a `1.0.4` section and a matching `[1.0.4]` release link.
+- Confirm `Cargo.toml` `[workspace.package]` version is `2.0.0`.
+- Confirm `release-metadata.json` uses tag `v2.0.0`.
+- Confirm the GitHub release tag is exactly `v2.0.0`.
+- Confirm `CHANGELOG.md` has a `2.0.0` section and a matching `[2.0.0]` release link.
 
 ## Install Channels
 

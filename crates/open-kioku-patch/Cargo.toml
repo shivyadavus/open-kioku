@@ -12,13 +12,13 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-actions = { version = "1.0.4", path = "../open-kioku-actions" }
-open-kioku-config = { version = "1.0.4", path = "../open-kioku-config" }
-open-kioku-context = { version = "1.0.4", path = "../open-kioku-context" }
-open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
-open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
-open-kioku-impact = { version = "1.0.4", path = "../open-kioku-impact" }
-open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
-open-kioku-tests = { version = "1.0.4", path = "../open-kioku-tests" }
+open-kioku-actions = { version = "2.0.0", path = "../open-kioku-actions" }
+open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
+open-kioku-context = { version = "2.0.0", path = "../open-kioku-context" }
+open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
+open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
+open-kioku-impact = { version = "2.0.0", path = "../open-kioku-impact" }
+open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
+open-kioku-tests = { version = "2.0.0", path = "../open-kioku-tests" }
 serde.workspace = true
 sha2.workspace = true

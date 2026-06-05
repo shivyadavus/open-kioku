@@ -78,7 +78,7 @@ body:
     attributes:
       label: "`ok` Version"
       description: "Run `ok --version` and paste the output."
-      placeholder: "e.g. ok 1.0.4"
+      placeholder: "e.g. ok 2.0.0"
     validations:
       required: true
 

@@ -7,9 +7,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [2.0.0] — 2026-06-05
+
 ### Added
 - Added a README motion demo and copy-paste 60-second quickstart that runs `ok demo`, generates an evidence-backed plan, and verifies a bounded edit.
 - Added reproducible demo scripts: `scripts/quickstart-demo.sh` runs the flow and `scripts/render-quickstart-demo.py` regenerates the GIF asset.
+- Added local vector index and hybrid semantic search.
+- Added visual crate map showing codebase architecture and dependency layers.
+- Added Elastic License 2.0 FAQ and STABILITY.md documentation.
+- Added workflow benchmark regression suite.
+- Added git co-change history signals and runtime evidence integration.
+- Added integration test coverage for Java fixtures and CLI smoke tests.
+
+### Changed
+- Bumped all crates and workspace packages to version 2.0.0.
+- Evolved homepage to highlight plan-before-edit paradigm and show real Elasticsearch proof numbers.
+- Upgraded domain routing for openkioku.com.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
 
 ---
 
@@ -121,6 +148,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.0
 [1.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.4
 [1.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.3
 [1.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.1

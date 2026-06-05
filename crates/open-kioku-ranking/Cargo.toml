@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
+open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 
 [dev-dependencies]
 chrono.workspace = true
