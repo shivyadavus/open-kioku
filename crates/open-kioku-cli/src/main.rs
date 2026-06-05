@@ -8,7 +8,7 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
-use open_kioku_patch::PatchPlanner;
+use open_kioku_patch::{ChangeVerificationReport, ChangeVerifier, PatchPlanner, VerifyChangeInput};
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
@@ -24,6 +24,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -134,6 +135,21 @@ enum Command {
         changed: Vec<PathBuf>,
         #[arg(long = "evidence-ref", value_name = "REF")]
         evidence_refs: Vec<String>,
+    },
+    /// Verify an actual diff against a saved JSON plan.
+    Verify {
+        #[arg(long, value_name = "PLAN_JSON")]
+        plan: PathBuf,
+        #[arg(long, value_name = "UNIFIED_DIFF")]
+        diff: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        git: bool,
+        #[arg(long = "changed", value_name = "PATH")]
+        changed: Vec<PathBuf>,
+        #[arg(long = "evidence-ref", value_name = "REF")]
+        evidence_refs: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        run_commands: bool,
     },
     Bench(BenchArgs),
     Eval(EvalArgs),
@@ -1128,6 +1144,47 @@ async fn main() -> anyhow::Result<()> {
                 for warning in &outcome.warnings {
                     eprintln!("{warning}");
                 }
+            }
+        }
+        Command::Verify {
+            plan,
+            diff,
+            git,
+            changed,
+            evidence_refs,
+            run_commands,
+        } => {
+            let store = open_store(&repo)?;
+            let report = load_saved_plan(&plan)?;
+            let unified_diff = verify_diff_input(&repo, diff.as_deref(), git)?;
+            let index_dir = default_index_dir(&repo);
+            let search_index = if TantivySearchIndex::exists(&index_dir) {
+                Some(TantivySearchIndex::open_or_create(&index_dir)?)
+            } else {
+                None
+            };
+            let verification = ChangeVerifier::new(&store as &dyn OkStore)
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .verify(
+                    &repo,
+                    &report,
+                    VerifyChangeInput {
+                        changed_files: changed,
+                        unified_diff,
+                        evidence_refs,
+                        run_commands,
+                    },
+                )?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&verification)?);
+            } else {
+                print_verify_report(&verification);
+            }
+            if matches!(
+                verification.verdict,
+                open_kioku_patch::VerificationVerdict::Fail
+            ) {
+                anyhow::bail!("change verification failed");
             }
         }
         Command::Bench(args) => {
@@ -3158,6 +3215,85 @@ struct BoundaryVerificationOutcome {
 fn load_saved_plan(path: &Path) -> anyhow::Result<PlanReport> {
     let bytes = fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn verify_diff_input(
+    repo: &Path,
+    diff_path: Option<&Path>,
+    include_git_diff: bool,
+) -> anyhow::Result<Option<String>> {
+    let mut diffs = Vec::new();
+    if let Some(path) = diff_path {
+        diffs.push(fs::read_to_string(path)?);
+    }
+    if include_git_diff {
+        let output = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["diff", "--unified=0", "--no-ext-diff", "--relative", "HEAD"])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        diffs.push(String::from_utf8(output.stdout)?);
+    }
+    if diffs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(diffs.join("\n")))
+    }
+}
+
+fn print_verify_report(report: &ChangeVerificationReport) {
+    println!("Verification: {:?}", report.verdict);
+    println!("Changed files: {}", report.changed_files.len());
+    for path in &report.changed_files {
+        println!("  - {}", path.display());
+    }
+    if !report.changed_symbols.is_empty() {
+        println!("Changed symbols:");
+        for symbol in &report.changed_symbols {
+            println!("  - {symbol}");
+        }
+    }
+    print_findings("Boundary failures", &report.boundary_violations);
+    print_findings("Warnings", &report.warnings);
+    print_findings("Missing tests", &report.missing_tests);
+    print_findings("Changed impact", &report.changed_impact);
+    if !report.recommended_tests.is_empty() {
+        println!("Recommended tests:");
+        for test in &report.recommended_tests {
+            let command = test.command.as_deref().unwrap_or("manual validation");
+            println!("  - {} via {}", test.name, command);
+        }
+    }
+    if !report.command_results.is_empty() {
+        println!("Command results:");
+        for result in &report.command_results {
+            println!(
+                "  - {}: {} ({:?})",
+                result.command, result.status, result.exit_code
+            );
+        }
+    }
+}
+
+fn print_findings(label: &str, findings: &[open_kioku_patch::VerificationFinding]) {
+    if findings.is_empty() {
+        return;
+    }
+    println!("{label}:");
+    for finding in findings {
+        let path = finding
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".into());
+        println!("  - [{}] {}: {}", finding.kind, path, finding.reason);
+    }
 }
 
 fn verify_saved_plan_boundary(

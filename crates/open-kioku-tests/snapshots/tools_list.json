@@ -715,6 +715,45 @@
         "name": "validate_patch"
       },
       {
+        "description": "Verify an actual diff or changed files against a saved evidence-backed plan",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "changed_files": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "diff": {
+              "description": "Unified diff to verify",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "plan": {
+              "description": "Saved PlanReport JSON object",
+              "type": "object"
+            },
+            "plan_json": {
+              "description": "Saved PlanReport JSON string",
+              "type": "string"
+            },
+            "run_commands": {
+              "description": "Run validation commands from the saved plan",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "verify_change"
+      },
+      {
         "description": "Map a stack trace to indexed source locations",
         "experimental": true,
         "inputSchema": {

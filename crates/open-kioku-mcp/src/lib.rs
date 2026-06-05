@@ -3,10 +3,10 @@ use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_core::{Confidence, ContextHandleId};
+use open_kioku_core::{Confidence, ContextHandleId, PlanReport};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
-use open_kioku_patch::PatchPlanner;
+use open_kioku_patch::{ChangeVerifier, PatchPlanner, VerifyChangeInput};
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
@@ -302,6 +302,57 @@ async fn dispatch(
                 PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
             ))
         }
+        "verify_change" => {
+            let plan = plan_from_params(&params)?;
+            let changed_files = params
+                .get("changed_files")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let evidence_refs = params
+                .get("evidence_refs")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let unified_diff = params
+                .get("diff")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let run_commands = params
+                .get("run_commands")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let index_dir = default_index_dir(repo);
+            let search_index = if TantivySearchIndex::exists(&index_dir) {
+                Some(TantivySearchIndex::open_or_create(index_dir)?)
+            } else {
+                None
+            };
+            Ok(json!(ChangeVerifier::new(store as &dyn OkStore)
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .verify(
+                    repo,
+                    &plan,
+                    VerifyChangeInput {
+                        changed_files,
+                        unified_diff,
+                        evidence_refs,
+                        run_commands,
+                    },
+                )?))
+        }
         "apply_patch" => {
             gate.ensure_allowed(ActionKind::ApplyPatch)?;
             if std::env::var("OPEN_KIOKU_ALLOW_WRITE").unwrap_or_default() != "true" {
@@ -417,6 +468,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("propose_patch", "Propose a patch plan for a task (read-only; does not write files)", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"Natural language description of the change"}}})),
         ("review_patch", "Review a patch plan", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string"}}})),
         ("validate_patch", "Validate a patch plan against the index", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string"}}})),
+        ("verify_change", "Verify an actual diff or changed files against a saved evidence-backed plan", json!({"type":"object","properties":{"plan":{"type":"object","description":"Saved PlanReport JSON object"},"plan_json":{"type":"string","description":"Saved PlanReport JSON string"},"diff":{"type":"string","description":"Unified diff to verify"},"changed_files":{"type":"array","items":{"type":"string"}},"evidence_refs":{"type":"array","items":{"type":"string"}},"run_commands":{"type":"boolean","description":"Run validation commands from the saved plan"}}})),
         ("map_stacktrace_to_code", "Map a stack trace to indexed source locations", json!({"type":"object","properties":{"stacktrace":{"type":"string"}}})),
         ("find_errors_for_symbol", "Find runtime errors associated with a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"}}})),
         ("find_recent_failures", "Find recent runtime failures in the indexed repository", json!({"type":"object","properties":{"limit":{"type":"integer"}}})),
@@ -499,6 +551,16 @@ fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required string argument `{key}`"))
+}
+
+fn plan_from_params(params: &Value) -> anyhow::Result<PlanReport> {
+    if let Some(plan) = params.get("plan") {
+        return Ok(serde_json::from_value(plan.clone())?);
+    }
+    if let Some(plan_json) = params.get("plan_json").and_then(Value::as_str) {
+        return Ok(serde_json::from_str(plan_json)?);
+    }
+    anyhow::bail!("verify_change requires `plan` object or `plan_json` string")
 }
 
 fn confidence_arg(params: &Value) -> Confidence {
