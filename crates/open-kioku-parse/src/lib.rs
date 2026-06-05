@@ -700,6 +700,11 @@ pub fn extract_tests(
                 Confidence::Medium
             },
             reason: "test-like path, annotation, or naming convention".into(),
+            evidence_refs: vec![stable_id(&format!(
+                "test:{}:{}",
+                file.path.display(),
+                symbol.name
+            ))],
             score_breakdown: vec![ScoreComponent::single(
                 "indexed_test_confidence",
                 if is_test_file {
