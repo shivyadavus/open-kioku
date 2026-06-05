@@ -1284,6 +1284,7 @@ name = "open-kioku-git"
 version = "1.0.4"
 dependencies = [
  "open-kioku-errors",
+ "tempfile",
 ]
 
 [[package]]

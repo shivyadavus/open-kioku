@@ -44,6 +44,22 @@ impl<'a> TestSelector<'a> {
                 }
             }
         }
+        if let Some(changed_file) = self.store.get_file_by_path(path)? {
+            for fact in self
+                .store
+                .analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?
+                .into_iter()
+                .filter(|fact| {
+                    fact.file_id == changed_file.id
+                        && fact.target_kind == open_kioku_core::GraphNodeType::Test
+                })
+                .take(128)
+            {
+                if let Some(test_file) = self.store.get_file_by_path(Path::new(&fact.target))? {
+                    file_ids.insert(test_file.id);
+                }
+            }
+        }
 
         let file_ids_vec = file_ids.into_iter().collect::<Vec<_>>();
         self.store.tests_for_files(&file_ids_vec)
@@ -64,6 +80,7 @@ impl<'a> TestSelector<'a> {
             .to_ascii_lowercase();
         let mut scored = Vec::new();
         let runtime_facts = self.runtime_facts_for_path(path)?;
+        let git_facts = self.git_history_facts_for_path(path)?;
         for test in tests {
             let test_file = files_by_id.get(&test.file_id);
             let mut candidate = test;
@@ -83,6 +100,7 @@ impl<'a> TestSelector<'a> {
                 }
             }
             score += apply_runtime_test_signal(&mut candidate, &runtime_facts, test_path);
+            score += apply_git_history_test_signal(&mut candidate, &git_facts, test_path);
             candidate.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -116,6 +134,7 @@ impl<'a> TestSelector<'a> {
         let changed_path = path.to_string_lossy().to_ascii_lowercase();
         let path_tokens = path_tokens(&changed_path);
         let runtime_facts = self.runtime_facts_for_path(path)?;
+        let git_facts = self.git_history_facts_for_path(path)?;
         let mut scored = Vec::new();
         for mut test in self.get_tests_for_path(path, &std::collections::HashSet::new())? {
             let test_path = files_by_id
@@ -142,6 +161,12 @@ impl<'a> TestSelector<'a> {
             score += apply_runtime_test_signal_with_searchable(
                 &mut test,
                 &runtime_facts,
+                &searchable,
+                test_path,
+            );
+            score += apply_git_history_test_signal_with_searchable(
+                &mut test,
+                &git_facts,
                 &searchable,
                 test_path,
             );
@@ -196,6 +221,7 @@ impl<'a> TestSelector<'a> {
         let changed_path = path.to_string_lossy().to_ascii_lowercase();
         let path_tokens = path_tokens(&changed_path);
         let runtime_facts = self.runtime_facts_for_path(path)?;
+        let git_facts = self.git_history_facts_for_path(path)?;
         let mut test_files_with_overlap = std::collections::HashSet::new();
         for symbol_id in &changed_symbols {
             if let Ok(occurrences) = self.store.references_for_symbol(symbol_id, 100) {
@@ -262,6 +288,12 @@ impl<'a> TestSelector<'a> {
                 &searchable,
                 test_path,
             );
+            score += apply_git_history_test_signal_with_searchable(
+                &mut test,
+                &git_facts,
+                &searchable,
+                test_path,
+            );
             test.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -310,6 +342,19 @@ impl<'a> TestSelector<'a> {
             .into_iter()
             .filter(|fact| fact.file_id == file.id)
             .take(8)
+            .collect())
+    }
+
+    fn git_history_facts_for_path(&self, path: &Path) -> Result<Vec<AnalysisFact>> {
+        let Some(file) = self.store.get_file_by_path(path)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .store
+            .analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?
+            .into_iter()
+            .filter(|fact| fact.file_id == file.id)
+            .take(128)
             .collect())
     }
 }
@@ -413,6 +458,78 @@ fn runtime_tokens(value: &str) -> Vec<String> {
         .filter(|token| token.len() >= 4)
         .take(8)
         .collect()
+}
+
+fn apply_git_history_test_signal(
+    test: &mut TestTarget,
+    git_facts: &[AnalysisFact],
+    test_path: Option<&Path>,
+) -> f32 {
+    let searchable = format!(
+        "{} {} {} {}",
+        test.id,
+        test.name,
+        test.command.as_deref().unwrap_or_default(),
+        test.reason
+    )
+    .to_ascii_lowercase();
+    apply_git_history_test_signal_with_searchable(test, git_facts, &searchable, test_path)
+}
+
+fn apply_git_history_test_signal_with_searchable(
+    test: &mut TestTarget,
+    git_facts: &[AnalysisFact],
+    searchable: &str,
+    test_path: Option<&Path>,
+) -> f32 {
+    if git_facts.is_empty() {
+        return 0.0;
+    }
+    let test_path = test_path
+        .map(|path| path.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let matched = git_facts
+        .iter()
+        .filter(|fact| {
+            let target = fact.target.to_ascii_lowercase();
+            let target_name = Path::new(&fact.target)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .unwrap_or_default();
+            test_path == target
+                || test_path.ends_with(&target)
+                || (!target_name.is_empty() && searchable.contains(&target_name))
+                || searchable.contains(&target)
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        return 0.0;
+    }
+    let contribution = 0.18;
+    let evidence_ids = matched
+        .iter()
+        .map(|fact| fact.id.clone())
+        .collect::<Vec<_>>();
+    for id in &evidence_ids {
+        if !test.evidence_refs.contains(id) {
+            test.evidence_refs.push(id.clone());
+        }
+    }
+    let labels = matched
+        .iter()
+        .map(|fact| fact.target.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    test.reason = format!("{}; git co-change test co-run ({})", test.reason, labels);
+    test.score_breakdown.push(ScoreComponent::adjustment(
+        "git_cochange",
+        contribution,
+        evidence_ids,
+        "test selected or boosted by historical git co-change or test co-run evidence",
+    ));
+    contribution
 }
 
 fn same_parent(left: &Path, right: &Path) -> bool {

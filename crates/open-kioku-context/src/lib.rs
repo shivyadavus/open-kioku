@@ -229,10 +229,13 @@ impl<'a> ContextPackBuilder<'a> {
             runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
         annotate_results_with_runtime(&mut primary_files, &runtime_signals);
         annotate_results_with_runtime(&mut supporting_files, &runtime_signals);
+        annotate_results_with_git_history(self.store, &mut primary_files)?;
+        annotate_results_with_git_history(self.store, &mut supporting_files)?;
         let runtime_evidence = runtime_signals
             .iter()
             .map(runtime_signal_evidence)
             .collect::<Vec<_>>();
+        let git_evidence = git_history_evidence_for_results(self.store, &primary_files)?;
 
         let evidence = primary_files
             .iter()
@@ -257,6 +260,7 @@ impl<'a> ContextPackBuilder<'a> {
             })
             .chain(impact.evidence.clone())
             .chain(runtime_evidence.clone())
+            .chain(git_evidence)
             .collect::<Vec<_>>();
         let allowed_files = primary
             .iter()
@@ -732,6 +736,117 @@ fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
         message: signal.message.clone(),
         indexed_at: Utc::now(),
     }
+}
+
+fn annotate_results_with_git_history(
+    store: &dyn OkStore,
+    results: &mut [SearchResult],
+) -> Result<()> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_path = files
+        .into_iter()
+        .map(|file| (normalize_path(&file.path), file))
+        .collect::<std::collections::HashMap<_, _>>();
+    for result in results {
+        let Some(file) = files_by_path.get(&normalize_path(&result.path)) else {
+            continue;
+        };
+        let matched = facts
+            .iter()
+            .filter(|fact| fact.file_id == file.id)
+            .take(3)
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            continue;
+        }
+        let evidence_ids = matched
+            .iter()
+            .map(|fact| fact.id.clone())
+            .collect::<Vec<_>>();
+        let labels = matched
+            .iter()
+            .map(|fact| fact.target.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for fact in &matched {
+            let evidence = format!(
+                "git co-change from local history: `{}` ({})",
+                fact.target, fact.message
+            );
+            if !result.evidence.contains(&evidence) {
+                result.evidence.push(evidence);
+            }
+        }
+        for id in &evidence_ids {
+            if !result.evidence_refs.contains(id) {
+                result.evidence_refs.push(id.clone());
+            }
+        }
+        result.score += 0.12 * matched.len() as f32;
+        result.confidence = result.confidence.max(0.70);
+        result.score_breakdown.push(ScoreComponent::adjustment(
+            "git_cochange",
+            0.12 * matched.len() as f32,
+            evidence_ids,
+            format!("local git history says this file co-changed with: {labels}"),
+        ));
+    }
+    Ok(())
+}
+
+fn git_history_evidence_for_results(
+    store: &dyn OkStore,
+    results: &[SearchResult],
+) -> Result<Vec<Evidence>> {
+    if results.is_empty() {
+        return Ok(Vec::new());
+    }
+    let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let files = store.list_files(usize::MAX, 0)?;
+    let paths_by_id = files
+        .into_iter()
+        .map(|file| (file.id, file.path))
+        .collect::<std::collections::HashMap<_, _>>();
+    let selected_paths = results
+        .iter()
+        .map(|result| normalize_path(&result.path))
+        .collect::<std::collections::HashSet<_>>();
+    let mut evidence = Vec::new();
+    for fact in facts {
+        let Some(path) = paths_by_id.get(&fact.file_id) else {
+            continue;
+        };
+        if !selected_paths.contains(&normalize_path(path)) {
+            continue;
+        }
+        evidence.push(Evidence {
+            id: EvidenceId::new(fact.id.clone()),
+            source: fact.source.clone(),
+            source_type: EvidenceSourceType::GitHistory,
+            file_range: Some(FileRange {
+                path: path.clone(),
+                line_range: None,
+            }),
+            symbol_id: None,
+            confidence: fact.confidence,
+            message: format!("{}: {}", fact.message, fact.target),
+            indexed_at: Utc::now(),
+        });
+        if evidence.len() >= 20 {
+            break;
+        }
+    }
+    Ok(evidence)
 }
 
 fn runtime_kind(fact: &AnalysisFact) -> String {
