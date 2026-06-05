@@ -1,4 +1,4 @@
-use open_kioku_core::{Confidence, File, FileId, TestTarget};
+use open_kioku_core::{Confidence, File, FileId, ScoreComponent, TestTarget};
 use open_kioku_errors::Result;
 use open_kioku_storage::MetadataStore;
 use std::collections::HashMap;
@@ -86,6 +86,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            set_test_score_breakdown(&mut candidate, score);
             scored.push((score, candidate));
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -140,6 +141,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            set_test_score_breakdown(&mut test, score);
             scored.push((score, test));
         }
         scored.sort_by(|a, b| {
@@ -249,6 +251,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            set_test_score_breakdown(&mut test, score);
             scored.push((score, test));
         }
         scored.sort_by(|a, b| {
@@ -278,6 +281,18 @@ impl<'a> TestSelector<'a> {
             .map(|file| (file.id.clone(), file))
             .collect())
     }
+}
+
+fn set_test_score_breakdown(test: &mut TestTarget, raw_score: f32) {
+    test.score_breakdown = vec![ScoreComponent::new(
+        "test_selection_score",
+        raw_score,
+        test.confidence.score(),
+        1.0,
+        test.confidence.score(),
+        vec![test.id.clone()],
+        test.reason.clone(),
+    )];
 }
 
 fn same_parent(left: &Path, right: &Path) -> bool {
@@ -397,7 +412,7 @@ mod tests {
     use open_kioku_core::Confidence;
     use open_kioku_core::{
         CodeChunk, EvidenceSourceType, File, FileId, Import, IndexManifest, Language, LineRange,
-        RepositoryId, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+        RepositoryId, ScoreComponent, Symbol, SymbolId, SymbolOccurrence, TestTarget,
     };
     use open_kioku_errors::Result;
     use open_kioku_storage::{IndexData, MetadataStore};
@@ -615,6 +630,12 @@ mod tests {
                 command: Some("gradle :server:test".into()),
                 confidence: Confidence::Medium,
                 reason: "test-like path".into(),
+                score_breakdown: vec![ScoreComponent::single(
+                    "test_fixture_confidence",
+                    Confidence::Medium.score(),
+                    vec!["search-service-test".into()],
+                    "test-like path",
+                )],
             }],
         };
 
@@ -713,6 +734,12 @@ mod tests {
             command: Some("cargo test".into()),
             confidence: Confidence::Low,
             reason: "test target".into(),
+            score_breakdown: vec![ScoreComponent::single(
+                "test_fixture_confidence",
+                Confidence::Low.score(),
+                vec![name.into()],
+                "test target",
+            )],
         }
     }
 

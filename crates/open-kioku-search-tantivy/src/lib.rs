@@ -1,4 +1,6 @@
-use open_kioku_core::{CodeChunk, File, SearchResult, Symbol};
+use open_kioku_core::{
+    search_result_evidence_ids, CodeChunk, File, ScoreComponent, SearchResult, Symbol,
+};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
@@ -127,15 +129,33 @@ impl SearchIndex for TantivySearchIndex {
                         boosted_score,
                     )
                     .build();
+                let path = file.path;
+                let line_range = Some(chunk.range.clone());
+                let evidence_ids =
+                    search_result_evidence_ids(&path, &line_range, evidence_strings.len());
                 results.push(SearchResult {
-                    path: file.path,
-                    line_range: Some(chunk.range),
+                    path,
+                    line_range,
                     snippet: snippet(&chunk.text, raw_query),
                     symbol,
                     score: boosted_score,
                     match_reason: "tantivy hybrid lexical match".into(),
-                    evidence: evidence_strings,
+                    evidence: evidence_strings.clone(),
                     confidence,
+                    score_breakdown: vec![
+                        ScoreComponent::single(
+                            "bm25_relevance",
+                            score,
+                            evidence_ids.clone(),
+                            "BM25 score from local Tantivy index",
+                        ),
+                        ScoreComponent::adjustment(
+                            "query_variant_boost",
+                            boosted_score - score,
+                            evidence_ids,
+                            "query variant, path, or symbol boost applied to lexical result",
+                        ),
+                    ],
                 });
             }
         }

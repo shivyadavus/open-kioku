@@ -1,4 +1,6 @@
-use open_kioku_core::{CodeChunk, File, LineRange, SearchResult, Symbol};
+use open_kioku_core::{
+    search_result_evidence_ids, CodeChunk, File, LineRange, ScoreComponent, SearchResult, Symbol,
+};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
@@ -50,9 +52,12 @@ impl SearchIndex for MemorySearchIndex {
             let (evidence_strings, confidence) = EvidenceBuilder::new()
                 .add(format!("lexical match for `{query}`"), score)
                 .build();
+            let line_range = Some(chunk.range.clone());
+            let evidence_ids =
+                search_result_evidence_ids(&file.path, &line_range, evidence_strings.len());
             results.push(SearchResult {
                 path: file.path.clone(),
-                line_range: Some(chunk.range.clone()),
+                line_range,
                 snippet,
                 symbol: chunk
                     .symbol_id
@@ -60,8 +65,14 @@ impl SearchIndex for MemorySearchIndex {
                     .and_then(|id| self.symbols_by_chunk.get(&id.0).cloned()),
                 score,
                 match_reason: "lexical substring match".into(),
-                evidence: evidence_strings,
+                evidence: evidence_strings.clone(),
                 confidence,
+                score_breakdown: vec![ScoreComponent::single(
+                    "lexical_relevance",
+                    score,
+                    evidence_ids,
+                    "lexical phrase/token score adjusted for generated and vendor paths",
+                )],
             });
         }
         results.sort_by(|a, b| {
@@ -121,15 +132,24 @@ pub fn regex_search_file(
             let (evidence_strings, confidence) = EvidenceBuilder::new()
                 .add(format!("regex match for `{pattern}`"), 1.0)
                 .build();
+            let line_range = Some(LineRange::single(line_number));
+            let evidence_ids =
+                search_result_evidence_ids(&path, &line_range, evidence_strings.len());
             results.push(SearchResult {
                 path: path.clone(),
-                line_range: Some(LineRange::single(line_number)),
+                line_range,
                 snippet: line.trim().to_string(),
                 symbol: None,
                 score: 1.0,
                 match_reason: "regex match".into(),
-                evidence: evidence_strings,
+                evidence: evidence_strings.clone(),
                 confidence,
+                score_breakdown: vec![ScoreComponent::single(
+                    "regex_match",
+                    1.0,
+                    evidence_ids,
+                    "direct regex line match",
+                )],
             });
             if results.len() >= limit {
                 break;

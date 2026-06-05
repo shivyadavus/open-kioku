@@ -1,5 +1,7 @@
 use open_kioku_config::SemanticConfig;
-use open_kioku_core::{CodeChunk, File, SearchResult, Symbol};
+use open_kioku_core::{
+    search_result_evidence_ids, CodeChunk, File, ScoreComponent, SearchResult, Symbol,
+};
 use open_kioku_embeddings::{EmbeddingProvider, LocalHashEmbeddingProvider};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
@@ -64,18 +66,27 @@ pub fn search_chunks_semantic(
             .as_ref()
             .and_then(|id| symbols.iter().find(|symbol| symbol.id == *id))
             .cloned();
+        let evidence = vec![
+            "query and chunk embedded locally with deterministic token hashing".into(),
+            "no network or hosted embedding provider was used".into(),
+        ];
+        let line_range = Some(chunk.range.clone());
+        let evidence_ids = search_result_evidence_ids(&file.path, &line_range, evidence.len());
         scored.push(SearchResult {
             path: file.path.clone(),
-            line_range: Some(chunk.range.clone()),
+            line_range,
             snippet: snippet(&chunk.text),
             symbol,
             score,
             match_reason: "local hash embedding similarity".into(),
-            evidence: vec![
-                "query and chunk embedded locally with deterministic token hashing".into(),
-                "no network or hosted embedding provider was used".into(),
-            ],
+            evidence: evidence.clone(),
             confidence: score.clamp(0.0, 1.0),
+            score_breakdown: vec![ScoreComponent::single(
+                "local_semantic_similarity",
+                score,
+                evidence_ids,
+                "deterministic local hash-embedding cosine similarity",
+            )],
         });
     }
 
