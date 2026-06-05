@@ -29,7 +29,7 @@ The `ok mcp serve` process makes **zero outbound network connections**. Network 
 The only network activity associated with Open Kioku is:
 
 1. **Installation:** downloading the `ok` binary from GitHub Releases (one-time, user-initiated).
-2. **Font/asset loading:** the animated web demo at `shivyadavus.github.io/open-kioku` loads standard web fonts from a CDN. This is a static documentation page only and is not part of the plugin.
+2. **Font/asset loading:** the animated web demo at `openkioku.com` loads standard web fonts from a CDN. This is a static documentation page only and is not part of the plugin.
 
 ## Secret and Sensitive Path Handling
 

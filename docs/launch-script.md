@@ -37,6 +37,6 @@ ok demo --force
 
 ## Links
 
-- Demo: https://shivyadavus.github.io/open-kioku/
+- Demo: https://openkioku.com/
 - npm: https://www.npmjs.com/package/open-kioku
 - Repo: https://github.com/shivyadavus/open-kioku

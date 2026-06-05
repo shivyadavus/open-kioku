@@ -58,7 +58,46 @@ For a Java/Gradle task, Open Kioku returned scoped validation commands such as:
 
 Proof: [`docs/large-repo-proof.md`](docs/large-repo-proof.md), [`docs/proof.md`](docs/proof.md), and [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
-Hosted demo: https://shivyadavus.github.io/open-kioku/
+Hosted demo: https://openkioku.com/
+Stable CLI + MCP contracts documented in [`STABILITY.md`](STABILITY.md).
+
+### Example Pre-Edit Plan Output
+
+Here is what an evidence-backed plan produced by `ok plan` looks like:
+
+```markdown
+# Plan: token
+
+Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation candidate(s)
+
+## Risk
+- Level: `low`
+- Score: `0.10`
+
+## Confidence
+- Overall: `High` (`0.81`)
+- Caveats:
+  - exact symbol/reference evidence is absent
+  - runtime corroboration is absent
+
+## Primary Context
+- `src/auth.rs`:7-11: pub fn validate_token(token: &str) -> bool
+- `tests/auth_flow.rs`:4-7: fn login_returns_valid_token()
+- `src/auth.rs`:3-6: pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String
+
+## Impact Candidates
+- `src/session.rs` — caller dependency of validate_token
+- `src/middleware.rs` — route guard dependency of issue_token
+
+## Validation Targets
+- `cargo test auth_flow`
+- `cargo test token_expiration`
+
+## Boundary Policy
+- Allowed: `src/auth.rs`, `tests/auth_flow.rs`
+- Caution: `src/session.rs` (caller)
+- Forbidden: `generated/`, `vendor/`
+```
 
 ## Why It Exists
 

@@ -5,7 +5,7 @@
   "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search — all on your machine. Precise code search, symbol navigation, blast-radius analysis, and patch planning. No cloud. No embeddings API. No data leaves your machine. Supports Rust, TypeScript, Python, JavaScript, Go, and Java.",
   "author": {
     "name": "Shiv Yadav",
-    "url": "https://shivyadavus.github.io/open-kioku/"
+    "url": "https://openkioku.com/"
   },
   "license": "Elastic-2.0",
   "keywords": ["code-intelligence", "mcp", "search", "symbols", "tree-sitter", "bm25", "local-first", "rust", "typescript", "python"],

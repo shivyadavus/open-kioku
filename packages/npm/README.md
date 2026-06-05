@@ -90,5 +90,5 @@ Supported packages:
 
 - Repository: https://github.com/shivyadavus/open-kioku
 - Releases: https://github.com/shivyadavus/open-kioku/releases
-- Demo: https://shivyadavus.github.io/open-kioku/
+- Demo: https://openkioku.com/
 - Security: https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md
