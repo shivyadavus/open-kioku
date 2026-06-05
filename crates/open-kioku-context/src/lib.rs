@@ -1,7 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
-    Evidence, EvidenceId, EvidenceSourceType, File, GraphEdge, NegativeEvidence, RiskReport,
+    AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
+    ConfidenceSignalInput, ContextPack, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
+    GraphEdge, GraphEdgeType, GraphNodeType, NegativeEvidence, RiskReport, RuntimeSignal,
     ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
@@ -48,6 +49,32 @@ impl ContextPackFormat {
                 out.push_str("## Supporting Impact\n\n");
                 for result in &pack.supporting_files {
                     out.push_str(&format!("- {}\n", result.path.display()));
+                }
+
+                out.push_str("\n## Runtime Signals\n\n");
+                if pack.runtime_signals.is_empty() {
+                    out.push_str("- None found\n");
+                } else {
+                    for signal in &pack.runtime_signals {
+                        let location = signal
+                            .file_range
+                            .as_ref()
+                            .map(|range| {
+                                let lines = range
+                                    .line_range
+                                    .as_ref()
+                                    .map(|line_range| {
+                                        format!(":{}-{}", line_range.start, line_range.end)
+                                    })
+                                    .unwrap_or_default();
+                                format!("{}{}", range.path.display(), lines)
+                            })
+                            .unwrap_or_else(|| "unknown location".into());
+                        out.push_str(&format!(
+                            "- `{}` at `{}` ({:?})\n",
+                            signal.message, location, signal.confidence
+                        ));
+                    }
                 }
 
                 out.push_str("\n## Validation Plan\n\n");
@@ -154,6 +181,8 @@ impl<'a> ContextPackBuilder<'a> {
         primary: Vec<SearchResult>,
         expand_impact: bool,
     ) -> Result<ContextPack> {
+        let mut primary = primary;
+        augment_primary_with_runtime(self.store, task, &mut primary, limit)?;
         let primary_symbols = primary
             .iter()
             .filter_map(|result| result.symbol.clone())
@@ -189,7 +218,23 @@ impl<'a> ContextPackBuilder<'a> {
         dependency_edges.dedup_by(|a, b| a.id == b.id);
         dependency_edges.truncate(50);
 
-        let evidence = primary
+        let mut primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();
+        let mut supporting_files = impact
+            .direct_impacts
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        let runtime_signals =
+            runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
+        annotate_results_with_runtime(&mut primary_files, &runtime_signals);
+        annotate_results_with_runtime(&mut supporting_files, &runtime_signals);
+        let runtime_evidence = runtime_signals
+            .iter()
+            .map(runtime_signal_evidence)
+            .collect::<Vec<_>>();
+
+        let evidence = primary_files
             .iter()
             .take(20)
             .flat_map(|result| {
@@ -211,18 +256,12 @@ impl<'a> ContextPackBuilder<'a> {
                 })
             })
             .chain(impact.evidence.clone())
+            .chain(runtime_evidence.clone())
             .collect::<Vec<_>>();
         let allowed_files = primary
             .iter()
             .take(8)
             .map(|result| result.path.clone())
-            .collect::<Vec<_>>();
-        let primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();
-        let supporting_files = impact
-            .direct_impacts
-            .iter()
-            .take(10)
-            .cloned()
             .collect::<Vec<_>>();
         let confidence_breakdown = confidence_for_context(
             &primary_files,
@@ -231,6 +270,7 @@ impl<'a> ContextPackBuilder<'a> {
             &impact.risk_report,
             allowed_files.len(),
             evidence.len(),
+            runtime_signals.len(),
         );
         let negative_evidence = negative_evidence_for_context(
             task,
@@ -238,6 +278,7 @@ impl<'a> ContextPackBuilder<'a> {
             &supporting_files,
             &tests,
             &impact.risk_report,
+            &runtime_signals,
         );
         let boundary_evidence_refs = primary_files
             .iter()
@@ -251,7 +292,7 @@ impl<'a> ContextPackBuilder<'a> {
             primary_symbols,
             supporting_files,
             dependency_edges,
-            runtime_signals: Vec::new(),
+            runtime_signals,
             test_candidates: tests.clone(),
             risk_report: impact.risk_report,
             recommended_change_boundary: ChangeBoundary {
@@ -289,6 +330,7 @@ fn negative_evidence_for_context(
     supporting_files: &[SearchResult],
     tests: &[open_kioku_core::TestTarget],
     risk: &RiskReport,
+    runtime_signals: &[RuntimeSignal],
 ) -> Vec<NegativeEvidence> {
     let mut items = Vec::new();
     if primary_files.is_empty() {
@@ -331,7 +373,7 @@ fn negative_evidence_for_context(
             }),
         });
     }
-    if runtime_signal_count(primary_files, supporting_files) == 0 {
+    if runtime_signals.is_empty() && runtime_signal_count(primary_files, supporting_files) == 0 {
         items.push(NegativeEvidence {
             query: task.into(),
             scope: "runtime".into(),
@@ -383,6 +425,7 @@ fn confidence_for_context(
     risk: &RiskReport,
     allowed_file_count: usize,
     evidence_count: usize,
+    runtime_signal_count_value: usize,
 ) -> ConfidenceBreakdown {
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
         primary_file_count: primary_files.len(),
@@ -392,7 +435,8 @@ fn confidence_for_context(
         validation_with_command_count: tests.iter().filter(|test| test.command.is_some()).count(),
         negative_evidence_count: negative_evidence_count(risk),
         allowed_file_count,
-        runtime_signal_count: runtime_signal_count(primary_files, supporting_files),
+        runtime_signal_count: runtime_signal_count_value
+            + runtime_signal_count(primary_files, supporting_files),
     })
 }
 
@@ -452,6 +496,277 @@ fn runtime_signal_count(
                 .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
         })
         .count()
+}
+
+fn runtime_signals_for_context(
+    store: &dyn OkStore,
+    task: &str,
+    primary_files: &[SearchResult],
+    supporting_files: &[SearchResult],
+    limit: usize,
+) -> Result<Vec<RuntimeSignal>> {
+    let facts = store.analysis_facts(Some(EvidenceSourceType::Runtime), 500)?;
+    if facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_id = files
+        .into_iter()
+        .map(|file| (file.id.clone(), file))
+        .collect::<std::collections::HashMap<_, _>>();
+    let selected_paths = primary_files
+        .iter()
+        .chain(supporting_files.iter())
+        .map(|result| normalize_path(&result.path))
+        .collect::<std::collections::HashSet<_>>();
+    let searchable_context = primary_files
+        .iter()
+        .chain(supporting_files.iter())
+        .flat_map(|result| {
+            [
+                result.path.display().to_string(),
+                result.snippet.clone(),
+                result.match_reason.clone(),
+                result.evidence.join(" "),
+            ]
+        })
+        .chain(std::iter::once(task.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let mut signals = facts
+        .into_iter()
+        .filter_map(|fact| {
+            let file = files_by_id.get(&fact.file_id)?;
+            if selected_paths.contains(&normalize_path(&file.path))
+                || runtime_fact_matches_query(&fact, &searchable_context)
+            {
+                Some(runtime_signal_from_fact(&fact, file))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    signals.sort_by(|a, b| a.id.cmp(&b.id));
+    signals.dedup_by(|a, b| a.id == b.id);
+    signals.truncate(limit);
+    Ok(signals)
+}
+
+fn augment_primary_with_runtime(
+    store: &dyn OkStore,
+    task: &str,
+    primary: &mut Vec<SearchResult>,
+    limit: usize,
+) -> Result<()> {
+    let facts = store.analysis_facts(Some(EvidenceSourceType::Runtime), 500)?;
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let task = task.to_ascii_lowercase();
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_id = files
+        .into_iter()
+        .map(|file| (file.id.clone(), file))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut existing_paths = primary
+        .iter()
+        .map(|result| normalize_path(&result.path))
+        .collect::<std::collections::HashSet<_>>();
+    let mut additions = Vec::new();
+    for fact in facts
+        .into_iter()
+        .filter(|fact| runtime_fact_matches_query(fact, &task))
+    {
+        let Some(file) = files_by_id.get(&fact.file_id) else {
+            continue;
+        };
+        let normalized_path = normalize_path(&file.path);
+        if !existing_paths.insert(normalized_path) {
+            continue;
+        }
+        if let Some(result) = runtime_seed_result(store, file, &fact)? {
+            additions.push(result);
+        }
+        if additions.len() >= limit {
+            break;
+        }
+    }
+    primary.extend(additions);
+    primary.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    primary.truncate(limit.max(1));
+    Ok(())
+}
+
+fn runtime_seed_result(
+    store: &dyn OkStore,
+    file: &File,
+    fact: &AnalysisFact,
+) -> Result<Option<SearchResult>> {
+    let chunks = store.chunks_for_file(&file.id)?;
+    let snippet = chunks
+        .iter()
+        .find(|chunk| {
+            fact.range
+                .as_ref()
+                .map(|range| chunk.range.start <= range.start && range.start <= chunk.range.end)
+                .unwrap_or(false)
+        })
+        .or_else(|| chunks.first())
+        .map(|chunk| chunk.text.clone())
+        .unwrap_or_else(|| fact.target.clone());
+    let evidence = vec![format!(
+        "runtime corroboration from local artifact `{}` targeting `{}`",
+        fact.source, fact.target
+    )];
+    Ok(Some(SearchResult {
+        path: file.path.clone(),
+        line_range: fact.range.clone(),
+        snippet,
+        symbol: None,
+        score: 1.35,
+        match_reason: "runtime artifact matched task intent".into(),
+        evidence,
+        evidence_refs: vec![fact.id.clone()],
+        confidence: fact.confidence.score(),
+        score_breakdown: vec![ScoreComponent::single(
+            "runtime_corroboration",
+            1.35,
+            vec![fact.id.clone()],
+            "local runtime trace/log/incident artifact matched the task",
+        )],
+    }))
+}
+
+fn annotate_results_with_runtime(results: &mut [SearchResult], signals: &[RuntimeSignal]) {
+    if signals.is_empty() {
+        return;
+    }
+    for result in results {
+        let result_path = normalize_path(&result.path);
+        let searchable = format!(
+            "{} {} {}",
+            result.snippet,
+            result.match_reason,
+            result.evidence.join(" ")
+        )
+        .to_ascii_lowercase();
+        let matched = signals
+            .iter()
+            .filter(|signal| {
+                signal
+                    .file_range
+                    .as_ref()
+                    .map(|range| normalize_path(&range.path) == result_path)
+                    .unwrap_or(false)
+                    || runtime_message_tokens(&signal.message)
+                        .iter()
+                        .any(|token| searchable.contains(token))
+            })
+            .take(3)
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            continue;
+        }
+        let evidence_ids = matched
+            .iter()
+            .map(|signal| signal.id.clone())
+            .collect::<Vec<_>>();
+        let labels = matched
+            .iter()
+            .map(|signal| signal.kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for signal in &matched {
+            let evidence = format!(
+                "runtime corroboration `{}`: {}",
+                signal.kind, signal.message
+            );
+            if !result.evidence.contains(&evidence) {
+                result.evidence.push(evidence);
+            }
+        }
+        for id in &evidence_ids {
+            if !result.evidence_refs.contains(id) {
+                result.evidence_refs.push(id.clone());
+            }
+        }
+        result.score += 0.15 * matched.len() as f32;
+        result.confidence = result.confidence.max(0.75);
+        result.score_breakdown.push(ScoreComponent::adjustment(
+            "runtime_corroboration",
+            0.15 * matched.len() as f32,
+            evidence_ids,
+            format!("local runtime artifact corroborates this context result: {labels}"),
+        ));
+    }
+}
+
+fn runtime_signal_from_fact(fact: &AnalysisFact, file: &File) -> RuntimeSignal {
+    RuntimeSignal {
+        id: fact.id.clone(),
+        kind: runtime_kind(fact),
+        message: format!("{}: {}", fact.message, fact.target),
+        file_range: Some(FileRange {
+            path: file.path.clone(),
+            line_range: fact.range.clone(),
+        }),
+        occurred_at: None,
+        confidence: fact.confidence,
+    }
+}
+
+fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(signal.id.clone()),
+        source: "open-kioku-runtime".into(),
+        source_type: EvidenceSourceType::Runtime,
+        file_range: signal.file_range.clone(),
+        symbol_id: None,
+        confidence: signal.confidence,
+        message: signal.message.clone(),
+        indexed_at: Utc::now(),
+    }
+}
+
+fn runtime_kind(fact: &AnalysisFact) -> String {
+    match (&fact.target_kind, &fact.edge_type) {
+        (GraphNodeType::Endpoint, GraphEdgeType::ExposesEndpoint) => "endpoint".into(),
+        (GraphNodeType::DatabaseTable, GraphEdgeType::ReadsTable) => "sql_read".into(),
+        (GraphNodeType::DatabaseTable, GraphEdgeType::WritesTable) => "sql_write".into(),
+        (GraphNodeType::RuntimeError, _) => "incident".into(),
+        (_, edge) => format!("{edge:?}").to_ascii_lowercase(),
+    }
+}
+
+fn runtime_fact_matches_query(fact: &AnalysisFact, searchable_context: &str) -> bool {
+    runtime_message_tokens(&fact.target)
+        .iter()
+        .any(|token| searchable_context.contains(token))
+        || runtime_message_tokens(&fact.message)
+            .iter()
+            .any(|token| searchable_context.contains(token))
+}
+
+fn runtime_message_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '/' || ch == '.'))
+        .map(|token| token.trim_matches('/').to_ascii_lowercase())
+        .filter(|token| token.len() >= 4)
+        .take(8)
+        .collect()
+}
+
+fn normalize_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string()
 }
 
 fn negative_evidence_count(risk: &RiskReport) -> usize {

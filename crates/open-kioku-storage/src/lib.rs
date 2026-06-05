@@ -1,6 +1,6 @@
 use open_kioku_core::{
-    CodeChunk, File, FileId, GraphEdge, GraphNode, ImpactReport, Import, IndexManifest,
-    SearchResult, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdge, GraphNode, ImpactReport,
+    Import, IndexManifest, SearchResult, Symbol, SymbolId, SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::Result;
 use std::path::Path;
@@ -19,6 +19,13 @@ pub trait MetadataStore: Send + Sync {
     fn all_chunks(&self) -> Result<Vec<CodeChunk>>;
     fn tests(&self) -> Result<Vec<TestTarget>>;
     fn imports(&self) -> Result<Vec<Import>>;
+    fn analysis_facts(
+        &self,
+        _source_type: Option<EvidenceSourceType>,
+        _limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        Ok(Vec::new())
+    }
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>>;
     fn occurrences_for_file(&self, file_id: &FileId) -> Result<Vec<SymbolOccurrence>>;
     fn symbols_for_file(&self, _file_id: &FileId) -> Result<Vec<Symbol>> {
@@ -68,6 +75,7 @@ pub struct IndexData<'a> {
     pub tests: &'a [TestTarget],
     pub imports: &'a [Import],
     pub occurrences: &'a [SymbolOccurrence],
+    pub analysis_facts: &'a [AnalysisFact],
 }
 
 pub trait GraphStore: Send + Sync {

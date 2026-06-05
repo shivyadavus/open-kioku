@@ -10,7 +10,19 @@ A Context Pack is the agent-ready bundle returned before edits:
   "primary_symbols": [],
   "supporting_files": [],
   "dependency_edges": [],
-  "runtime_signals": [],
+  "runtime_signals": [
+    {
+      "id": "runtime-auth-endpoint",
+      "kind": "endpoint",
+      "message": "runtime endpoint observed in local trace artifact: POST /login",
+      "file_range": {
+        "path": "src/auth.rs",
+        "line_range": { "start": 3, "end": 5 }
+      },
+      "occurred_at": null,
+      "confidence": "high"
+    }
+  ],
   "test_candidates": [],
   "risk_report": {},
   "recommended_change_boundary": {
@@ -83,8 +95,8 @@ A Context Pack is the agent-ready bundle returned before edits:
 
 The builder classifies the task, searches indexed chunks, resolves symbols, estimates impact, recommends tests, and emits a conservative edit boundary. Semantic search may contribute only when enabled; it is never authoritative. Confidence is computed from deterministic evidence signals, not from language-model wording.
 
-`PlanReport` extends this provenance with `evidence_by_section`, mapping sections such as `primary_context`, `validation`, `impact`, `boundary`, and `negative_evidence` to stable evidence IDs. Context, validation items, and boundary rules also expose `evidence_refs` so downstream MCP tools can audit why each item was selected.
+`PlanReport` extends this provenance with `runtime_signals` and `evidence_by_section`, mapping sections such as `primary_context`, `validation`, `impact`, `boundary`, and `negative_evidence` to stable evidence IDs. Context, validation items, runtime signals, and boundary rules also expose `evidence_refs` or stable IDs so downstream MCP tools can audit why each item was selected.
 
-Saved JSON plans can be enforced with `ok verify-boundary --plan plan.json --changed <path>`. Allowed files pass, caution files are surfaced with reasons, forbidden generated/vendor/security-sensitive paths fail, and edits outside the saved boundary require explicit `--evidence-ref` values.
+Saved JSON plans can be enforced with `ok verify --plan plan.json --changed <path>`. Allowed files pass, caution files are surfaced with reasons, forbidden generated/vendor/security-sensitive paths fail, and edits outside the saved boundary require explicit `--evidence-ref` values.
 
 Post-edit verification uses `ok verify --plan plan.json --diff patch.diff`, `ok verify --plan plan.json --git`, or explicit `--changed <path>` values. It parses changed files from unified diffs, computes changed symbols, checks evidence-backed boundaries, recomputes impact and validation recommendations, optionally runs saved validation commands with `--run-commands`, and returns `pass`, `warn`, or `fail`. MCP exposes the same behavior through `verify_change` with `plan`/`plan_json`, `diff` or `changed_files`, optional `evidence_refs`, and optional `run_commands`.

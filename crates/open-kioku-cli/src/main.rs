@@ -3936,6 +3936,7 @@ fn index_repo_with_config(
         tests: &snapshot.tests,
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
+        analysis_facts: &snapshot.analysis_facts,
     })?;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
     let graph = InMemoryGraph::from_index_with_analysis(

@@ -1006,6 +1006,8 @@ pub struct PlanReport {
     pub recommended_next_steps: Vec<String>,
     pub tool_calls: Vec<ToolCallRecommendation>,
     pub memory_facts: Vec<MemorySearchResult>,
+    #[serde(default)]
+    pub runtime_signals: Vec<RuntimeSignal>,
     pub evidence: Vec<Evidence>,
     #[serde(default)]
     pub evidence_by_section: BTreeMap<String, Vec<String>>,
