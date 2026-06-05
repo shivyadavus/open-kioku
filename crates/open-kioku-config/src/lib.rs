@@ -95,8 +95,17 @@ impl Default for OkConfig {
             ranking: RankingConfig::default(),
             semantic: SemanticConfig {
                 enabled: false,
+                backend: "exact-flat".into(),
                 provider: "local".into(),
-                model: String::new(),
+                model: "local-hash".into(),
+                dimensions: 384,
+                distance: "cosine".into(),
+                batch_size: 64,
+                index_symbols: true,
+                index_chunks: true,
+                index_docs: true,
+                index_memory: true,
+                external_provider_allowed: false,
             },
             mcp: McpConfig {
                 mode: "read-only".into(),
@@ -217,6 +226,8 @@ pub struct RankingConfig {
     pub validation_proximity: f32,
     pub memory_signal: f32,
     pub path_quality: f32,
+    #[serde(default = "default_semantic_similarity_weight")]
+    pub semantic_similarity: f32,
 }
 
 impl Default for RankingConfig {
@@ -231,15 +242,37 @@ impl Default for RankingConfig {
             validation_proximity: 1.0,
             memory_signal: 0.20,
             path_quality: 1.0,
+            semantic_similarity: default_semantic_similarity_weight(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_semantic_backend")]
+    pub backend: String,
+    #[serde(default = "default_semantic_provider")]
     pub provider: String,
+    #[serde(default = "default_semantic_model")]
     pub model: String,
+    #[serde(default = "default_semantic_dimensions")]
+    pub dimensions: usize,
+    #[serde(default = "default_semantic_distance")]
+    pub distance: String,
+    #[serde(default = "default_semantic_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_true")]
+    pub index_symbols: bool,
+    #[serde(default = "default_true")]
+    pub index_chunks: bool,
+    #[serde(default = "default_true")]
+    pub index_docs: bool,
+    #[serde(default = "default_true")]
+    pub index_memory: bool,
+    #[serde(default)]
+    pub external_provider_allowed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +352,17 @@ impl OkConfig {
                 "scip.allow_install cannot be true while security.deny_network is true".into(),
             ));
         }
+        if self.semantic.provider == "external" && !self.semantic.external_provider_allowed {
+            return Err(OkError::Config(
+                "semantic external providers require semantic.external_provider_allowed = true"
+                    .into(),
+            ));
+        }
+        if self.semantic.dimensions == 0 {
+            return Err(OkError::Config(
+                "semantic.dimensions must be greater than zero".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -396,6 +440,34 @@ fn default_history_max_files_per_commit() -> usize {
 
 fn default_scip_timeout_seconds() -> u64 {
     300
+}
+
+fn default_semantic_similarity_weight() -> f32 {
+    0.30
+}
+
+fn default_semantic_backend() -> String {
+    "exact-flat".into()
+}
+
+fn default_semantic_provider() -> String {
+    "local".into()
+}
+
+fn default_semantic_model() -> String {
+    "local-hash".into()
+}
+
+fn default_semantic_dimensions() -> usize {
+    384
+}
+
+fn default_semantic_distance() -> String {
+    "cosine".into()
+}
+
+fn default_semantic_batch_size() -> usize {
+    64
 }
 
 pub fn parse_size(value: &str) -> Result<u64> {
