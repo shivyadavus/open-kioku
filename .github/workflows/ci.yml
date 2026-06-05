@@ -30,6 +30,10 @@ jobs:
       - run: cargo test -p open-kioku-tests
       - name: release readiness smoke
         run: scripts/verify-release-readiness.sh
+      - name: Cursor starter smoke
+        run: OK_BIN=target/debug/ok examples/cursor/smoke.sh
+      - name: Claude starter smoke
+        run: OK_BIN=target/debug/ok examples/claude/smoke.sh
 
   audit:
     runs-on: ubuntu-latest

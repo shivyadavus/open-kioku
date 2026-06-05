@@ -1,0 +1,37 @@
+{
+  "client": "cursor",
+  "prompt": "Use Open Kioku before editing. Build a plan for changing token handling, inspect impact, find tests, and verify the intended edit boundary.",
+  "expected_tools": [
+    {
+      "name": "plan_change",
+      "arguments": {
+        "task": "token",
+        "format": "json",
+        "limit": 5
+      }
+    },
+    {
+      "name": "impact_analysis",
+      "arguments": {
+        "path": "src/auth.rs",
+        "limit": 5
+      }
+    },
+    {
+      "name": "find_tests_for_change",
+      "arguments": {
+        "path": "src/auth.rs",
+        "limit": 5
+      }
+    },
+    {
+      "name": "verify_change",
+      "arguments": {
+        "changed_files": [
+          "src/auth.rs"
+        ]
+      }
+    }
+  ]
+}
+
