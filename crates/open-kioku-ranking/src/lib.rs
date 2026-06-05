@@ -467,6 +467,7 @@ mod tests {
             score,
             match_reason: "test".into(),
             evidence: vec!["test".into()],
+            evidence_refs: Vec::new(),
             confidence: 0.6,
             score_breakdown: vec![ScoreComponent::single(
                 "test_score",

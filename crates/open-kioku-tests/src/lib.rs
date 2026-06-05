@@ -630,6 +630,7 @@ mod tests {
                 command: Some("gradle :server:test".into()),
                 confidence: Confidence::Medium,
                 reason: "test-like path".into(),
+                evidence_refs: vec!["search-service-test".into()],
                 score_breakdown: vec![ScoreComponent::single(
                     "test_fixture_confidence",
                     Confidence::Medium.score(),
@@ -734,6 +735,7 @@ mod tests {
             command: Some("cargo test".into()),
             confidence: Confidence::Low,
             reason: "test target".into(),
+            evidence_refs: vec![name.into()],
             score_breakdown: vec![ScoreComponent::single(
                 "test_fixture_confidence",
                 Confidence::Low.score(),

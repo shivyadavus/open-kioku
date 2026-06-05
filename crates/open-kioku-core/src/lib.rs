@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -592,16 +593,21 @@ pub struct TestTarget {
     pub confidence: Confidence,
     pub reason: String,
     #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
 }
 
 impl TestTarget {
     pub fn reconcile_score_breakdown(&mut self) {
+        if self.evidence_refs.is_empty() {
+            self.evidence_refs.push(format!("test:{}", self.id));
+        }
         reconcile_score_breakdown(
             self.confidence.score(),
             &mut self.score_breakdown,
             "test_confidence",
-            vec![self.id.clone()],
+            self.evidence_refs.clone(),
             &self.reason,
         );
     }
@@ -759,6 +765,8 @@ pub struct SearchResult {
     pub score: f32,
     pub match_reason: String,
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
     pub confidence: f32,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
@@ -766,15 +774,22 @@ pub struct SearchResult {
 
 impl SearchResult {
     pub fn derived_evidence_ids(&self) -> Vec<String> {
+        if !self.evidence_refs.is_empty() {
+            return self.evidence_refs.clone();
+        }
         search_result_evidence_ids(&self.path, &self.line_range, self.evidence.len())
     }
 
     pub fn reconcile_score_breakdown(&mut self) {
+        if self.evidence_refs.is_empty() {
+            self.evidence_refs =
+                search_result_evidence_ids(&self.path, &self.line_range, self.evidence.len());
+        }
         reconcile_score_breakdown(
             self.score,
             &mut self.score_breakdown,
             "search_score",
-            search_result_evidence_ids(&self.path, &self.line_range, self.evidence.len()),
+            self.evidence_refs.clone(),
             &self.match_reason,
         );
     }
@@ -859,6 +874,8 @@ pub struct ChangeBoundary {
     pub allowed_files: Vec<PathBuf>,
     pub caution_files: Vec<PathBuf>,
     pub forbidden_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -943,6 +960,8 @@ pub struct PlanReport {
     pub tool_calls: Vec<ToolCallRecommendation>,
     pub memory_facts: Vec<MemorySearchResult>,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub evidence_by_section: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub negative_evidence: Vec<NegativeEvidence>,
     pub confidence_summary: String,

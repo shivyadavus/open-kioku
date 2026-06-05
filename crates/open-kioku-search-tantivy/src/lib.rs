@@ -141,6 +141,7 @@ impl SearchIndex for TantivySearchIndex {
                     score: boosted_score,
                     match_reason: "tantivy hybrid lexical match".into(),
                     evidence: evidence_strings.clone(),
+                    evidence_refs: evidence_ids.clone(),
                     confidence,
                     score_breakdown: vec![
                         ScoreComponent::single(
