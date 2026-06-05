@@ -309,6 +309,7 @@ mod tests {
                 score: 1.0,
                 match_reason: "test".into(),
                 evidence: Vec::new(),
+                evidence_refs: Vec::new(),
                 confidence: 1.0,
                 score_breakdown: vec![ScoreComponent::single(
                     "test_score",
@@ -331,6 +332,7 @@ mod tests {
                 allowed_files: Vec::new(),
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
+                evidence_refs: Vec::new(),
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),

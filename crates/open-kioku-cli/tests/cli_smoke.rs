@@ -253,7 +253,9 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan.contains("# Plan: token"));
     assert!(plan.contains("## Confidence"));
     assert!(plan.contains("## Negative Evidence"));
+    assert!(plan.contains("## Evidence Provenance"));
     assert!(plan.contains("exact_references"));
+    assert!(plan.contains("evidence:"));
     assert!(plan.contains("## Primary Context"));
     assert!(plan.contains("## Agent Tool Calls"));
 
@@ -272,6 +274,8 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan_json.contains("\"components\""));
     assert!(plan_json.contains("\"caveats\""));
     assert!(plan_json.contains("\"negative_evidence\""));
+    assert!(plan_json.contains("\"evidence_by_section\""));
+    assert!(plan_json.contains("\"evidence_refs\""));
 
     let (_warn_stdout, warn_stderr) = run_ok_with_stderr({
         let mut command = ok();

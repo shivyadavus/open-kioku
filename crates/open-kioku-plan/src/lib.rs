@@ -144,6 +144,13 @@ impl<'a> PlanEngine<'a> {
             context.runtime_signals.len(),
         );
         let confidence_summary = confidence_summary(&confidence_breakdown);
+        let evidence_by_section = evidence_by_section(
+            &primary_context,
+            &impact,
+            &validation,
+            &recommended_change_boundary,
+            &negative_evidence,
+        );
 
         let mut report = PlanReport {
             task: task.into(),
@@ -158,6 +165,7 @@ impl<'a> PlanEngine<'a> {
             tool_calls,
             memory_facts: self.memory_facts.clone(),
             evidence,
+            evidence_by_section,
             negative_evidence,
             confidence_summary,
             confidence_breakdown,
@@ -783,7 +791,99 @@ fn change_boundary(
         allowed_files: allowed.into_iter().collect(),
         caution_files: caution.into_iter().collect(),
         forbidden_files: context_boundary.forbidden_files.clone(),
+        evidence_refs: boundary_evidence_refs(primary_context, &impact.direct_impacts),
     }
+}
+
+fn boundary_evidence_refs(primary: &[SearchResult], impacts: &[SearchResult]) -> Vec<String> {
+    let mut refs = primary
+        .iter()
+        .chain(impacts.iter())
+        .flat_map(|result| result.derived_evidence_ids())
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs.truncate(50);
+    refs
+}
+
+fn evidence_by_section(
+    primary_context: &[SearchResult],
+    impact: &ImpactReport,
+    validation: &[TestTarget],
+    boundary: &ChangeBoundary,
+    negative_evidence: &[NegativeEvidence],
+) -> BTreeMap<String, Vec<String>> {
+    let mut sections = BTreeMap::new();
+    sections.insert(
+        "primary_context".into(),
+        stable_refs(
+            primary_context
+                .iter()
+                .flat_map(|result| result.derived_evidence_ids()),
+        ),
+    );
+    sections.insert(
+        "impact".into(),
+        stable_refs(
+            impact
+                .direct_impacts
+                .iter()
+                .chain(impact.indirect_impacts.iter())
+                .flat_map(|result| result.derived_evidence_ids())
+                .chain(impact.evidence.iter().map(|evidence| evidence.id.0.clone())),
+        ),
+    );
+    sections.insert(
+        "validation".into(),
+        stable_refs(validation.iter().flat_map(|test| {
+            if test.evidence_refs.is_empty() {
+                vec![format!("test:{}", test.id)]
+            } else {
+                test.evidence_refs.clone()
+            }
+        })),
+    );
+    sections.insert(
+        "boundary".into(),
+        stable_refs(boundary.evidence_refs.clone()),
+    );
+    sections.insert(
+        "negative_evidence".into(),
+        stable_refs(negative_evidence.iter().map(|item| {
+            format!(
+                "negative:{}:{}",
+                item.scope,
+                stable_slug(&format!("{}:{}", item.query, item.reason))
+            )
+        })),
+    );
+    sections
+}
+
+fn stable_refs(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut refs = values.into_iter().collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn stable_slug(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn next_steps(
@@ -934,6 +1034,7 @@ fn render_text(report: &PlanReport) -> String {
     }
     write_confidence_text(&mut out, &report.confidence_breakdown);
     write_negative_evidence_text(&mut out, &report.negative_evidence);
+    write_evidence_provenance_text(&mut out, report);
 
     out.push_str("\nPrimary context:\n");
     write_results(&mut out, &report.primary_context);
@@ -960,10 +1061,11 @@ fn render_text(report: &PlanReport) -> String {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
             out.push_str(&format!(
-                "  - {} [{}] ({})\n",
+                "  - {} [{}] ({}; evidence {})\n",
                 test.name,
                 command,
-                top_score_signals(&test.score_breakdown)
+                top_score_signals(&test.score_breakdown),
+                evidence_refs_text(&test.evidence_refs)
             ));
         }
     }
@@ -1014,6 +1116,9 @@ fn render_markdown(report: &PlanReport) -> String {
     out.push_str("\n## Negative Evidence\n\n");
     write_markdown_negative_evidence(&mut out, &report.negative_evidence);
 
+    out.push_str("\n## Evidence Provenance\n\n");
+    write_markdown_evidence_provenance(&mut out, report);
+
     out.push_str("\n## Primary Context\n\n");
     write_markdown_results(&mut out, &report.primary_context);
 
@@ -1039,10 +1144,11 @@ fn render_markdown(report: &PlanReport) -> String {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
             out.push_str(&format!(
-                "- `{}` via `{}`; signals: {}\n",
+                "- `{}` via `{}`; signals: {}; evidence: `{}`\n",
                 test.name,
                 command,
-                top_score_signals(&test.score_breakdown)
+                top_score_signals(&test.score_breakdown),
+                evidence_refs_text(&test.evidence_refs)
             ));
         }
     }
@@ -1066,6 +1172,10 @@ fn render_markdown(report: &PlanReport) -> String {
     write_paths(&mut out, &report.recommended_change_boundary.allowed_files);
     out.push_str("\nCaution files:\n");
     write_paths(&mut out, &report.recommended_change_boundary.caution_files);
+    out.push_str(&format!(
+        "\nBoundary evidence: `{}`\n",
+        evidence_refs_text(&report.recommended_change_boundary.evidence_refs)
+    ));
 
     out.push_str("\n## Recommended Next Steps\n\n");
     for step in &report.recommended_next_steps {
@@ -1091,11 +1201,12 @@ fn write_results(out: &mut String, results: &[SearchResult]) {
     for result in results {
         let range = line_range(result);
         out.push_str(&format!(
-            "  - {}{} [{:.3}; {}]: {}\n",
+            "  - {}{} [{:.3}; {}; evidence {}]: {}\n",
             result.path.display(),
             range,
             result.score,
             top_score_signals(&result.score_breakdown),
+            evidence_refs_text(&result.derived_evidence_ids()),
             one_line(&result.snippet)
         ));
     }
@@ -1114,6 +1225,10 @@ fn write_markdown_results(out: &mut String, results: &[SearchResult]) {
             one_line(&result.snippet),
             result.score,
             top_score_signals(&result.score_breakdown)
+        ));
+        out.push_str(&format!(
+            "  - evidence: `{}`\n",
+            result.derived_evidence_ids().join(", ")
         ));
     }
 }
@@ -1221,6 +1336,54 @@ fn write_markdown_negative_evidence(out: &mut String, items: &[NegativeEvidence]
     }
 }
 
+fn write_evidence_provenance_text(out: &mut String, report: &PlanReport) {
+    out.push_str("Evidence provenance:\n");
+    if report.evidence_by_section.is_empty() {
+        out.push_str("  - none\n");
+        return;
+    }
+    for (section, refs) in &report.evidence_by_section {
+        out.push_str(&format!("  - {}: {}\n", section, evidence_refs_text(refs)));
+    }
+}
+
+fn write_markdown_evidence_provenance(out: &mut String, report: &PlanReport) {
+    if report.evidence_by_section.is_empty() {
+        out.push_str("- None\n");
+        return;
+    }
+    out.push_str("### Section References\n\n");
+    for (section, refs) in &report.evidence_by_section {
+        out.push_str(&format!(
+            "- `{}`: `{}`\n",
+            section,
+            evidence_refs_text(refs)
+        ));
+    }
+    out.push_str("\n### Evidence Items\n\n");
+    if report.evidence.is_empty() {
+        out.push_str("- None\n");
+    } else {
+        for item in &report.evidence {
+            out.push_str(&format!(
+                "- `{}` `{}` ({:?}): {}\n",
+                item.id.0,
+                item.source,
+                item.source_type,
+                one_line(&item.message)
+            ));
+        }
+    }
+}
+
+fn evidence_refs_text(refs: &[String]) -> String {
+    if refs.is_empty() {
+        "none".into()
+    } else {
+        refs.join(", ")
+    }
+}
+
 fn top_score_signals(components: &[ScoreComponent]) -> String {
     if components.is_empty() {
         return "no score signals".into();
@@ -1320,6 +1483,7 @@ mod tests {
             command: Some("cargo test".into()),
             confidence: Confidence::High,
             reason: "test-like path".into(),
+            evidence_refs: vec!["login-test".into()],
             score_breakdown: vec![ScoreComponent::single(
                 "test_fixture_confidence",
                 Confidence::High.score(),
@@ -1393,6 +1557,7 @@ mod tests {
             score: 1.0,
             match_reason: "lexical match".into(),
             evidence: vec!["lexical evidence".into()],
+            evidence_refs: Vec::new(),
             confidence: 0.6,
             score_breakdown: vec![ScoreComponent::single(
                 "test_score",
@@ -1425,6 +1590,7 @@ mod tests {
                 allowed_files: vec![PathBuf::from("tests/auth_flow.rs")],
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
+                evidence_refs: Vec::new(),
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
@@ -1477,6 +1643,7 @@ mod tests {
     fn builds_evidence_backed_plan() {
         let store = test_store();
         let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+        let second = PlanEngine::new(&store).plan("token", 10).unwrap();
 
         assert_eq!(report.task, "token");
         assert!(!report.primary_context.is_empty());
@@ -1493,6 +1660,16 @@ mod tests {
             .iter()
             .any(|call| call.tool == "impact_analysis"));
         assert_ne!(report.risk.level, "unknown");
+        assert_eq!(report.evidence_by_section, second.evidence_by_section);
+        assert!(report
+            .primary_context
+            .iter()
+            .all(|result| !result.evidence_refs.is_empty()));
+        assert!(report
+            .validation
+            .iter()
+            .all(|test| !test.evidence_refs.is_empty()));
+        assert!(!report.recommended_change_boundary.evidence_refs.is_empty());
     }
 
     #[test]
@@ -1531,6 +1708,7 @@ mod tests {
             score: 1.0,
             match_reason: "test".into(),
             evidence: vec!["test evidence".into()],
+            evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: vec![ScoreComponent::single(
                 "test_score",
@@ -1557,6 +1735,7 @@ mod tests {
                 allowed_files: vec![PathBuf::from("src/auth.rs")],
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
+                evidence_refs: Vec::new(),
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
@@ -1618,6 +1797,7 @@ mod tests {
             score: 1.0,
             match_reason: "test".into(),
             evidence: vec!["test evidence".into()],
+            evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: vec![ScoreComponent::single(
                 "test_score",
@@ -1646,6 +1826,7 @@ mod tests {
                 allowed_files: vec![PathBuf::from("src/EnterpriseRateValidator.java")],
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
+                evidence_refs: Vec::new(),
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
@@ -1690,6 +1871,8 @@ mod tests {
 
         assert!(rendered.contains("### Score Signals"));
         assert!(rendered.contains("## Confidence"));
+        assert!(rendered.contains("## Evidence Provenance"));
+        assert!(rendered.contains("evidence:"));
         assert!(rendered.contains("exact_references"));
         assert!(rendered.contains("signals:"));
         assert!(rendered.contains("score:"));
