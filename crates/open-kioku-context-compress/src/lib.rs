@@ -340,6 +340,7 @@ mod tests {
             },
             evidence: Vec::new(),
             confidence_summary: "test".into(),
+            confidence_breakdown: open_kioku_core::ConfidenceBreakdown::default(),
         };
 
         let compressed = store.compress_pack(&pack).unwrap();

@@ -223,8 +223,25 @@ fn demo_creates_indexed_sample_repo() {
         command
     });
     assert!(plan.contains("# Plan: token"));
+    assert!(plan.contains("## Confidence"));
+    assert!(plan.contains("exact_references"));
     assert!(plan.contains("## Primary Context"));
     assert!(plan.contains("## Agent Tool Calls"));
+
+    let plan_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("plan")
+            .arg("token");
+        command
+    });
+    assert!(plan_json.contains("\"confidence_breakdown\""));
+    assert!(plan_json.contains("\"overall_score\""));
+    assert!(plan_json.contains("\"components\""));
+    assert!(plan_json.contains("\"caveats\""));
 
     let eval = run({
         let mut command = ok();
