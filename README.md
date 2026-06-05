@@ -207,6 +207,15 @@ ok eval /absolute/path/to/repo \
   --min-mrr 0.5
 ```
 
+Use `ok workflow-bench` for plan -> edit -> verify benchmark cases:
+
+```sh
+ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
+```
+
+See [`docs/workflow-benchmarks.md`](docs/workflow-benchmarks.md) for the case
+format and rollup metrics.
+
 ## Try The Demo
 
 ```sh
@@ -249,7 +258,7 @@ ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
 ```
 
-Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
 
 Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
