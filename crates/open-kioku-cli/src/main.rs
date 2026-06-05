@@ -970,7 +970,10 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Open Kioku status has failing readiness checks");
             }
         }
-        Command::Doctor { repo: command_repo, format } => {
+        Command::Doctor {
+            repo: command_repo,
+            format,
+        } => {
             let repo = resolve_repo(&repo, command_repo);
             let report = doctor_report(&repo);
             let ok = report.ok;
