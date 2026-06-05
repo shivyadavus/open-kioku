@@ -1,0 +1,37 @@
+{
+  "client": "claude",
+  "prompt": "Use Open Kioku first. For a token-handling change, build an evidence-backed plan, inspect impact, find the tests, and verify the changed files against the saved plan.",
+  "expected_tools": [
+    {
+      "name": "plan_change",
+      "arguments": {
+        "task": "token",
+        "format": "json",
+        "limit": 5
+      }
+    },
+    {
+      "name": "impact_analysis",
+      "arguments": {
+        "path": "src/auth.rs",
+        "limit": 5
+      }
+    },
+    {
+      "name": "find_tests_for_change",
+      "arguments": {
+        "path": "src/auth.rs",
+        "limit": 5
+      }
+    },
+    {
+      "name": "verify_change",
+      "arguments": {
+        "changed_files": [
+          "src/auth.rs"
+        ]
+      }
+    }
+  ]
+}
+

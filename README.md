@@ -170,6 +170,9 @@ ok mcp install zed --repo /absolute/path/to/repo
 
 Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
 
+Starter examples with golden prompts and one-command smoke tests are available
+in [`examples/cursor`](examples/cursor) and [`examples/claude`](examples/claude).
+
 `ok status --markdown --write ok-status.md` creates a portable handoff with index counts, SCIP quality, readiness checks, and next steps. `ok setup audit` checks the index, security posture, MCP server health, plugin metadata, and the supported client install matrix.
 
 Ask your agent to use Open Kioku before editing:
