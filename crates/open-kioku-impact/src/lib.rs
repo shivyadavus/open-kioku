@@ -1,7 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File, FileId, FileRange,
-    ImpactReport, RiskReport, SearchResult, Symbol, SymbolOccurrence,
+    search_result_evidence_ids, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType,
+    File, FileId, FileRange, ImpactReport, RiskReport, ScoreComponent, SearchResult, Symbol,
+    SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
@@ -152,7 +153,7 @@ impl<'a> ImpactEngine<'a> {
             },
             indexed_at: Utc::now(),
         };
-        Ok(ImpactReport {
+        let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
             indirect_impacts: indirect,
@@ -169,7 +170,15 @@ impl<'a> ImpactEngine<'a> {
                 reasons,
             },
             evidence: vec![evidence],
-        })
+            score_breakdown: vec![ScoreComponent::single(
+                "direct_reference_density",
+                score,
+                vec![format!("impact:{}", path.display())],
+                "impact risk from count of exact and lexical direct dependents",
+            )],
+        };
+        report.reconcile_score_breakdown();
+        Ok(report)
     }
 }
 
@@ -225,18 +234,28 @@ fn occurrence_result(
         EvidenceSourceType::Lsp => "LSP",
         _ => "indexed",
     };
+    let score = 1.25 + occurrence.confidence.score();
+    let evidence = vec![format!(
+        "exact reference to `{}` from `{source}` occurrence data",
+        symbol.qualified_name
+    )];
+    let line_range = occurrence.range.clone();
+    let evidence_ids = search_result_evidence_ids(&file.path, &line_range, evidence.len());
     Ok(Some(SearchResult {
         path: file.path.clone(),
-        line_range: occurrence.range.clone(),
+        line_range,
         snippet,
         symbol: None,
-        score: 1.25 + occurrence.confidence.score(),
+        score,
         match_reason: format!("exact symbol reference via {source}"),
-        evidence: vec![format!(
-            "exact reference to `{}` from `{source}` occurrence data",
-            symbol.qualified_name
-        )],
+        evidence: evidence.clone(),
         confidence: occurrence.confidence.score(),
+        score_breakdown: vec![ScoreComponent::single(
+            "exact_symbol_reference",
+            score,
+            evidence_ids,
+            format!("{source} occurrence confidence plus exact-reference base weight"),
+        )],
     }))
 }
 
@@ -282,12 +301,14 @@ fn dedupe_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
                     existing.line_range = result.line_range.clone();
                     existing.match_reason = result.match_reason.clone();
                     existing.confidence = existing.confidence.max(result.confidence);
+                    existing.score_breakdown = result.score_breakdown.clone();
                 }
                 for evidence in result.evidence {
                     if !existing.evidence.contains(&evidence) {
                         existing.evidence.push(evidence);
                     }
                 }
+                existing.reconcile_score_breakdown();
             }
             None => {
                 by_path.insert(key, result);

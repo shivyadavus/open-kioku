@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -102,6 +102,108 @@ pub struct Evidence {
     pub confidence: Confidence,
     pub message: String,
     pub indexed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScoreComponent {
+    pub signal: String,
+    pub raw_value: f32,
+    pub normalized_value: f32,
+    pub weight: f32,
+    pub contribution: f32,
+    pub evidence_ids: Vec<String>,
+    pub rationale: String,
+}
+
+impl ScoreComponent {
+    pub fn new(
+        signal: impl Into<String>,
+        raw_value: f32,
+        normalized_value: f32,
+        weight: f32,
+        contribution: f32,
+        evidence_ids: Vec<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            signal: signal.into(),
+            raw_value,
+            normalized_value,
+            weight,
+            contribution,
+            evidence_ids,
+            rationale: rationale.into(),
+        }
+    }
+
+    pub fn single(
+        signal: impl Into<String>,
+        score: f32,
+        evidence_ids: Vec<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            signal,
+            score,
+            score.clamp(0.0, 1.0),
+            1.0,
+            score,
+            evidence_ids,
+            rationale,
+        )
+    }
+
+    pub fn adjustment(
+        signal: impl Into<String>,
+        contribution: f32,
+        evidence_ids: Vec<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            signal,
+            contribution,
+            contribution.clamp(-1.0, 1.0),
+            1.0,
+            contribution,
+            evidence_ids,
+            rationale,
+        )
+    }
+}
+
+pub fn score_component_total(components: &[ScoreComponent]) -> f32 {
+    components
+        .iter()
+        .map(|component| component.contribution)
+        .sum()
+}
+
+pub fn reconcile_score_breakdown(
+    score: f32,
+    components: &mut Vec<ScoreComponent>,
+    fallback_signal: &str,
+    evidence_ids: Vec<String>,
+    rationale: &str,
+) {
+    if components.is_empty() {
+        components.push(ScoreComponent::single(
+            fallback_signal,
+            score,
+            evidence_ids,
+            rationale,
+        ));
+        return;
+    }
+
+    let delta = score - score_component_total(components);
+    if delta.abs() > 0.001 {
+        components.push(ScoreComponent::adjustment(
+            "score_reconciliation",
+            delta,
+            evidence_ids,
+            format!("adjusted component total to match surfaced score: {rationale}"),
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -260,6 +362,20 @@ pub struct TestTarget {
     pub command: Option<String>,
     pub confidence: Confidence,
     pub reason: String,
+    #[serde(default)]
+    pub score_breakdown: Vec<ScoreComponent>,
+}
+
+impl TestTarget {
+    pub fn reconcile_score_breakdown(&mut self) {
+        reconcile_score_breakdown(
+            self.confidence.score(),
+            &mut self.score_breakdown,
+            "test_confidence",
+            vec![self.id.clone()],
+            &self.reason,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -415,6 +531,43 @@ pub struct SearchResult {
     pub match_reason: String,
     pub evidence: Vec<String>,
     pub confidence: f32,
+    #[serde(default)]
+    pub score_breakdown: Vec<ScoreComponent>,
+}
+
+impl SearchResult {
+    pub fn derived_evidence_ids(&self) -> Vec<String> {
+        search_result_evidence_ids(&self.path, &self.line_range, self.evidence.len())
+    }
+
+    pub fn reconcile_score_breakdown(&mut self) {
+        reconcile_score_breakdown(
+            self.score,
+            &mut self.score_breakdown,
+            "search_score",
+            search_result_evidence_ids(&self.path, &self.line_range, self.evidence.len()),
+            &self.match_reason,
+        );
+    }
+
+    pub fn add_score_component(&mut self, component: ScoreComponent) {
+        self.score_breakdown.push(component);
+    }
+}
+
+pub fn search_result_evidence_ids(
+    path: &Path,
+    line_range: &Option<LineRange>,
+    evidence_len: usize,
+) -> Vec<String> {
+    let range = line_range
+        .as_ref()
+        .map(|range| format!("{}-{}", range.start, range.end))
+        .unwrap_or_else(|| "unknown".into());
+    let count = evidence_len.max(1);
+    (0..count)
+        .map(|index| format!("search:{}:{range}:{index}", path.display()))
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -494,6 +647,29 @@ pub struct ImpactReport {
     pub indirect_impacts: Vec<SearchResult>,
     pub risk_report: RiskReport,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub score_breakdown: Vec<ScoreComponent>,
+}
+
+impl ImpactReport {
+    pub fn reconcile_score_breakdown(&mut self) {
+        reconcile_score_breakdown(
+            self.risk_report.score,
+            &mut self.score_breakdown,
+            "impact_risk",
+            self.evidence
+                .iter()
+                .map(|evidence| evidence.id.0.clone())
+                .collect(),
+            "impact risk score",
+        );
+        for result in &mut self.direct_impacts {
+            result.reconcile_score_breakdown();
+        }
+        for result in &mut self.indirect_impacts {
+            result.reconcile_score_breakdown();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -535,6 +711,30 @@ pub struct PlanReport {
     pub memory_facts: Vec<MemorySearchResult>,
     pub evidence: Vec<Evidence>,
     pub confidence_summary: String,
+    #[serde(default)]
+    pub score_breakdown: Vec<ScoreComponent>,
+}
+
+impl PlanReport {
+    pub fn reconcile_score_breakdown(&mut self) {
+        reconcile_score_breakdown(
+            self.risk.score,
+            &mut self.score_breakdown,
+            "plan_risk",
+            self.evidence
+                .iter()
+                .map(|evidence| evidence.id.0.clone())
+                .collect(),
+            "plan risk score",
+        );
+        for result in &mut self.primary_context {
+            result.reconcile_score_breakdown();
+        }
+        self.impact.reconcile_score_breakdown();
+        for test in &mut self.validation {
+            test.reconcile_score_breakdown();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -552,4 +752,48 @@ pub struct PatchPlan {
     pub unified_diff: Option<String>,
     pub requires_approval: bool,
     pub evidence: Vec<Evidence>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reconcile_score_breakdown, score_component_total, ScoreComponent};
+
+    #[test]
+    fn reconciliation_adds_delta_to_match_surfaced_score() {
+        let mut components = vec![ScoreComponent::single(
+            "base",
+            0.4,
+            vec!["ev:base".into()],
+            "base signal",
+        )];
+
+        reconcile_score_breakdown(
+            0.65,
+            &mut components,
+            "fallback",
+            vec!["ev:adjust".into()],
+            "test score",
+        );
+
+        assert_eq!(components.len(), 2);
+        assert!((score_component_total(&components) - 0.65).abs() < 0.001);
+        assert_eq!(components[1].signal, "score_reconciliation");
+    }
+
+    #[test]
+    fn reconciliation_creates_fallback_for_empty_components() {
+        let mut components = Vec::new();
+
+        reconcile_score_breakdown(
+            0.85,
+            &mut components,
+            "confidence",
+            vec!["test:id".into()],
+            "test confidence",
+        );
+
+        assert_eq!(components.len(), 1);
+        assert_eq!(components[0].signal, "confidence");
+        assert!((score_component_total(&components) - 0.85).abs() < 0.001);
+    }
 }

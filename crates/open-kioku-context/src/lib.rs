@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
     ChangeBoundary, CodeChunk, Confidence, ContextPack, Evidence, EvidenceId, EvidenceSourceType,
-    File, GraphEdge, RiskReport, SearchResult, Symbol, ValidationPlan,
+    File, GraphEdge, RiskReport, ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -297,6 +297,7 @@ fn search_candidates(
                         existing.snippet = result.snippet;
                         existing.line_range = result.line_range;
                         existing.symbol = result.symbol;
+                        existing.score_breakdown = result.score_breakdown;
                     }
                     for evidence in result.evidence {
                         if !existing.evidence.contains(&evidence) {
@@ -307,6 +308,7 @@ fn search_candidates(
                         existing.match_reason =
                             format!("{}; task anchor `{term}`", existing.match_reason);
                     }
+                    existing.reconcile_score_breakdown();
                 }
                 None => {
                     merged.insert(key, result);
@@ -329,6 +331,12 @@ fn rerank_for_task(results: Vec<SearchResult>, intent: &TaskSearchIntent) -> Vec
                 result
                     .evidence
                     .push(format!("primary task anchor `{anchor}` matched"));
+                result.add_score_component(ScoreComponent::adjustment(
+                    "primary_task_anchor_boost",
+                    0.65,
+                    result.derived_evidence_ids(),
+                    format!("primary task anchor `{anchor}` matched result text"),
+                ));
             }
         }
         for anchor in &intent.reference_anchors {
@@ -338,6 +346,12 @@ fn rerank_for_task(results: Vec<SearchResult>, intent: &TaskSearchIntent) -> Vec
                 result
                     .evidence
                     .push(format!("reference task anchor `{anchor}` matched"));
+                result.add_score_component(ScoreComponent::adjustment(
+                    "reference_task_anchor_boost",
+                    0.25,
+                    result.derived_evidence_ids(),
+                    format!("reference task anchor `{anchor}` matched result text"),
+                ));
             }
         }
         for anchor in intent
@@ -351,8 +365,15 @@ fn rerank_for_task(results: Vec<SearchResult>, intent: &TaskSearchIntent) -> Vec
                 result
                     .evidence
                     .push(format!("ticket/path task anchor `{anchor}` matched"));
+                result.add_score_component(ScoreComponent::adjustment(
+                    "ticket_or_path_anchor_boost",
+                    0.35,
+                    result.derived_evidence_ids(),
+                    format!("ticket/path anchor `{anchor}` matched result text"),
+                ));
             }
         }
+        result.reconcile_score_breakdown();
     }
     results.sort_by(|a, b| {
         b.score
@@ -518,6 +539,12 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
             message: "context pack search did not find indexed evidence".into(),
             indexed_at: Utc::now(),
         }],
+        score_breakdown: vec![ScoreComponent::single(
+            "no_context_found",
+            0.0,
+            vec!["context:no-match".into()],
+            "no indexed context matched the task",
+        )],
     }
 }
 
@@ -543,6 +570,12 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
                     .into(),
             indexed_at: Utc::now(),
         }],
+        score_breakdown: vec![ScoreComponent::single(
+            "bounded_context_risk",
+            0.1,
+            vec!["context:bounded-search".into()],
+            "bounded context used persisted search results without full impact expansion",
+        )],
     }
 }
 
