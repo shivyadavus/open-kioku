@@ -4,8 +4,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Open Kioku is a local-first code intelligence MCP that gives AI coding agents fast search, symbol context, impact analysis, and validation plans without sending your code to a cloud service.">
+    <link rel="canonical" href="https://openkioku.com/">
+    <meta property="og:title" content="Open Kioku — Plan before edit. Verify after edit.">
+    <meta property="og:description" content="Local-first code intelligence for AI coding agents. Index once, plan from evidence, verify bounded edits. No cloud required.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://openkioku.com/">
+    <meta property="og:image" content="https://openkioku.com/og-image.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Open Kioku — Plan before edit. Verify after edit.">
+    <meta name="twitter:description" content="Local-first code intelligence for AI coding agents.">
+    <meta name="twitter:image" content="https://openkioku.com/og-image.png">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
     <title>Open Kioku - Local-First Code Intelligence for AI Agents</title>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Open Kioku",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "offers": { "@type": "Offer", "price": "0" },
+      "description": "Local-first code intelligence for AI coding agents. Plan before edit, verify after edit.",
+      "url": "https://openkioku.com"
+    }
+    </script>
     <style>
         @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap");
 
@@ -612,6 +634,112 @@
             text-decoration: none;
         }
 
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .stat-card {
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            padding: 20px 16px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 800;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-unit {
+            font-size: 1rem;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .stat-label {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.84rem;
+        }
+
+        .stat-card-accent {
+            border-color: rgba(34, 197, 94, 0.32);
+            background: rgba(34, 197, 94, 0.06);
+        }
+
+        .stat-card-accent .stat-value {
+            color: #86efac;
+        }
+
+        .positioning-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .positioning-card {
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            padding: 22px;
+        }
+
+        .positioning-card h3 {
+            font-size: 1.02rem;
+            margin-top: 12px;
+        }
+
+        .positioning-card p {
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 0.94rem;
+        }
+
+        .positioning-icon {
+            font-size: 1.6rem;
+        }
+
+        .positioning-card-highlight {
+            border-color: rgba(45, 212, 191, 0.32);
+            background: rgba(45, 212, 191, 0.06);
+        }
+
+        .client-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .trust-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .trust-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-panel);
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+
+        .trust-check {
+            color: var(--green);
+            font-weight: 800;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+
         @keyframes blink {
             50% { opacity: 0; }
         }
@@ -643,6 +771,22 @@
 
             .workflow-grid,
             .security-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .positioning-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .client-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .trust-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
@@ -698,6 +842,22 @@
                 flex-direction: column;
                 align-items: flex-start;
             }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .stat-value {
+                font-size: 1.4rem;
+            }
+
+            .client-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .trust-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -722,18 +882,22 @@
         <section class="hero">
             <div class="hero-grid">
                 <div>
-                    <div class="eyebrow"><span class="status-dot"></span> v1.0.1 live on npm and GitHub Releases</div>
-                    <h1>Make coding agents stop guessing.</h1>
-                    <p class="hero-copy">Open Kioku is the local-first code intelligence layer for Claude, Cursor, and other MCP clients. It indexes your repo once, then gives agents precise search, symbols, impact analysis, tests, and context packs without sending code to a cloud service.</p>
+                    <div class="eyebrow"><span class="status-dot"></span> v1.0.4 — plan before edit, verify after edit</div>
+                    <h1>Plan before edit.<br>Verify after edit.</h1>
+                    <p class="hero-copy">Open Kioku is the local evidence layer for Claude, Cursor, Codex, and other MCP coding agents. It indexes your repo once, builds evidence-backed plans before edits begin, then verifies bounded changes stayed inside the plan. No cloud. No source upload. Read-only by default.</p>
 
                     <div class="hero-actions">
                         <a class="button button-primary" href="#demo" aria-label="Watch the Open Kioku workflow demo">
-                            <span>Watch workflow</span>
+                            <span>60-Second Demo</span>
                             <span aria-hidden="true">v</span>
                         </a>
                         <a class="button button-secondary" href="https://www.npmjs.com/package/open-kioku" aria-label="Open the Open Kioku npm package">
                             <span>npm package</span>
                             <span aria-hidden="true">open</span>
+                        </a>
+                        <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku" aria-label="View the Open Kioku repository on GitHub">
+                            <span>GitHub</span>
+                            <span aria-hidden="true">★</span>
                         </a>
                     </div>
 
@@ -779,6 +943,22 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install an
                         </div>
                     </div>
                 </aside>
+            </div>
+        </section>
+
+        <section class="proof-banner" aria-label="Verified on real codebases">
+            <div class="section-heading">
+                <div class="section-kicker">Verified at Scale</div>
+                <h2>Tested on a local Elasticsearch checkout.</h2>
+                <p class="section-copy">Not a marketing benchmark. A real run with real numbers, real gaps documented. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-repo-proof.md" style="color: var(--cyan); text-decoration: underline;">Read the full proof →</a></p>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card"><div class="stat-value">36,640</div><div class="stat-label">files indexed</div></div>
+                <div class="stat-card"><div class="stat-value">495,919</div><div class="stat-label">symbols extracted</div></div>
+                <div class="stat-card"><div class="stat-value">509,665</div><div class="stat-label">chunks stored</div></div>
+                <div class="stat-card"><div class="stat-value">159,483</div><div class="stat-label">tests indexed</div></div>
+                <div class="stat-card"><div class="stat-value">1,015,502</div><div class="stat-label">graph edges</div></div>
+                <div class="stat-card stat-card-accent"><div class="stat-value">97<span class="stat-unit">/100</span></div><div class="stat-label">avg usefulness score across 20 tasks</div></div>
             </div>
         </section>
 
@@ -868,6 +1048,31 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy real repo 
 
         <section>
             <div class="section-heading">
+                <div class="section-kicker">Positioning</div>
+                <h2>Search finds code. Planning knows what to do with it.</h2>
+                <p class="section-copy">Most tools give agents files. Open Kioku gives them a plan: which files to touch, which symbols are affected, which tests to run, what the blast radius looks like, and whether the edit stayed inside the boundary.</p>
+            </div>
+            <div class="positioning-grid">
+                <div class="positioning-card">
+                    <div class="positioning-icon">🔍</div>
+                    <h3>Search tools</h3>
+                    <p>Find matching files and lines. The agent still decides what they mean and what to do next.</p>
+                </div>
+                <div class="positioning-card">
+                    <div class="positioning-icon">🗺️</div>
+                    <h3>Repo map tools</h3>
+                    <p>Show file trees and symbol summaries. Better orientation, but no impact analysis or validation targets.</p>
+                </div>
+                <div class="positioning-card positioning-card-highlight">
+                    <div class="positioning-icon">⚡</div>
+                    <h3>Open Kioku</h3>
+                    <p>Indexed evidence → symbols → impact → tests → plan → verify. The full pre-edit routine, with bounded confidence and validation commands.</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-heading">
                 <div class="section-kicker">Real Repo Setup</div>
                 <h2>Index first, then connect your LLM.</h2>
                 <p class="section-copy">Use this path for an existing codebase. The MCP config points your agent at the same local index that the CLI verifies.</p>
@@ -927,24 +1132,52 @@ then edit only after the indexed evidence is clear.</code></pre>
         <section id="connect">
             <div class="section-heading">
                 <div class="section-kicker">Connect</div>
-                <h2>Copy-paste setup for Claude and Cursor.</h2>
-                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. These commands print client-specific configuration for the indexed repo; they do not edit your client files automatically.</p>
+                <h2>Copy-paste setup for every major MCP client.</h2>
+                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. These commands print client-specific configuration; they do not edit your config files automatically.</p>
             </div>
 
-            <div class="setup-grid">
-                <div class="setup-block">
+            <div class="client-grid">
+                <div class="setup-block" id="cursor">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Cursor</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy Cursor setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install cursor --repo /absolute/path/to/repo</code></pre>
+                </div>
+                <div class="setup-block" id="claude">
                     <div class="setup-block-header">
                         <div class="setup-block-title">Claude Code</div>
                         <button class="copy-button" type="button" data-copy="ok mcp install claude --repo /absolute/path/to/repo" aria-label="Copy Claude setup command">Copy</button>
                     </div>
                     <pre><code>ok mcp install claude --repo /absolute/path/to/repo</code></pre>
                 </div>
-                <div class="setup-block">
+                <div class="setup-block" id="codex">
                     <div class="setup-block-header">
-                        <div class="setup-block-title">Cursor</div>
-                        <button class="copy-button" type="button" data-copy="ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy Cursor setup command">Copy</button>
+                        <div class="setup-block-title">Codex</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install codex --repo /absolute/path/to/repo" aria-label="Copy Codex setup command">Copy</button>
                     </div>
-                    <pre><code>ok mcp install cursor --repo /absolute/path/to/repo</code></pre>
+                    <pre><code>ok mcp install codex --repo /absolute/path/to/repo</code></pre>
+                </div>
+                <div class="setup-block" id="gemini">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Gemini CLI</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install gemini --repo /absolute/path/to/repo" aria-label="Copy Gemini setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install gemini --repo /absolute/path/to/repo</code></pre>
+                </div>
+                <div class="setup-block" id="opencode">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">OpenCode</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install opencode --repo /absolute/path/to/repo" aria-label="Copy OpenCode setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install opencode --repo /absolute/path/to/repo</code></pre>
+                </div>
+                <div class="setup-block" id="zed">
+                    <div class="setup-block-header">
+                        <div class="setup-block-title">Zed</div>
+                        <button class="copy-button" type="button" data-copy="ok mcp install zed --repo /absolute/path/to/repo" aria-label="Copy Zed setup command">Copy</button>
+                    </div>
+                    <pre><code>ok mcp install zed --repo /absolute/path/to/repo</code></pre>
                 </div>
             </div>
         </section>
@@ -971,15 +1204,35 @@ then edit only after the indexed evidence is clear.</code></pre>
                 </div>
             </div>
         </section>
+
+        <section>
+            <div class="section-heading">
+                <div class="section-kicker">Quality</div>
+                <h2>Every commit tested, audited, and benchmarked.</h2>
+            </div>
+            <div class="trust-grid">
+                <div class="trust-item"><span class="trust-check">✓</span><span>CI on Ubuntu + macOS</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>cargo audit + cargo deny</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>20/20 usefulness proof tasks</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>Cursor + Claude smoke tests</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>Criterion benchmark gates</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>Workflow-bench regression suite</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>Golden snapshot coverage</span></div>
+                <div class="trust-item"><span class="trust-check">✓</span><span>SHA-256 signed release binaries</span></div>
+            </div>
+        </section>
     </main>
 
     <footer class="page">
         <div class="footer-row">
-            <div>Open Kioku v1.0.1 - Local-first code intelligence MCP</div>
+            <div>Open Kioku v1.0.4 — Plan before edit. Verify after edit.</div>
             <div class="footer-links">
                 <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
                 <a href="https://www.npmjs.com/package/open-kioku">npm</a>
                 <a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
             </div>
         </div>
     </footer>
