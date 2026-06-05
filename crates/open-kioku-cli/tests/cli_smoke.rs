@@ -264,6 +264,80 @@ fn demo_creates_indexed_sample_repo() {
     assert!(explained_search.contains("ranking:"));
     assert!(explained_search.contains("text_relevance"));
 
+    let semantic_status = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("semantic")
+            .arg("status");
+        command
+    });
+    assert!(semantic_status.contains("\"state\": \"disabled\""));
+
+    let semantic_index = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("semantic")
+            .arg("index");
+        command
+    });
+    assert!(semantic_index.contains("\"state\": \"ready\""));
+    assert!(semantic_index.contains("\"vector_count\""));
+    assert!(repo.join(".ok/vectors/current/manifest.json").exists());
+
+    let semantic_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--semantic")
+            .arg("session token")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    assert!(semantic_json.contains("src/auth.rs"));
+    assert!(semantic_json.contains("semantic_similarity"));
+
+    let hybrid = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("search")
+            .arg("--hybrid")
+            .arg("--explain-ranking")
+            .arg("session token");
+        command
+    });
+    assert!(hybrid.contains("semantic_similarity"));
+
+    let mcp_semantic_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "tools/call",
+        "params": {
+            "name": "hybrid_search",
+            "arguments": {"query": "session token", "limit": 5}
+        }
+    })
+    .to_string();
+    let mcp_semantic = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_semantic_req + "\n"),
+    );
+    assert!(mcp_semantic.contains("semantic_status"));
+    assert!(mcp_semantic.contains("semantic_similarity"));
+
     let plan = run({
         let mut command = ok();
         command
@@ -485,8 +559,10 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(eval.contains("\"baseline\""));
     assert!(eval.contains("\"fusion\""));
+    assert!(eval.contains("\"semantic\""));
     assert!(eval.contains("\"ablations\""));
     assert!(eval.contains("\"signal\": \"text_relevance\""));
+    assert!(eval.contains("\"signal\": \"semantic_similarity\""));
     assert!(eval.contains("\"top_search_signals\""));
 
     let workflow_cases = repo.join("workflow-cases.json");

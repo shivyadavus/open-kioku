@@ -16,3 +16,11 @@ open-kioku-core = { version = "1.0.4", path = "../open-kioku-core" }
 open-kioku-embeddings = { version = "1.0.4", path = "../open-kioku-embeddings" }
 open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
 open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
+open-kioku-vector = { version = "1.0.4", path = "../open-kioku-vector" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+open-kioku-storage-sqlite = { version = "1.0.4", path = "../open-kioku-storage-sqlite" }
+tempfile.workspace = true

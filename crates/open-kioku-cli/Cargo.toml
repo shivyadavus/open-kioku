@@ -34,6 +34,7 @@ open-kioku-plan = { version = "1.0.4", path = "../open-kioku-plan" }
 open-kioku-ranking = { version = "1.0.4", path = "../open-kioku-ranking" }
 open-kioku-search-regex = { version = "1.0.4", path = "../open-kioku-search-regex" }
 open-kioku-search-tantivy = { version = "1.0.4", path = "../open-kioku-search-tantivy" }
+open-kioku-semantic = { version = "1.0.4", path = "../open-kioku-semantic" }
 open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
 open-kioku-storage-sqlite = { version = "1.0.4", path = "../open-kioku-storage-sqlite" }
 open-kioku-symbols = { version = "1.0.4", path = "../open-kioku-symbols" }

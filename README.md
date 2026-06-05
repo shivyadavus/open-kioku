@@ -312,7 +312,7 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 ## Repository Layout
 
-This is a 42-crate Cargo workspace. Important crates:
+This is a 43-crate Cargo workspace. Important crates:
 
 - `open-kioku-cli`: the `ok` binary.
 - `open-kioku-mcp`: JSON-RPC MCP server over stdio.
@@ -320,6 +320,8 @@ This is a 42-crate Cargo workspace. Important crates:
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
 - `open-kioku-storage-sqlite`: SQLite metadata and graph storage.
 - `open-kioku-search-tantivy`: disk-backed BM25 search.
+- `open-kioku-vector`: local vector index contracts and exact-flat backend.
+- `open-kioku-semantic`: local semantic indexing and hybrid search orchestration.
 - `open-kioku-context`: task context pack builder.
 - `open-kioku-context-compress`: reversible context handle compression.
 - `open-kioku-format`: prompt-oriented renderers, including TOON.
@@ -328,6 +330,8 @@ This is a 42-crate Cargo workspace. Important crates:
 - `open-kioku-tests`: validation target selection.
 
 Architecture docs: [`docs/architecture.md`](docs/architecture.md)
+
+Semantic search docs: [`docs/semantic-search.md`](docs/semantic-search.md), [`docs/vector-index.md`](docs/vector-index.md), [`docs/embedding-providers.md`](docs/embedding-providers.md), [`docs/hybrid-ranking.md`](docs/hybrid-ranking.md)
 
 Contributor guide: [`docs/contributor-guide.md`](docs/contributor-guide.md)
 

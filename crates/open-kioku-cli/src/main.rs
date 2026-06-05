@@ -20,6 +20,7 @@ use open_kioku_ranking::{
 };
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
+use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
@@ -94,6 +95,14 @@ enum Command {
         limit: usize,
         #[arg(long, default_value_t = false)]
         explain_ranking: bool,
+        #[arg(long, default_value_t = false)]
+        semantic: bool,
+        #[arg(long, default_value_t = false)]
+        hybrid: bool,
+    },
+    Semantic {
+        #[command(subcommand)]
+        command: SemanticCommand,
     },
     Symbol {
         #[command(subcommand)]
@@ -225,6 +234,28 @@ enum MemoryCommand {
     Recent {
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum SemanticCommand {
+    Status {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Index {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Rebuild {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+    },
+    Clean {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = false)]
+        include_cache: bool,
     },
 }
 
@@ -665,6 +696,8 @@ struct EvalReport {
     case_count: usize,
     summary: EvalSummary,
     baseline: RankingEvalSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic: Option<RankingEvalSummary>,
     fusion: RankingEvalSummary,
     ablations: Vec<RankingAblationReport>,
     cases: Vec<EvalCaseReport>,
@@ -1034,9 +1067,17 @@ async fn main() -> anyhow::Result<()> {
             query,
             limit,
             explain_ranking,
+            semantic,
+            hybrid,
         } => {
             let store = open_store(&repo)?;
-            let results = search(&repo, &store, &query, limit)?;
+            let results = if semantic {
+                semantic_search(&repo, &store, &query, limit)?
+            } else if hybrid {
+                hybrid_search(&repo, &store, &query, limit)?
+            } else {
+                search(&repo, &store, &query, limit)?
+            };
             output(cli.json, &results, || {
                 for result in &results {
                     println!(
@@ -1057,6 +1098,55 @@ async fn main() -> anyhow::Result<()> {
                 }
             })?;
         }
+        Command::Semantic { command } => match command {
+            SemanticCommand::Status { repo: command_repo } => {
+                let repo = absolutize(&resolve_repo(&repo, command_repo))?;
+                let store = open_store(&repo)?;
+                let config = OkConfig::load_from_repo(&repo)?;
+                let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
+                let status = manager.status();
+                output(cli.json, &status, || print_semantic_status(&status))?;
+            }
+            SemanticCommand::Index { repo: command_repo } => {
+                let repo = absolutize(&resolve_repo(&repo, command_repo))?;
+                let store = open_store(&repo)?;
+                let mut config = OkConfig::load_from_repo(&repo)?;
+                config.semantic.enabled = true;
+                let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
+                let report = manager.index()?;
+                output(cli.json, &report, || {
+                    println!(
+                        "Semantic index ready: {} vectors, {} reused, {} embedded",
+                        report.status.vector_count, report.reused_embeddings, report.embedded_count
+                    );
+                })?;
+            }
+            SemanticCommand::Rebuild { repo: command_repo } => {
+                let repo = absolutize(&resolve_repo(&repo, command_repo))?;
+                let store = open_store(&repo)?;
+                let mut config = OkConfig::load_from_repo(&repo)?;
+                config.semantic.enabled = true;
+                let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
+                let report = manager.rebuild()?;
+                output(cli.json, &report, || {
+                    println!(
+                        "Semantic index rebuilt: {} vectors, {} embedded",
+                        report.status.vector_count, report.embedded_count
+                    );
+                })?;
+            }
+            SemanticCommand::Clean {
+                repo: command_repo,
+                include_cache,
+            } => {
+                let repo = absolutize(&resolve_repo(&repo, command_repo))?;
+                let store = open_store(&repo)?;
+                let config = OkConfig::load_from_repo(&repo)?;
+                let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
+                manager.clean(include_cache)?;
+                println!("Semantic artifacts removed.");
+            }
+        },
         Command::Symbol { command } => {
             let store = open_store(&repo)?;
             let engine = SymbolEngine::new(&store);
@@ -3392,10 +3482,17 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
     }
     let store = open_store(&repo)?;
     let ranking_options = ranking_options_for_repo(&repo)?;
+    let mut semantic_config = OkConfig::load_from_repo(&repo)?.semantic;
+    semantic_config.enabled = true;
+    let semantic_manager = SemanticIndexManager::new(&repo, &store, &semantic_config);
+    let semantic_ready = semantic_manager.status().ready;
     let mut case_reports = Vec::with_capacity(cases.len());
     let mut recall_sum = 0.0;
     let mut mrr_sum = 0.0;
     let mut ndcg_sum = 0.0;
+    let mut semantic_recall_sum = 0.0;
+    let mut semantic_mrr_sum = 0.0;
+    let mut semantic_ndcg_sum = 0.0;
     let mut baseline_recall_sum = 0.0;
     let mut baseline_mrr_sum = 0.0;
     let mut baseline_ndcg_sum = 0.0;
@@ -3413,9 +3510,17 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
             search_raw(&repo, &store, &case.task, ranking_candidate_limit(limit))?;
         let baseline_results = top_unique_paths(rerank_baseline(raw_candidates.clone()), limit);
         annotate_candidates_with_git_history(&store, &mut raw_candidates)?;
+        let semantic_results = if semantic_ready {
+            semantic_manager.search(&case.task, ranking_candidate_limit(limit))?
+        } else {
+            Vec::new()
+        };
+        if semantic_ready {
+            raw_candidates.extend(semantic_results.clone());
+        }
         let mut case_ranking_options = ranking_options.clone();
         case_ranking_options.query = Some(case.task.clone());
-        let search_results = top_unique_paths(
+        let search_results = top_unique_paths_merging(
             rerank_with_options(raw_candidates.clone(), &case_ranking_options),
             limit,
         );
@@ -3447,6 +3552,20 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
         );
         baseline_mrr_sum += reciprocal_rank(&baseline_ranks);
         baseline_ndcg_sum += ndcg(&baseline_ranks, limit);
+
+        if semantic_ready {
+            let semantic_paths = semantic_results
+                .iter()
+                .map(|result| result.path.clone())
+                .collect::<Vec<_>>();
+            let semantic_ranks = expected_path_ranks(&case.expected_paths, &semantic_paths);
+            semantic_recall_sum += ratio(
+                semantic_ranks.iter().filter(|rank| rank.is_some()).count(),
+                case.expected_paths.len(),
+            );
+            semantic_mrr_sum += reciprocal_rank(&semantic_ranks);
+            semantic_ndcg_sum += ndcg(&semantic_ranks, limit);
+        }
 
         let search_ranks = expected_path_ranks(&case.expected_paths, &search_paths);
         let search_hits = search_ranks.iter().filter(|rank| rank.is_some()).count();
@@ -3536,6 +3655,12 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
         search_mrr: baseline_mrr_sum / count,
         search_ndcg_at_k: baseline_ndcg_sum / count,
     };
+    let semantic = semantic_ready.then(|| RankingEvalSummary {
+        mode: "semantic".into(),
+        search_recall_at_k: semantic_recall_sum / count,
+        search_mrr: semantic_mrr_sum / count,
+        search_ndcg_at_k: semantic_ndcg_sum / count,
+    });
     let ablations = ablation_sums
         .into_iter()
         .map(|(signal, recall, mrr, ndcg_value)| {
@@ -3566,6 +3691,7 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
             abstention_required,
         },
         baseline,
+        semantic,
         fusion,
         ablations,
         cases: case_reports,
@@ -3710,6 +3836,16 @@ fn print_eval_report(report: &EvalReport) {
         report.limit,
         report.fusion.search_ndcg_at_k
     );
+    if let Some(semantic) = &report.semantic {
+        println!(
+            "Ranking semantic-only: recall@{} {:.3}, MRR {:.3}, nDCG@{} {:.3}",
+            report.limit,
+            semantic.search_recall_at_k,
+            semantic.search_mrr,
+            report.limit,
+            semantic.search_ndcg_at_k
+        );
+    }
     if !report.ablations.is_empty() {
         println!("Ranking ablations:");
         for ablation in &report.ablations {
@@ -3994,6 +4130,7 @@ fn ranking_ablation_signals() -> Vec<RankingSignal> {
         RankingSignal::GitCochange,
         RankingSignal::ValidationProximity,
         RankingSignal::MemorySignal,
+        RankingSignal::SemanticSimilarity,
         RankingSignal::PathQuality,
     ]
 }
@@ -4008,6 +4145,7 @@ fn ranking_signal_name(signal: RankingSignal) -> &'static str {
         RankingSignal::GitCochange => "git_cochange",
         RankingSignal::ValidationProximity => "validation_proximity",
         RankingSignal::MemorySignal => "memory_signal",
+        RankingSignal::SemanticSimilarity => "semantic_similarity",
         RankingSignal::PathQuality => "path_quality",
     }
 }
@@ -4820,6 +4958,51 @@ fn search(
     search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
 }
 
+fn semantic_search(
+    repo: impl AsRef<Path>,
+    store: &dyn MetadataStore,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let repo = repo.as_ref();
+    let mut config = OkConfig::load_from_repo(repo)?;
+    config.semantic.enabled = true;
+    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
+    let mut results = manager.search(query, limit)?;
+    let mut options = ranking_options_for_repo(repo)?;
+    options.query = Some(query.into());
+    Ok(top_unique_paths(
+        rerank_with_options(results.split_off(0), &options),
+        limit,
+    ))
+}
+
+fn hybrid_search(
+    repo: impl AsRef<Path>,
+    store: &dyn MetadataStore,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let repo = repo.as_ref();
+    let candidate_limit = ranking_candidate_limit(limit);
+    let mut raw = search_raw(repo, store, query, candidate_limit)?;
+    annotate_candidates_with_git_history(store, &mut raw)?;
+
+    let mut config = OkConfig::load_from_repo(repo)?;
+    config.semantic.enabled = true;
+    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
+    if manager.status().ready {
+        raw.extend(manager.search(query, candidate_limit)?);
+    }
+
+    let mut options = ranking_options_for_repo(repo)?;
+    options.query = Some(query.into());
+    Ok(top_unique_paths_merging(
+        rerank_with_options(raw, &options),
+        limit,
+    ))
+}
+
 fn search_with_ranking_mode(
     repo: impl AsRef<Path>,
     store: &dyn MetadataStore,
@@ -4969,6 +5152,57 @@ fn top_unique_paths(
     unique
 }
 
+fn top_unique_paths_merging(
+    results: Vec<open_kioku_core::SearchResult>,
+    limit: usize,
+) -> Vec<open_kioku_core::SearchResult> {
+    let mut indexes = std::collections::HashMap::<String, usize>::new();
+    let mut unique = Vec::<open_kioku_core::SearchResult>::with_capacity(limit);
+    for result in results {
+        let path = normalize_path_fragment(&result.path.to_string_lossy());
+        if let Some(index) = indexes.get(&path).copied() {
+            if !has_semantic_signal(&result) {
+                continue;
+            }
+            let existing = &mut unique[index];
+            for evidence in result.evidence {
+                if !existing.evidence.contains(&evidence) {
+                    existing.evidence.push(evidence);
+                }
+            }
+            for evidence_ref in result.evidence_refs {
+                if !existing.evidence_refs.contains(&evidence_ref) {
+                    existing.evidence_refs.push(evidence_ref);
+                }
+            }
+            for component in result.score_breakdown {
+                if !existing
+                    .score_breakdown
+                    .iter()
+                    .any(|existing| existing.signal == component.signal)
+                {
+                    existing.score_breakdown.push(component);
+                }
+            }
+            existing.reconcile_score_breakdown();
+            continue;
+        }
+        if unique.len() == limit {
+            continue;
+        }
+        indexes.insert(path, unique.len());
+        unique.push(result);
+    }
+    unique
+}
+
+fn has_semantic_signal(result: &open_kioku_core::SearchResult) -> bool {
+    result
+        .score_breakdown
+        .iter()
+        .any(|component| component.signal == "semantic_similarity")
+}
+
 fn search_raw(
     repo: impl AsRef<Path>,
     store: &dyn MetadataStore,
@@ -5009,6 +5243,27 @@ fn ranking_weights_from_config(config: &RankingConfig) -> RankingWeights {
         validation_proximity: config.validation_proximity,
         memory_signal: config.memory_signal,
         path_quality: config.path_quality,
+        semantic_similarity: config.semantic_similarity,
+    }
+}
+
+fn print_semantic_status(status: &open_kioku_semantic::SemanticStatus) {
+    println!("# Open Kioku Semantic Status");
+    println!("state: {}", status.state);
+    println!("backend: {}", status.backend);
+    println!("provider: {}", status.provider);
+    println!("model: {}", status.model);
+    println!("dimensions: {}", status.dimensions);
+    println!("vectors: {}", status.vector_count);
+    println!("indexed: {}", status.indexed_count);
+    println!("stale: {}", status.stale_count);
+    println!("failed: {}", status.failed_count);
+    println!("disk_bytes: {}", status.disk_usage_bytes);
+    if !status.notes.is_empty() {
+        println!("notes:");
+        for note in &status.notes {
+            println!("- {note}");
+        }
     }
 }
 

@@ -95,7 +95,10 @@ Stable source-read tools:
 
 Experimental tools:
 
-- `semantic_search`: falls back to lexical search while semantic search is disabled. With `semantic.enabled = true` and `semantic.provider = "local"` in `ok.toml`, it uses the built-in offline hash embedding provider and does not call a hosted embeddings API.
+- `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
+- `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
+- `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.
+- `explain_search_result`: returns hybrid search details for explaining semantic, lexical, and other score contributions.
 - `structural_search`: currently searches indexed symbols and chunks, not a full structural query language.
 - `get_implementations`, `get_callers`, `get_callees`: graph-backed heuristics until language-specific call resolution is stronger.
 - `explain_flow`: currently returns architecture summary data.

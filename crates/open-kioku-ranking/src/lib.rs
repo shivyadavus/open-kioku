@@ -11,6 +11,7 @@ pub struct RankingWeights {
     pub validation_proximity: f32,
     pub memory_signal: f32,
     pub path_quality: f32,
+    pub semantic_similarity: f32,
 }
 
 impl Default for RankingWeights {
@@ -25,6 +26,7 @@ impl Default for RankingWeights {
             validation_proximity: 1.0,
             memory_signal: 0.20,
             path_quality: 1.0,
+            semantic_similarity: 0.30,
         }
     }
 }
@@ -47,6 +49,7 @@ pub enum RankingSignal {
     ValidationProximity,
     MemorySignal,
     PathQuality,
+    SemanticSimilarity,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +80,7 @@ pub struct RankingFeatures {
     pub validation_proximity: f32,
     pub memory_signal: f32,
     pub path_quality_penalty: f32,
+    pub semantic_similarity: f32,
 }
 
 struct SignalSpec<'a> {
@@ -133,6 +137,22 @@ impl RankingFeatures {
         } else {
             0.0
         };
+        let semantic_similarity = result
+            .score_breakdown
+            .iter()
+            .find(|component| {
+                component.signal == "semantic_similarity"
+                    || component.signal == "local_semantic_similarity"
+            })
+            .map(|component| component.raw_value)
+            .or_else(|| {
+                if reason.contains("semantic") || evidence.contains("semantic vector") {
+                    Some(result.score.clamp(0.0, 1.0))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0);
         let path_quality_penalty = path_quality_penalty(&path, result.score);
         let symbol_name_hit = result
             .symbol
@@ -151,6 +171,7 @@ impl RankingFeatures {
             validation_proximity,
             memory_signal,
             path_quality_penalty,
+            semantic_similarity,
         }
     }
 }
@@ -298,6 +319,14 @@ fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
             weight: weights.memory_signal,
             evidence_ids: evidence_ids.clone(),
             rationale: "repo memory signal when available",
+        },
+        SignalSpec {
+            signal: RankingSignal::SemanticSimilarity,
+            name: "semantic_similarity",
+            raw_value: features.semantic_similarity,
+            weight: weights.semantic_similarity,
+            evidence_ids: evidence_ids.clone(),
+            rationale: "local semantic vector similarity signal when available",
         },
         SignalSpec {
             signal: RankingSignal::PathQuality,
