@@ -1,8 +1,7 @@
 # Workflow Benchmarks
 
 `ok workflow-bench` scores plan -> edit -> verify workflows from JSON cases.
-The committed suite lives at `benchmarks/workflow-cases.json` and contains 20
-cases that CI runs on every pull request through `.github/workflows/bench.yml`.
+The committed suite lives at `benchmarks/workflow-cases.json` and contains 20 cases that CI runs on every pull request through `.github/workflows/bench.yml`.
 
 Run it locally:
 

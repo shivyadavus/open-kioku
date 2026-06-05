@@ -26,7 +26,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Architecture
 
-The workspace is composed of 34 focused crates (e.g., `open-kioku-core`, `open-kioku-storage-sqlite`, `open-kioku-mcp`). When adding a new feature, place it in the most specific crate or create a new crate if it represents a distinct architectural component.
+The workspace is composed of 42 focused crates (e.g., `open-kioku-core`, `open-kioku-storage-sqlite`, `open-kioku-mcp`). When adding a new feature, place it in the most specific crate or create a new crate if it represents a distinct architectural component.
+
+Use [`docs/contributor-guide.md`](docs/contributor-guide.md) for the current architecture map, crate selection guide, fixture conventions, benchmark authoring guide, signal checklist, label taxonomy, and smoke-test expectations.
 
 ## Pull Requests
 
