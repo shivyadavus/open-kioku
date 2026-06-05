@@ -194,7 +194,7 @@ Default indexing consumes existing SCIP files such as `index.scip` and `.ok/inde
 
 SCIP is the primary precision provider. The default quality model stays local and free: indexed symbols/chunks/imports, language-specific static facts, indexed tests, build-system detection, and SCIP exact references when an `index.scip` is available. Java/Gradle repositories get scoped validation commands when the test file path is known, for example `./gradlew :x-pack:plugin:ml:test --tests org.example.SomeTests` instead of a generic repository-wide test command.
 
-Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Runtime analysis is opt-in evidence ingestion only: place local JSONL trace/span artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths, routes, methods, or SQL statements, then re-run `ok index`. Open Kioku does not install or run a runtime agent by default.
+Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Runtime analysis is opt-in evidence ingestion only: place local JSONL trace, span, log, incident, error, or failure artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths plus routes, methods, SQL statements, or messages, then re-run `ok index`. Open Kioku turns matching entries into runtime signals for context, ranking, impact, test selection, and post-edit verification. It does not install or run a runtime agent by default.
 
 `ok setup audit` keeps CodeQL, BSP, LSP, coverage, and JUnit artifacts in an optional advanced section only when those artifacts are actually present.
 
@@ -261,7 +261,7 @@ Open Kioku's default path is local:
 
 - Tree-sitter extracts symbols and chunks from supported source files.
 - Built-in static analyzers add language/framework graph facts from source text.
-- Runtime trace/span artifacts are consumed only when local files are provided under `.ok/runtime/` or `.ok/analysis/runtime/`.
+- Runtime trace/span/log/incident artifacts are consumed only when local files are provided under `.ok/runtime/` or `.ok/analysis/runtime/`.
 - SQLite stores metadata and dependency graph rows under `.ok/`.
 - Tantivy stores BM25 lexical search data under `.ok/search/tantivy`.
 - Repo memory facts are append-only and local under `.ok/memory.sqlite`.

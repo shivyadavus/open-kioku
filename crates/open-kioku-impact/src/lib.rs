@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    search_result_evidence_ids, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType,
-    File, FileId, FileRange, ImpactReport, RiskReport, ScoreComponent, SearchResult, Symbol,
-    SymbolOccurrence,
+    search_result_evidence_ids, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId,
+    EvidenceSourceType, File, FileId, FileRange, ImpactReport, RiskReport, ScoreComponent,
+    SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
@@ -35,9 +35,20 @@ impl<'a> ImpactEngine<'a> {
         } else {
             Vec::new()
         };
+        let runtime_facts = if let Some(file) = &file {
+            runtime_facts_for_file(self.store, &file.id)?
+        } else {
+            Vec::new()
+        };
 
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
+            direct.extend(runtime_impacts(
+                self.store,
+                self.search_index,
+                file,
+                &runtime_facts,
+            )?);
             for term in impact_terms(path, file, &target_symbols)
                 .into_iter()
                 .take(8)
@@ -116,13 +127,21 @@ impl<'a> ImpactEngine<'a> {
         if direct.len() > 10 {
             reasons.push("many lexical dependents reference this file or its symbols".into());
         }
+        if !runtime_facts.is_empty() {
+            reasons.push(format!(
+                "{} local runtime trace/log/incident fact(s) touch this file",
+                runtime_facts.len()
+            ));
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
         if reasons.is_empty() {
             reasons.push("limited indexed downstream references found".into());
         }
-        let score = (direct.len() as f32 / 20.0).min(1.0);
+        let runtime_score = (runtime_facts.len() as f32 / 12.0).min(0.25);
+        let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
+        let score = (direct_reference_score + runtime_score).min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
@@ -153,6 +172,10 @@ impl<'a> ImpactEngine<'a> {
             },
             indexed_at: Utc::now(),
         };
+        let runtime_evidence = runtime_facts
+            .iter()
+            .map(|fact| runtime_fact_evidence(fact, path))
+            .collect::<Vec<_>>();
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -169,17 +192,124 @@ impl<'a> ImpactEngine<'a> {
                 score,
                 reasons,
             },
-            evidence: vec![evidence],
+            evidence: std::iter::once(evidence).chain(runtime_evidence).collect(),
             score_breakdown: vec![ScoreComponent::single(
                 "direct_reference_density",
-                score,
+                direct_reference_score,
                 vec![format!("impact:{}", path.display())],
                 "impact risk from count of exact and lexical direct dependents",
             )],
         };
+        if runtime_score > 0.0 {
+            report.score_breakdown.push(ScoreComponent::adjustment(
+                "runtime_corroboration",
+                runtime_score,
+                runtime_facts.iter().map(|fact| fact.id.clone()).collect(),
+                "impact risk adjusted by local runtime trace/log/incident facts",
+            ));
+        }
         report.reconcile_score_breakdown();
         Ok(report)
     }
+}
+
+fn runtime_facts_for_file(
+    store: &dyn MetadataStore,
+    file_id: &FileId,
+) -> Result<Vec<AnalysisFact>> {
+    Ok(store
+        .analysis_facts(Some(EvidenceSourceType::Runtime), 500)?
+        .into_iter()
+        .filter(|fact| &fact.file_id == file_id)
+        .take(12)
+        .collect())
+}
+
+fn runtime_impacts(
+    store: &dyn MetadataStore,
+    search_index: Option<&dyn SearchIndex>,
+    target_file: &File,
+    runtime_facts: &[AnalysisFact],
+) -> Result<Vec<SearchResult>> {
+    let files = store.list_files(usize::MAX, 0)?;
+    let chunks = if search_index.is_none() {
+        store.all_chunks()?
+    } else {
+        Vec::new()
+    };
+    let symbols = if search_index.is_none() {
+        store.list_symbols(None, usize::MAX, 0)?
+    } else {
+        Vec::new()
+    };
+    let mut results = Vec::new();
+    for fact in runtime_facts.iter().take(6) {
+        for term in runtime_search_terms(fact).into_iter().take(3) {
+            let matches = if let Some(index) = search_index {
+                index.search(&term, 10)?
+            } else {
+                search_chunks(&chunks, &files, &symbols, &term, 10)?
+            };
+            for mut result in matches {
+                if result.path == target_file.path {
+                    continue;
+                }
+                annotate_runtime_impact(&mut result, fact);
+                results.push(result);
+            }
+        }
+    }
+    Ok(dedupe_results(results))
+}
+
+fn annotate_runtime_impact(result: &mut SearchResult, fact: &AnalysisFact) {
+    let evidence = format!(
+        "runtime corroboration from local artifact `{}` targeting `{}`",
+        fact.source, fact.target
+    );
+    if !result.evidence.contains(&evidence) {
+        result.evidence.push(evidence);
+    }
+    if !result.evidence_refs.contains(&fact.id) {
+        result.evidence_refs.push(fact.id.clone());
+    }
+    result.score += 0.20;
+    result.confidence = result.confidence.max(fact.confidence.score());
+    result.score_breakdown.push(ScoreComponent::adjustment(
+        "runtime_corroboration",
+        0.20,
+        vec![fact.id.clone()],
+        "impact candidate matched observed runtime endpoint, SQL table, or incident",
+    ));
+}
+
+fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(fact.id.clone()),
+        source: fact.source.clone(),
+        source_type: EvidenceSourceType::Runtime,
+        file_range: Some(FileRange {
+            path: path.to_path_buf(),
+            line_range: fact.range.clone(),
+        }),
+        symbol_id: fact.symbol_id.clone(),
+        confidence: fact.confidence,
+        message: format!("{}: {}", fact.message, fact.target),
+        indexed_at: Utc::now(),
+    }
+}
+
+fn runtime_search_terms(fact: &AnalysisFact) -> Vec<String> {
+    let mut terms = vec![fact.target.clone()];
+    terms.extend(
+        fact.target
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+            .filter(|part| part.len() >= 4)
+            .map(ToOwned::to_owned),
+    );
+    terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    terms.dedup();
+    terms
 }
 
 fn exact_reference_impacts(
@@ -478,6 +608,7 @@ mod tests {
                 chunks: &[c1, c2],
                 imports: &[],
                 tests: &[],
+                analysis_facts: &[],
             })
             .unwrap();
 
@@ -597,6 +728,7 @@ mod tests {
                 chunks: &chunks,
                 imports: &[],
                 tests: &[],
+                analysis_facts: &[],
             })
             .unwrap();
 
