@@ -10,7 +10,9 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
-use open_kioku_patch::{ChangeVerificationReport, ChangeVerifier, PatchPlanner, VerifyChangeInput};
+use open_kioku_patch::{
+    ChangeVerificationReport, ChangeVerifier, PatchPlanner, VerificationVerdict, VerifyChangeInput,
+};
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
@@ -22,7 +24,7 @@ use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIn
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -154,6 +156,7 @@ enum Command {
         run_commands: bool,
     },
     Bench(BenchArgs),
+    WorkflowBench(WorkflowBenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),
 
@@ -260,6 +263,37 @@ struct BenchArgs {
     /// Fail when quality precision@1 is below this threshold.
     #[arg(long, default_value_t = 0.0)]
     quality_min_precision_at_1: f64,
+}
+
+#[derive(Args)]
+struct WorkflowBenchArgs {
+    /// Repository to index and benchmark.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// JSON file containing workflow benchmark cases.
+    #[arg(long, default_value = "benchmarks/workflow-cases.json")]
+    cases_file: PathBuf,
+
+    /// Number of context/test/impact results considered for each case.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+
+    /// Use the existing .ok index instead of re-indexing before benchmarking.
+    #[arg(long, default_value_t = false)]
+    no_index: bool,
+
+    /// Fail when context recall is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_context_recall: f64,
+
+    /// Fail when verification verdict accuracy is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_verification_accuracy: f64,
+
+    /// Fail unless at least this many cases are loaded.
+    #[arg(long, default_value_t = 20)]
+    min_cases: usize,
 }
 
 #[derive(Args)]
@@ -481,6 +515,92 @@ struct QualityCaseReport {
     top_path: Option<PathBuf>,
     matched_path: Option<PathBuf>,
     result_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowBenchCase {
+    id: String,
+    task: String,
+    #[serde(default)]
+    expected_primary_context: Vec<String>,
+    #[serde(default)]
+    expected_impact: Vec<String>,
+    #[serde(default)]
+    expected_tests: Vec<String>,
+    #[serde(default)]
+    expected_boundary: Vec<String>,
+    #[serde(default)]
+    forbidden_paths: Vec<String>,
+    #[serde(default)]
+    changed_files: Vec<PathBuf>,
+    #[serde(default)]
+    unified_diff: Option<String>,
+    #[serde(default)]
+    expected_verdict: Option<VerificationVerdict>,
+    #[serde(default)]
+    expected_confidence: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct WorkflowBenchReport {
+    repo: PathBuf,
+    cases_file: PathBuf,
+    limit: usize,
+    case_count: usize,
+    baseline: WorkflowBenchSummary,
+    workflow: WorkflowBenchSummary,
+    deltas: WorkflowBenchDeltas,
+    cases: Vec<WorkflowBenchCaseReport>,
+}
+
+#[derive(Serialize, Clone)]
+struct WorkflowBenchSummary {
+    context_recall_at_k: f64,
+    impact_recall_at_k: f64,
+    test_recall_at_k: f64,
+    boundary_precision: f64,
+    boundary_recall: f64,
+    confidence_calibration_error: f64,
+    verification_verdict_accuracy: f64,
+}
+
+#[derive(Serialize)]
+struct WorkflowBenchDeltas {
+    context_recall_at_k: f64,
+    impact_recall_at_k: f64,
+    test_recall_at_k: f64,
+    boundary_precision: f64,
+    boundary_recall: f64,
+    confidence_calibration_error: f64,
+    verification_verdict_accuracy: f64,
+}
+
+#[derive(Serialize)]
+struct WorkflowBenchCaseReport {
+    id: String,
+    task: String,
+    context_recall: f64,
+    impact_recall: f64,
+    test_recall: f64,
+    boundary_precision: f64,
+    boundary_recall: f64,
+    confidence_expected_success: Option<bool>,
+    confidence_probability: f64,
+    confidence_calibration_error: Option<f64>,
+    expected_verdict: Option<VerificationVerdict>,
+    actual_verdict: Option<VerificationVerdict>,
+    verification_correct: Option<bool>,
+    baseline_context_recall: f64,
+    baseline_impact_recall: f64,
+    baseline_test_recall: f64,
+    context_hits: Vec<String>,
+    impact_hits: Vec<String>,
+    test_hits: Vec<String>,
+    boundary_hits: Vec<String>,
+    forbidden_boundary_hits: Vec<String>,
+    top_context_paths: Vec<PathBuf>,
+    top_impact_paths: Vec<PathBuf>,
+    top_tests: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1205,6 +1325,39 @@ async fn main() -> anyhow::Result<()> {
                         min_precision
                     );
                 }
+            }
+        }
+        Command::WorkflowBench(args) => {
+            let min_context_recall = args.min_context_recall;
+            let min_verification_accuracy = args.min_verification_accuracy;
+            let min_cases = args.min_cases;
+            let report = run_workflow_bench(args)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_workflow_bench_report(&report);
+            }
+            if report.case_count < min_cases {
+                anyhow::bail!(
+                    "workflow benchmark loaded {} cases, below required {}",
+                    report.case_count,
+                    min_cases
+                );
+            }
+            if report.workflow.context_recall_at_k < min_context_recall {
+                anyhow::bail!(
+                    "workflow context recall@{} {:.3} is below required {:.3}",
+                    report.limit,
+                    report.workflow.context_recall_at_k,
+                    min_context_recall
+                );
+            }
+            if report.workflow.verification_verdict_accuracy < min_verification_accuracy {
+                anyhow::bail!(
+                    "workflow verification accuracy {:.3} is below required {:.3}",
+                    report.workflow.verification_verdict_accuracy,
+                    min_verification_accuracy
+                );
             }
         }
         Command::Eval(args) => {
@@ -2830,6 +2983,399 @@ fn print_bench_report(report: &BenchReport) {
                 case.query, case.expected_path, rank, top_path
             );
         }
+    }
+}
+
+fn run_workflow_bench(args: WorkflowBenchArgs) -> anyhow::Result<WorkflowBenchReport> {
+    let repo = absolutize(&args.path)?;
+    let cases_file = if args.cases_file.is_absolute() {
+        args.cases_file.clone()
+    } else {
+        repo.join(&args.cases_file)
+    };
+    let cases = load_workflow_bench_cases(&cases_file)?;
+    if cases.is_empty() {
+        anyhow::bail!(
+            "workflow benchmark cases file is empty: {}",
+            cases_file.display()
+        );
+    }
+    if !args.no_index {
+        index_repo(&repo)?;
+    }
+    let store = open_store(&repo)?;
+    let index_dir = default_index_dir(&repo);
+    let search_index = if TantivySearchIndex::exists(&index_dir) {
+        Some(TantivySearchIndex::open_or_create(&index_dir)?)
+    } else {
+        None
+    };
+    let planner = PlanEngine::new(&store as &dyn OkStore)
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+    let verifier = ChangeVerifier::new(&store as &dyn OkStore)
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+    let limit = args.limit.clamp(1, 100);
+    let mut reports = Vec::with_capacity(cases.len());
+    for case in cases {
+        let baseline_paths = baseline_context_paths(&repo, &store, &case.task, limit, &cases_file)?;
+        let plan = workflow_plan(&repo, &store, &planner, &case.task, limit, &cases_file)?;
+        reports.push(score_workflow_case(
+            &repo,
+            &verifier,
+            &case,
+            &plan,
+            &baseline_paths,
+            limit,
+        )?);
+    }
+    let workflow = summarize_workflow_cases(&reports, false);
+    let baseline = summarize_workflow_cases(&reports, true);
+    let deltas = WorkflowBenchDeltas {
+        context_recall_at_k: workflow.context_recall_at_k - baseline.context_recall_at_k,
+        impact_recall_at_k: workflow.impact_recall_at_k - baseline.impact_recall_at_k,
+        test_recall_at_k: workflow.test_recall_at_k - baseline.test_recall_at_k,
+        boundary_precision: workflow.boundary_precision - baseline.boundary_precision,
+        boundary_recall: workflow.boundary_recall - baseline.boundary_recall,
+        confidence_calibration_error: baseline.confidence_calibration_error
+            - workflow.confidence_calibration_error,
+        verification_verdict_accuracy: workflow.verification_verdict_accuracy
+            - baseline.verification_verdict_accuracy,
+    };
+    Ok(WorkflowBenchReport {
+        repo,
+        cases_file,
+        limit,
+        case_count: reports.len(),
+        baseline,
+        workflow,
+        deltas,
+        cases: reports,
+    })
+}
+
+fn load_workflow_bench_cases(path: &Path) -> anyhow::Result<Vec<WorkflowBenchCase>> {
+    let raw = fs::read_to_string(path)?;
+    let cases: Vec<WorkflowBenchCase> = serde_json::from_str(&raw)?;
+    for case in &cases {
+        if case.id.trim().is_empty() || case.task.trim().is_empty() {
+            anyhow::bail!("workflow benchmark cases require non-empty id and task");
+        }
+    }
+    Ok(cases)
+}
+
+fn baseline_context_paths(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    task: &str,
+    limit: usize,
+    cases_file: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut raw = search_raw(repo, store, task, ranking_candidate_limit(limit))?;
+    filter_workflow_benchmark_artifacts(&mut raw, repo, cases_file);
+    Ok(top_unique_paths(rerank_baseline(raw), limit)
+        .into_iter()
+        .map(|result| result.path)
+        .collect())
+}
+
+fn workflow_plan(
+    repo: &Path,
+    store: &SqliteStore,
+    planner: &PlanEngine,
+    task: &str,
+    limit: usize,
+    cases_file: &Path,
+) -> anyhow::Result<PlanReport> {
+    let mut context = build_context_pack(repo, store, task, limit)?;
+    context
+        .primary_files
+        .retain(|result| !is_workflow_benchmark_artifact(&result.path, repo, cases_file));
+    context
+        .supporting_files
+        .retain(|result| !is_workflow_benchmark_artifact(&result.path, repo, cases_file));
+    planner
+        .plan_from_context(task, limit, context)
+        .map_err(Into::into)
+}
+
+fn filter_workflow_benchmark_artifacts(
+    results: &mut Vec<open_kioku_core::SearchResult>,
+    repo: &Path,
+    cases_file: &Path,
+) {
+    results.retain(|result| !is_workflow_benchmark_artifact(&result.path, repo, cases_file));
+}
+
+fn is_workflow_benchmark_artifact(path: &Path, repo: &Path, cases_file: &Path) -> bool {
+    let normalized = normalize_path_fragment(&path.to_string_lossy());
+    let cases = cases_file
+        .strip_prefix(repo)
+        .unwrap_or(cases_file)
+        .to_string_lossy();
+    normalized == normalize_path_fragment(&cases) || normalized.starts_with("benchmarks/")
+}
+
+fn score_workflow_case(
+    repo: &Path,
+    verifier: &ChangeVerifier,
+    case: &WorkflowBenchCase,
+    plan: &PlanReport,
+    baseline_paths: &[PathBuf],
+    limit: usize,
+) -> anyhow::Result<WorkflowBenchCaseReport> {
+    let context_paths = plan
+        .primary_context
+        .iter()
+        .take(limit)
+        .map(|result| result.path.clone())
+        .collect::<Vec<_>>();
+    let impact_paths = plan
+        .impact
+        .direct_impacts
+        .iter()
+        .chain(plan.impact.indirect_impacts.iter())
+        .take(limit)
+        .map(|result| result.path.clone())
+        .collect::<Vec<_>>();
+    let test_names = plan
+        .validation
+        .iter()
+        .take(limit)
+        .map(|test| test.name.clone())
+        .collect::<Vec<_>>();
+    let boundary_paths = plan
+        .recommended_change_boundary
+        .allowed_files
+        .iter()
+        .chain(plan.recommended_change_boundary.caution_files.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let context_hits = matching_expected_values(&case.expected_primary_context, &context_paths);
+    let impact_hits = matching_expected_values(&case.expected_impact, &impact_paths);
+    let test_hits = matching_expected_strings(&case.expected_tests, &test_names);
+    let boundary_hits = matching_expected_values(&case.expected_boundary, &boundary_paths);
+    let forbidden_boundary_hits = matching_expected_values(&case.forbidden_paths, &boundary_paths);
+    let baseline_context_hits =
+        matching_expected_values(&case.expected_primary_context, baseline_paths);
+
+    let expected_success = case.expected_confidence.unwrap_or_else(|| {
+        !case
+            .expected_verdict
+            .is_some_and(|verdict| verdict == VerificationVerdict::Fail)
+    });
+    let confidence_probability = plan_success_probability(plan);
+    let confidence_calibration_error =
+        Some((confidence_probability - if expected_success { 1.0 } else { 0.0 }).abs());
+
+    let verification = if case.expected_verdict.is_some()
+        && (!case.changed_files.is_empty() || case.unified_diff.is_some())
+    {
+        Some(verifier.verify(
+            repo,
+            plan,
+            VerifyChangeInput {
+                changed_files: case.changed_files.clone(),
+                unified_diff: case.unified_diff.clone(),
+                evidence_refs: Vec::new(),
+                run_commands: false,
+            },
+        )?)
+    } else {
+        None
+    };
+    let actual_verdict = verification.as_ref().map(|report| report.verdict);
+    let verification_correct = case
+        .expected_verdict
+        .zip(actual_verdict)
+        .map(|(expected, actual)| expected == actual);
+
+    Ok(WorkflowBenchCaseReport {
+        id: case.id.clone(),
+        task: case.task.clone(),
+        context_recall: ratio(context_hits.len(), case.expected_primary_context.len()),
+        impact_recall: ratio(impact_hits.len(), case.expected_impact.len()),
+        test_recall: ratio(test_hits.len(), case.expected_tests.len()),
+        boundary_precision: boundary_precision(&boundary_paths, &case.forbidden_paths),
+        boundary_recall: ratio(boundary_hits.len(), case.expected_boundary.len()),
+        confidence_expected_success: Some(expected_success),
+        confidence_probability,
+        confidence_calibration_error,
+        expected_verdict: case.expected_verdict,
+        actual_verdict,
+        verification_correct,
+        baseline_context_recall: ratio(
+            baseline_context_hits.len(),
+            case.expected_primary_context.len(),
+        ),
+        baseline_impact_recall: 0.0,
+        baseline_test_recall: 0.0,
+        context_hits,
+        impact_hits,
+        test_hits,
+        boundary_hits,
+        forbidden_boundary_hits,
+        top_context_paths: context_paths,
+        top_impact_paths: impact_paths,
+        top_tests: test_names,
+    })
+}
+
+fn summarize_workflow_cases(
+    reports: &[WorkflowBenchCaseReport],
+    baseline: bool,
+) -> WorkflowBenchSummary {
+    let count = reports.len() as f64;
+    let verification = reports
+        .iter()
+        .filter_map(|case| case.verification_correct)
+        .collect::<Vec<_>>();
+    let calibration = reports
+        .iter()
+        .filter_map(|case| case.confidence_calibration_error)
+        .collect::<Vec<_>>();
+    WorkflowBenchSummary {
+        context_recall_at_k: mean(
+            reports
+                .iter()
+                .map(|case| {
+                    if baseline {
+                        case.baseline_context_recall
+                    } else {
+                        case.context_recall
+                    }
+                })
+                .sum::<f64>(),
+            count,
+        ),
+        impact_recall_at_k: mean(
+            reports
+                .iter()
+                .map(|case| {
+                    if baseline {
+                        case.baseline_impact_recall
+                    } else {
+                        case.impact_recall
+                    }
+                })
+                .sum::<f64>(),
+            count,
+        ),
+        test_recall_at_k: mean(
+            reports
+                .iter()
+                .map(|case| {
+                    if baseline {
+                        case.baseline_test_recall
+                    } else {
+                        case.test_recall
+                    }
+                })
+                .sum::<f64>(),
+            count,
+        ),
+        boundary_precision: if baseline {
+            0.0
+        } else {
+            mean(
+                reports
+                    .iter()
+                    .map(|case| case.boundary_precision)
+                    .sum::<f64>(),
+                count,
+            )
+        },
+        boundary_recall: if baseline {
+            0.0
+        } else {
+            mean(
+                reports.iter().map(|case| case.boundary_recall).sum::<f64>(),
+                count,
+            )
+        },
+        confidence_calibration_error: if baseline {
+            1.0
+        } else {
+            mean(calibration.iter().sum::<f64>(), calibration.len() as f64)
+        },
+        verification_verdict_accuracy: if baseline {
+            0.0
+        } else {
+            mean(
+                verification.iter().filter(|correct| **correct).count() as f64,
+                verification.len() as f64,
+            )
+        },
+    }
+}
+
+fn boundary_precision(selected: &[PathBuf], forbidden: &[String]) -> f64 {
+    if selected.is_empty() {
+        return 1.0;
+    }
+    let forbidden_hits = matching_expected_values(forbidden, selected).len();
+    (selected.len().saturating_sub(forbidden_hits)) as f64 / selected.len() as f64
+}
+
+fn plan_success_probability(plan: &PlanReport) -> f64 {
+    match plan.risk.level.as_str() {
+        "low" => 0.85,
+        "medium" => 0.6,
+        "high" => 0.3,
+        "critical" => 0.1,
+        _ => 0.5,
+    }
+}
+
+fn mean(sum: f64, count: f64) -> f64 {
+    if count == 0.0 {
+        1.0
+    } else {
+        sum / count
+    }
+}
+
+fn print_workflow_bench_report(report: &WorkflowBenchReport) {
+    println!(
+        "Workflow benchmark: {} case(s), limit {}",
+        report.case_count, report.limit
+    );
+    println!(
+        "Workflow: context recall {:.3}, impact recall {:.3}, test recall {:.3}, boundary precision {:.3}, boundary recall {:.3}, calibration error {:.3}, verification accuracy {:.3}",
+        report.workflow.context_recall_at_k,
+        report.workflow.impact_recall_at_k,
+        report.workflow.test_recall_at_k,
+        report.workflow.boundary_precision,
+        report.workflow.boundary_recall,
+        report.workflow.confidence_calibration_error,
+        report.workflow.verification_verdict_accuracy
+    );
+    println!(
+        "Deltas vs baseline: context {:+.3}, impact {:+.3}, test {:+.3}, boundary precision {:+.3}, boundary recall {:+.3}, calibration {:+.3}, verification {:+.3}",
+        report.deltas.context_recall_at_k,
+        report.deltas.impact_recall_at_k,
+        report.deltas.test_recall_at_k,
+        report.deltas.boundary_precision,
+        report.deltas.boundary_recall,
+        report.deltas.confidence_calibration_error,
+        report.deltas.verification_verdict_accuracy
+    );
+    for case in &report.cases {
+        let verdict = case
+            .actual_verdict
+            .map(|verdict| format!("{verdict:?}"))
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "  {}: context {:.3}, impact {:.3}, tests {:.3}, boundary {:.3}/{:.3}, verdict {}",
+            case.id,
+            case.context_recall,
+            case.impact_recall,
+            case.test_recall,
+            case.boundary_precision,
+            case.boundary_recall,
+            verdict
+        );
     }
 }
 
