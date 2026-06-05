@@ -11,6 +11,23 @@ No hosted index. No source upload. No embeddings API required.
 
 The default path is offline and lexical. SCIP exact references, semantic search, git-history co-change evidence, and runtime evidence are optional local upgrades.
 
+![Open Kioku 60-second quickstart](assets/open-kioku-quickstart.gif)
+
+## Copy-Paste 60-Second Quickstart
+
+```sh
+npm install -g open-kioku
+ok demo --force
+ok --repo ./open-kioku-demo plan token --format markdown --limit 6
+ok --repo ./open-kioku-demo --json plan token > /tmp/open-kioku-plan.json
+ok --repo ./open-kioku-demo --json verify --plan /tmp/open-kioku-plan.json --changed src/auth.rs
+```
+
+This creates a local demo repo, indexes it, asks for an evidence-backed plan,
+and verifies a bounded edit against that saved plan. The recording is
+reproducible with `scripts/quickstart-demo.sh`; regenerate the GIF with
+`scripts/render-quickstart-demo.py assets/open-kioku-quickstart.gif`.
+
 ## The 60-Second Pitch
 
 Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:
@@ -37,15 +54,6 @@ For a Java/Gradle task, Open Kioku returned scoped validation commands such as:
 
 ```text
 ./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests
-```
-
-```sh
-npm install -g open-kioku
-ok init /path/to/your/repo
-ok index /path/to/your/repo
-ok status /path/to/your/repo --markdown --write ok-status.md
-ok setup audit /path/to/your/repo
-ok mcp install cursor --repo /path/to/your/repo
 ```
 
 Proof: [`docs/large-repo-proof.md`](docs/large-repo-proof.md), [`docs/proof.md`](docs/proof.md), and [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
