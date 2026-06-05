@@ -1,7 +1,8 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
-    ChangeBoundary, ContextPack, FileId, ImpactReport, MemorySearchResult, PlanReport, RiskReport,
-    ScoreComponent, SearchResult, TestTarget, ToolCallRecommendation,
+    ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
+    MemorySearchResult, PlanReport, RiskReport, ScoreComponent, SearchResult, TestTarget,
+    ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -125,6 +126,16 @@ impl<'a> PlanEngine<'a> {
             &self.memory_facts,
         );
         let score_breakdown = plan_score_breakdown(&risk);
+        let confidence_breakdown = confidence_for_plan(
+            &primary_context,
+            &impact,
+            &validation,
+            &risk,
+            &recommended_change_boundary,
+            &evidence,
+            context.runtime_signals.len(),
+        );
+        let confidence_summary = confidence_summary(&confidence_breakdown);
 
         let mut report = PlanReport {
             task: task.into(),
@@ -139,9 +150,8 @@ impl<'a> PlanEngine<'a> {
             tool_calls,
             memory_facts: self.memory_facts.clone(),
             evidence,
-            confidence_summary:
-                "derived from local task-anchor search, symbol extraction, exact references when indexed, impact analysis, and test heuristics"
-                    .into(),
+            confidence_summary,
+            confidence_breakdown,
             score_breakdown,
         };
         report.reconcile_score_breakdown();
@@ -390,6 +400,105 @@ fn plan_score_breakdown(risk: &RiskReport) -> Vec<ScoreComponent> {
         ),
     ));
     components
+}
+
+fn confidence_for_plan(
+    primary_context: &[SearchResult],
+    impact: &ImpactReport,
+    validation: &[TestTarget],
+    risk: &RiskReport,
+    boundary: &ChangeBoundary,
+    evidence: &[open_kioku_core::Evidence],
+    context_runtime_signal_count: usize,
+) -> ConfidenceBreakdown {
+    ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+        primary_file_count: primary_context.len(),
+        evidence_count: evidence.len(),
+        exact_reference_count: exact_reference_count(primary_context, impact),
+        validation_count: validation.len(),
+        validation_with_command_count: validation
+            .iter()
+            .filter(|test| test.command.is_some())
+            .count(),
+        negative_evidence_count: negative_evidence_count(risk),
+        allowed_file_count: boundary.allowed_files.len(),
+        runtime_signal_count: context_runtime_signal_count
+            + runtime_signal_count(primary_context)
+            + runtime_signal_count(&impact.direct_impacts)
+            + runtime_signal_count(&impact.indirect_impacts)
+            + evidence
+                .iter()
+                .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Runtime)
+                .count(),
+    })
+}
+
+fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
+    let mut parts = vec![format!(
+        "overall {:?} ({:.2}) from evidence density, references, validation, boundaries, runtime, and negative evidence",
+        breakdown.overall_enum, breakdown.overall_score
+    )];
+    if let Some(blocker) = breakdown.blockers.first() {
+        parts.push(format!("blocker: {blocker}"));
+    }
+    if let Some(caveat) = breakdown.caveats.first() {
+        parts.push(format!("caveat: {caveat}"));
+    }
+    parts.join("; ")
+}
+
+fn exact_reference_count(primary_context: &[SearchResult], impact: &ImpactReport) -> usize {
+    primary_context
+        .iter()
+        .chain(impact.direct_impacts.iter())
+        .chain(impact.indirect_impacts.iter())
+        .filter(|result| has_exact_reference_signal(result))
+        .count()
+}
+
+fn has_exact_reference_signal(result: &SearchResult) -> bool {
+    result
+        .evidence
+        .iter()
+        .any(|evidence| contains_exact_reference(evidence))
+        || contains_exact_reference(&result.match_reason)
+}
+
+fn contains_exact_reference(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("exact reference")
+        || lower.contains("exact symbol reference")
+        || lower.contains("scip")
+}
+
+fn runtime_signal_count(results: &[SearchResult]) -> usize {
+    results
+        .iter()
+        .filter(|result| {
+            result.score_breakdown.iter().any(|component| {
+                component.signal == "runtime_corroboration" && component.contribution > 0.0
+            }) || result
+                .evidence
+                .iter()
+                .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
+        })
+        .count()
+}
+
+fn negative_evidence_count(risk: &RiskReport) -> usize {
+    risk.reasons
+        .iter()
+        .filter(|reason| {
+            let lower = reason.to_ascii_lowercase();
+            lower.contains("low confidence")
+                || lower.contains("no matching")
+                || lower.contains("missing")
+                || lower.contains("absent")
+                || lower.contains("unavailable")
+                || lower.contains("weak")
+                || lower.contains("unknown")
+        })
+        .count()
 }
 
 fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
@@ -652,9 +761,14 @@ fn render_text(report: &PlanReport) -> String {
         "Risk: {} ({:.2})\n",
         report.risk.level, report.risk.score
     ));
+    out.push_str(&format!(
+        "Confidence: {:?} ({:.2})\n",
+        report.confidence_breakdown.overall_enum, report.confidence_breakdown.overall_score
+    ));
     for reason in &report.risk.reasons {
         out.push_str(&format!("  - {reason}\n"));
     }
+    write_confidence_text(&mut out, &report.confidence_breakdown);
 
     out.push_str("\nPrimary context:\n");
     write_results(&mut out, &report.primary_context);
@@ -724,6 +838,13 @@ fn render_markdown(report: &PlanReport) -> String {
     }
     out.push_str("\n### Score Signals\n\n");
     write_markdown_score_components(&mut out, &report.score_breakdown);
+
+    out.push_str("\n## Confidence\n\n");
+    out.push_str(&format!(
+        "- Overall: `{:?}` (`{:.2}`)\n",
+        report.confidence_breakdown.overall_enum, report.confidence_breakdown.overall_score
+    ));
+    write_markdown_confidence_breakdown(&mut out, &report.confidence_breakdown);
 
     out.push_str("\n## Primary Context\n\n");
     write_markdown_results(&mut out, &report.primary_context);
@@ -838,6 +959,54 @@ fn write_markdown_score_components(out: &mut String, components: &[ScoreComponen
         out.push_str(&format!(
             "- `{}` contribution `{:.3}`: {}\n",
             component.signal,
+            component.contribution,
+            one_line(&component.rationale)
+        ));
+    }
+}
+
+fn write_confidence_text(out: &mut String, breakdown: &ConfidenceBreakdown) {
+    if !breakdown.blockers.is_empty() {
+        out.push_str("Confidence blockers:\n");
+        for blocker in &breakdown.blockers {
+            out.push_str(&format!("  - {blocker}\n"));
+        }
+    }
+    if !breakdown.caveats.is_empty() {
+        out.push_str("Confidence caveats:\n");
+        for caveat in &breakdown.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+    out.push_str("Confidence components:\n");
+    for component in &breakdown.components {
+        out.push_str(&format!(
+            "  - {}: {:.2} × {:.2} = {:.2}\n",
+            component.signal, component.normalized_value, component.weight, component.contribution
+        ));
+    }
+}
+
+fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceBreakdown) {
+    if !breakdown.blockers.is_empty() {
+        out.push_str("- Blockers:\n");
+        for blocker in &breakdown.blockers {
+            out.push_str(&format!("  - {blocker}\n"));
+        }
+    }
+    if !breakdown.caveats.is_empty() {
+        out.push_str("- Caveats:\n");
+        for caveat in &breakdown.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+    out.push_str("- Components:\n");
+    for component in &breakdown.components {
+        out.push_str(&format!(
+            "  - `{}` score `{:.2}`, weight `{:.2}`, contribution `{:.2}`: {}\n",
+            component.signal,
+            component.normalized_value,
+            component.weight,
             component.contribution,
             one_line(&component.rationale)
         ));
@@ -1100,6 +1269,7 @@ mod tests {
             },
             evidence: vec![evidence],
             confidence_summary: "bounded".into(),
+            confidence_breakdown: ConfidenceBreakdown::default(),
         };
 
         let report = PlanEngine::new(&store)
@@ -1111,6 +1281,12 @@ mod tests {
         assert_eq!(report.impact.evidence.len(), 1);
         assert_eq!(report.impact.evidence[0].id.0, "context:bounded-search");
         assert!(!report.score_breakdown.is_empty());
+        assert!(!report.confidence_breakdown.components.is_empty());
+        assert!(report
+            .confidence_breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("exact symbol/reference")));
         assert!(!report.primary_context[0].score_breakdown.is_empty());
         assert!(!report.impact.score_breakdown.is_empty());
         assert!(
@@ -1181,6 +1357,7 @@ mod tests {
             },
             evidence: vec![evidence],
             confidence_summary: "bounded".into(),
+            confidence_breakdown: ConfidenceBreakdown::default(),
         };
 
         let report = PlanEngine::new(&store)
@@ -1197,6 +1374,11 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("PublishRestrictionsMutation")));
+        assert_eq!(
+            report.confidence_breakdown.overall_enum,
+            open_kioku_core::Confidence::Low
+        );
+        assert!(!report.confidence_breakdown.blockers.is_empty());
     }
 
     #[test]
@@ -1208,6 +1390,8 @@ mod tests {
         let rendered = PlanFormat::Markdown.render(&report).unwrap();
 
         assert!(rendered.contains("### Score Signals"));
+        assert!(rendered.contains("## Confidence"));
+        assert!(rendered.contains("exact_references"));
         assert!(rendered.contains("signals:"));
         assert!(rendered.contains("score:"));
     }
