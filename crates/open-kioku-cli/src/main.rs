@@ -3,7 +3,7 @@ use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::{OkConfig, RankingConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_core::{Confidence, ContextHandleId, IndexManifest};
+use open_kioku_core::{Confidence, ContextHandleId, IndexManifest, PlanReport};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
@@ -123,6 +123,8 @@ enum Command {
         format: PlanFormat,
         #[arg(long, default_value_t = 12)]
         limit: usize,
+        #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
+        verify_evidence: EvidenceVerifyMode,
     },
     Bench(BenchArgs),
     Eval(EvalArgs),
@@ -156,6 +158,13 @@ enum ConfidenceArg {
     Medium,
     High,
     Exact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum EvidenceVerifyMode {
+    Off,
+    Warn,
+    Fail,
 }
 
 impl From<ConfidenceArg> for Confidence {
@@ -1075,6 +1084,7 @@ async fn main() -> anyhow::Result<()> {
             task,
             format,
             limit,
+            verify_evidence,
         } => {
             let store = open_store(&repo)?;
             let context = build_context_pack(&repo, &store, &task, limit)?;
@@ -1090,6 +1100,7 @@ async fn main() -> anyhow::Result<()> {
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
+            verify_plan_evidence(&report, verify_evidence)?;
         }
         Command::Bench(args) => {
             let min_precision = args.quality_min_precision_at_1;
@@ -3076,6 +3087,37 @@ fn print_eval_report(report: &EvalReport) {
             println!("  note: {note}");
         }
     }
+}
+
+fn verify_plan_evidence(report: &PlanReport, mode: EvidenceVerifyMode) -> anyhow::Result<()> {
+    if mode == EvidenceVerifyMode::Off {
+        return Ok(());
+    }
+    let missing = report
+        .negative_evidence
+        .iter()
+        .filter(|item| item.confidence >= 0.70)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for item in &missing {
+        let next_probe = item
+            .suggested_next_probe
+            .as_deref()
+            .unwrap_or("collect stronger evidence before editing");
+        eprintln!(
+            "negative evidence [{}]: {} (confidence {:.2}); next probe: {}",
+            item.scope, item.reason, item.confidence, next_probe
+        );
+    }
+    if mode == EvidenceVerifyMode::Fail {
+        anyhow::bail!(
+            "plan evidence verification failed: {} required evidence signal(s) missing",
+            missing.len()
+        );
+    }
+    Ok(())
 }
 
 fn ranking_ablation_signals() -> Vec<RankingSignal> {

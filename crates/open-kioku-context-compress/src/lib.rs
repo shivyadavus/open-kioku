@@ -339,6 +339,7 @@ mod tests {
                 evidence: Vec::new(),
             },
             evidence: Vec::new(),
+            negative_evidence: Vec::new(),
             confidence_summary: "test".into(),
             confidence_breakdown: open_kioku_core::ConfidenceBreakdown::default(),
         };
