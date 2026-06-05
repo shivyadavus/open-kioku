@@ -276,6 +276,65 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan_json.contains("\"negative_evidence\""));
     assert!(plan_json.contains("\"evidence_by_section\""));
     assert!(plan_json.contains("\"evidence_refs\""));
+    assert!(plan_json.contains("\"allowed_rules\""));
+    assert!(plan_json.contains("\"caution_rules\""));
+    assert!(plan_json.contains("\"forbidden_rules\""));
+    assert!(plan_json.contains("\"expansion_requirements\""));
+
+    let plan_path = repo.join("plan.json");
+    fs::write(&plan_path, &plan_json).unwrap();
+    let verify_allowed = run({
+        let mut command = ok();
+        command
+            .arg("verify-boundary")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/auth.rs");
+        command
+    });
+    assert!(verify_allowed.contains("Boundary verification passed"));
+
+    let (_boundary_stdout, boundary_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("verify-boundary")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/out_of_scope.rs");
+        command
+    });
+    assert!(boundary_stderr.contains("out of saved plan boundary"));
+    assert!(boundary_stderr.contains("boundary expansion requires explicit evidence"));
+
+    let verify_expansion = run({
+        let mut command = ok();
+        command
+            .arg("verify-boundary")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/out_of_scope.rs")
+            .arg("--evidence-ref")
+            .arg("search:src/out_of_scope.rs:1-2:0");
+        command
+    });
+    assert!(verify_expansion.contains("Boundary verification passed"));
+
+    let (_forbidden_stdout, forbidden_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("verify-boundary")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("vendor/generated.rs")
+            .arg("--evidence-ref")
+            .arg("manual:vendor");
+        command
+    });
+    assert!(forbidden_stderr.contains("forbidden boundary edit"));
 
     let (_warn_stdout, warn_stderr) = run_ok_with_stderr({
         let mut command = ok();

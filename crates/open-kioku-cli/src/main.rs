@@ -126,6 +126,15 @@ enum Command {
         #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
         verify_evidence: EvidenceVerifyMode,
     },
+    /// Verify changed files against a saved JSON plan boundary.
+    VerifyBoundary {
+        #[arg(long, value_name = "PLAN_JSON")]
+        plan: PathBuf,
+        #[arg(long = "changed", required = true, value_name = "PATH")]
+        changed: Vec<PathBuf>,
+        #[arg(long = "evidence-ref", value_name = "REF")]
+        evidence_refs: Vec<String>,
+    },
     Bench(BenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),
@@ -1101,6 +1110,25 @@ async fn main() -> anyhow::Result<()> {
             let format = if cli.json { PlanFormat::Json } else { format };
             println!("{}", format.render(&report)?);
             verify_plan_evidence(&report, verify_evidence)?;
+        }
+        Command::VerifyBoundary {
+            plan,
+            changed,
+            evidence_refs,
+        } => {
+            let report = load_saved_plan(&plan)?;
+            let outcome = verify_saved_plan_boundary(&report, &changed, &evidence_refs)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&outcome)?);
+            } else {
+                println!(
+                    "Boundary verification passed for {} changed file(s)",
+                    outcome.changed_files.len()
+                );
+                for warning in &outcome.warnings {
+                    eprintln!("{warning}");
+                }
+            }
         }
         Command::Bench(args) => {
             let min_precision = args.quality_min_precision_at_1;
@@ -3118,6 +3146,127 @@ fn verify_plan_evidence(report: &PlanReport, mode: EvidenceVerifyMode) -> anyhow
         );
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct BoundaryVerificationOutcome {
+    changed_files: Vec<String>,
+    warnings: Vec<String>,
+    evidence_refs: Vec<String>,
+}
+
+fn load_saved_plan(path: &Path) -> anyhow::Result<PlanReport> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn verify_saved_plan_boundary(
+    report: &PlanReport,
+    changed: &[PathBuf],
+    evidence_refs: &[String],
+) -> anyhow::Result<BoundaryVerificationOutcome> {
+    let boundary = &report.recommended_change_boundary;
+    let allowed = boundary
+        .allowed_files
+        .iter()
+        .map(|path| normalize_boundary_path(path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let caution = boundary
+        .caution_files
+        .iter()
+        .map(|path| normalize_boundary_path(path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let changed_files = changed
+        .iter()
+        .map(|path| normalize_boundary_path(path))
+        .collect::<Vec<_>>();
+
+    for path in &changed_files {
+        if let Some(rule) = boundary
+            .forbidden_rules
+            .iter()
+            .find(|rule| boundary_pattern_matches(&rule.pattern, path))
+        {
+            errors.push(format!(
+                "forbidden boundary edit: {path} matches `{}` ({})",
+                rule.pattern, rule.reason
+            ));
+            continue;
+        }
+        if allowed.contains(path) {
+            continue;
+        }
+        if let Some(rule) = boundary
+            .caution_rules
+            .iter()
+            .find(|rule| normalize_boundary_path(&rule.path) == *path)
+        {
+            warnings.push(format!(
+                "caution boundary edit: {path} ({}) evidence: {}",
+                rule.reason,
+                rule.evidence_refs.join(", ")
+            ));
+            continue;
+        }
+        if caution.contains(path) {
+            warnings.push(format!("caution boundary edit: {path}"));
+            continue;
+        }
+        if evidence_refs.is_empty() {
+            errors.push(format!(
+                "out of saved plan boundary: {path}; boundary expansion requires explicit evidence via --evidence-ref"
+            ));
+        } else {
+            warnings.push(format!(
+                "expanded boundary for {path} with explicit evidence refs: {}",
+                evidence_refs.join(", ")
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        anyhow::bail!("boundary verification failed:\n{}", errors.join("\n"));
+    }
+
+    Ok(BoundaryVerificationOutcome {
+        changed_files,
+        warnings,
+        evidence_refs: evidence_refs.to_vec(),
+    })
+}
+
+fn normalize_boundary_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    raw.trim_start_matches("./").to_string()
+}
+
+fn boundary_pattern_matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.trim_start_matches("./").replace('\\', "/");
+    if pattern == path {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        if let Some(middle) = prefix.strip_prefix("**/") {
+            return path == middle
+                || path.starts_with(&format!("{middle}/"))
+                || path.contains(&format!("/{middle}/"));
+        }
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if pattern.contains('*') {
+        let mut remainder = path;
+        for part in pattern.split('*').filter(|part| !part.is_empty()) {
+            if let Some(index) = remainder.find(part) {
+                remainder = &remainder[index + part.len()..];
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
 }
 
 fn ranking_ablation_signals() -> Vec<RankingSignal> {
