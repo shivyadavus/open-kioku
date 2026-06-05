@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
     ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
-    Evidence, EvidenceId, EvidenceSourceType, File, GraphEdge, RiskReport, ScoreComponent,
-    SearchResult, Symbol, ValidationPlan,
+    Evidence, EvidenceId, EvidenceSourceType, File, GraphEdge, NegativeEvidence, RiskReport,
+    ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -232,6 +232,13 @@ impl<'a> ContextPackBuilder<'a> {
             allowed_files.len(),
             evidence.len(),
         );
+        let negative_evidence = negative_evidence_for_context(
+            task,
+            &primary_files,
+            &supporting_files,
+            &tests,
+            &impact.risk_report,
+        );
         let confidence_summary = confidence_summary(&confidence_breakdown);
         Ok(ContextPack {
             task: task.into(),
@@ -263,10 +270,104 @@ impl<'a> ContextPackBuilder<'a> {
                 evidence: evidence.clone(),
             },
             evidence,
+            negative_evidence,
             confidence_summary,
             confidence_breakdown,
         })
     }
+}
+
+fn negative_evidence_for_context(
+    task: &str,
+    primary_files: &[SearchResult],
+    supporting_files: &[SearchResult],
+    tests: &[open_kioku_core::TestTarget],
+    risk: &RiskReport,
+) -> Vec<NegativeEvidence> {
+    let mut items = Vec::new();
+    if primary_files.is_empty() {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: "primary_context".into(),
+            inspected_sources: vec!["lexical_search".into(), "ranking_fusion".into()],
+            reason: "no primary context matched the task".into(),
+            confidence: 0.95,
+            suggested_next_probe: Some("Run `ok search <task> --explain-ranking` with named symbols or paths from the ticket.".into()),
+        });
+    }
+    if exact_reference_count(primary_files, supporting_files) == 0 {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: "exact_references".into(),
+            inspected_sources: vec![
+                "search_result.evidence".into(),
+                "search_result.match_reason".into(),
+            ],
+            reason: "no explicit exact symbol reference or SCIP evidence was found".into(),
+            confidence: 0.85,
+            suggested_next_probe: Some(
+                "Run `ok scip setup .` and re-index with `ok index . --with-scip auto`.".into(),
+            ),
+        });
+    }
+    if tests.is_empty() {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: "validation".into(),
+            inspected_sources: vec!["indexed_tests".into(), "test_selector".into()],
+            reason: "no nearby validation target was selected".into(),
+            confidence: 0.80,
+            suggested_next_probe: primary_files.first().map(|result| {
+                format!(
+                    "Run `ok tests {}` to inspect validation candidates for the top file.",
+                    result.path.display()
+                )
+            }),
+        });
+    }
+    if runtime_signal_count(primary_files, supporting_files) == 0 {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: "runtime".into(),
+            inspected_sources: vec!["runtime_signals".into(), "search_result.evidence".into()],
+            reason:
+                "no runtime trace, incident, or error artifact corroborated the selected context"
+                    .into(),
+            confidence: 0.75,
+            suggested_next_probe: Some(
+                "Import or configure runtime artifacts, then rerun `ok plan`.".into(),
+            ),
+        });
+    }
+    if docs_or_tests_only(primary_files) {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: "boundary".into(),
+            inspected_sources: vec!["primary_context.paths".into()],
+            reason: "task anchors only matched docs or test fixtures, not source edit targets"
+                .into(),
+            confidence: 0.90,
+            suggested_next_probe: Some(
+                "Search for the production symbol or source path named by the ticket.".into(),
+            ),
+        });
+    }
+    for reason in &risk.reasons {
+        let lower = reason.to_ascii_lowercase();
+        if lower.contains("low confidence") || lower.contains("no matching") {
+            items.push(NegativeEvidence {
+                query: task.into(),
+                scope: "risk".into(),
+                inspected_sources: vec!["risk_report.reasons".into()],
+                reason: reason.clone(),
+                confidence: 0.85,
+                suggested_next_probe: Some(
+                    "Resolve the missing task anchor before editing.".into(),
+                ),
+            });
+        }
+    }
+    items
 }
 
 fn confidence_for_context(
@@ -361,6 +462,27 @@ fn negative_evidence_count(risk: &RiskReport) -> usize {
                 || lower.contains("unknown")
         })
         .count()
+}
+
+fn docs_or_tests_only(results: &[SearchResult]) -> bool {
+    !results.is_empty()
+        && results
+            .iter()
+            .all(|result| is_docs_or_test_path(&result.path.to_string_lossy()))
+}
+
+fn is_docs_or_test_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.starts_with("docs/")
+        || path.starts_with("test/")
+        || path.starts_with("tests/")
+        || path.contains("/docs/")
+        || path.ends_with(".md")
+        || path.ends_with(".mdx")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("_test.")
+        || path.contains("test_")
 }
 
 #[derive(Debug, Clone, Default)]

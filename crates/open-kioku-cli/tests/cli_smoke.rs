@@ -16,6 +16,34 @@ fn run(mut command: Command) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf-8")
 }
 
+fn run_ok_with_stderr(mut command: Command) -> (String, String) {
+    let output = command.output().expect("command should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf-8"),
+        String::from_utf8(output.stderr).expect("stderr should be utf-8"),
+    )
+}
+
+fn run_failure(mut command: Command) -> (String, String) {
+    let output = command.output().expect("command should run");
+    assert!(
+        !output.status.success(),
+        "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf-8"),
+        String::from_utf8(output.stderr).expect("stderr should be utf-8"),
+    )
+}
+
 #[test]
 fn init_index_search_and_doctor_work_together() {
     let temp = tempfile::tempdir().unwrap();
@@ -224,6 +252,7 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(plan.contains("# Plan: token"));
     assert!(plan.contains("## Confidence"));
+    assert!(plan.contains("## Negative Evidence"));
     assert!(plan.contains("exact_references"));
     assert!(plan.contains("## Primary Context"));
     assert!(plan.contains("## Agent Tool Calls"));
@@ -242,6 +271,33 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan_json.contains("\"overall_score\""));
     assert!(plan_json.contains("\"components\""));
     assert!(plan_json.contains("\"caveats\""));
+    assert!(plan_json.contains("\"negative_evidence\""));
+
+    let (_warn_stdout, warn_stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("plan")
+            .arg("token")
+            .arg("--verify-evidence")
+            .arg("warn");
+        command
+    });
+    assert!(warn_stderr.contains("negative evidence"));
+
+    let (_fail_stdout, fail_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("plan")
+            .arg("token")
+            .arg("--verify-evidence")
+            .arg("fail");
+        command
+    });
+    assert!(fail_stderr.contains("plan evidence verification failed"));
 
     let eval = run({
         let mut command = ok();
