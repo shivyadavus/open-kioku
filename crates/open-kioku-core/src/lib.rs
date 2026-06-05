@@ -54,6 +54,225 @@ impl Confidence {
             Self::Exact => 1.0,
         }
     }
+
+    pub fn from_score(score: f32) -> Self {
+        if score >= 0.95 {
+            Self::Exact
+        } else if score >= 0.75 {
+            Self::High
+        } else if score >= 0.55 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConfidenceBreakdown {
+    pub overall_enum: Confidence,
+    pub overall_score: f32,
+    pub components: Vec<ScoreComponent>,
+    pub blockers: Vec<String>,
+    pub caveats: Vec<String>,
+}
+
+impl Default for ConfidenceBreakdown {
+    fn default() -> Self {
+        Self {
+            overall_enum: Confidence::Low,
+            overall_score: 0.0,
+            components: Vec::new(),
+            blockers: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfidenceSignalInput {
+    pub primary_file_count: usize,
+    pub evidence_count: usize,
+    pub exact_reference_count: usize,
+    pub validation_count: usize,
+    pub validation_with_command_count: usize,
+    pub negative_evidence_count: usize,
+    pub allowed_file_count: usize,
+    pub runtime_signal_count: usize,
+}
+
+impl ConfidenceBreakdown {
+    pub fn from_signals(input: ConfidenceSignalInput) -> Self {
+        let mut blockers = Vec::new();
+        let mut caveats = Vec::new();
+
+        if input.primary_file_count == 0 {
+            blockers.push("no primary context matched the task".into());
+        }
+        if input.negative_evidence_count > 0 {
+            blockers.push(format!(
+                "{} negative evidence signal(s) lowered confidence",
+                input.negative_evidence_count
+            ));
+        }
+        if input.exact_reference_count == 0 {
+            caveats.push("exact symbol/reference evidence is absent".into());
+        }
+        if input.validation_count == 0 {
+            caveats.push("no validation target was selected".into());
+        } else if input.validation_with_command_count == 0 {
+            caveats.push("validation targets require manual commands".into());
+        }
+        if input.runtime_signal_count == 0 {
+            caveats.push("runtime corroboration is absent".into());
+        }
+        if input.allowed_file_count == 0 {
+            caveats.push("change boundary has no allowed files".into());
+        } else if input.allowed_file_count > 8 {
+            caveats.push("change boundary is broad".into());
+        }
+
+        let evidence_target = input.primary_file_count.max(1) * 2;
+        let evidence_density = if input.primary_file_count == 0 {
+            0.0
+        } else {
+            (input.evidence_count as f32 / evidence_target.max(4) as f32).min(1.0)
+        };
+        if evidence_density < 0.5 {
+            caveats.push("evidence density is thin".into());
+        }
+
+        let exact_reference = if input.exact_reference_count > 0 {
+            1.0
+        } else {
+            0.25
+        };
+        let validation_availability = if input.validation_count > 0 { 1.0 } else { 0.2 };
+        let negative_evidence = if input.negative_evidence_count == 0 {
+            1.0
+        } else if input.negative_evidence_count <= 2 {
+            0.3
+        } else {
+            0.1
+        };
+        let boundary_tightness = if input.primary_file_count == 0 {
+            0.0
+        } else if input.allowed_file_count == 0 {
+            0.3
+        } else if input.allowed_file_count <= 3 {
+            1.0
+        } else if input.allowed_file_count <= 8
+            && input.allowed_file_count <= input.primary_file_count.max(1) * 2
+        {
+            0.85
+        } else {
+            0.45
+        };
+        let runtime_corroboration = if input.runtime_signal_count > 0 {
+            1.0
+        } else {
+            0.25
+        };
+        let test_coverage = if input.validation_count == 0 {
+            0.2
+        } else if input.validation_with_command_count > 0 {
+            1.0
+        } else {
+            0.6
+        };
+
+        let mut components = vec![
+            confidence_component(
+                "evidence_density",
+                evidence_density,
+                0.20,
+                "amount of independent indexed evidence near the selected context",
+            ),
+            confidence_component(
+                "exact_references",
+                exact_reference,
+                0.20,
+                "explicit exact symbol references or SCIP signals",
+            ),
+            confidence_component(
+                "validation_availability",
+                validation_availability,
+                0.15,
+                "presence of validation targets for the likely change",
+            ),
+            confidence_component(
+                "negative_evidence",
+                negative_evidence,
+                0.15,
+                "absence of low-confidence, missing-anchor, or no-match evidence",
+            ),
+            confidence_component(
+                "boundary_tightness",
+                boundary_tightness,
+                0.15,
+                "how narrowly allowed edit files bound the proposed change",
+            ),
+            confidence_component(
+                "runtime_corroboration",
+                runtime_corroboration,
+                0.05,
+                "runtime traces, incidents, or error signals that support the context",
+            ),
+            confidence_component(
+                "test_coverage",
+                test_coverage,
+                0.10,
+                "selected tests with runnable commands",
+            ),
+        ];
+        components.sort_by(|a, b| a.signal.cmp(&b.signal));
+        let mut overall_score = score_component_total(&components).clamp(0.0, 1.0);
+        if input.primary_file_count == 0 {
+            overall_score = overall_score.min(0.35);
+        }
+        if input.exact_reference_count == 0
+            && input.validation_count == 0
+            && input.runtime_signal_count == 0
+        {
+            overall_score = overall_score.min(0.55);
+        }
+        if input.negative_evidence_count > 0 {
+            overall_score = overall_score.min(0.60);
+        }
+
+        blockers.sort();
+        blockers.dedup();
+        caveats.sort();
+        caveats.dedup();
+        if !caveats.is_empty() {
+            overall_score = overall_score.min(0.94);
+        }
+
+        Self {
+            overall_enum: Confidence::from_score(overall_score),
+            overall_score,
+            components,
+            blockers,
+            caveats,
+        }
+    }
+}
+
+fn confidence_component(
+    signal: &'static str,
+    value: f32,
+    weight: f32,
+    rationale: &'static str,
+) -> ScoreComponent {
+    ScoreComponent::new(
+        signal,
+        value,
+        value,
+        weight,
+        value * weight,
+        Vec::new(),
+        rationale,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -104,7 +323,7 @@ pub struct Evidence {
     pub indexed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScoreComponent {
     pub signal: String,
     pub raw_value: f32,
@@ -687,6 +906,8 @@ pub struct ContextPack {
     pub validation_plan: ValidationPlan,
     pub evidence: Vec<Evidence>,
     pub confidence_summary: String,
+    #[serde(default)]
+    pub confidence_breakdown: ConfidenceBreakdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -711,6 +932,8 @@ pub struct PlanReport {
     pub memory_facts: Vec<MemorySearchResult>,
     pub evidence: Vec<Evidence>,
     pub confidence_summary: String,
+    #[serde(default)]
+    pub confidence_breakdown: ConfidenceBreakdown,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
 }
@@ -756,7 +979,10 @@ pub struct PatchPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_score_breakdown, score_component_total, ScoreComponent};
+    use super::{
+        reconcile_score_breakdown, score_component_total, Confidence, ConfidenceBreakdown,
+        ConfidenceSignalInput, ScoreComponent,
+    };
 
     #[test]
     fn reconciliation_adds_delta_to_match_surfaced_score() {
@@ -795,5 +1021,85 @@ mod tests {
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].signal, "confidence");
         assert!((score_component_total(&components) - 0.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn confidence_breakdown_is_stable_for_same_signals() {
+        let input = ConfidenceSignalInput {
+            primary_file_count: 2,
+            evidence_count: 8,
+            exact_reference_count: 2,
+            validation_count: 2,
+            validation_with_command_count: 1,
+            negative_evidence_count: 0,
+            allowed_file_count: 2,
+            runtime_signal_count: 1,
+        };
+
+        let first = ConfidenceBreakdown::from_signals(input);
+        let second = ConfidenceBreakdown::from_signals(input);
+
+        assert_eq!(first.overall_enum, second.overall_enum);
+        assert_eq!(first.overall_score, second.overall_score);
+        assert_eq!(first.components, second.components);
+        assert!(first.caveats.is_empty());
+        assert!(first.blockers.is_empty());
+    }
+
+    #[test]
+    fn confidence_drops_without_exact_tests_or_runtime() {
+        let grounded = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 1,
+            evidence_count: 6,
+            exact_reference_count: 1,
+            validation_count: 1,
+            validation_with_command_count: 1,
+            negative_evidence_count: 0,
+            allowed_file_count: 1,
+            runtime_signal_count: 1,
+        });
+        let thin = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 1,
+            evidence_count: 6,
+            exact_reference_count: 0,
+            validation_count: 0,
+            validation_with_command_count: 0,
+            negative_evidence_count: 0,
+            allowed_file_count: 1,
+            runtime_signal_count: 0,
+        });
+
+        assert!(thin.overall_score < grounded.overall_score);
+        assert_eq!(thin.overall_enum, Confidence::Medium);
+        assert!(thin
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("exact symbol/reference")));
+        assert!(thin
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("no validation")));
+        assert!(thin
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("runtime corroboration")));
+    }
+
+    #[test]
+    fn negative_evidence_prevents_false_high_confidence() {
+        let breakdown = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 3,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            negative_evidence_count: 1,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+        });
+
+        assert!(breakdown.overall_score <= 0.60);
+        assert_ne!(breakdown.overall_enum, Confidence::High);
+        assert!(!breakdown.blockers.is_empty());
     }
 }

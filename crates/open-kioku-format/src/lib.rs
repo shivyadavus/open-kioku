@@ -1,6 +1,7 @@
 use open_kioku_core::{
-    CompressedContextPack, ContextHandle, ContextPack, Evidence, LineRange, MemorySearchResult,
-    PlanReport, ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack, Evidence, LineRange,
+    MemorySearchResult, PlanReport, ScoreComponent, SearchResult, Symbol, TestTarget,
+    ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -11,6 +12,7 @@ pub fn render_context_pack_toon(pack: &ContextPack) -> String {
     push_kv(&mut out, 0, "task", &pack.task);
     push_kv(&mut out, 0, "intent", &pack.intent);
     push_kv(&mut out, 0, "confidence_summary", &pack.confidence_summary);
+    push_confidence_breakdown(&mut out, &pack.confidence_breakdown);
     push_search_results(&mut out, "primary_context", &pack.primary_files);
     push_search_results(&mut out, "supporting_impact", &pack.supporting_files);
     push_tests(&mut out, "validation", &pack.validation_plan.tests);
@@ -63,6 +65,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_kv(&mut out, 1, "level", &report.risk.level);
     push_kv(&mut out, 1, "score", format!("{:.2}", report.risk.score));
     push_string_list(&mut out, 1, "reasons", &report.risk.reasons);
+    push_confidence_breakdown(&mut out, &report.confidence_breakdown);
     push_search_results(&mut out, "primary_context", &report.primary_context);
     push_symbols(&mut out, &report.relevant_symbols);
     push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
@@ -221,6 +224,25 @@ fn push_score_components(out: &mut String, name: &str, components: &[ScoreCompon
             ],
         );
     }
+}
+
+fn push_confidence_breakdown(out: &mut String, breakdown: &ConfidenceBreakdown) {
+    out.push_str("confidence:\n");
+    push_kv(
+        out,
+        1,
+        "overall_enum",
+        format!("{:?}", breakdown.overall_enum),
+    );
+    push_kv(
+        out,
+        1,
+        "overall_score",
+        format!("{:.3}", breakdown.overall_score),
+    );
+    push_score_components(out, "confidence_components", &breakdown.components);
+    push_string_list(out, 1, "blockers", &breakdown.blockers);
+    push_string_list(out, 1, "caveats", &breakdown.caveats);
 }
 
 fn top_score_signals(components: &[ScoreComponent]) -> String {
@@ -461,6 +483,7 @@ mod tests {
                 indexed_at: Utc::now(),
             }],
             confidence_summary: "test".into(),
+            confidence_breakdown: ConfidenceBreakdown::default(),
             score_breakdown: vec![ScoreComponent::single(
                 "plan_fixture",
                 0.1,
@@ -472,6 +495,8 @@ mod tests {
         let rendered = render_plan_toon(&report);
 
         assert!(rendered.contains("type: plan_report"));
+        assert!(rendered.contains("confidence:"));
+        assert!(rendered.contains("confidence_components"));
         assert!(rendered
             .contains("primary_context[0]{path,lines,score,signals,reason,symbol,summary}:"));
         assert!(rendered.contains("allowed_files[1]{path}:"));
