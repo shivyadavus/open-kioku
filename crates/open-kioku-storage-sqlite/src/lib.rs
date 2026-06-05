@@ -685,6 +685,7 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
         EvidenceSourceType::Lexical => "lexical",
         EvidenceSourceType::Semantic => "semantic",
         EvidenceSourceType::Runtime => "runtime",
+        EvidenceSourceType::GitHistory => "git_history",
         EvidenceSourceType::StaticAnalysis => "static_analysis",
         EvidenceSourceType::ExternalIntegration => "external_integration",
         EvidenceSourceType::Heuristic => "heuristic",
@@ -829,6 +830,19 @@ mod tests {
             source_type: EvidenceSourceType::StaticAnalysis,
             message: "static fact".into(),
         };
+        let git_fact = AnalysisFact {
+            id: "git-1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "tests/handler_test.rs".into(),
+            target_kind: GraphNodeType::Test,
+            edge_type: GraphEdgeType::ChangedBy,
+            range: None,
+            confidence: Confidence::High,
+            source: "git-history:abc123".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            message: "git co-change observed in 1 commit(s), recency weight 1.00".into(),
+        };
 
         store
             .replace_index(IndexData {
@@ -839,7 +853,7 @@ mod tests {
                 chunks: &[],
                 imports: &[],
                 tests: &[],
-                analysis_facts: &[runtime_fact.clone(), static_fact],
+                analysis_facts: &[runtime_fact.clone(), static_fact, git_fact.clone()],
             })
             .unwrap();
 
@@ -849,8 +863,14 @@ mod tests {
         assert_eq!(runtime.len(), 1);
         assert_eq!(runtime[0].id, runtime_fact.id);
         assert_eq!(runtime[0].target, runtime_fact.target);
+        let git = store
+            .analysis_facts(Some(EvidenceSourceType::GitHistory), 10)
+            .unwrap();
+        assert_eq!(git.len(), 1);
+        assert_eq!(git[0].id, git_fact.id);
+        assert_eq!(git[0].target, git_fact.target);
         let all = store.analysis_facts(None, 10).unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

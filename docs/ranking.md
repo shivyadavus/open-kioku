@@ -26,7 +26,20 @@ Signals:
 - `graph_proximity`: dependency or impact-graph proximity when available.
 - `boundary_fit`: source-like files that are better primary edit candidates.
 - `runtime_corroboration`: runtime traces or incidents when configured.
-- `git_cochange`: historical co-change evidence when configured.
+- `git_cochange`: local `git log --name-only` co-change and path-to-test co-run evidence from `.ok/index.sqlite`.
+
+Git-history indexing is local and enabled by default. Configure it in `ok.toml`:
+
+```toml
+[history]
+enabled = true
+max_commits = 500
+max_files_per_commit = 40
+```
+
+Set `enabled = false` to skip history indexing entirely. Large commits above
+`max_files_per_commit` are ignored so mass-formatting or generated-file commits
+do not dominate ranking.
 - `validation_proximity`: test and validation-path proximity.
 - `memory_signal`: repo memory evidence when available.
 - `path_quality`: penalties for generated or vendor paths.

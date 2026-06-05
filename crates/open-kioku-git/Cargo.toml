@@ -13,3 +13,5 @@ categories.workspace = true
 [dependencies]
 open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
 
+[dev-dependencies]
+tempfile.workspace = true

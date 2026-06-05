@@ -462,22 +462,42 @@ fn negative_evidence_for_plan(
     risk: &RiskReport,
 ) -> Vec<NegativeEvidence> {
     let mut items = context.negative_evidence.clone();
-    push_unique_negative_evidence(
-        &mut items,
-        NegativeEvidence {
-            query: task.into(),
-            scope: "git_history".into(),
-            inspected_sources: vec!["plan.evidence".into(), "search_result.evidence".into()],
-            reason: "no git co-change or historical validation evidence was available".into(),
-            confidence: 0.70,
-            suggested_next_probe: primary_context.first().map(|result| {
-                format!(
-                    "Run `git log --name-only -- {}` to inspect historical co-change manually.",
-                    result.path.display()
-                )
-            }),
-        },
-    );
+    if git_signal_count(primary_context)
+        + git_signal_count(&impact.direct_impacts)
+        + git_signal_count(&impact.indirect_impacts)
+        + validation
+            .iter()
+            .filter(|test| {
+                test.score_breakdown
+                    .iter()
+                    .any(|component| component.signal == "git_cochange")
+                    || test.reason.to_ascii_lowercase().contains("git co-change")
+            })
+            .count()
+        + impact
+            .evidence
+            .iter()
+            .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::GitHistory)
+            .count()
+        == 0
+    {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: "git_history".into(),
+                inspected_sources: vec!["plan.evidence".into(), "search_result.evidence".into()],
+                reason: "no git co-change or historical validation evidence was available".into(),
+                confidence: 0.70,
+                suggested_next_probe: primary_context.first().map(|result| {
+                    format!(
+                        "Run `git log --name-only -- {}` to inspect historical co-change manually.",
+                        result.path.display()
+                    )
+                }),
+            },
+        );
+    }
     if exact_reference_count(primary_context, impact) == 0 {
         push_unique_negative_evidence(
             &mut items,
@@ -634,6 +654,22 @@ fn runtime_signal_count(results: &[SearchResult]) -> usize {
                 .evidence
                 .iter()
                 .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
+        })
+        .count()
+}
+
+fn git_signal_count(results: &[SearchResult]) -> usize {
+    results
+        .iter()
+        .filter(|result| {
+            result
+                .score_breakdown
+                .iter()
+                .any(|component| component.signal == "git_cochange" && component.contribution > 0.0)
+                || result
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.to_ascii_lowercase().contains("git co-change"))
         })
         .count()
 }

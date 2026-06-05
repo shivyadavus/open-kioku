@@ -149,6 +149,18 @@ impl Indexer {
         let runtime_facts = collect_runtime_analysis_facts(&root, &files)?;
         let runtime_analysis_facts = runtime_facts.len();
         analysis_facts.extend(runtime_facts);
+        let git_history_facts = if config.history.enabled {
+            collect_git_history_facts(
+                &root,
+                &files,
+                config.history.max_commits,
+                config.history.max_files_per_commit,
+            )?
+        } else {
+            Vec::new()
+        };
+        let git_history_fact_count = git_history_facts.len();
+        analysis_facts.extend(git_history_facts);
         on_progress(IndexProgress {
             phase: "occurrences",
             scanned_files: files.len(),
@@ -185,8 +197,11 @@ impl Indexer {
             scip_report.as_ref(),
             tests.len(),
             imports.len(),
-            static_analysis_facts,
-            runtime_analysis_facts,
+            AnalysisCounts {
+                static_facts: static_analysis_facts,
+                runtime_facts: runtime_analysis_facts,
+                git_history_facts: git_history_fact_count,
+            },
         );
         let manifest = IndexManifest {
             repository,
@@ -299,14 +314,20 @@ impl Indexer {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnalysisCounts {
+    static_facts: usize,
+    runtime_facts: usize,
+    git_history_facts: usize,
+}
+
 fn index_quality(
     root: &Path,
     config: &OkConfig,
     scip_report: Option<&ScipIndexReport>,
     test_count: usize,
     import_count: usize,
-    static_analysis_facts: usize,
-    runtime_analysis_facts: usize,
+    analysis: AnalysisCounts,
 ) -> IndexQuality {
     let mut quality_notes = Vec::new();
     let build_systems = detect_build_systems(root);
@@ -331,14 +352,22 @@ fn index_quality(
     if junit_reports > 0 {
         semantic_provider_notes.push(format!("JUnit-style reports detected: {junit_reports}"));
     }
-    if static_analysis_facts > 0 {
+    if analysis.static_facts > 0 {
         semantic_provider_notes.push(format!(
-            "language static analysis facts detected: {static_analysis_facts}"
+            "language static analysis facts detected: {}",
+            analysis.static_facts
         ));
     }
-    if runtime_analysis_facts > 0 {
+    if analysis.runtime_facts > 0 {
         semantic_provider_notes.push(format!(
-            "runtime analysis facts detected: {runtime_analysis_facts}"
+            "runtime analysis facts detected: {}",
+            analysis.runtime_facts
+        ));
+    }
+    if analysis.git_history_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "git history co-change facts detected: {}",
+            analysis.git_history_facts
         ));
     }
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
@@ -377,8 +406,9 @@ fn index_quality(
             codeql_databases,
             coverage_reports,
             junit_reports,
-            static_analysis_facts,
-            runtime_analysis_facts,
+            static_analysis_facts: analysis.static_facts,
+            runtime_analysis_facts: analysis.runtime_facts,
+            git_history_facts: analysis.git_history_facts,
             semantic_provider_notes,
             quality_notes,
         }
@@ -400,12 +430,68 @@ fn index_quality(
             codeql_databases,
             coverage_reports,
             junit_reports,
-            static_analysis_facts,
-            runtime_analysis_facts,
+            static_analysis_facts: analysis.static_facts,
+            runtime_analysis_facts: analysis.runtime_facts,
+            git_history_facts: analysis.git_history_facts,
             semantic_provider_notes,
             quality_notes,
         }
     }
+}
+
+fn collect_git_history_facts(
+    root: &Path,
+    files: &[File],
+    max_commits: usize,
+    max_files_per_commit: usize,
+) -> Result<Vec<AnalysisFact>> {
+    let files_by_path = files
+        .iter()
+        .map(|file| (normalize_history_path(&file.path), file))
+        .collect::<HashMap<_, _>>();
+    let records = open_kioku_git::cochange_records(root, max_commits, max_files_per_commit)?;
+    let mut facts = Vec::new();
+    for record in records {
+        let Some(file) = files_by_path.get(&normalize_history_path(&record.path)) else {
+            continue;
+        };
+        if !files_by_path.contains_key(&normalize_history_path(&record.cochanged_path)) {
+            continue;
+        }
+        let id = stable_id(&format!(
+            "git-history:{}:{}",
+            record.path.display(),
+            record.cochanged_path.display()
+        ));
+        let mut message = format!(
+            "git co-change observed in {} commit(s), recency weight {:.2}",
+            record.commit_count, record.recency_weight
+        );
+        if record.test_corun {
+            message.push_str("; includes historical path-to-test co-run");
+        }
+        facts.push(AnalysisFact {
+            id,
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: normalize_history_path(&record.cochanged_path),
+            target_kind: if record.test_corun {
+                GraphNodeType::Test
+            } else {
+                GraphNodeType::File
+            },
+            edge_type: GraphEdgeType::ChangedBy,
+            range: None,
+            confidence: Confidence::from_score((0.45 + record.recency_weight / 4.0).min(0.90)),
+            source: format!("git-history:{}", record.commits.join(",")),
+            source_type: EvidenceSourceType::GitHistory,
+            message,
+        });
+        if facts.len() >= 5000 {
+            break;
+        }
+    }
+    Ok(dedupe_analysis_facts(facts))
 }
 
 fn detect_build_systems(root: &Path) -> Vec<String> {
@@ -775,6 +861,10 @@ fn normalize_path(value: &str) -> String {
     value.trim_start_matches("./").replace('\\', "/")
 }
 
+fn normalize_history_path(path: &Path) -> String {
+    normalize_path(&path.to_string_lossy())
+}
+
 fn extract_sql_table(statement: &str) -> Option<String> {
     let lower = statement.to_ascii_lowercase();
     for keyword in [" from ", " join ", " update ", " into "] {
@@ -875,6 +965,7 @@ mod tests {
         CodeChunk, Confidence, EvidenceSourceType, FileId, Language, LineRange, Symbol, SymbolId,
         SymbolKind,
     };
+    use std::process::Command;
 
     fn symbol(id: &str, name: &str, line: u32) -> Symbol {
         Symbol {
@@ -985,5 +1076,53 @@ class ExampleTests extends BaseTests {
             .semantic_provider_notes
             .iter()
             .any(|note| note.contains("build systems detected")));
+    }
+
+    #[test]
+    fn index_git_history_facts_can_be_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test User"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("src/auth.rs"), "pub fn login() {}\n").unwrap();
+        std::fs::write(
+            root.join("tests/auth_test.rs"),
+            "#[test] fn login_test() {}\n",
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "auth with tests"]);
+
+        let mut enabled = OkConfig::default();
+        enabled.scip.enabled = false;
+        let snapshot = Indexer::default().index_repo(root, &enabled).unwrap();
+        assert!(snapshot.manifest.quality.git_history_facts > 0);
+        assert!(snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.source_type == EvidenceSourceType::GitHistory
+                && fact.target == "tests/auth_test.rs"));
+
+        let mut disabled = enabled;
+        disabled.history.enabled = false;
+        let snapshot = Indexer::default().index_repo(root, &disabled).unwrap();
+        assert_eq!(snapshot.manifest.quality.git_history_facts, 0);
+        assert!(!snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.source_type == EvidenceSourceType::GitHistory));
+    }
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
     }
 }

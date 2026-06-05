@@ -3,7 +3,9 @@ use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::{OkConfig, RankingConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_core::{Confidence, ContextHandleId, IndexManifest, PlanReport};
+use open_kioku_core::{
+    Confidence, ContextHandleId, EvidenceSourceType, IndexManifest, PlanReport, ScoreComponent,
+};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ingest::{IndexProgress, Indexer};
@@ -1437,6 +1439,12 @@ fn render_status_markdown(
                 manifest.quality.runtime_analysis_facts
             ));
         }
+        if manifest.quality.git_history_facts > 0 {
+            out.push_str(&format!(
+                "| Git history facts | {} |\n",
+                manifest.quality.git_history_facts
+            ));
+        }
         if manifest.quality.codeql_databases > 0 {
             out.push_str(&format!(
                 "| CodeQL databases | {} |\n",
@@ -1863,6 +1871,9 @@ fn quality_provider_report(
     let runtime_analysis_facts = manifest
         .map(|manifest| manifest.quality.runtime_analysis_facts)
         .unwrap_or(0);
+    let git_history_facts = manifest
+        .map(|manifest| manifest.quality.git_history_facts)
+        .unwrap_or(0);
     let mut providers = Vec::new();
 
     providers.push(QualityProviderReport {
@@ -1935,6 +1946,20 @@ fn quality_provider_report(
             next_step: None,
         });
     }
+    providers.push(QualityProviderReport {
+        name: "git-history",
+        status: if git_history_facts > 0 {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        evidence: format!("{git_history_facts} git co-change fact(s) from local history"),
+        next_step: if git_history_facts == 0 {
+            Some("Keep repository history available and enable `[history].enabled = true`, then rerun `ok index .`.".into())
+        } else {
+            None
+        },
+    });
     providers.push(QualityProviderReport {
         name: "validation",
         status: if test_count > 0 {
@@ -2838,13 +2863,16 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
     let mut abstention_required = 0usize;
 
     for case in cases {
-        let raw_candidates = search_raw(&repo, &store, &case.task, ranking_candidate_limit(limit))?;
-        let mut baseline_results = rerank_baseline(raw_candidates.clone());
-        baseline_results.truncate(limit);
+        let mut raw_candidates =
+            search_raw(&repo, &store, &case.task, ranking_candidate_limit(limit))?;
+        let baseline_results = top_unique_paths(rerank_baseline(raw_candidates.clone()), limit);
+        annotate_candidates_with_git_history(&store, &mut raw_candidates)?;
         let mut case_ranking_options = ranking_options.clone();
         case_ranking_options.query = Some(case.task.clone());
-        let mut search_results = rerank_with_options(raw_candidates.clone(), &case_ranking_options);
-        search_results.truncate(limit);
+        let search_results = top_unique_paths(
+            rerank_with_options(raw_candidates.clone(), &case_ranking_options),
+            limit,
+        );
         let context = build_context_pack(&repo, &store, &case.task, limit)?;
         let search_paths = search_results
             .iter()
@@ -2883,8 +2911,13 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
         for (signal, recall, mrr, ndcg_value) in &mut ablation_sums {
             let mut ablation_options = case_ranking_options.clone();
             ablation_options.mode = RankingMode::WithoutSignal(*signal);
-            let mut ablated = rerank_with_options(raw_candidates.clone(), &ablation_options);
-            ablated.truncate(limit);
+            let candidates = if *signal == RankingSignal::GitCochange {
+                without_git_history_candidates(raw_candidates.clone())
+            } else {
+                raw_candidates.clone()
+            };
+            let ablated =
+                top_unique_paths(rerank_with_options(candidates, &ablation_options), limit);
             let ablated_paths = ablated
                 .iter()
                 .map(|result| result.path.clone())
@@ -4250,13 +4283,144 @@ fn search_with_ranking_mode(
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
     let repo = repo.as_ref();
     let candidate_limit = ranking_candidate_limit(limit);
-    let raw = search_raw(repo, store, query, candidate_limit)?;
+    let mut raw = search_raw(repo, store, query, candidate_limit)?;
+    annotate_candidates_with_git_history(store, &mut raw)?;
     let mut options = ranking_options_for_repo(repo)?;
     options.mode = mode;
     options.query = Some(query.into());
-    let mut ranked = rerank_with_options(raw, &options);
-    ranked.truncate(limit);
-    Ok(ranked)
+    Ok(top_unique_paths(rerank_with_options(raw, &options), limit))
+}
+
+fn annotate_candidates_with_git_history(
+    store: &dyn MetadataStore,
+    results: &mut Vec<open_kioku_core::SearchResult>,
+) -> anyhow::Result<()> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_path = files
+        .into_iter()
+        .map(|file| (normalize_path_fragment(&file.path.to_string_lossy()), file))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut existing_paths = results
+        .iter()
+        .map(|result| normalize_path_fragment(&result.path.to_string_lossy()))
+        .collect::<std::collections::HashSet<_>>();
+    let mut additions = Vec::new();
+    for result in &mut *results {
+        let Some(file) =
+            files_by_path.get(&normalize_path_fragment(&result.path.to_string_lossy()))
+        else {
+            continue;
+        };
+        let matched = facts
+            .iter()
+            .filter(|fact| fact.file_id == file.id)
+            .take(32)
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            continue;
+        }
+        let displayed = matched.iter().copied().take(3).collect::<Vec<_>>();
+        let evidence_ids = displayed
+            .iter()
+            .map(|fact| fact.id.clone())
+            .collect::<Vec<_>>();
+        let labels = displayed
+            .iter()
+            .map(|fact| fact.target.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for fact in &displayed {
+            let evidence = format!(
+                "git co-change from local history: `{}` ({})",
+                fact.target, fact.message
+            );
+            if !result.evidence.contains(&evidence) {
+                result.evidence.push(evidence);
+            }
+        }
+        for id in &evidence_ids {
+            if !result.evidence_refs.contains(id) {
+                result.evidence_refs.push(id.clone());
+            }
+        }
+        result.score_breakdown.push(ScoreComponent::adjustment(
+            "git_cochange",
+            0.12 * matched.len() as f32,
+            evidence_ids,
+            format!("local git history says this result co-changed with: {labels}"),
+        ));
+        for fact in matched {
+            let target_path = normalize_path_fragment(&fact.target);
+            if !existing_paths.insert(target_path.clone()) {
+                continue;
+            }
+            let Some(target_file) = files_by_path.get(&target_path) else {
+                continue;
+            };
+            let snippet = store
+                .chunks_for_file(&target_file.id)?
+                .first()
+                .map(|chunk| chunk.text.clone())
+                .unwrap_or_else(|| target_file.path.display().to_string());
+            additions.push(open_kioku_core::SearchResult {
+                path: target_file.path.clone(),
+                line_range: None,
+                snippet,
+                symbol: None,
+                score: 0.95 + fact.confidence.score(),
+                match_reason: "historical git co-change candidate".into(),
+                evidence: vec![format!(
+                    "git co-change from local history: `{}` ({})",
+                    fact.target, fact.message
+                )],
+                evidence_refs: vec![fact.id.clone()],
+                confidence: fact.confidence.score(),
+                score_breakdown: vec![ScoreComponent::single(
+                    "git_cochange",
+                    0.35,
+                    vec![fact.id.clone()],
+                    "candidate added from historical git co-change evidence",
+                )],
+            });
+        }
+    }
+    results.extend(additions);
+    Ok(())
+}
+
+fn without_git_history_candidates(
+    results: Vec<open_kioku_core::SearchResult>,
+) -> Vec<open_kioku_core::SearchResult> {
+    results
+        .into_iter()
+        .filter(|result| result.match_reason != "historical git co-change candidate")
+        .collect()
+}
+
+fn top_unique_paths(
+    results: Vec<open_kioku_core::SearchResult>,
+    limit: usize,
+) -> Vec<open_kioku_core::SearchResult> {
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::with_capacity(limit);
+    for result in results {
+        let path = normalize_path_fragment(&result.path.to_string_lossy());
+        if !seen.insert(path) {
+            continue;
+        }
+        unique.push(result);
+        if unique.len() == limit {
+            break;
+        }
+    }
+    unique
 }
 
 fn search_raw(
