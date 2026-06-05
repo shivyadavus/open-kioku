@@ -1,0 +1,186 @@
+[
+  {
+    "id": "plan-engine",
+    "task": "change plan engine boundary evidence",
+    "expected_primary_context": ["crates/open-kioku-plan/src/lib.rs"],
+    "expected_impact": ["crates/open-kioku-context/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-plan/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-plan/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "context-pack",
+    "task": "improve context pack primary file selection",
+    "expected_primary_context": ["crates/open-kioku-context/src/lib.rs"],
+    "expected_impact": ["crates/open-kioku-plan/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-context/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-context/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "test-selector",
+    "task": "update test selection scoring for changed files",
+    "expected_primary_context": ["crates/open-kioku-tests/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-tests/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-tests/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "tantivy-search",
+    "task": "change TantivySearchIndex ranking",
+    "expected_primary_context": ["crates/open-kioku-search-tantivy/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-search-tantivy/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-search-tantivy/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "sqlite-storage",
+    "task": "persist analysis facts in sqlite storage",
+    "expected_primary_context": ["crates/open-kioku-storage-sqlite/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-storage-sqlite/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-storage-sqlite/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "ingest-history",
+    "task": "index git history facts during ingest",
+    "expected_primary_context": ["crates/open-kioku-ingest/src/lib.rs"],
+    "expected_impact": ["crates/open-kioku-git/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-ingest/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-ingest/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "git-history",
+    "task": "parse git log cochange records",
+    "expected_primary_context": ["crates/open-kioku-git/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-git/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-git/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "ranking-signals",
+    "task": "adjust ranking signal weights",
+    "expected_primary_context": ["crates/open-kioku-ranking/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-ranking/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-ranking/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "impact-analysis",
+    "task": "improve impact analysis direct impacts",
+    "expected_primary_context": ["crates/open-kioku-impact/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-impact/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-impact/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "patch-verify",
+    "task": "verify changed files against saved plans",
+    "expected_primary_context": ["crates/open-kioku-patch/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-patch/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-patch/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "mcp-tools",
+    "task": "update MCP verify_change tool schema",
+    "expected_primary_context": ["crates/open-kioku-mcp/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-mcp/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-mcp/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "cli-eval",
+    "task": "add eval report ablations to CLI",
+    "expected_primary_context": ["crates/open-kioku-cli/src/main.rs"],
+    "expected_boundary": ["crates/open-kioku-cli/src/main.rs"],
+    "changed_files": ["crates/open-kioku-cli/src/main.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "config-history",
+    "task": "add history configuration defaults",
+    "expected_primary_context": ["crates/open-kioku-config/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-config/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-config/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "parse-java",
+    "task": "extract java static analysis facts",
+    "expected_primary_context": ["crates/open-kioku-parse/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-parse/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-parse/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "scip-import",
+    "task": "import binary SCIP index occurrences",
+    "expected_primary_context": ["crates/open-kioku-scip/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-scip/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-scip/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "memory-search",
+    "task": "search repo memory facts by entity",
+    "expected_primary_context": ["crates/open-kioku-memory/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-memory/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-memory/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "architecture",
+    "task": "detect architecture component boundaries",
+    "expected_primary_context": ["crates/open-kioku-architecture/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-architecture/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-architecture/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "watch-index",
+    "task": "watch index status reindex repo",
+    "expected_primary_context": ["crates/open-kioku-watch/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-watch/src/lib.rs"],
+    "changed_files": ["crates/open-kioku-watch/src/lib.rs"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  },
+  {
+    "id": "forbidden-generated",
+    "task": "change plan engine boundary evidence",
+    "expected_primary_context": ["crates/open-kioku-plan/src/lib.rs"],
+    "expected_boundary": ["crates/open-kioku-plan/src/lib.rs"],
+    "forbidden_paths": ["target/generated.rs"],
+    "changed_files": ["target/generated.rs"],
+    "expected_verdict": "fail",
+    "expected_confidence": false
+  },
+  {
+    "id": "docs-agent-workflow",
+    "task": "document agent workflows for contributors",
+    "expected_primary_context": ["docs/guides/agent-workflows.md"],
+    "expected_boundary": ["docs/guides/agent-workflows.md"],
+    "changed_files": ["docs/guides/agent-workflows.md"],
+    "expected_verdict": "warn",
+    "expected_confidence": true
+  }
+]

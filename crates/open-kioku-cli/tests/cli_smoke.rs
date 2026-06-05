@@ -488,6 +488,42 @@ fn demo_creates_indexed_sample_repo() {
     assert!(eval.contains("\"ablations\""));
     assert!(eval.contains("\"signal\": \"text_relevance\""));
     assert!(eval.contains("\"top_search_signals\""));
+
+    let workflow_cases = repo.join("workflow-cases.json");
+    fs::write(
+        &workflow_cases,
+        r#"[
+          {
+            "id": "auth-token",
+            "task": "issue_token",
+            "expected_primary_context": ["src/auth.rs"],
+            "expected_boundary": ["src/auth.rs"],
+            "changed_files": ["src/auth.rs"],
+            "expected_verdict": "pass",
+            "expected_confidence": true
+          }
+        ]"#,
+    )
+    .unwrap();
+    let workflow_bench = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("workflow-bench")
+            .arg(&repo)
+            .arg("--cases-file")
+            .arg(&workflow_cases)
+            .arg("--limit")
+            .arg("5")
+            .arg("--min-cases")
+            .arg("1")
+            .arg("--no-index");
+        command
+    });
+    assert!(workflow_bench.contains("\"workflow\""));
+    assert!(workflow_bench.contains("\"deltas\""));
+    assert!(workflow_bench.contains("\"context_recall_at_k\""));
+    assert!(workflow_bench.contains("\"verification_verdict_accuracy\""));
 }
 
 #[test]

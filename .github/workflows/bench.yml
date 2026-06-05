@@ -36,3 +36,10 @@ jobs:
           --quality-case TantivySearchIndex=crates/open-kioku-search-tantivy/src/lib.rs \
           --quality-case WatchIndexStatus=crates/open-kioku-watch/src/lib.rs \
           --quality-min-precision-at-1 1.0
+        ./target/release/ok workflow-bench . \
+          --cases-file benchmarks/workflow-cases.json \
+          --limit 10 \
+          --min-cases 20 \
+          --min-context-recall 1.0 \
+          --min-verification-accuracy 1.0 \
+          --no-index
