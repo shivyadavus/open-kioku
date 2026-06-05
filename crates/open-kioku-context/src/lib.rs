@@ -5,7 +5,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
-use open_kioku_ranking::rerank;
+use open_kioku_ranking::{rerank_with_options, RankingOptions};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::OkStore;
 use open_kioku_tests::TestSelector;
@@ -74,11 +74,20 @@ impl ContextPackFormat {
 
 pub struct ContextPackBuilder<'a> {
     store: &'a dyn OkStore,
+    ranking_options: RankingOptions,
 }
 
 impl<'a> ContextPackBuilder<'a> {
     pub fn new(store: &'a dyn OkStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            ranking_options: RankingOptions::default(),
+        }
+    }
+
+    pub fn with_ranking_options(mut self, ranking_options: RankingOptions) -> Self {
+        self.ranking_options = ranking_options;
+        self
     }
 
     pub fn build(&self, task: &str, limit: usize) -> Result<ContextPack> {
@@ -89,6 +98,7 @@ impl<'a> ContextPackBuilder<'a> {
         let primary = rerank_for_task(
             search_candidates(&chunks, &files, &symbols, task, limit, &intent)?,
             &intent,
+            &self.ranking_options,
         );
         self.build_from_primary_with_impact(task, limit, primary, true)
     }
@@ -99,7 +109,12 @@ impl<'a> ContextPackBuilder<'a> {
         limit: usize,
         primary: Vec<SearchResult>,
     ) -> Result<ContextPack> {
-        self.build_from_primary_with_impact(task, limit, rerank(primary), false)
+        self.build_from_primary_with_impact(
+            task,
+            limit,
+            rerank_with_options(primary, &self.ranking_options),
+            false,
+        )
     }
 
     fn build_from_primary_with_impact(
@@ -320,8 +335,12 @@ fn search_candidates(
     Ok(merged.into_values().collect())
 }
 
-fn rerank_for_task(results: Vec<SearchResult>, intent: &TaskSearchIntent) -> Vec<SearchResult> {
-    let mut results = rerank(results);
+fn rerank_for_task(
+    results: Vec<SearchResult>,
+    intent: &TaskSearchIntent,
+    ranking_options: &RankingOptions,
+) -> Vec<SearchResult> {
+    let mut results = rerank_with_options(results, ranking_options);
     for result in &mut results {
         let haystack = searchable_result_text(result);
         for anchor in &intent.primary_anchors {
@@ -657,6 +676,7 @@ mod tests {
         let results = rerank_for_task(
             search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
             &intent,
+            &RankingOptions::default(),
         );
 
         assert_eq!(
