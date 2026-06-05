@@ -333,6 +333,7 @@ mod tests {
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 evidence_refs: Vec::new(),
+                ..Default::default()
             },
             validation_plan: ValidationPlan {
                 commands: Vec::new(),
