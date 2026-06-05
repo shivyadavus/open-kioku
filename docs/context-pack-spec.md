@@ -20,6 +20,16 @@ A Context Pack is the agent-ready bundle returned before edits:
   },
   "validation_plan": {},
   "evidence": [],
+  "negative_evidence": [
+    {
+      "query": "Add retry handling for failed API imports",
+      "scope": "runtime",
+      "inspected_sources": ["runtime_signals", "search_result.evidence"],
+      "reason": "no runtime trace, incident, or error artifact corroborated the selected context",
+      "confidence": 0.75,
+      "suggested_next_probe": "Import or configure runtime artifacts, then rerun `ok plan`."
+    }
+  ],
   "confidence_summary": "",
   "confidence_breakdown": {
     "overall_enum": "medium",
