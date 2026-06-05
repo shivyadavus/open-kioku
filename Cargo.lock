@@ -1174,6 +1174,7 @@ dependencies = [
  "open-kioku-ranking",
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
+ "open-kioku-semantic",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
  "open-kioku-symbols",
@@ -1514,11 +1515,17 @@ dependencies = [
 name = "open-kioku-semantic"
 version = "1.0.4"
 dependencies = [
+ "chrono",
  "open-kioku-config",
  "open-kioku-core",
  "open-kioku-embeddings",
  "open-kioku-errors",
  "open-kioku-storage",
+ "open-kioku-storage-sqlite",
+ "open-kioku-vector",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1600,6 +1607,15 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+]
+
+[[package]]
+name = "open-kioku-vector"
+version = "1.0.4"
+dependencies = [
+ "open-kioku-errors",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

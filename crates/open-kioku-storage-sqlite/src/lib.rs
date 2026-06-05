@@ -105,6 +105,42 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
+            CREATE TABLE IF NOT EXISTS vector_targets (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              target_kind TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              vector_id INTEGER NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_vector_targets_file ON vector_targets(file_id);
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              cache_key TEXT PRIMARY KEY,
+              target_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_index_runs (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              vector_count INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS semantic_coverage (
+              id TEXT PRIMARY KEY,
+              target_kind TEXT NOT NULL,
+              indexed_count INTEGER NOT NULL,
+              stale_count INTEGER NOT NULL,
+              failed_count INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS graph_nodes (
               id TEXT PRIMARY KEY,
               label TEXT NOT NULL,

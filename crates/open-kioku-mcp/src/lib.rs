@@ -10,7 +10,7 @@ use open_kioku_patch::{ChangeVerifier, PatchPlanner, VerifyChangeInput};
 use open_kioku_plan::{PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
-use open_kioku_semantic::SemanticSearchEngine;
+use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::disabled_response;
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
@@ -251,7 +251,10 @@ async fn dispatch(
             let (nodes, edges) = store.neighbors(&node, limit(&params))?;
             Ok(json!({"symbol": symbol, "nodes": nodes, "edges": edges}))
         }
+        "semantic_status" => semantic_status_tool(repo, store, config),
         "semantic_search" => semantic_search_tool(repo, store, config, &params),
+        "hybrid_search" => hybrid_search_tool(repo, store, config, &params),
+        "explain_search_result" => hybrid_search_tool(repo, store, config, &params),
         "get_implementations" | "structural_search" => search_tool(repo, store, &params),
         "dependency_path" => {
             let from = required_str(&params, "from")?;
@@ -422,10 +425,100 @@ fn semantic_search_tool(
     params: &Value,
 ) -> anyhow::Result<Value> {
     let query = required_str(params, "query")?;
-    if let Some(engine) = SemanticSearchEngine::from_config(store, &config.semantic)? {
-        return Ok(json!(engine.search(query, limit(params))?));
+    let mut semantic_config = config.semantic.clone();
+    semantic_config.enabled = true;
+    let manager = SemanticIndexManager::new(repo, store, &semantic_config);
+    let status = manager.status();
+    if status.ready {
+        return Ok(json!({
+            "semantic_status": status,
+            "results": manager.search(query, limit(params))?,
+        }));
     }
-    search_tool(repo, store, params)
+    Ok(json!({
+        "semantic_status": status,
+        "results": [],
+        "error": "semantic index is not ready; run `ok semantic index` first"
+    }))
+}
+
+fn semantic_status_tool(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    config: &OkConfig,
+) -> anyhow::Result<Value> {
+    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
+    Ok(json!(manager.status()))
+}
+
+fn hybrid_search_tool(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    config: &OkConfig,
+    params: &Value,
+) -> anyhow::Result<Value> {
+    let query = required_str(params, "query")?;
+    let mut results = search_tool(repo, store, params)?
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect::<Vec<open_kioku_core::SearchResult>>();
+    let mut semantic_config = config.semantic.clone();
+    semantic_config.enabled = true;
+    let manager = SemanticIndexManager::new(repo, store, &semantic_config);
+    let status = manager.status();
+    if status.ready {
+        merge_semantic_results(&mut results, manager.search(query, limit(params))?);
+    }
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    results.truncate(limit(params));
+    Ok(json!({
+        "semantic_status": status,
+        "results": results,
+    }))
+}
+
+fn merge_semantic_results(
+    results: &mut Vec<open_kioku_core::SearchResult>,
+    semantic_results: Vec<open_kioku_core::SearchResult>,
+) {
+    for semantic in semantic_results {
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|result| result.path == semantic.path)
+        {
+            for evidence in semantic.evidence {
+                if !existing.evidence.contains(&evidence) {
+                    existing.evidence.push(evidence);
+                }
+            }
+            for evidence_ref in semantic.evidence_refs {
+                if !existing.evidence_refs.contains(&evidence_ref) {
+                    existing.evidence_refs.push(evidence_ref);
+                }
+            }
+            for component in semantic.score_breakdown {
+                if !existing
+                    .score_breakdown
+                    .iter()
+                    .any(|existing| existing.signal == component.signal)
+                {
+                    existing.score_breakdown.push(component);
+                }
+            }
+            existing.reconcile_score_breakdown();
+        } else {
+            results.push(semantic);
+        }
+    }
 }
 
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
@@ -441,7 +534,10 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("search_code", "Lexical BM25 search across all indexed code chunks", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"integer"}}})),
         ("search_files", "Search indexed files by content", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("regex_search", "Search indexed code using a regex pattern", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"Regex pattern"},"limit":{"type":"integer"}}})),
-        ("semantic_search", "Optional semantic search using configured offline providers; falls back to lexical when disabled", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
+        ("semantic_status", "Report local semantic vector index readiness and staleness", json!({"type":"object","properties":{}})),
+        ("semantic_search", "Search the local semantic vector index with explicit semantic status metadata", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
+        ("hybrid_search", "Combine lexical and semantic candidates with explainable evidence", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
+        ("explain_search_result", "Run hybrid search and return ranking/evidence details for top results", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("structural_search", "Structural search across symbols and chunks", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
         ("get_definition", "Find the definition of a symbol by name", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Symbol name"}}})),
         ("get_references", "Find all references to a symbol", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}})),
@@ -525,6 +621,9 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
 fn tool_maturity(name: &str) -> &'static str {
     match name {
         "semantic_search"
+        | "semantic_status"
+        | "hybrid_search"
+        | "explain_search_result"
         | "structural_search"
         | "get_implementations"
         | "get_callers"

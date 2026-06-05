@@ -19,6 +19,7 @@ members = [
   "crates/open-kioku-impact",
   "crates/open-kioku-architecture",
   "crates/open-kioku-semantic",
+  "crates/open-kioku-vector",
   "crates/open-kioku-embeddings",
   "crates/open-kioku-qdrant",
   "crates/open-kioku-sentry",

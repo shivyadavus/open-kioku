@@ -3,7 +3,10 @@
   "jsonrpc": "2.0",
   "result": {
     "_unstable_experimental_tools": [
+      "semantic_status",
       "semantic_search",
+      "hybrid_search",
+      "explain_search_result",
       "structural_search",
       "get_implementations",
       "get_callers",
@@ -177,7 +180,17 @@
         "name": "regex_search"
       },
       {
-        "description": "Optional semantic search using configured offline providers; falls back to lexical when disabled",
+        "description": "Report local semantic vector index readiness and staleness",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "semantic_status"
+      },
+      {
+        "description": "Search the local semantic vector index with explicit semantic status metadata",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -195,6 +208,46 @@
         },
         "maturity": "experimental",
         "name": "semantic_search"
+      },
+      {
+        "description": "Combine lexical and semantic candidates with explainable evidence",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "hybrid_search"
+      },
+      {
+        "description": "Run hybrid search and return ranking/evidence details for top results",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "explain_search_result"
       },
       {
         "description": "Structural search across symbols and chunks",
