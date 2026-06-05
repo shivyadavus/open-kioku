@@ -33,6 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -87,6 +91,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -110,6 +118,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
 
       - uses: actions/setup-node@v4
         with:

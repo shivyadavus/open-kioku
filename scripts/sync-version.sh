@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sync-version.sh
 # Reads the canonical version from Cargo.toml [workspace.package]
-# and writes it into every marketplace manifest.
+# and writes it into every marketplace and release manifest.
 # Safe to run repeatedly (idempotent).
 
 set -euo pipefail
@@ -55,5 +55,22 @@ for NPM_JSON in "$ROOT"/packages/npm*/package.json; do
   echo "  ✓ ${NPM_JSON#$ROOT/}"
 done
 shopt -u nullglob
+
+# ── Release metadata ─────────────────────────────────────────────────────────
+RELEASE_JSON="$ROOT/release-metadata.json"
+if [[ -f "$RELEASE_JSON" ]]; then
+  sync_json_version "$RELEASE_JSON"
+  sed -i.bak "s/\"tag\": \"v[^\"]*\"/\"tag\": \"v$VERSION\"/g" "$RELEASE_JSON"
+  rm -f "${RELEASE_JSON}.bak"
+  echo "  ✓ release-metadata.json"
+fi
+
+# ── Homebrew formula version and release URLs ────────────────────────────────
+FORMULA="$ROOT/Formula/open-kioku.rb"
+if [[ -f "$FORMULA" ]]; then
+  sed -i.bak -E "s/version \"[^\"]+\"/version \"$VERSION\"/g; s/releases\\/download\\/v[0-9]+\\.[0-9]+\\.[0-9]+/releases\\/download\\/v$VERSION/g" "$FORMULA"
+  rm -f "${FORMULA}.bak"
+  echo "  ✓ Formula/open-kioku.rb"
+fi
 
 echo "Done. All manifests are at $VERSION."
