@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::{OkConfig, ScipMode};
+use open_kioku_config::{OkConfig, RankingConfig, ScipMode};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{Confidence, ContextHandleId, IndexManifest};
@@ -10,6 +10,10 @@ use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::PatchPlanner;
 use open_kioku_plan::{PlanEngine, PlanFormat};
+use open_kioku_ranking::{
+    rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
+    RankingSignal, RankingWeights,
+};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
 use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIndex};
@@ -83,6 +87,8 @@ enum Command {
         query: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long, default_value_t = false)]
+        explain_ranking: bool,
     },
     Symbol {
         #[command(subcommand)]
@@ -268,6 +274,10 @@ struct EvalArgs {
     /// Fail when mean reciprocal rank is below this threshold.
     #[arg(long, default_value_t = 0.0)]
     min_mrr: f64,
+
+    /// Use the existing .ok index instead of re-indexing before evaluation.
+    #[arg(long, default_value_t = false)]
+    no_index: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -498,6 +508,9 @@ struct EvalReport {
     limit: usize,
     case_count: usize,
     summary: EvalSummary,
+    baseline: RankingEvalSummary,
+    fusion: RankingEvalSummary,
+    ablations: Vec<RankingAblationReport>,
     cases: Vec<EvalCaseReport>,
 }
 
@@ -511,6 +524,25 @@ struct EvalSummary {
     abstention_required: usize,
 }
 
+#[derive(Serialize, Clone)]
+struct RankingEvalSummary {
+    mode: String,
+    search_recall_at_k: f64,
+    search_mrr: f64,
+    search_ndcg_at_k: f64,
+}
+
+#[derive(Serialize)]
+struct RankingAblationReport {
+    signal: String,
+    search_recall_at_k: f64,
+    search_mrr: f64,
+    search_ndcg_at_k: f64,
+    recall_delta_vs_fusion: f64,
+    mrr_delta_vs_fusion: f64,
+    ndcg_delta_vs_fusion: f64,
+}
+
 #[derive(Serialize)]
 struct EvalCaseReport {
     task: String,
@@ -521,6 +553,7 @@ struct EvalCaseReport {
     test_hits: Vec<String>,
     top_search_paths: Vec<PathBuf>,
     top_context_paths: Vec<PathBuf>,
+    top_search_signals: Vec<String>,
     confidence: &'static str,
     notes: Vec<String>,
 }
@@ -841,7 +874,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Search { query, limit } => {
+        Command::Search {
+            query,
+            limit,
+            explain_ranking,
+        } => {
             let store = open_store(&repo)?;
             let results = search(&repo, &store, &query, limit)?;
             output(cli.json, &results, || {
@@ -853,6 +890,14 @@ async fn main() -> anyhow::Result<()> {
                         result.score,
                         result.snippet
                     );
+                    if explain_ranking {
+                        let signals = top_score_signals(result, 3);
+                        if signals.is_empty() {
+                            println!("  ranking: no dominant signals");
+                        } else {
+                            println!("  ranking: {}", signals.join(", "));
+                        }
+                    }
                 }
             })?;
         }
@@ -2675,20 +2720,41 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
         anyhow::bail!("no eval cases provided; pass --case TASK=EXPECTED_PATH or --cases-file");
     }
 
-    index_repo(&repo)?;
+    if !args.no_index {
+        index_repo(&repo)?;
+    }
     let store = open_store(&repo)?;
+    let ranking_options = ranking_options_for_repo(&repo)?;
     let mut case_reports = Vec::with_capacity(cases.len());
     let mut recall_sum = 0.0;
     let mut mrr_sum = 0.0;
     let mut ndcg_sum = 0.0;
+    let mut baseline_recall_sum = 0.0;
+    let mut baseline_mrr_sum = 0.0;
+    let mut baseline_ndcg_sum = 0.0;
+    let signals = ranking_ablation_signals();
+    let mut ablation_sums = signals
+        .iter()
+        .map(|signal| (*signal, 0.0, 0.0, 0.0))
+        .collect::<Vec<_>>();
     let mut context_recall_sum = 0.0;
     let mut test_recall_sum = 0.0;
     let mut abstention_required = 0usize;
 
     for case in cases {
-        let search_results = search(&repo, &store, &case.task, limit)?;
+        let raw_candidates = search_raw(&repo, &store, &case.task, ranking_candidate_limit(limit))?;
+        let mut baseline_results = rerank_baseline(raw_candidates.clone());
+        baseline_results.truncate(limit);
+        let mut case_ranking_options = ranking_options.clone();
+        case_ranking_options.query = Some(case.task.clone());
+        let mut search_results = rerank_with_options(raw_candidates.clone(), &case_ranking_options);
+        search_results.truncate(limit);
         let context = build_context_pack(&repo, &store, &case.task, limit)?;
         let search_paths = search_results
+            .iter()
+            .map(|result| result.path.clone())
+            .collect::<Vec<_>>();
+        let baseline_paths = baseline_results
             .iter()
             .map(|result| result.path.clone())
             .collect::<Vec<_>>();
@@ -2704,12 +2770,37 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
             .map(|test| test.name.clone())
             .collect::<Vec<_>>();
 
+        let baseline_ranks = expected_path_ranks(&case.expected_paths, &baseline_paths);
+        baseline_recall_sum += ratio(
+            baseline_ranks.iter().filter(|rank| rank.is_some()).count(),
+            case.expected_paths.len(),
+        );
+        baseline_mrr_sum += reciprocal_rank(&baseline_ranks);
+        baseline_ndcg_sum += ndcg(&baseline_ranks, limit);
+
         let search_ranks = expected_path_ranks(&case.expected_paths, &search_paths);
         let search_hits = search_ranks.iter().filter(|rank| rank.is_some()).count();
         let search_recall = ratio(search_hits, case.expected_paths.len());
         recall_sum += search_recall;
         mrr_sum += reciprocal_rank(&search_ranks);
         ndcg_sum += ndcg(&search_ranks, limit);
+        for (signal, recall, mrr, ndcg_value) in &mut ablation_sums {
+            let mut ablation_options = case_ranking_options.clone();
+            ablation_options.mode = RankingMode::WithoutSignal(*signal);
+            let mut ablated = rerank_with_options(raw_candidates.clone(), &ablation_options);
+            ablated.truncate(limit);
+            let ablated_paths = ablated
+                .iter()
+                .map(|result| result.path.clone())
+                .collect::<Vec<_>>();
+            let ablated_ranks = expected_path_ranks(&case.expected_paths, &ablated_paths);
+            *recall += ratio(
+                ablated_ranks.iter().filter(|rank| rank.is_some()).count(),
+                case.expected_paths.len(),
+            );
+            *mrr += reciprocal_rank(&ablated_ranks);
+            *ndcg_value += ndcg(&ablated_ranks, limit);
+        }
 
         let context_hits = matching_expected_values(&case.expected_paths, &context_paths);
         let context_recall = ratio(context_hits.len(), case.expected_paths.len());
@@ -2748,24 +2839,60 @@ fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
             test_hits,
             top_search_paths: search_paths.into_iter().take(limit).collect(),
             top_context_paths: context_paths.into_iter().take(limit).collect(),
+            top_search_signals: search_results
+                .first()
+                .map(|result| top_score_signals(result, 3))
+                .unwrap_or_default(),
             confidence,
             notes,
         });
     }
 
     let count = case_reports.len() as f64;
+    let fusion = RankingEvalSummary {
+        mode: "fusion".into(),
+        search_recall_at_k: recall_sum / count,
+        search_mrr: mrr_sum / count,
+        search_ndcg_at_k: ndcg_sum / count,
+    };
+    let baseline = RankingEvalSummary {
+        mode: "baseline".into(),
+        search_recall_at_k: baseline_recall_sum / count,
+        search_mrr: baseline_mrr_sum / count,
+        search_ndcg_at_k: baseline_ndcg_sum / count,
+    };
+    let ablations = ablation_sums
+        .into_iter()
+        .map(|(signal, recall, mrr, ndcg_value)| {
+            let recall_at_k = recall / count;
+            let search_mrr = mrr / count;
+            let ndcg_at_k = ndcg_value / count;
+            RankingAblationReport {
+                signal: ranking_signal_name(signal).into(),
+                search_recall_at_k: recall_at_k,
+                search_mrr,
+                search_ndcg_at_k: ndcg_at_k,
+                recall_delta_vs_fusion: fusion.search_recall_at_k - recall_at_k,
+                mrr_delta_vs_fusion: fusion.search_mrr - search_mrr,
+                ndcg_delta_vs_fusion: fusion.search_ndcg_at_k - ndcg_at_k,
+            }
+        })
+        .collect::<Vec<_>>();
     Ok(EvalReport {
         repo,
         limit,
         case_count: case_reports.len(),
         summary: EvalSummary {
-            search_recall_at_k: recall_sum / count,
-            search_mrr: mrr_sum / count,
-            search_ndcg_at_k: ndcg_sum / count,
+            search_recall_at_k: fusion.search_recall_at_k,
+            search_mrr: fusion.search_mrr,
+            search_ndcg_at_k: fusion.search_ndcg_at_k,
             context_recall_at_k: context_recall_sum / count,
             test_recall_at_k: test_recall_sum / count,
             abstention_required,
         },
+        baseline,
+        fusion,
+        ablations,
         cases: case_reports,
     })
 }
@@ -2893,6 +3020,38 @@ fn print_eval_report(report: &EvalReport) {
         report.summary.search_ndcg_at_k
     );
     println!(
+        "Ranking baseline: recall@{} {:.3}, MRR {:.3}, nDCG@{} {:.3}",
+        report.limit,
+        report.baseline.search_recall_at_k,
+        report.baseline.search_mrr,
+        report.limit,
+        report.baseline.search_ndcg_at_k
+    );
+    println!(
+        "Ranking fusion: recall@{} {:.3}, MRR {:.3}, nDCG@{} {:.3}",
+        report.limit,
+        report.fusion.search_recall_at_k,
+        report.fusion.search_mrr,
+        report.limit,
+        report.fusion.search_ndcg_at_k
+    );
+    if !report.ablations.is_empty() {
+        println!("Ranking ablations:");
+        for ablation in &report.ablations {
+            println!(
+                "  - without {}: recall@{} {:.3} (delta {:+.3}), MRR {:.3} (delta {:+.3}), nDCG {:.3} (delta {:+.3})",
+                ablation.signal,
+                report.limit,
+                ablation.search_recall_at_k,
+                ablation.recall_delta_vs_fusion,
+                ablation.search_mrr,
+                ablation.mrr_delta_vs_fusion,
+                ablation.search_ndcg_at_k,
+                ablation.ndcg_delta_vs_fusion
+            );
+        }
+    }
+    println!(
         "Context recall@{} {:.3}, test recall@{} {:.3}, weak/abstain {}",
         report.limit,
         report.summary.context_recall_at_k,
@@ -2904,12 +3063,46 @@ fn print_eval_report(report: &EvalReport) {
         println!("\n- {} [{}]", case.task, case.confidence);
         println!("  expected paths: {}", case.expected_paths.join(", "));
         println!("  ranks: {:?}", case.search_ranks);
+        if !case.top_search_signals.is_empty() {
+            println!(
+                "  top ranking signals: {}",
+                case.top_search_signals.join(", ")
+            );
+        }
         if !case.test_hits.is_empty() {
             println!("  test hits: {}", case.test_hits.join(", "));
         }
         for note in &case.notes {
             println!("  note: {note}");
         }
+    }
+}
+
+fn ranking_ablation_signals() -> Vec<RankingSignal> {
+    vec![
+        RankingSignal::TextRelevance,
+        RankingSignal::ExactReference,
+        RankingSignal::GraphProximity,
+        RankingSignal::BoundaryFit,
+        RankingSignal::RuntimeCorroboration,
+        RankingSignal::GitCochange,
+        RankingSignal::ValidationProximity,
+        RankingSignal::MemorySignal,
+        RankingSignal::PathQuality,
+    ]
+}
+
+fn ranking_signal_name(signal: RankingSignal) -> &'static str {
+    match signal {
+        RankingSignal::TextRelevance => "text_relevance",
+        RankingSignal::ExactReference => "exact_reference",
+        RankingSignal::GraphProximity => "graph_proximity",
+        RankingSignal::BoundaryFit => "boundary_fit",
+        RankingSignal::RuntimeCorroboration => "runtime_corroboration",
+        RankingSignal::GitCochange => "git_cochange",
+        RankingSignal::ValidationProximity => "validation_proximity",
+        RankingSignal::MemorySignal => "memory_signal",
+        RankingSignal::PathQuality => "path_quality",
     }
 }
 
@@ -3357,10 +3550,13 @@ fn build_context_pack(
     limit: usize,
 ) -> anyhow::Result<open_kioku_core::ContextPack> {
     let search_dir = default_index_dir(repo);
-    let builder = ContextPackBuilder::new(store as &dyn OkStore);
+    let mut ranking_options = ranking_options_for_repo(repo)?;
+    ranking_options.query = Some(task.into());
+    let builder =
+        ContextPackBuilder::new(store as &dyn OkStore).with_ranking_options(ranking_options);
     if TantivySearchIndex::exists(&search_dir) {
         let index = TantivySearchIndex::open_or_create(&search_dir)?;
-        let primary = index.search(task, limit.max(20))?;
+        let primary = index.search(task, ranking_candidate_limit(limit))?;
         return Ok(builder.build_from_primary(task, limit, primary)?);
     }
     Ok(builder.build(task, limit)?)
@@ -3714,6 +3910,33 @@ fn search(
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
+}
+
+fn search_with_ranking_mode(
+    repo: impl AsRef<Path>,
+    store: &dyn MetadataStore,
+    query: &str,
+    limit: usize,
+    mode: RankingMode,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let repo = repo.as_ref();
+    let candidate_limit = ranking_candidate_limit(limit);
+    let raw = search_raw(repo, store, query, candidate_limit)?;
+    let mut options = ranking_options_for_repo(repo)?;
+    options.mode = mode;
+    options.query = Some(query.into());
+    let mut ranked = rerank_with_options(raw, &options);
+    ranked.truncate(limit);
+    Ok(ranked)
+}
+
+fn search_raw(
+    repo: impl AsRef<Path>,
+    store: &dyn MetadataStore,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
     let index_dir = default_index_dir(repo);
     if TantivySearchIndex::exists(&index_dir) {
         return Ok(TantivySearchIndex::open_or_create(index_dir)?.search(query, limit)?);
@@ -3722,6 +3945,33 @@ fn search(
     let chunks = store.all_chunks()?;
     let symbols = store.list_symbols(None, usize::MAX, 0)?;
     Ok(search_chunks(&chunks, &files, &symbols, query, limit)?)
+}
+
+fn ranking_candidate_limit(limit: usize) -> usize {
+    limit.clamp(1, 100).saturating_mul(4).clamp(100, 200)
+}
+
+fn ranking_options_for_repo(repo: &Path) -> anyhow::Result<RankingOptions> {
+    let config = OkConfig::load_from_repo(repo)?;
+    Ok(RankingOptions {
+        weights: ranking_weights_from_config(&config.ranking),
+        mode: RankingMode::Fusion,
+        query: None,
+    })
+}
+
+fn ranking_weights_from_config(config: &RankingConfig) -> RankingWeights {
+    RankingWeights {
+        text_relevance: config.text_relevance,
+        exact_reference: config.exact_reference,
+        graph_proximity: config.graph_proximity,
+        boundary_fit: config.boundary_fit,
+        runtime_corroboration: config.runtime_corroboration,
+        git_cochange: config.git_cochange,
+        validation_proximity: config.validation_proximity,
+        memory_signal: config.memory_signal,
+        path_quality: config.path_quality,
+    }
 }
 
 fn resolve_repo(global: &Path, command: PathBuf) -> PathBuf {

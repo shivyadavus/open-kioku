@@ -1171,6 +1171,7 @@ dependencies = [
  "open-kioku-memory",
  "open-kioku-patch",
  "open-kioku-plan",
+ "open-kioku-ranking",
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
  "open-kioku-storage",
