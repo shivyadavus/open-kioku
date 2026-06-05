@@ -78,6 +78,8 @@ enum Command {
     Doctor {
         #[arg(default_value = ".")]
         repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = DoctorFormat::Text)]
+        format: DoctorFormat,
     },
     Setup {
         #[command(subcommand)]
@@ -384,6 +386,12 @@ struct EvalArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProveFormat {
     Markdown,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DoctorFormat {
+    Text,
     Json,
 }
 
@@ -962,11 +970,11 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Open Kioku status has failing readiness checks");
             }
         }
-        Command::Doctor { repo: command_repo } => {
+        Command::Doctor { repo: command_repo, format } => {
             let repo = resolve_repo(&repo, command_repo);
             let report = doctor_report(&repo);
             let ok = report.ok;
-            if cli.json {
+            if cli.json || format == DoctorFormat::Json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("Open Kioku doctor for {}", report.repo.display());

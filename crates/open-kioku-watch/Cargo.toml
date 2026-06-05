@@ -12,13 +12,13 @@ categories.workspace = true
 
 [dependencies]
 notify.workspace = true
-open-kioku-config = { version = "1.0.4", path = "../open-kioku-config" }
-open-kioku-graph = { version = "1.0.4", path = "../open-kioku-graph" }
-open-kioku-ingest = { version = "1.0.4", path = "../open-kioku-ingest" }
-open-kioku-search-tantivy = { version = "1.0.4", path = "../open-kioku-search-tantivy" }
-open-kioku-storage = { version = "1.0.4", path = "../open-kioku-storage" }
-open-kioku-storage-sqlite = { version = "1.0.4", path = "../open-kioku-storage-sqlite" }
-open-kioku-errors = { version = "1.0.4", path = "../open-kioku-errors" }
+open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
+open-kioku-graph = { version = "2.0.0", path = "../open-kioku-graph" }
+open-kioku-ingest = { version = "2.0.0", path = "../open-kioku-ingest" }
+open-kioku-search-tantivy = { version = "2.0.0", path = "../open-kioku-search-tantivy" }
+open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { version = "2.0.0", path = "../open-kioku-storage-sqlite" }
+open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 
 [dev-dependencies]
 tempfile.workspace = true
