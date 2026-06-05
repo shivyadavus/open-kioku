@@ -1409,7 +1409,10 @@ dependencies = [
  "open-kioku-context",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-impact",
  "open-kioku-storage",
+ "open-kioku-tests",
+ "serde",
  "sha2",
 ]
 

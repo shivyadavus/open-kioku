@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 
 fn ok() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ok"))
@@ -42,6 +44,29 @@ fn run_failure(mut command: Command) -> (String, String) {
         String::from_utf8(output.stdout).expect("stdout should be utf-8"),
         String::from_utf8(output.stderr).expect("stderr should be utf-8"),
     )
+}
+
+fn run_with_stdin(mut command: Command, stdin: &str) -> String {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("command should spawn");
+    child
+        .stdin
+        .take()
+        .expect("stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("stdin should write");
+    let output = child.wait_with_output().expect("command should finish");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf-8")
 }
 
 #[test]
@@ -335,6 +360,89 @@ fn demo_creates_indexed_sample_repo() {
         command
     });
     assert!(forbidden_stderr.contains("forbidden boundary edit"));
+
+    let verify_diff_path = repo.join("auth.diff");
+    fs::write(
+        &verify_diff_path,
+        "diff --git a/src/auth.rs b/src/auth.rs\n--- a/src/auth.rs\n+++ b/src/auth.rs\n@@ -3,0 +4 @@\n+// verifier smoke\n",
+    )
+    .unwrap();
+    let verify_pass = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--diff")
+            .arg(&verify_diff_path);
+        command
+    });
+    assert!(verify_pass.contains("\"verdict\": \"pass\""));
+    assert!(verify_pass.contains("\"changed_symbols\""));
+
+    let verify_warn = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/out_of_scope.rs")
+            .arg("--evidence-ref")
+            .arg("search:src/out_of_scope.rs:1-2:0");
+        command
+    });
+    assert!(verify_warn.contains("\"verdict\": \"warn\""));
+    assert!(verify_warn.contains("boundary_expansion"));
+
+    let (verify_fail_stdout, verify_fail_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/out_of_scope.rs");
+        command
+    });
+    assert!(verify_fail_stdout.contains("\"verdict\": \"fail\""));
+    assert!(verify_fail_stdout.contains("out_of_boundary"));
+    assert!(verify_fail_stderr.contains("change verification failed"));
+
+    let plan_value: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+    let mcp_verify_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 42,
+        "method": "tools/call",
+        "params": {
+            "name": "verify_change",
+            "arguments": {
+                "plan": plan_value,
+                "changed_files": ["src/auth.rs"]
+            }
+        }
+    })
+    .to_string();
+    let mcp_verify = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_verify_req + "\n"),
+    );
+    assert!(mcp_verify.contains("structuredContent"));
+    assert!(mcp_verify.contains("\"verdict\""));
+    assert!(mcp_verify.contains("changed_symbols"));
 
     let (_warn_stdout, warn_stderr) = run_ok_with_stderr({
         let mut command = ok();
