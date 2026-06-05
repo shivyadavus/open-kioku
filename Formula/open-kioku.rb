@@ -1,26 +1,26 @@
 class OpenKioku < Formula
   desc "Local-first code intelligence MCP for AI coding agents"
   homepage "https://github.com/shivyadavus/open-kioku"
-  version "0.1.4"
+  version "1.0.4"
   license "Elastic-2.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v0.1.4/ok-macos-arm64"
-      sha256 "5b30f7cd552d3bfce7c946b01eb0937094e83c7d39357473007a42ac6df68cd1"
+      url "https://github.com/shivyadavus/open-kioku/releases/download/v1.0.4/ok-macos-arm64"
+      sha256 "2db7ab0b77293988349b27da72cbdde2f37ddf5d897ef13ec3020cadc3fb90e0"
     else
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v0.1.4/ok-macos-x86_64"
-      sha256 "f794acaa7d591deca43d67cd5ea7303c7b81336a37458f98cc2655a48bd34f86"
+      url "https://github.com/shivyadavus/open-kioku/releases/download/v1.0.4/ok-macos-x86_64"
+      sha256 "5bbcd44ccfee2fd304fc1887939e6374830c365802684cf46af79e9453ccc4a7"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v0.1.4/ok-linux-arm64"
-      sha256 "a102b034ba25e9255c370863ffe6c2b1e9aa9aa0d683562bb78155b278c8e64b"
+      url "https://github.com/shivyadavus/open-kioku/releases/download/v1.0.4/ok-linux-arm64"
+      sha256 "1a88a5031ef0c66a704c2c7f5469c0ed5f1a808da2baea305083e3237b9619b3"
     else
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v0.1.4/ok-linux-x86_64"
-      sha256 "5c0eeb707bcbef715a1d92e456bc04d93f893b1b35f209f989a5c1d24883b0a8"
+      url "https://github.com/shivyadavus/open-kioku/releases/download/v1.0.4/ok-linux-x86_64"
+      sha256 "ecc4c75971333587cb8fb662783f3623fd659ce03f29c153692ec231b2c62cd4"
     end
   end
 

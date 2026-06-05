@@ -1,63 +1,29 @@
 #!/usr/bin/env bash
 # validate-versions.sh
-# Asserts that every marketplace manifest version matches Cargo.toml.
-# Run in CI to catch a version mismatch before it reaches the marketplace.
+# Asserts that every package, marketplace, release, and install-channel
+# manifest matches Cargo.toml. Run in CI to catch drift before release.
 
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-CARGO="$ROOT/Cargo.toml"
-
-CARGO_VERSION=$(grep -m1 '^version' "$CARGO" | sed 's/version = "//;s/"//')
-EXIT=0
-
-check_version() {
-  local file="$1"
-  if [[ ! -f "$file" ]]; then
-    return
-  fi
-  local file_version
-  file_version=$(grep -m1 '"version"' "$file" | sed 's/.*"version": "//;s/".*//')
-  if [[ "$file_version" != "$CARGO_VERSION" ]]; then
-    echo "VERSION MISMATCH: $file has $file_version, Cargo.toml has $CARGO_VERSION"
-    EXIT=1
+PYTHON="${PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
   else
-    echo "  ✓ $file ($file_version)"
+    echo "ERROR: Python 3.11+ is required to validate release metadata." >&2
+    exit 1
   fi
-}
-
-check_open_kioku_dependencies() {
-  local file="$1"
-  local line
-  while IFS= read -r line; do
-    local package version
-    package=$(sed 's/.*"\(@open-kioku\/[^"]*\)":.*/\1/' <<<"$line")
-    version=$(sed 's/.*": "\([^"]*\)".*/\1/' <<<"$line")
-    if [[ "$version" != "$CARGO_VERSION" ]]; then
-      echo "VERSION MISMATCH: $file dependency $package has $version, Cargo.toml has $CARGO_VERSION"
-      EXIT=1
-    else
-      echo "  ✓ $file dependency $package ($version)"
-    fi
-  done < <(grep '^[[:space:]]*"@open-kioku/[^"]*"[[:space:]]*:' "$file" || true)
-}
-
-echo "Validating manifest versions against Cargo.toml ($CARGO_VERSION)..."
-check_version "$ROOT/.cursor-plugin/plugin.json"
-check_version "$ROOT/.cursor-plugin/marketplace.json"
-check_version "$ROOT/claude-plugin.json"
-
-shopt -s nullglob
-for npm_package in "$ROOT"/packages/npm*/package.json; do
-  check_version "$npm_package"
-  check_open_kioku_dependencies "$npm_package"
-done
-shopt -u nullglob
-
-if [[ $EXIT -ne 0 ]]; then
-  echo ""
-  echo "Run scripts/sync-version.sh to fix mismatches."
-  exit 1
 fi
 
-echo "All manifest versions match."
+"$PYTHON" - <<'PY'
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit("ERROR: Python 3.11+ is required to validate release metadata.")
+PY
+
+echo "Validating release metadata against Cargo.toml..."
+"$PYTHON" "$ROOT/scripts/validate-release-metadata.py"
+echo "All release manifests match."

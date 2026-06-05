@@ -27,6 +27,8 @@ scripts/verify-release-readiness.sh
 scripts/generate-proof.sh
 ```
 
+Use `docs/release-checklist.md` for the full package, tag, formula, npm, cargo-binstall, release-note, and artifact consistency checklist.
+
 For a real repository:
 
 ```sh
