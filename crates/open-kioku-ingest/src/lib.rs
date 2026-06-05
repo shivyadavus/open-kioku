@@ -514,7 +514,11 @@ fn collect_runtime_analysis_facts(root: &Path, files: &[File]) -> Result<Vec<Ana
                 || !(lower_name.contains("span")
                     || lower_name.contains("trace")
                     || lower_name.contains("runtime")
-                    || lower_name.contains("otel"))
+                    || lower_name.contains("otel")
+                    || lower_name.contains("log")
+                    || lower_name.contains("incident")
+                    || lower_name.contains("error")
+                    || lower_name.contains("failure"))
             {
                 continue;
             }
@@ -551,6 +555,10 @@ fn collect_runtime_analysis_facts(root: &Path, files: &[File]) -> Result<Vec<Ana
                     facts.push(fact);
                 }
                 if let Some(fact) = runtime_table_fact(file, &value, line_number, path, idx + 1) {
+                    facts.push(fact);
+                }
+                if let Some(fact) = runtime_incident_fact(file, &value, line_number, path, idx + 1)
+                {
                     facts.push(fact);
                 }
             }
@@ -624,6 +632,41 @@ fn runtime_table_fact(
             artifact,
             artifact_line,
             message: "runtime database access observed in local trace artifact",
+        },
+    ))
+}
+
+fn runtime_incident_fact(
+    file: &File,
+    value: &Value,
+    line_number: Option<u32>,
+    artifact: &Path,
+    artifact_line: usize,
+) -> Option<AnalysisFact> {
+    let message = json_string(
+        value,
+        &[
+            "error.message",
+            "exception.message",
+            "log.message",
+            "message",
+            "event.message",
+            "span.status.message",
+            "name",
+            "span.name",
+        ],
+    )?;
+    let signal = compact_runtime_message(&message)?;
+    Some(runtime_fact(
+        file,
+        GraphEdgeType::FailedIn,
+        GraphNodeType::RuntimeError,
+        signal,
+        line_number,
+        RuntimeFactSource {
+            artifact,
+            artifact_line,
+            message: "runtime incident observed in local log or failure artifact",
         },
     ))
 }
@@ -744,6 +787,14 @@ fn extract_sql_table(statement: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn compact_runtime_message(message: &str) -> Option<String> {
+    let value = message.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.chars().take(160).collect())
 }
 
 fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {
@@ -897,6 +948,11 @@ class ExampleTests extends BaseTests {
             r#"{"file":"src/test/java/org/example/ExampleTests.java","line":4,"attributes":{"http.route":"/example","http.request.method":"GET","db.statement":"select * from example_orders"}}"#,
         )
         .unwrap();
+        std::fs::write(
+            root.join(".ok/runtime/incidents.jsonl"),
+            r#"{"file":"src/test/java/org/example/ExampleTests.java","line":5,"error.message":"checkout failure after runtime request"}"#,
+        )
+        .unwrap();
 
         let mut config = OkConfig::default();
         config.scip.enabled = false;
@@ -910,7 +966,7 @@ class ExampleTests extends BaseTests {
         assert_eq!(snapshot.manifest.quality.coverage_reports, 1);
         assert_eq!(snapshot.manifest.quality.junit_reports, 1);
         assert!(snapshot.manifest.quality.static_analysis_facts >= 3);
-        assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 2);
+        assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 3);
         assert!(snapshot
             .analysis_facts
             .iter()
@@ -919,6 +975,10 @@ class ExampleTests extends BaseTests {
             .analysis_facts
             .iter()
             .any(|fact| fact.target == "example_orders"));
+        assert!(snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.target == "checkout failure after runtime request"));
         assert!(snapshot
             .manifest
             .quality

@@ -1,7 +1,9 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
-use open_kioku_core::{PatchId, PatchPlan, PlanReport, SearchResult, TestTarget};
+use open_kioku_core::{
+    AnalysisFact, EvidenceSourceType, PatchId, PatchPlan, PlanReport, SearchResult, TestTarget,
+};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
@@ -175,6 +177,7 @@ impl<'a> ChangeVerifier<'a> {
             &changed_files,
             &input.evidence_refs,
         ));
+        warnings.extend(runtime_warnings(self.store, &changed_files)?);
 
         let verdict = if !boundary_violations.is_empty() || !command_failures.is_empty() {
             VerificationVerdict::Fail
@@ -458,6 +461,45 @@ fn changed_impact(
     Ok(findings)
 }
 
+fn runtime_warnings(
+    store: &dyn MetadataStore,
+    changed_files: &[PathBuf],
+) -> Result<Vec<VerificationFinding>> {
+    let runtime_facts = store.analysis_facts(Some(EvidenceSourceType::Runtime), 500)?;
+    if runtime_facts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut findings = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in changed_files {
+        let Some(file) = store.get_file_by_path(path)? else {
+            continue;
+        };
+        for fact in runtime_facts
+            .iter()
+            .filter(|fact| fact.file_id == file.id)
+            .take(5)
+        {
+            if seen.insert((normalize_path(path), fact.id.clone())) {
+                findings.push(runtime_finding(path, fact));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+fn runtime_finding(path: &Path, fact: &AnalysisFact) -> VerificationFinding {
+    VerificationFinding {
+        path: Some(path.to_path_buf()),
+        kind: "nearby_runtime_signal".into(),
+        reason: format!(
+            "changed file has local runtime trace/log/incident evidence `{}`: {}",
+            fact.target, fact.message
+        ),
+        evidence_refs: vec![fact.id.clone()],
+    }
+}
+
 fn impact_finding(result: &SearchResult) -> VerificationFinding {
     VerificationFinding {
         path: Some(result.path.clone()),
@@ -559,4 +601,163 @@ fn stable_id(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_kioku_core::{
+        CodeChunk, Confidence, File, FileId, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
+        Import, IndexManifest, Language, LineRange, RepositoryId, Symbol, SymbolId,
+        SymbolOccurrence,
+    };
+    use open_kioku_errors::Result;
+    use open_kioku_storage::{GraphStore, IndexData};
+
+    struct RuntimeStore {
+        file: File,
+        fact: AnalysisFact,
+    }
+
+    impl RuntimeStore {
+        fn new() -> Self {
+            let file = File {
+                id: FileId::new("handler"),
+                repository_id: RepositoryId::new("repo"),
+                path: PathBuf::from("src/handler.rs"),
+                language: Language::Rust,
+                size_bytes: 100,
+                content_hash: "handler".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let fact = AnalysisFact {
+                id: "runtime-incident".into(),
+                file_id: file.id.clone(),
+                symbol_id: None,
+                target: "panic in checkout flow".into(),
+                target_kind: GraphNodeType::RuntimeError,
+                edge_type: GraphEdgeType::FailedIn,
+                range: Some(LineRange::single(9)),
+                confidence: Confidence::High,
+                source: "open-kioku-runtime:.ok/runtime/incidents.jsonl".into(),
+                source_type: EvidenceSourceType::Runtime,
+                message: "runtime incident observed in local log or failure artifact".into(),
+            };
+            Self { file, fact }
+        }
+    }
+
+    impl MetadataStore for RuntimeStore {
+        fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn put_manifest(&self, _manifest: &IndexManifest) -> Result<()> {
+            Ok(())
+        }
+
+        fn manifest(&self) -> Result<Option<IndexManifest>> {
+            Ok(None)
+        }
+
+        fn replace_index(&self, _data: IndexData<'_>) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_files(&self, _limit: usize, _offset: usize) -> Result<Vec<File>> {
+            Ok(vec![self.file.clone()])
+        }
+
+        fn get_file_by_path(&self, path: &Path) -> Result<Option<File>> {
+            Ok((path == self.file.path).then(|| self.file.clone()))
+        }
+
+        fn list_symbols(
+            &self,
+            _query: Option<&str>,
+            _limit: usize,
+            _offset: usize,
+        ) -> Result<Vec<Symbol>> {
+            Ok(Vec::new())
+        }
+
+        fn symbol_by_id(&self, _id: &SymbolId) -> Result<Option<Symbol>> {
+            Ok(None)
+        }
+
+        fn chunks_for_file(&self, _file_id: &FileId) -> Result<Vec<CodeChunk>> {
+            Ok(Vec::new())
+        }
+
+        fn all_chunks(&self) -> Result<Vec<CodeChunk>> {
+            Ok(Vec::new())
+        }
+
+        fn tests(&self) -> Result<Vec<TestTarget>> {
+            Ok(Vec::new())
+        }
+
+        fn imports(&self) -> Result<Vec<Import>> {
+            Ok(Vec::new())
+        }
+
+        fn analysis_facts(
+            &self,
+            source_type: Option<EvidenceSourceType>,
+            _limit: usize,
+        ) -> Result<Vec<AnalysisFact>> {
+            if source_type == Some(EvidenceSourceType::Runtime) {
+                Ok(vec![self.fact.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn references_for_symbol(
+            &self,
+            _id: &SymbolId,
+            _limit: usize,
+        ) -> Result<Vec<SymbolOccurrence>> {
+            Ok(Vec::new())
+        }
+
+        fn occurrences_for_file(&self, _file_id: &FileId) -> Result<Vec<SymbolOccurrence>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl GraphStore for RuntimeStore {
+        fn replace_graph(&self, _nodes: &[GraphNode], _edges: &[GraphEdge]) -> Result<()> {
+            Ok(())
+        }
+
+        fn neighbors(
+            &self,
+            _node: &str,
+            _limit: usize,
+        ) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
+            Ok((Vec::new(), Vec::new()))
+        }
+
+        fn shortest_path(
+            &self,
+            _from: &str,
+            _to: &str,
+            _max_depth: usize,
+        ) -> Result<Vec<GraphEdge>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn runtime_warnings_surface_nearby_incidents() {
+        let store = RuntimeStore::new();
+        let warnings = runtime_warnings(&store, &[PathBuf::from("src/handler.rs")]).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].kind, "nearby_runtime_signal");
+        assert!(warnings[0].reason.contains("panic in checkout flow"));
+        assert_eq!(warnings[0].evidence_refs, vec!["runtime-incident"]);
+    }
 }

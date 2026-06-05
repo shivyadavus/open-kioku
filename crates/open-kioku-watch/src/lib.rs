@@ -89,6 +89,7 @@ pub fn reindex_repo(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         tests: &snapshot.tests,
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
+        analysis_facts: &snapshot.analysis_facts,
     })?;
 
     let graph = InMemoryGraph::from_index_with_analysis(

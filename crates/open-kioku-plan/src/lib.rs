@@ -2,8 +2,8 @@ use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
     ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
-    MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, ScoreComponent, SearchResult,
-    Symbol, TestTarget, ToolCallRecommendation,
+    MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, RuntimeSignal, ScoreComponent,
+    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -166,6 +166,7 @@ impl<'a> PlanEngine<'a> {
             recommended_next_steps,
             tool_calls,
             memory_facts: self.memory_facts.clone(),
+            runtime_signals: context.runtime_signals.clone(),
             evidence,
             evidence_by_section,
             negative_evidence,
@@ -514,11 +515,10 @@ fn negative_evidence_for_plan(
             },
         );
     }
-    if runtime_signal_count(primary_context)
+    let ranked_runtime_signal_count = runtime_signal_count(primary_context)
         + runtime_signal_count(&impact.direct_impacts)
-        + runtime_signal_count(&impact.indirect_impacts)
-        == 0
-    {
+        + runtime_signal_count(&impact.indirect_impacts);
+    if context.runtime_signals.is_empty() && ranked_runtime_signal_count == 0 {
         push_unique_negative_evidence(
             &mut items,
             NegativeEvidence {
@@ -1255,6 +1255,9 @@ fn render_text(report: &PlanReport) -> String {
     out.push_str("\nImpact candidates:\n");
     write_results(&mut out, &report.impact.direct_impacts);
 
+    out.push_str("\nRuntime signals:\n");
+    write_runtime_signals_text(&mut out, &report.runtime_signals);
+
     out.push_str("\nValidation candidates:\n");
     if report.validation.is_empty() {
         out.push_str("  - none found\n");
@@ -1339,6 +1342,9 @@ fn render_markdown(report: &PlanReport) -> String {
 
     out.push_str("\n## Impact Candidates\n\n");
     write_markdown_results(&mut out, &report.impact.direct_impacts);
+
+    out.push_str("\n## Runtime Signals\n\n");
+    write_markdown_runtime_signals(&mut out, &report.runtime_signals);
 
     out.push_str("\n## Validation Candidates\n\n");
     if report.validation.is_empty() {
@@ -1425,6 +1431,62 @@ fn write_markdown_results(out: &mut String, results: &[SearchResult]) {
         out.push_str(&format!(
             "  - evidence: `{}`\n",
             result.derived_evidence_ids().join(", ")
+        ));
+    }
+}
+
+fn write_runtime_signals_text(out: &mut String, signals: &[RuntimeSignal]) {
+    if signals.is_empty() {
+        out.push_str("  - none found\n");
+        return;
+    }
+    for signal in signals {
+        let range = signal
+            .file_range
+            .as_ref()
+            .map(|range| {
+                let lines = range
+                    .line_range
+                    .as_ref()
+                    .map(|line_range| format!(":{}-{}", line_range.start, line_range.end))
+                    .unwrap_or_default();
+                format!("{}{}", range.path.display(), lines)
+            })
+            .unwrap_or_else(|| "unknown location".into());
+        out.push_str(&format!(
+            "  - {} [{}; {:?}; evidence {}]\n",
+            one_line(&signal.message),
+            range,
+            signal.confidence,
+            signal.id
+        ));
+    }
+}
+
+fn write_markdown_runtime_signals(out: &mut String, signals: &[RuntimeSignal]) {
+    if signals.is_empty() {
+        out.push_str("- None found\n");
+        return;
+    }
+    for signal in signals {
+        let range = signal
+            .file_range
+            .as_ref()
+            .map(|range| {
+                let lines = range
+                    .line_range
+                    .as_ref()
+                    .map(|line_range| format!(":{}-{}", line_range.start, line_range.end))
+                    .unwrap_or_default();
+                format!("{}{}", range.path.display(), lines)
+            })
+            .unwrap_or_else(|| "unknown location".into());
+        out.push_str(&format!(
+            "- `{}` at `{}` ({:?}); evidence `{}`\n",
+            one_line(&signal.message),
+            range,
+            signal.confidence,
+            signal.id
         ));
     }
 }
@@ -1745,14 +1807,19 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use open_kioku_core::{
-        CodeChunk, Confidence, ConfidenceBreakdown, Evidence, EvidenceId, EvidenceSourceType, File,
-        FileId, IndexManifest, Language, LineRange, Repository, RepositoryId, Symbol, SymbolId,
-        SymbolKind, TestTarget, ValidationPlan,
+        AnalysisFact, CodeChunk, Confidence, ConfidenceBreakdown, Evidence, EvidenceId,
+        EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest, Language,
+        LineRange, Repository, RepositoryId, Symbol, SymbolId, SymbolKind, TestTarget,
+        ValidationPlan,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
 
     fn test_store() -> SqliteStore {
+        test_store_with_analysis_facts(Vec::new())
+    }
+
+    fn test_store_with_analysis_facts(analysis_facts: Vec<AnalysisFact>) -> SqliteStore {
         let store = SqliteStore::open(":memory:").unwrap();
         let repo_id = RepositoryId::new("repo");
         let file_auth = File {
@@ -1864,6 +1931,7 @@ mod tests {
                 tests: &[login_test],
                 imports: &[],
                 occurrences: &[],
+                analysis_facts: &analysis_facts,
             })
             .unwrap();
         store
@@ -2008,6 +2076,49 @@ mod tests {
             .recommended_change_boundary
             .expansion_requirements
             .is_empty());
+    }
+
+    #[test]
+    fn plan_surfaces_runtime_signals_and_attribution() {
+        let runtime_fact = AnalysisFact {
+            id: "runtime-auth-endpoint".into(),
+            file_id: FileId::new("auth"),
+            symbol_id: None,
+            target: "POST /login".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: Some(LineRange { start: 3, end: 5 }),
+            confidence: Confidence::High,
+            source: "open-kioku-runtime:.ok/runtime/spans.jsonl".into(),
+            source_type: EvidenceSourceType::Runtime,
+            message: "runtime endpoint observed in local trace artifact".into(),
+        };
+        let store = test_store_with_analysis_facts(vec![runtime_fact]);
+
+        let report = PlanEngine::new(&store)
+            .plan("change token login endpoint", 10)
+            .unwrap();
+
+        assert_eq!(report.runtime_signals.len(), 1);
+        assert_eq!(report.runtime_signals[0].kind, "endpoint");
+        assert!(report
+            .evidence
+            .iter()
+            .any(|evidence| evidence.source_type == EvidenceSourceType::Runtime));
+        assert!(report.primary_context.iter().any(|result| {
+            result
+                .score_breakdown
+                .iter()
+                .any(|component| component.signal == "runtime_corroboration")
+        }));
+        assert!(report.validation.iter().any(|test| {
+            test.score_breakdown
+                .iter()
+                .any(|component| component.signal == "runtime_corroboration")
+        }));
+        let rendered = PlanFormat::Markdown.render(&report).unwrap();
+        assert!(rendered.contains("## Runtime Signals"));
+        assert!(rendered.contains("POST /login"));
     }
 
     #[test]

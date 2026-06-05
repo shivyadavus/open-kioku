@@ -1,7 +1,7 @@
 use open_kioku_core::{
     ChangeBoundary, CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack,
-    Evidence, LineRange, MemorySearchResult, NegativeEvidence, PlanReport, ScoreComponent,
-    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    Evidence, LineRange, MemorySearchResult, NegativeEvidence, PlanReport, RuntimeSignal,
+    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -15,6 +15,7 @@ pub fn render_context_pack_toon(pack: &ContextPack) -> String {
     push_confidence_breakdown(&mut out, &pack.confidence_breakdown);
     push_search_results(&mut out, "primary_context", &pack.primary_files);
     push_search_results(&mut out, "supporting_impact", &pack.supporting_files);
+    push_runtime_signals(&mut out, &pack.runtime_signals);
     push_tests(&mut out, "validation", &pack.validation_plan.tests);
     push_path_list(
         &mut out,
@@ -70,6 +71,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_symbols(&mut out, &report.relevant_symbols);
     push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
     push_search_results(&mut out, "impact_indirect", &report.impact.indirect_impacts);
+    push_runtime_signals(&mut out, &report.runtime_signals);
     push_tests(&mut out, "validation", &report.validation);
     push_negative_evidence(&mut out, &report.negative_evidence);
     push_evidence_by_section(&mut out, &report.evidence_by_section);
@@ -183,6 +185,36 @@ fn push_symbols(out: &mut String, symbols: &[Symbol]) {
                 format!("{:?}", symbol.kind),
                 symbol.file_id.0.clone(),
                 line_range(&symbol.range),
+            ],
+        );
+    }
+}
+
+fn push_runtime_signals(out: &mut String, signals: &[RuntimeSignal]) {
+    out.push_str(&format!(
+        "runtime_signals[{}]{{id,kind,path,lines,confidence,message}}:\n",
+        signals.len()
+    ));
+    for signal in signals {
+        let (path, lines) = signal
+            .file_range
+            .as_ref()
+            .map(|range| {
+                (
+                    range.path.display().to_string(),
+                    line_range(&range.line_range),
+                )
+            })
+            .unwrap_or_else(|| ("".into(), "".into()));
+        push_row(
+            out,
+            &[
+                signal.id.clone(),
+                signal.kind.clone(),
+                path,
+                lines,
+                format!("{:?}", signal.confidence),
+                one_line(&signal.message),
             ],
         );
     }
@@ -572,6 +604,7 @@ mod tests {
             recommended_next_steps: vec!["Inspect context".into()],
             tool_calls: Vec::new(),
             memory_facts: Vec::new(),
+            runtime_signals: Vec::new(),
             evidence: vec![Evidence {
                 id: EvidenceId::new("ev"),
                 source: "test".into(),

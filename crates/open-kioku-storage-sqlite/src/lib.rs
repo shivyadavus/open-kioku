@@ -1,6 +1,6 @@
 use open_kioku_core::{
-    CodeChunk, File, FileId, GraphEdge, GraphNode, Import, IndexManifest, Symbol, SymbolId,
-    SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdge, GraphNode, Import,
+    IndexManifest, Symbol, SymbolId, SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
@@ -96,6 +96,15 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol_id);
             CREATE INDEX IF NOT EXISTS idx_occurrences_file ON occurrences(file_id);
+            CREATE TABLE IF NOT EXISTS analysis_facts (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              target TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
             CREATE TABLE IF NOT EXISTS graph_nodes (
               id TEXT PRIMARY KEY,
               label TEXT NOT NULL,
@@ -152,6 +161,8 @@ impl MetadataStore for SqliteStore {
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let tx = conn.transaction().map_err(storage_err)?;
         tx.execute("DELETE FROM occurrences", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM analysis_facts", [])
             .map_err(storage_err)?;
         tx.execute("DELETE FROM imports", []).map_err(storage_err)?;
         tx.execute("DELETE FROM tests", []).map_err(storage_err)?;
@@ -241,6 +252,19 @@ impl MetadataStore for SqliteStore {
                     &occurrence.file_id.0,
                     if occurrence.is_definition { 1 } else { 0 },
                     serde_json::to_string(occurrence)?
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for fact in data.analysis_facts {
+            tx.execute(
+                "INSERT INTO analysis_facts(id, file_id, source_type, target, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &fact.id,
+                    &fact.file_id.0,
+                    source_type_name(&fact.source_type),
+                    &fact.target,
+                    serde_json::to_string(fact)?
                 ],
             )
             .map_err(storage_err)?;
@@ -377,6 +401,40 @@ impl MetadataStore for SqliteStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         collect_json(rows)
+    }
+
+    fn analysis_facts(
+        &self,
+        source_type: Option<EvidenceSourceType>,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let rows = if let Some(source_type) = source_type {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM analysis_facts WHERE source_type = ?1 ORDER BY file_id, target LIMIT ?2",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![source_type_name(&source_type), limit], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        } else {
+            let mut stmt = conn
+                .prepare("SELECT json FROM analysis_facts ORDER BY file_id, target LIMIT ?1")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![limit], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        };
+        Ok(rows)
     }
 
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>> {
@@ -618,14 +676,29 @@ fn occurrence_id(file_id: &str, value: &str, line: Option<u32>, flag: bool) -> S
     format!("{:x}", hasher.finalize())
 }
 
+fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
+    match source_type {
+        EvidenceSourceType::TreeSitter => "tree_sitter",
+        EvidenceSourceType::Scip => "scip",
+        EvidenceSourceType::Lsp => "lsp",
+        EvidenceSourceType::Regex => "regex",
+        EvidenceSourceType::Lexical => "lexical",
+        EvidenceSourceType::Semantic => "semantic",
+        EvidenceSourceType::Runtime => "runtime",
+        EvidenceSourceType::StaticAnalysis => "static_analysis",
+        EvidenceSourceType::ExternalIntegration => "external_integration",
+        EvidenceSourceType::Heuristic => "heuristic",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SqliteStore;
     use chrono::Utc;
     use open_kioku_core::{
-        Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId, GraphEdge,
-        GraphEdgeType, GraphNode, GraphNodeType, IndexManifest, IndexQuality, Language, LineRange,
-        NodeId, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
+        AnalysisFact, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
+        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, IndexManifest, IndexQuality, Language,
+        LineRange, NodeId, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
     };
     use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
 
@@ -711,6 +784,7 @@ mod tests {
             chunks: &[],
             imports: &[],
             tests: &[],
+            analysis_facts: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -722,6 +796,61 @@ mod tests {
             .unwrap();
         assert!(by_path.is_some());
         assert_eq!(by_path.unwrap().id, file1.id);
+    }
+
+    #[test]
+    fn replace_index_persists_analysis_facts() {
+        let store = make_store();
+        let file = make_file("f1", "src/handler.rs");
+        let manifest = make_manifest();
+        let runtime_fact = AnalysisFact {
+            id: "runtime-1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "GET /api/orders".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: Some(LineRange::single(12)),
+            confidence: Confidence::High,
+            source: "open-kioku-runtime:.ok/runtime/spans.jsonl".into(),
+            source_type: EvidenceSourceType::Runtime,
+            message: "runtime endpoint observed in local trace artifact".into(),
+        };
+        let static_fact = AnalysisFact {
+            id: "static-1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "orders".into(),
+            target_kind: GraphNodeType::DatabaseTable,
+            edge_type: GraphEdgeType::ReadsTable,
+            range: None,
+            confidence: Confidence::Medium,
+            source: "open-kioku-static".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "static fact".into(),
+        };
+
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[file],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[runtime_fact.clone(), static_fact],
+            })
+            .unwrap();
+
+        let runtime = store
+            .analysis_facts(Some(EvidenceSourceType::Runtime), 10)
+            .unwrap();
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].id, runtime_fact.id);
+        assert_eq!(runtime[0].target, runtime_fact.target);
+        let all = store.analysis_facts(None, 10).unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
@@ -741,6 +870,7 @@ mod tests {
             chunks: &[],
             imports: &[],
             tests: &[],
+            analysis_facts: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -767,6 +897,7 @@ mod tests {
             chunks: &[],
             imports: &[],
             tests: &[],
+            analysis_facts: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -819,6 +950,7 @@ mod tests {
             chunks: &[],
             imports: &[],
             tests: &[],
+            analysis_facts: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -864,6 +996,7 @@ mod tests {
             chunks: &[],
             imports: &[],
             tests: &[],
+            analysis_facts: &[],
         };
         store.replace_index(data).unwrap();
         store.replace_graph(&[], &[]).unwrap();
