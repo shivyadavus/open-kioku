@@ -2,6 +2,13 @@
 
 Thank you for your interest in contributing to Open Kioku!
 
+## Start Here
+
+1. Read the [crate map](docs/crate-map.md) to understand the workspace architecture.
+2. Browse [good first issues](https://github.com/shivyadavus/open-kioku/labels/good%20first%20issue) for contributor-friendly tasks.
+3. Read the [contributor guide](docs/contributor-guide.md) for fixture conventions, signal checklist, and smoke expectations.
+4. Check the [stability policy](STABILITY.md) to understand which APIs are stable.
+
 ## Development Environment
 
 - Rust toolchain (1.78+)

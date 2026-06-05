@@ -19,3 +19,9 @@ target/
 .DS_Store
 Thumbs.db
 ok.toml
+
+# Local demo directory
+open-kioku-demo/
+
+# Private launch drafts
+docs/launch/

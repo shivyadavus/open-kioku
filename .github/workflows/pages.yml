@@ -23,6 +23,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Copy proof docs to demo
+        run: |
+          cp docs/usefulness-proof.md demo/usefulness-proof.md
+          cp docs/large-repo-proof.md demo/large-repo-proof.md
+          cp docs/proof.md demo/proof.md
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

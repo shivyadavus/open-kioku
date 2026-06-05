@@ -269,6 +269,20 @@ ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
 ```
 
+## Share Your Results
+
+Open Kioku outputs are designed to be attached to issues, PRs, and social posts:
+
+```sh
+ok --repo /path/to/repo plan "your task" --format markdown > plan.md
+ok status /path/to/repo --markdown --write ok-status.md
+ok prove /path/to/repo --task "your task"
+```
+
+These reports include indexed counts, evidence scores, validation commands, and
+path shapes — but intentionally omit source code, so they are safe to share
+from private repos.
+
 Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
 
 Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
@@ -331,11 +345,17 @@ This is a 43-crate Cargo workspace. Important crates:
 
 Architecture docs: [`docs/architecture.md`](docs/architecture.md)
 
+Crate map: [`docs/crate-map.md`](docs/crate-map.md)
+
 Semantic search docs: [`docs/semantic-search.md`](docs/semantic-search.md), [`docs/vector-index.md`](docs/vector-index.md), [`docs/embedding-providers.md`](docs/embedding-providers.md), [`docs/hybrid-ranking.md`](docs/hybrid-ranking.md)
 
 Contributor guide: [`docs/contributor-guide.md`](docs/contributor-guide.md)
 
 Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+
+## License
+
+Open Kioku is licensed under [Elastic License 2.0](LICENSE). In short: free to use, modify, and distribute — you just cannot offer it as a hosted managed service. See [`docs/license-faq.md`](docs/license-faq.md) for a plain-English explainer of what is and is not allowed.
 
 ## Development
 
