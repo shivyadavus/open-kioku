@@ -239,6 +239,10 @@ impl<'a> ContextPackBuilder<'a> {
             &tests,
             &impact.risk_report,
         );
+        let boundary_evidence_refs = primary_files
+            .iter()
+            .flat_map(|result| result.derived_evidence_ids())
+            .collect::<Vec<_>>();
         let confidence_summary = confidence_summary(&confidence_breakdown);
         Ok(ContextPack {
             task: task.into(),
@@ -259,6 +263,7 @@ impl<'a> ContextPackBuilder<'a> {
                     .map(|result| result.path.clone())
                     .collect(),
                 forbidden_files: Vec::new(),
+                evidence_refs: boundary_evidence_refs,
             },
             validation_plan: ValidationPlan {
                 commands: tests

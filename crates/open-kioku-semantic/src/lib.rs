@@ -80,6 +80,7 @@ pub fn search_chunks_semantic(
             score,
             match_reason: "local hash embedding similarity".into(),
             evidence: evidence.clone(),
+            evidence_refs: evidence_ids.clone(),
             confidence: score.clamp(0.0, 1.0),
             score_breakdown: vec![ScoreComponent::single(
                 "local_semantic_similarity",

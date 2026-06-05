@@ -72,6 +72,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_search_results(&mut out, "impact_indirect", &report.impact.indirect_impacts);
     push_tests(&mut out, "validation", &report.validation);
     push_negative_evidence(&mut out, &report.negative_evidence);
+    push_evidence_by_section(&mut out, &report.evidence_by_section);
     push_score_components(&mut out, "plan_score_breakdown", &report.score_breakdown);
     push_score_components(
         &mut out,
@@ -103,7 +104,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
 
 fn push_search_results(out: &mut String, name: &str, results: &[SearchResult]) {
     out.push_str(&format!(
-        "{name}[{}]{{path,lines,score,signals,reason,symbol,summary}}:\n",
+        "{name}[{}]{{path,lines,score,evidence_refs,signals,reason,symbol,summary}}:\n",
         results.len()
     ));
     for result in results {
@@ -118,6 +119,7 @@ fn push_search_results(out: &mut String, name: &str, results: &[SearchResult]) {
                 result.path.display().to_string(),
                 line_range(&result.line_range),
                 format!("{:.3}", result.score),
+                result.derived_evidence_ids().join(","),
                 top_score_signals(&result.score_breakdown),
                 result.match_reason.clone(),
                 symbol.to_string(),
@@ -187,7 +189,7 @@ fn push_symbols(out: &mut String, symbols: &[Symbol]) {
 
 fn push_tests(out: &mut String, name: &str, tests: &[TestTarget]) {
     out.push_str(&format!(
-        "{name}[{}]{{name,command,confidence,signals,reason}}:\n",
+        "{name}[{}]{{name,command,confidence,evidence_refs,signals,reason}}:\n",
         tests.len()
     ));
     for test in tests {
@@ -199,6 +201,7 @@ fn push_tests(out: &mut String, name: &str, tests: &[TestTarget]) {
                     .clone()
                     .unwrap_or_else(|| "manual validation".into()),
                 format!("{:?}", test.confidence),
+                test.evidence_refs.join(","),
                 top_score_signals(&test.score_breakdown),
                 test.reason.clone(),
             ],
@@ -244,6 +247,19 @@ fn push_negative_evidence(out: &mut String, items: &[NegativeEvidence]) {
                 item.suggested_next_probe.clone().unwrap_or_default(),
             ],
         );
+    }
+}
+
+fn push_evidence_by_section(
+    out: &mut String,
+    sections: &std::collections::BTreeMap<String, Vec<String>>,
+) {
+    out.push_str(&format!(
+        "evidence_by_section[{}]{{section,evidence_refs}}:\n",
+        sections.len()
+    ));
+    for (section, refs) in sections {
+        push_row(out, &[section.clone(), refs.join(",")]);
     }
 }
 
@@ -489,6 +505,7 @@ mod tests {
                 allowed_files: vec!["src/auth.rs".into()],
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
+                evidence_refs: Vec::new(),
             },
             recommended_next_steps: vec!["Inspect context".into()],
             tool_calls: Vec::new(),
@@ -503,6 +520,7 @@ mod tests {
                 message: "rendered".into(),
                 indexed_at: Utc::now(),
             }],
+            evidence_by_section: std::collections::BTreeMap::new(),
             negative_evidence: Vec::new(),
             confidence_summary: "test".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
@@ -519,8 +537,10 @@ mod tests {
         assert!(rendered.contains("type: plan_report"));
         assert!(rendered.contains("confidence:"));
         assert!(rendered.contains("confidence_components"));
-        assert!(rendered
-            .contains("primary_context[0]{path,lines,score,signals,reason,symbol,summary}:"));
+        assert!(rendered.contains(
+            "primary_context[0]{path,lines,score,evidence_refs,signals,reason,symbol,summary}:"
+        ));
+        assert!(rendered.contains("evidence_by_section"));
         assert!(rendered.contains("allowed_files[1]{path}:"));
     }
 }

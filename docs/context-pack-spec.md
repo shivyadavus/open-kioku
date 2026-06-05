@@ -52,3 +52,5 @@ A Context Pack is the agent-ready bundle returned before edits:
 ```
 
 The builder classifies the task, searches indexed chunks, resolves symbols, estimates impact, recommends tests, and emits a conservative edit boundary. Semantic search may contribute only when enabled; it is never authoritative. Confidence is computed from deterministic evidence signals, not from language-model wording.
+
+`PlanReport` extends this provenance with `evidence_by_section`, mapping sections such as `primary_context`, `validation`, `impact`, `boundary`, and `negative_evidence` to stable evidence IDs. Context and validation items also expose `evidence_refs` so downstream MCP tools can audit why each item was selected.

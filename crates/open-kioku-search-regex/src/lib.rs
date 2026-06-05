@@ -66,6 +66,7 @@ impl SearchIndex for MemorySearchIndex {
                 score,
                 match_reason: "lexical substring match".into(),
                 evidence: evidence_strings.clone(),
+                evidence_refs: evidence_ids.clone(),
                 confidence,
                 score_breakdown: vec![ScoreComponent::single(
                     "lexical_relevance",
@@ -143,6 +144,7 @@ pub fn regex_search_file(
                 score: 1.0,
                 match_reason: "regex match".into(),
                 evidence: evidence_strings.clone(),
+                evidence_refs: evidence_ids.clone(),
                 confidence,
                 score_breakdown: vec![ScoreComponent::single(
                     "regex_match",

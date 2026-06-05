@@ -249,6 +249,7 @@ fn occurrence_result(
         score,
         match_reason: format!("exact symbol reference via {source}"),
         evidence: evidence.clone(),
+        evidence_refs: evidence_ids.clone(),
         confidence: occurrence.confidence.score(),
         score_breakdown: vec![ScoreComponent::single(
             "exact_symbol_reference",
