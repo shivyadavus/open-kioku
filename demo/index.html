@@ -887,17 +887,17 @@
                     <p class="hero-copy">Open Kioku is the local evidence layer for Claude, Cursor, Codex, and other MCP coding agents. It indexes your repo once, builds evidence-backed plans before edits begin, then verifies bounded changes stayed inside the plan. No cloud. No source upload. Read-only by default.</p>
 
                     <div class="hero-actions">
-                        <a class="button button-primary" href="#demo" aria-label="Watch the Open Kioku workflow demo">
-                            <span>60-Second Demo</span>
-                            <span aria-hidden="true">v</span>
-                        </a>
-                        <a class="button button-secondary" href="https://www.npmjs.com/package/open-kioku" aria-label="Open the Open Kioku npm package">
-                            <span>npm package</span>
-                            <span aria-hidden="true">open</span>
+                        <a class="button button-primary" href="#demo" aria-label="Try Open Kioku with the 60-second quickstart">
+                            <span>Try in 60 seconds</span>
+                            <span aria-hidden="true">→</span>
                         </a>
                         <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku" aria-label="View the Open Kioku repository on GitHub">
-                            <span>GitHub</span>
+                            <span>View GitHub</span>
                             <span aria-hidden="true">★</span>
+                        </a>
+                        <a class="button button-secondary" href="https://www.npmjs.com/package/open-kioku" aria-label="Open the Open Kioku npm package">
+                            <span>Install with npm</span>
+                            <span aria-hidden="true">open</span>
                         </a>
                     </div>
 
@@ -964,9 +964,9 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install an
 
         <section id="proof">
             <div class="section-heading">
-                <div class="section-kicker">Agent Proof</div>
-                <h2>Replace blind file crawling with indexed evidence.</h2>
-                <p class="section-copy">Open Kioku gives agents a reliable pre-edit routine: search the repo, resolve the symbol, trace references, produce an evidence-backed plan, pick validation targets, and generate a shareable proof report before touching code.</p>
+                <div class="section-kicker">Why not just grep / repo map / RAG?</div>
+                <h2>Search finds code. Planning knows what to do with it.</h2>
+                <p class="section-copy">Grep finds text. Repo maps outline files. Open Kioku gives agents a reliable pre-edit routine: indexed evidence → symbols → impact → tests → plan → verify.</p>
             </div>
 
             <div class="comparison">
@@ -1046,28 +1046,47 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy real repo 
             </div>
         </section>
 
-        <section>
+        <section id="plan-output">
             <div class="section-heading">
-                <div class="section-kicker">Positioning</div>
-                <h2>Search finds code. Planning knows what to do with it.</h2>
-                <p class="section-copy">Most tools give agents files. Open Kioku gives them a plan: which files to touch, which symbols are affected, which tests to run, what the blast radius looks like, and whether the edit stayed inside the boundary.</p>
+                <div class="section-kicker">Example Output</div>
+                <h2>What an evidence-backed plan looks like.</h2>
+                <p class="section-copy">Open Kioku generates structured, markdown-compatible plans that AI agents use to establish edit boundaries, target tests, and assess confidence before touching files.</p>
             </div>
-            <div class="positioning-grid">
-                <div class="positioning-card">
-                    <div class="positioning-icon">🔍</div>
-                    <h3>Search tools</h3>
-                    <p>Find matching files and lines. The agent still decides what they mean and what to do next.</p>
+            <div class="setup-block" style="max-width: 800px; margin: 0 auto; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;">
+                <div class="setup-block-header" style="border-bottom: 1px solid var(--border); padding: 12px 16px;">
+                    <div class="setup-block-title" style="font-family: 'Fira Code', monospace; font-size: 0.9rem; color: var(--cyan);">ok plan "update token expiration"</div>
                 </div>
-                <div class="positioning-card">
-                    <div class="positioning-icon">🗺️</div>
-                    <h3>Repo map tools</h3>
-                    <p>Show file trees and symbol summaries. Better orientation, but no impact analysis or validation targets.</p>
-                </div>
-                <div class="positioning-card positioning-card-highlight">
-                    <div class="positioning-icon">⚡</div>
-                    <h3>Open Kioku</h3>
-                    <p>Indexed evidence → symbols → impact → tests → plan → verify. The full pre-edit routine, with bounded confidence and validation commands.</p>
-                </div>
+                <pre style="white-space: pre-wrap; font-family: 'Fira Code', monospace; font-size: 0.88rem; line-height: 1.5; overflow-x: auto; padding: 20px; color: var(--text);"><code># Plan: token
+
+Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation candidate(s)
+
+## Risk
+- Level: `low`
+- Score: `0.10`
+
+## Confidence
+- Overall: `High` (`0.81`)
+- Caveats:
+  - exact symbol/reference evidence is absent
+  - runtime corroboration is absent
+
+## Primary Context
+- `src/auth.rs`:7-11: pub fn validate_token(token: &str) -> bool
+- `tests/auth_flow.rs`:4-7: fn login_returns_valid_token()
+- `src/auth.rs`:3-6: pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String
+
+## Impact Candidates
+- `src/session.rs` — caller dependency of validate_token
+- `src/middleware.rs` — route guard dependency of issue_token
+
+## Validation Targets
+- `cargo test auth_flow`
+- `cargo test token_expiration`
+
+## Boundary Policy
+- Allowed: `src/auth.rs`, `tests/auth_flow.rs`
+- Caution: `src/session.rs` (caller)
+- Forbidden: `generated/`, `vendor/`</code></pre>
             </div>
         </section>
 
@@ -1242,7 +1261,7 @@ then edit only after the indexed evidence is clear.</code></pre>
         const steps = [
             { kind: "note", text: "# Install once. The wrapper pulls the native binary for your OS." },
             { kind: "cmd", text: "npm install -g open-kioku" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> installed ok 1.0.1<br><span class="term-muted">native packages are published for macOS, Linux, and Windows</span>' },
+            { kind: "out", html: '<span class="term-good">[ok]</span> installed ok 2.0.0<br><span class="term-muted">native packages are published for macOS, Linux, and Windows</span>' },
             { kind: "pause", ms: 900 },
             { kind: "note", text: "\n# Initialize and index the repo your agent will edit." },
             { kind: "cmd", text: "ok init /work/acme-api" },
