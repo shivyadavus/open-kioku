@@ -1,7 +1,7 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     ChangeBoundary, ContextPack, FileId, ImpactReport, MemorySearchResult, PlanReport, RiskReport,
-    SearchResult, TestTarget, ToolCallRecommendation,
+    ScoreComponent, SearchResult, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -73,15 +73,22 @@ impl<'a> PlanEngine<'a> {
         context: ContextPack,
     ) -> Result<PlanReport> {
         let context_limit = limit.clamp(1, 100);
-        let primary_context = context
+        let mut primary_context = context
             .primary_files
             .iter()
             .take(MAX_PRIMARY_CONTEXT.min(context_limit))
             .cloned()
             .collect::<Vec<_>>();
+        for result in &mut primary_context {
+            result.reconcile_score_breakdown();
+        }
         let impact_target = impact_target(&primary_context);
-        let impact = self.impact_for_primary_context(task, impact_target, &context)?;
-        let validation = self.validation_for_context(&primary_context, &context)?;
+        let mut impact = self.impact_for_primary_context(task, impact_target, &context)?;
+        impact.reconcile_score_breakdown();
+        let mut validation = self.validation_for_context(&primary_context, &context)?;
+        for test in &mut validation {
+            test.reconcile_score_breakdown();
+        }
         let unmatched_anchors = unmatched_named_anchors(task, &primary_context);
         let risk = merge_risk(
             &context.risk_report,
@@ -117,8 +124,9 @@ impl<'a> PlanEngine<'a> {
             &risk,
             &self.memory_facts,
         );
+        let score_breakdown = plan_score_breakdown(&risk);
 
-        Ok(PlanReport {
+        let mut report = PlanReport {
             task: task.into(),
             summary,
             primary_context,
@@ -134,7 +142,10 @@ impl<'a> PlanEngine<'a> {
             confidence_summary:
                 "derived from local task-anchor search, symbol extraction, exact references when indexed, impact analysis, and test heuristics"
                     .into(),
-        })
+            score_breakdown,
+        };
+        report.reconcile_score_breakdown();
+        Ok(report)
     }
 
     fn impact_for_primary_context(
@@ -158,6 +169,12 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts: Vec::new(),
                 risk_report: context.risk_report.clone(),
                 evidence,
+                score_breakdown: vec![ScoreComponent::single(
+                    "bounded_context_impact",
+                    context.risk_report.score,
+                    vec!["context:bounded-search".into()],
+                    "bounded context reused persisted supporting files",
+                )],
             });
         }
         if let Some(target) = impact_target {
@@ -171,6 +188,16 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts: Vec::new(),
                 risk_report: context.risk_report.clone(),
                 evidence: context.evidence.clone(),
+                score_breakdown: vec![ScoreComponent::single(
+                    "context_risk_fallback",
+                    context.risk_report.score,
+                    context
+                        .evidence
+                        .iter()
+                        .map(|evidence| evidence.id.0.clone())
+                        .collect(),
+                    "no primary impact target; using context risk",
+                )],
             })
         }
     }
@@ -343,6 +370,26 @@ fn merge_risk(
         score,
         reasons,
     }
+}
+
+fn plan_score_breakdown(risk: &RiskReport) -> Vec<ScoreComponent> {
+    let mut components = Vec::new();
+    let reason_ids = risk
+        .reasons
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("risk:reason:{index}"))
+        .collect::<Vec<_>>();
+    components.push(ScoreComponent::single(
+        "plan_risk_score",
+        risk.score,
+        reason_ids,
+        format!(
+            "plan risk is `{}` from merged context and impact risk",
+            risk.level
+        ),
+    ));
+    components
 }
 
 fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
@@ -633,7 +680,12 @@ fn render_text(report: &PlanReport) -> String {
     } else {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
-            out.push_str(&format!("  - {} [{}]\n", test.name, command));
+            out.push_str(&format!(
+                "  - {} [{}] ({})\n",
+                test.name,
+                command,
+                top_score_signals(&test.score_breakdown)
+            ));
         }
     }
 
@@ -670,6 +722,8 @@ fn render_markdown(report: &PlanReport) -> String {
     for reason in &report.risk.reasons {
         out.push_str(&format!("- {reason}\n"));
     }
+    out.push_str("\n### Score Signals\n\n");
+    write_markdown_score_components(&mut out, &report.score_breakdown);
 
     out.push_str("\n## Primary Context\n\n");
     write_markdown_results(&mut out, &report.primary_context);
@@ -695,7 +749,12 @@ fn render_markdown(report: &PlanReport) -> String {
     } else {
         for test in &report.validation {
             let command = test.command.as_deref().unwrap_or("manual validation");
-            out.push_str(&format!("- `{}` via `{}`\n", test.name, command));
+            out.push_str(&format!(
+                "- `{}` via `{}`; signals: {}\n",
+                test.name,
+                command,
+                top_score_signals(&test.score_breakdown)
+            ));
         }
     }
 
@@ -743,9 +802,11 @@ fn write_results(out: &mut String, results: &[SearchResult]) {
     for result in results {
         let range = line_range(result);
         out.push_str(&format!(
-            "  - {}{}: {}\n",
+            "  - {}{} [{:.3}; {}]: {}\n",
             result.path.display(),
             range,
+            result.score,
+            top_score_signals(&result.score_breakdown),
             one_line(&result.snippet)
         ));
     }
@@ -758,12 +819,42 @@ fn write_markdown_results(out: &mut String, results: &[SearchResult]) {
     }
     for result in results {
         out.push_str(&format!(
-            "- `{}`{}: {}\n",
+            "- `{}`{}: {}\n  - score: `{:.3}`; signals: {}\n",
             result.path.display(),
             line_range(result),
-            one_line(&result.snippet)
+            one_line(&result.snippet),
+            result.score,
+            top_score_signals(&result.score_breakdown)
         ));
     }
+}
+
+fn write_markdown_score_components(out: &mut String, components: &[ScoreComponent]) {
+    if components.is_empty() {
+        out.push_str("- None\n");
+        return;
+    }
+    for component in components.iter().take(3) {
+        out.push_str(&format!(
+            "- `{}` contribution `{:.3}`: {}\n",
+            component.signal,
+            component.contribution,
+            one_line(&component.rationale)
+        ));
+    }
+}
+
+fn top_score_signals(components: &[ScoreComponent]) -> String {
+    if components.is_empty() {
+        return "no score signals".into();
+    }
+    components
+        .iter()
+        .filter(|component| component.contribution.abs() > 0.001)
+        .take(3)
+        .map(|component| format!("`{}` {:+.3}", component.signal, component.contribution))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn write_paths(out: &mut String, paths: &[PathBuf]) {
@@ -852,6 +943,12 @@ mod tests {
             command: Some("cargo test".into()),
             confidence: Confidence::High,
             reason: "test-like path".into(),
+            score_breakdown: vec![ScoreComponent::single(
+                "test_fixture_confidence",
+                Confidence::High.score(),
+                vec!["login-test".into()],
+                "test-like path",
+            )],
         };
         let chunks = vec![
             CodeChunk {
@@ -969,6 +1066,12 @@ mod tests {
             match_reason: "test".into(),
             evidence: vec!["test evidence".into()],
             confidence: 1.0,
+            score_breakdown: vec![ScoreComponent::single(
+                "test_score",
+                1.0,
+                vec!["test evidence".into()],
+                "test fixture",
+            )],
         };
         let context = ContextPack {
             task: "token".into(),
@@ -1007,6 +1110,15 @@ mod tests {
         assert_eq!(report.impact.risk_report.level, "low");
         assert_eq!(report.impact.evidence.len(), 1);
         assert_eq!(report.impact.evidence[0].id.0, "context:bounded-search");
+        assert!(!report.score_breakdown.is_empty());
+        assert!(!report.primary_context[0].score_breakdown.is_empty());
+        assert!(!report.impact.score_breakdown.is_empty());
+        assert!(
+            (open_kioku_core::score_component_total(&report.primary_context[0].score_breakdown)
+                - report.primary_context[0].score)
+                .abs()
+                < 0.001
+        );
     }
 
     #[test]
@@ -1033,6 +1145,12 @@ mod tests {
             match_reason: "test".into(),
             evidence: vec!["test evidence".into()],
             confidence: 1.0,
+            score_breakdown: vec![ScoreComponent::single(
+                "test_score",
+                1.0,
+                vec!["test evidence".into()],
+                "test fixture",
+            )],
         };
         let context = ContextPack {
             task:
@@ -1079,5 +1197,18 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("PublishRestrictionsMutation")));
+    }
+
+    #[test]
+    fn markdown_plan_renders_score_signals() {
+        let store = test_store();
+        let report = PlanEngine::new(&store)
+            .plan("change issue_token validation", 5)
+            .unwrap();
+        let rendered = PlanFormat::Markdown.render(&report).unwrap();
+
+        assert!(rendered.contains("### Score Signals"));
+        assert!(rendered.contains("signals:"));
+        assert!(rendered.contains("score:"));
     }
 }

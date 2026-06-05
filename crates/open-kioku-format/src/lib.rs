@@ -1,6 +1,6 @@
 use open_kioku_core::{
     CompressedContextPack, ContextHandle, ContextPack, Evidence, LineRange, MemorySearchResult,
-    PlanReport, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    PlanReport, ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -68,6 +68,12 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
     push_search_results(&mut out, "impact_indirect", &report.impact.indirect_impacts);
     push_tests(&mut out, "validation", &report.validation);
+    push_score_components(&mut out, "plan_score_breakdown", &report.score_breakdown);
+    push_score_components(
+        &mut out,
+        "impact_score_breakdown",
+        &report.impact.score_breakdown,
+    );
     push_memory(&mut out, &report.memory_facts);
     push_path_list(
         &mut out,
@@ -93,7 +99,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
 
 fn push_search_results(out: &mut String, name: &str, results: &[SearchResult]) {
     out.push_str(&format!(
-        "{name}[{}]{{path,lines,score,reason,symbol,summary}}:\n",
+        "{name}[{}]{{path,lines,score,signals,reason,symbol,summary}}:\n",
         results.len()
     ));
     for result in results {
@@ -108,6 +114,7 @@ fn push_search_results(out: &mut String, name: &str, results: &[SearchResult]) {
                 result.path.display().to_string(),
                 line_range(&result.line_range),
                 format!("{:.3}", result.score),
+                top_score_signals(&result.score_breakdown),
                 result.match_reason.clone(),
                 symbol.to_string(),
                 one_line(&result.snippet),
@@ -176,7 +183,7 @@ fn push_symbols(out: &mut String, symbols: &[Symbol]) {
 
 fn push_tests(out: &mut String, name: &str, tests: &[TestTarget]) {
     out.push_str(&format!(
-        "{name}[{}]{{name,command,confidence,reason}}:\n",
+        "{name}[{}]{{name,command,confidence,signals,reason}}:\n",
         tests.len()
     ));
     for test in tests {
@@ -188,9 +195,45 @@ fn push_tests(out: &mut String, name: &str, tests: &[TestTarget]) {
                     .clone()
                     .unwrap_or_else(|| "manual validation".into()),
                 format!("{:?}", test.confidence),
+                top_score_signals(&test.score_breakdown),
                 test.reason.clone(),
             ],
         );
+    }
+}
+
+fn push_score_components(out: &mut String, name: &str, components: &[ScoreComponent]) {
+    out.push_str(&format!(
+        "{name}[{}]{{signal,raw,normalized,weight,contribution,evidence,rationale}}:\n",
+        components.len()
+    ));
+    for component in components {
+        push_row(
+            out,
+            &[
+                component.signal.clone(),
+                format!("{:.3}", component.raw_value),
+                format!("{:.3}", component.normalized_value),
+                format!("{:.3}", component.weight),
+                format!("{:.3}", component.contribution),
+                component.evidence_ids.join(","),
+                component.rationale.clone(),
+            ],
+        );
+    }
+}
+
+fn top_score_signals(components: &[ScoreComponent]) -> String {
+    let signals = components
+        .iter()
+        .filter(|component| component.contribution.abs() > 0.001)
+        .take(3)
+        .map(|component| format!("{}{:+.3}", component.signal, component.contribution))
+        .collect::<Vec<_>>();
+    if signals.is_empty() {
+        "none".into()
+    } else {
+        signals.join(",")
     }
 }
 
@@ -336,7 +379,7 @@ mod tests {
     use chrono::Utc;
     use open_kioku_core::{
         ChangeBoundary, Confidence, ContextHandleId, EvidenceId, EvidenceSourceType, FileRange,
-        ImpactReport, RiskReport,
+        ImpactReport, RiskReport, ScoreComponent,
     };
 
     #[test]
@@ -386,6 +429,12 @@ mod tests {
                     reasons: Vec::new(),
                 },
                 evidence: Vec::new(),
+                score_breakdown: vec![ScoreComponent::single(
+                    "impact_fixture",
+                    0.1,
+                    Vec::new(),
+                    "format fixture",
+                )],
             },
             validation: Vec::new(),
             risk: RiskReport {
@@ -412,12 +461,19 @@ mod tests {
                 indexed_at: Utc::now(),
             }],
             confidence_summary: "test".into(),
+            score_breakdown: vec![ScoreComponent::single(
+                "plan_fixture",
+                0.1,
+                vec!["ev".into()],
+                "format fixture",
+            )],
         };
 
         let rendered = render_plan_toon(&report);
 
         assert!(rendered.contains("type: plan_report"));
-        assert!(rendered.contains("primary_context[0]{path,lines,score,reason,symbol,summary}:"));
+        assert!(rendered
+            .contains("primary_context[0]{path,lines,score,signals,reason,symbol,summary}:"));
         assert!(rendered.contains("allowed_files[1]{path}:"));
     }
 }

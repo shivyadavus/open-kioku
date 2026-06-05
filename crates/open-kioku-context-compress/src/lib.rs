@@ -277,7 +277,7 @@ fn storage_err(err: rusqlite::Error) -> OkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{ChangeBoundary, RiskReport, ValidationPlan};
+    use open_kioku_core::{ChangeBoundary, RiskReport, ScoreComponent, ValidationPlan};
 
     #[test]
     fn compresses_and_retrieves_context_handles() {
@@ -310,6 +310,12 @@ mod tests {
                 match_reason: "test".into(),
                 evidence: Vec::new(),
                 confidence: 1.0,
+                score_breakdown: vec![ScoreComponent::single(
+                    "test_score",
+                    1.0,
+                    Vec::new(),
+                    "test fixture",
+                )],
             }],
             primary_symbols: Vec::new(),
             supporting_files: Vec::new(),

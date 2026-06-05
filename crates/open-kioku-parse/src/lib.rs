@@ -1,7 +1,7 @@
 use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, GraphEdgeType, GraphNodeType,
-    Import, Language, LineRange, Symbol, SymbolId, SymbolKind, TestTarget,
+    Import, Language, LineRange, ScoreComponent, Symbol, SymbolId, SymbolKind, TestTarget,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -700,6 +700,20 @@ pub fn extract_tests(
                 Confidence::Medium
             },
             reason: "test-like path, annotation, or naming convention".into(),
+            score_breakdown: vec![ScoreComponent::single(
+                "indexed_test_confidence",
+                if is_test_file {
+                    Confidence::High.score()
+                } else {
+                    Confidence::Medium.score()
+                },
+                vec![stable_id(&format!(
+                    "test:{}:{}",
+                    file.path.display(),
+                    symbol.name
+                ))],
+                "test-like path, annotation, or naming convention",
+            )],
         })
         .collect()
 }
