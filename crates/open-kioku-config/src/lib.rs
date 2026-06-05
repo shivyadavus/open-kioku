@@ -11,6 +11,8 @@ pub struct OkConfig {
     pub languages: LanguagesConfig,
     pub scip: ScipConfig,
     pub search: SearchConfig,
+    #[serde(default)]
+    pub ranking: RankingConfig,
     pub semantic: SemanticConfig,
     pub mcp: McpConfig,
     pub security: SecurityConfig,
@@ -87,6 +89,7 @@ impl Default for OkConfig {
                 semantic: "disabled".into(),
                 structural: true,
             },
+            ranking: RankingConfig::default(),
             semantic: SemanticConfig {
                 enabled: false,
                 provider: "local".into(),
@@ -178,6 +181,35 @@ pub struct SearchConfig {
     pub lexical: String,
     pub semantic: String,
     pub structural: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RankingConfig {
+    pub text_relevance: f32,
+    pub exact_reference: f32,
+    pub graph_proximity: f32,
+    pub boundary_fit: f32,
+    pub runtime_corroboration: f32,
+    pub git_cochange: f32,
+    pub validation_proximity: f32,
+    pub memory_signal: f32,
+    pub path_quality: f32,
+}
+
+impl Default for RankingConfig {
+    fn default() -> Self {
+        Self {
+            text_relevance: 1.0,
+            exact_reference: 1.0,
+            graph_proximity: 0.35,
+            boundary_fit: 0.25,
+            runtime_corroboration: 0.30,
+            git_cochange: 0.25,
+            validation_proximity: 1.0,
+            memory_signal: 0.20,
+            path_quality: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,6 +468,17 @@ lexical = "tantivy"
 semantic = "disabled"
 structural = true
 
+[ranking]
+text_relevance = 1.0
+exact_reference = 1.0
+graph_proximity = 0.35
+boundary_fit = 0.25
+runtime_corroboration = 0.30
+git_cochange = 0.25
+validation_proximity = 1.0
+memory_signal = 0.20
+path_quality = 1.0
+
 [semantic]
 enabled = false
 provider = "local"
@@ -467,6 +510,8 @@ rules = ".ok/architecture-rules.yml"
         .unwrap();
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
         assert_eq!(loaded.scip.mode, ScipMode::Auto);
+        assert_eq!(loaded.ranking.text_relevance, 1.0);
+        assert_eq!(loaded.ranking.graph_proximity, 0.35);
     }
 
     #[test]

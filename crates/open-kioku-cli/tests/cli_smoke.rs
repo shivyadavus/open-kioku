@@ -198,6 +198,19 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(search.contains("src/auth.rs"));
 
+    let explained_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("search")
+            .arg("issue_token")
+            .arg("--explain-ranking");
+        command
+    });
+    assert!(explained_search.contains("ranking:"));
+    assert!(explained_search.contains("text_relevance"));
+
     let plan = run({
         let mut command = ok();
         command
@@ -212,6 +225,25 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan.contains("# Plan: token"));
     assert!(plan.contains("## Primary Context"));
     assert!(plan.contains("## Agent Tool Calls"));
+
+    let eval = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("eval")
+            .arg(&repo)
+            .arg("--case")
+            .arg("issue_token=src/auth.rs")
+            .arg("--limit")
+            .arg("5")
+            .arg("--no-index");
+        command
+    });
+    assert!(eval.contains("\"baseline\""));
+    assert!(eval.contains("\"fusion\""));
+    assert!(eval.contains("\"ablations\""));
+    assert!(eval.contains("\"signal\": \"text_relevance\""));
+    assert!(eval.contains("\"top_search_signals\""));
 }
 
 #[test]
