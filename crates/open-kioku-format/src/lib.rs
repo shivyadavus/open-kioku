@@ -1,7 +1,7 @@
 use open_kioku_core::{
-    CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack, Evidence, LineRange,
-    MemorySearchResult, NegativeEvidence, PlanReport, ScoreComponent, SearchResult, Symbol,
-    TestTarget, ToolCallRecommendation,
+    ChangeBoundary, CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack,
+    Evidence, LineRange, MemorySearchResult, NegativeEvidence, PlanReport, ScoreComponent,
+    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -90,6 +90,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
         "caution_files",
         &report.recommended_change_boundary.caution_files,
     );
+    push_boundary_rules(&mut out, &report.recommended_change_boundary);
     push_string_list(&mut out, 0, "next_steps", &report.recommended_next_steps);
     push_tool_calls(&mut out, &report.tool_calls);
     push_evidence(&mut out, &report.evidence);
@@ -357,6 +358,66 @@ fn push_path_list(out: &mut String, name: &str, paths: &[PathBuf]) {
     }
 }
 
+fn push_boundary_rules(out: &mut String, boundary: &ChangeBoundary) {
+    out.push_str(&format!(
+        "allowed_rules[{}]{{path,reason,evidence_refs,symbols}}:\n",
+        boundary.allowed_rules.len()
+    ));
+    for rule in &boundary.allowed_rules {
+        push_row(
+            out,
+            &[
+                rule.path.display().to_string(),
+                rule.reason.clone(),
+                rule.evidence_refs.join("|"),
+                rule.symbols.join("|"),
+            ],
+        );
+    }
+    out.push_str(&format!(
+        "caution_rules[{}]{{path,reason,evidence_refs,symbols}}:\n",
+        boundary.caution_rules.len()
+    ));
+    for rule in &boundary.caution_rules {
+        push_row(
+            out,
+            &[
+                rule.path.display().to_string(),
+                rule.reason.clone(),
+                rule.evidence_refs.join("|"),
+                rule.symbols.join("|"),
+            ],
+        );
+    }
+    out.push_str(&format!(
+        "forbidden_rules[{}]{{pattern,reason,evidence_refs}}:\n",
+        boundary.forbidden_rules.len()
+    ));
+    for rule in &boundary.forbidden_rules {
+        push_row(
+            out,
+            &[
+                rule.pattern.clone(),
+                rule.reason.clone(),
+                rule.evidence_refs.join("|"),
+            ],
+        );
+    }
+    out.push_str(&format!(
+        "boundary_expansion[{}]{{reason,required_evidence_refs}}:\n",
+        boundary.expansion_requirements.len()
+    ));
+    for requirement in &boundary.expansion_requirements {
+        push_row(
+            out,
+            &[
+                requirement.reason.clone(),
+                requirement.required_evidence_refs.join("|"),
+            ],
+        );
+    }
+}
+
 fn push_string_list(out: &mut String, indent: usize, name: &str, values: &[String]) {
     out.push_str(&format!(
         "{}{name}[{}]{{text}}:\n",
@@ -506,6 +567,7 @@ mod tests {
                 caution_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 evidence_refs: Vec::new(),
+                ..Default::default()
             },
             recommended_next_steps: vec!["Inspect context".into()],
             tool_calls: Vec::new(),
@@ -542,5 +604,7 @@ mod tests {
         ));
         assert!(rendered.contains("evidence_by_section"));
         assert!(rendered.contains("allowed_files[1]{path}:"));
+        assert!(rendered.contains("allowed_rules[0]{path,reason,evidence_refs,symbols}:"));
+        assert!(rendered.contains("forbidden_rules[0]{pattern,reason,evidence_refs}:"));
     }
 }
