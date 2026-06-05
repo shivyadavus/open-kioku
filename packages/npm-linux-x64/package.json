@@ -5,5 +5,13 @@
   "cpu": ["x64"],
   "main": "",
   "author": "Open Kioku",
-  "license": "Elastic-2.0"
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shivyadavus/open-kioku.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shivyadavus/open-kioku/issues"
+  },
+  "homepage": "https://openkioku.com"
 }
