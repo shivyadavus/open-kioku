@@ -40,9 +40,15 @@ impl<'a> ImpactEngine<'a> {
         } else {
             Vec::new()
         };
+        let git_facts = if let Some(file) = &file {
+            git_history_facts_for_file(self.store, &file.id)?
+        } else {
+            Vec::new()
+        };
 
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
+            direct.extend(git_cochange_impacts(self.store, file, &git_facts)?);
             direct.extend(runtime_impacts(
                 self.store,
                 self.search_index,
@@ -133,6 +139,12 @@ impl<'a> ImpactEngine<'a> {
                 runtime_facts.len()
             ));
         }
+        if !git_facts.is_empty() {
+            reasons.push(format!(
+                "{} git co-change or historical validation fact(s) touch this file",
+                git_facts.len()
+            ));
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
@@ -140,8 +152,9 @@ impl<'a> ImpactEngine<'a> {
             reasons.push("limited indexed downstream references found".into());
         }
         let runtime_score = (runtime_facts.len() as f32 / 12.0).min(0.25);
+        let git_score = (git_facts.len() as f32 / 12.0).min(0.20);
         let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
-        let score = (direct_reference_score + runtime_score).min(1.0);
+        let score = (direct_reference_score + runtime_score + git_score).min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
@@ -176,6 +189,10 @@ impl<'a> ImpactEngine<'a> {
             .iter()
             .map(|fact| runtime_fact_evidence(fact, path))
             .collect::<Vec<_>>();
+        let git_evidence = git_facts
+            .iter()
+            .map(|fact| git_fact_evidence(fact, path))
+            .collect::<Vec<_>>();
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -192,7 +209,10 @@ impl<'a> ImpactEngine<'a> {
                 score,
                 reasons,
             },
-            evidence: std::iter::once(evidence).chain(runtime_evidence).collect(),
+            evidence: std::iter::once(evidence)
+                .chain(runtime_evidence)
+                .chain(git_evidence)
+                .collect(),
             score_breakdown: vec![ScoreComponent::single(
                 "direct_reference_density",
                 direct_reference_score,
@@ -206,6 +226,14 @@ impl<'a> ImpactEngine<'a> {
                 runtime_score,
                 runtime_facts.iter().map(|fact| fact.id.clone()).collect(),
                 "impact risk adjusted by local runtime trace/log/incident facts",
+            ));
+        }
+        if git_score > 0.0 {
+            report.score_breakdown.push(ScoreComponent::adjustment(
+                "git_cochange",
+                git_score,
+                git_facts.iter().map(|fact| fact.id.clone()).collect(),
+                "impact risk adjusted by git co-change and historical validation facts",
             ));
         }
         report.reconcile_score_breakdown();
@@ -223,6 +251,64 @@ fn runtime_facts_for_file(
         .filter(|fact| &fact.file_id == file_id)
         .take(12)
         .collect())
+}
+
+fn git_history_facts_for_file(
+    store: &dyn MetadataStore,
+    file_id: &FileId,
+) -> Result<Vec<AnalysisFact>> {
+    Ok(store
+        .analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?
+        .into_iter()
+        .filter(|fact| &fact.file_id == file_id)
+        .take(12)
+        .collect())
+}
+
+fn git_cochange_impacts(
+    store: &dyn MetadataStore,
+    target_file: &File,
+    git_facts: &[AnalysisFact],
+) -> Result<Vec<SearchResult>> {
+    let mut results = Vec::new();
+    for fact in git_facts.iter().take(12) {
+        let target = Path::new(&fact.target);
+        let Some(file) = store.get_file_by_path(target)? else {
+            continue;
+        };
+        if file.path == target_file.path {
+            continue;
+        }
+        let snippet = store
+            .chunks_for_file(&file.id)?
+            .first()
+            .map(|chunk| chunk.text.clone())
+            .unwrap_or_else(|| file.path.display().to_string());
+        let evidence = vec![format!(
+            "git co-change from local history: `{}` changed with `{}` ({})",
+            target_file.path.display(),
+            file.path.display(),
+            fact.message
+        )];
+        results.push(SearchResult {
+            path: file.path.clone(),
+            line_range: None,
+            snippet,
+            symbol: None,
+            score: 1.15 + fact.confidence.score(),
+            match_reason: "historical git co-change with target file".into(),
+            evidence,
+            evidence_refs: vec![fact.id.clone()],
+            confidence: fact.confidence.score(),
+            score_breakdown: vec![ScoreComponent::single(
+                "git_cochange",
+                0.20,
+                vec![fact.id.clone()],
+                "impact candidate historically changed with the target file",
+            )],
+        });
+    }
+    Ok(dedupe_results(results))
 }
 
 fn runtime_impacts(
@@ -293,6 +379,22 @@ fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
             line_range: fact.range.clone(),
         }),
         symbol_id: fact.symbol_id.clone(),
+        confidence: fact.confidence,
+        message: format!("{}: {}", fact.message, fact.target),
+        indexed_at: Utc::now(),
+    }
+}
+
+fn git_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(fact.id.clone()),
+        source: fact.source.clone(),
+        source_type: EvidenceSourceType::GitHistory,
+        file_range: Some(FileRange {
+            path: path.to_path_buf(),
+            line_range: None,
+        }),
+        symbol_id: None,
         confidence: fact.confidence,
         message: format!("{}: {}", fact.message, fact.target),
         indexed_at: Utc::now(),

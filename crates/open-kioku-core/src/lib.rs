@@ -317,6 +317,7 @@ pub enum EvidenceSourceType {
     Lexical,
     Semantic,
     Runtime,
+    GitHistory,
     StaticAnalysis,
     ExternalIntegration,
     Heuristic,
@@ -679,6 +680,8 @@ pub struct IndexQuality {
     pub static_analysis_facts: usize,
     #[serde(default)]
     pub runtime_analysis_facts: usize,
+    #[serde(default)]
+    pub git_history_facts: usize,
     #[serde(default)]
     pub semantic_provider_notes: Vec<String>,
     pub quality_notes: Vec<String>,

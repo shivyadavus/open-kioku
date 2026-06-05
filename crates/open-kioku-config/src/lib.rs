@@ -10,6 +10,8 @@ pub struct OkConfig {
     pub index: IndexConfig,
     pub languages: LanguagesConfig,
     pub scip: ScipConfig,
+    #[serde(default)]
+    pub history: HistoryConfig,
     pub search: SearchConfig,
     #[serde(default)]
     pub ranking: RankingConfig,
@@ -84,6 +86,7 @@ impl Default for OkConfig {
                     ".ok/indexes/python.scip".into(),
                 ],
             },
+            history: HistoryConfig::default(),
             search: SearchConfig {
                 lexical: "tantivy".into(),
                 semantic: "disabled".into(),
@@ -164,6 +167,26 @@ pub struct ScipConfig {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_history_max_commits")]
+    pub max_commits: usize,
+    #[serde(default = "default_history_max_files_per_commit")]
+    pub max_files_per_commit: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_commits: 500,
+            max_files_per_commit: 40,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +384,14 @@ impl OkConfig {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_history_max_commits() -> usize {
+    500
+}
+
+fn default_history_max_files_per_commit() -> usize {
+    40
 }
 
 fn default_scip_timeout_seconds() -> u64 {
