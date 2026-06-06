@@ -2081,7 +2081,9 @@ fn client_verify_command(client: McpClient) -> String {
         McpClient::Gemini => "run gemini /mcp and confirm open-kioku is connected".into(),
         McpClient::Opencode => "run opencode and ask it to use the open-kioku MCP tools".into(),
         McpClient::Zed => "open Agent Panel settings and confirm the server is active".into(),
-        McpClient::Windsurf => "open Windsurf, click Cascade MCPs icon, and confirm open-kioku is connected".into(),
+        McpClient::Windsurf => {
+            "open Windsurf, click Cascade MCPs icon, and confirm open-kioku is connected".into()
+        }
         McpClient::Trae => "open Trae Settings -> MCP, and confirm open-kioku is active".into(),
     }
 }
