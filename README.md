@@ -209,6 +209,17 @@ ok mcp install zed --repo /absolute/path/to/repo
 
 Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
 
+### Git-Based Plugin & Marketplace Distribution
+
+Open Kioku bundles pre-configured repository-scoped plugin and marketplace manifests. This allows teams to share and auto-load the server configurations directly from the repository using agent-specific plugin models:
+
+- **OpenAI Codex**: Install the repository-scoped plugin marketplace directly from GitHub:
+  ```sh
+  codex plugin marketplace add shivyadavus/open-kioku
+  ```
+- **Claude Code**: Integrates using the `.claude-plugin/` manifest.
+- **Cursor**: Integrates using the `.cursor-plugin/` ruleset.
+
 Starter examples with golden prompts and one-command smoke tests are available
 in [`examples/cursor`](examples/cursor) and [`examples/claude`](examples/claude).
 
