@@ -9,6 +9,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.0.1] — 2026-06-05
+
+### Added
+- Added styled GitHub star call-to-action cards and buttons on the landing page and npm README to bridge package discovery and GitHub conversions.
+- Added subtle, action-oriented post-install success prints to `ok init`, `ok demo`, and `ok prove` commands.
+- Synced metadata repositories, homepages, and bugs fields for all sub-packages in the workspace.
+
+### Changed
+- Bumped workspace crates and manifests to version 2.0.1 to publish patch updates.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.0.0] — 2026-06-05
 
 ### Added
@@ -148,6 +172,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.1
 [2.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.0
 [1.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.4
 [1.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.3
