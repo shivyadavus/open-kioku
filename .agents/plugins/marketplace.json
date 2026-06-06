@@ -1,0 +1,20 @@
+{
+  "name": "open-kioku-marketplace",
+  "interface": {
+    "displayName": "Open Kioku Marketplace"
+  },
+  "plugins": [
+    {
+      "name": "open-kioku",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
