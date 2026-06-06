@@ -223,6 +223,32 @@ fn mcp_install_prints_client_config() {
     });
     assert!(zed.contains("context_servers"));
     assert!(zed.contains("open-kioku"));
+
+    let windsurf = run({
+        let mut command = ok();
+        command
+            .arg("mcp")
+            .arg("install")
+            .arg("windsurf")
+            .arg("--repo")
+            .arg(temp.path());
+        command
+    });
+    assert!(windsurf.contains("mcpServers"));
+    assert!(windsurf.contains("open-kioku"));
+
+    let trae = run({
+        let mut command = ok();
+        command
+            .arg("mcp")
+            .arg("install")
+            .arg("trae")
+            .arg("--repo")
+            .arg(temp.path());
+        command
+    });
+    assert!(trae.contains("mcpServers"));
+    assert!(trae.contains("open-kioku"));
 }
 
 #[test]

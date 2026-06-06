@@ -200,6 +200,8 @@ ok --repo /absolute/path/to/repo search "the feature or bug you care about" --li
 ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
 ok mcp install codex --repo /absolute/path/to/repo
+ok mcp install windsurf --repo /absolute/path/to/repo
+ok mcp install trae --repo /absolute/path/to/repo
 ok mcp install gemini --repo /absolute/path/to/repo
 ok mcp install opencode --repo /absolute/path/to/repo
 ok mcp install zed --repo /absolute/path/to/repo
@@ -207,7 +209,7 @@ ok mcp install zed --repo /absolute/path/to/repo
 
 `ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
-Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
+Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Windsurf, Trae, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
 
 ### Git-Based Plugin & Marketplace Distribution
 
@@ -293,6 +295,8 @@ ok setup audit ./open-kioku-demo --markdown
 ok mcp install cursor --repo ./open-kioku-demo
 ok mcp install claude --repo ./open-kioku-demo
 ok mcp install codex --repo ./open-kioku-demo
+ok mcp install windsurf --repo ./open-kioku-demo
+ok mcp install trae --repo ./open-kioku-demo
 ```
 
 `ok demo` creates `./open-kioku-demo`, writes `ok.toml`, and builds the local SQLite and Tantivy indexes. Use `ok demo --path /tmp/open-kioku-demo --force` for a custom path.
