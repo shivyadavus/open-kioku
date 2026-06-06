@@ -1,0 +1,37 @@
+{
+  "name": "open-kioku",
+  "version": "2.0.1",
+  "description": "Local-first code intelligence for AI agents — instant code search, symbol resolution, impact analysis, dependency graphs, and context packs across any codebase. Works offline. No data leaves your machine.",
+  "author": {
+    "name": "Shiv Yadav",
+    "email": "shivyadavus@users.noreply.github.com",
+    "url": "https://github.com/shivyadavus"
+  },
+  "license": "Elastic-2.0",
+  "repository": "https://github.com/shivyadavus/open-kioku",
+  "homepage": "https://openkioku.com",
+  "keywords": [
+    "code-intelligence",
+    "code-search",
+    "symbol-resolution",
+    "impact-analysis",
+    "context-pack",
+    "dependency-graph",
+    "mcp",
+    "local-first"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Open Kioku",
+    "shortDescription": "Local code intelligence for AI agents",
+    "longDescription": "Instant code search, symbol resolution, blast-radius analysis, and patch planning — all 100% offline, zero hosted data.",
+    "developerName": "Shiv Yadav",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://openkioku.com",
+    "brandColor": "#2dd4bf"
+  }
+}
