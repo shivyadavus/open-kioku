@@ -45,7 +45,7 @@ exclude = ["crates/open-kioku-tests/fixtures/rust-fixture"]
 resolver = "2"
 
 [workspace.package]
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 license = "Elastic-2.0"
 repository = "https://github.com/shivyadavus/open-kioku"
