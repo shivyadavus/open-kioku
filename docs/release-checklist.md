@@ -60,4 +60,5 @@ ok demo --force
 ok prove ./open-kioku-demo --task token
 ok mcp install cursor --repo "$PWD/open-kioku-demo"
 ok mcp install claude --repo "$PWD/open-kioku-demo"
+ok mcp install codex --repo "$PWD/open-kioku-demo"
 ```
