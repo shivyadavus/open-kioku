@@ -485,6 +485,8 @@ enum McpClient {
     Gemini,
     Opencode,
     Zed,
+    Windsurf,
+    Trae,
 }
 
 impl McpClient {
@@ -496,6 +498,8 @@ impl McpClient {
             Self::Gemini => "gemini",
             Self::Opencode => "opencode",
             Self::Zed => "zed",
+            Self::Windsurf => "windsurf",
+            Self::Trae => "trae",
         }
     }
 
@@ -2056,7 +2060,7 @@ fn markdown_cell(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', " ")
 }
 
-fn all_mcp_clients() -> [McpClient; 6] {
+fn all_mcp_clients() -> [McpClient; 8] {
     [
         McpClient::Claude,
         McpClient::Cursor,
@@ -2064,6 +2068,8 @@ fn all_mcp_clients() -> [McpClient; 6] {
         McpClient::Gemini,
         McpClient::Opencode,
         McpClient::Zed,
+        McpClient::Windsurf,
+        McpClient::Trae,
     ]
 }
 
@@ -2075,6 +2081,8 @@ fn client_verify_command(client: McpClient) -> String {
         McpClient::Gemini => "run gemini /mcp and confirm open-kioku is connected".into(),
         McpClient::Opencode => "run opencode and ask it to use the open-kioku MCP tools".into(),
         McpClient::Zed => "open Agent Panel settings and confirm the server is active".into(),
+        McpClient::Windsurf => "open Windsurf, click Cascade MCPs icon, and confirm open-kioku is connected".into(),
+        McpClient::Trae => "open Trae Settings -> MCP, and confirm open-kioku is active".into(),
     }
 }
 
@@ -2086,6 +2094,8 @@ fn client_install_note(client: McpClient) -> &'static str {
         McpClient::Gemini => "Gemini CLI settings.json mcpServers entry.",
         McpClient::Opencode => "OpenCode opencode.json mcp local server entry.",
         McpClient::Zed => "Zed settings.json context_servers entry.",
+        McpClient::Windsurf => "Windsurf mcp_config.json entry.",
+        McpClient::Trae => "Trae mcp.json entry.",
     }
 }
 
@@ -2102,6 +2112,12 @@ fn plugin_surfaces(repo: &Path) -> Vec<PluginSurfaceReport> {
             path: repo.join(".claude-plugin/plugin.json"),
             present: repo.join(".claude-plugin/plugin.json").exists(),
             note: "Claude plugin manifest.",
+        },
+        PluginSurfaceReport {
+            name: "codex-plugin",
+            path: repo.join(".codex-plugin/plugin.json"),
+            present: repo.join(".codex-plugin/plugin.json").exists(),
+            note: "Codex plugin manifest.",
         },
         PluginSurfaceReport {
             name: "github-workflows",
@@ -4937,6 +4953,30 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
                         "command": "ok",
                         "args": args,
                         "env": {}
+                    }
+                }
+            }
+        }),
+        McpClient::Windsurf => serde_json::json!({
+            "client": "windsurf",
+            "instructions": "Add this entry to ~/.codeium/windsurf/mcp_config.json (or %USERPROFILE%\\.codeium\\windsurf\\mcp_config.json on Windows).",
+            "config": {
+                "mcpServers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args
+                    }
+                }
+            }
+        }),
+        McpClient::Trae => serde_json::json!({
+            "client": "trae",
+            "instructions": "Add this entry to ~/.trae/mcp.json (or %USERPROFILE%\\.trae\\mcp.json on Windows), or locally in your project's .trae/mcp.json.",
+            "config": {
+                "mcpServers": {
+                    "open-kioku": {
+                        "command": "ok",
+                        "args": args
                     }
                 }
             }
