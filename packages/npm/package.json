@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "version": "2.0.1",
-  "description": "Local-first code intelligence MCP for AI coding agents",
+  "description": "Local-first code intelligence for AI agents. Plan before edit. Verify after edit.",
   "mcpName": "open-kioku",
   "bin": {
     "ok": "./bin/ok.js",
