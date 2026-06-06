@@ -1,5 +1,5 @@
 class OpenKioku < Formula
-  desc "Local-first code intelligence MCP for AI coding agents"
+  desc "Local-first code intelligence for AI agents. Plan before edit. Verify after edit."
   homepage "https://github.com/shivyadavus/open-kioku"
   version "2.0.1"
   license "Elastic-2.0"

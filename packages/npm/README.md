@@ -1,6 +1,6 @@
 # Open Kioku
 
-Local-first code intelligence for AI coding agents.
+Local-first code intelligence for AI agents. Plan before edit. Verify after edit.
 
 If Open Kioku helps your AI coding workflow, please consider starring the repo:
 https://github.com/shivyadavus/open-kioku
