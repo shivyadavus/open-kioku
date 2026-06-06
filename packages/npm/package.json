@@ -2,6 +2,7 @@
   "name": "open-kioku",
   "version": "2.0.1",
   "description": "Local-first code intelligence MCP for AI coding agents",
+  "mcpName": "open-kioku",
   "bin": {
     "ok": "./bin/ok.js",
     "open-kioku": "./bin/ok.js"
