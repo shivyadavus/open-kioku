@@ -94,6 +94,8 @@ body:
         - Gemini
         - OpenCode
         - Zed
+        - Windsurf
+        - Trae
         - "None / CLI only"
     validations:
       required: true
