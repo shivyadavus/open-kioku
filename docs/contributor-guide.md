@@ -151,7 +151,7 @@ Add focused smokes based on the touched surface:
 | Fixtures | `cargo test -p open-kioku-tests` |
 | Workflow quality | `ok workflow-bench . --cases-file benchmarks/workflow-cases.json --no-index` |
 | MCP clients | `examples/cursor/smoke.sh`, `examples/claude/smoke.sh` |
-| Large-repo behavior | Run `ok --repo /Users/shivyadav/dev/elasticsearch ...` against the target index |
+| Large-repo behavior | Run `ok --repo /absolute/path/to/large-repo ...` against the target index |
 | Docs counts | `scripts/validate-docs.sh` |
 
 ## Fixture Matrix
@@ -163,4 +163,3 @@ Add focused smokes based on the touched surface:
 | Tests | `open-kioku-tests` tests and fixtures | workflow `expected_tests` |
 | Verify | `open-kioku-patch` tests and CLI smoke | workflow `expected_verdict` |
 | MCP | `open-kioku-mcp` tests and client smokes | Cursor/Claude examples |
-

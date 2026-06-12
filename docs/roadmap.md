@@ -6,7 +6,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 
 - Done: Ship the binary as `ok`.
 - Done: Provide `ok doctor` for local health checks.
-- Done: Provide `ok mcp install <client>` to print copy-paste MCP config for Claude and Cursor.
+- Done: Provide `ok mcp install <client>` to print copy-paste MCP config for all supported clients.
 - Done: Publish release binaries and SHA-256 checksums for macOS, Linux, and Windows.
 - Done: Add Homebrew and `cargo binstall` installation paths.
 - Next: Add provenance signing or attestations for release artifacts.

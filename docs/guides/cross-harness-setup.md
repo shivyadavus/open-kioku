@@ -9,6 +9,8 @@ ok mcp install codex --repo /absolute/path/to/repo
 ok mcp install gemini --repo /absolute/path/to/repo
 ok mcp install opencode --repo /absolute/path/to/repo
 ok mcp install zed --repo /absolute/path/to/repo
+ok mcp install windsurf --repo /absolute/path/to/repo
+ok mcp install trae --repo /absolute/path/to/repo
 ```
 
 Run this first:
@@ -38,6 +40,8 @@ Client matrix:
 | Gemini CLI | `settings.json` `mcpServers` | Run `/mcp` and confirm connection status. |
 | OpenCode | `opencode.json` local MCP entry | Prompt OpenCode to use the `open-kioku` MCP. |
 | Zed | `settings.json` `context_servers` | Confirm the server is active in Agent Panel settings. |
+| Windsurf | Windsurf MCP JSON entry | Confirm `open-kioku` is enabled in Windsurf MCP settings. |
+| Trae | Trae MCP JSON entry | Confirm `open-kioku` is enabled in Trae MCP settings. |
 
 Keep the server read-only for normal use:
 
