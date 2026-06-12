@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://openkioku.com/sitemap.xml
+Sitemap: https://www.openkioku.com/sitemap.xml
