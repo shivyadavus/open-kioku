@@ -19,6 +19,8 @@ ok mcp install codex --repo /absolute/path/to/repo
 ok mcp install gemini --repo /absolute/path/to/repo
 ok mcp install opencode --repo /absolute/path/to/repo
 ok mcp install zed --repo /absolute/path/to/repo
+ok mcp install windsurf --repo /absolute/path/to/repo
+ok mcp install trae --repo /absolute/path/to/repo
 ```
 
 Supported install snippets:
@@ -31,6 +33,8 @@ Supported install snippets:
 | Gemini CLI | `settings.json` `mcpServers` |
 | OpenCode | `opencode.json` `mcp.open-kioku` local server |
 | Zed | `settings.json` `context_servers.open-kioku` |
+| Windsurf | Windsurf MCP JSON |
+| Trae | Trae MCP JSON |
 
 The MCP server runs over stdio:
 
@@ -91,7 +95,7 @@ Stable source-read tools:
 - `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `explain_file`, `explain_symbol`
 - `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
-- `propose_patch`, `review_patch`, `validate_patch`
+- `propose_patch`, `review_patch`, `validate_patch`, `verify_change`
 
 Experimental tools:
 

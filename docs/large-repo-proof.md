@@ -1,11 +1,13 @@
 # Public Repository Proof
 
-This audit records local Open Kioku 2.0.1 runs against pinned public
-repositories under permissive open-source licenses. It checks whether commands
-merely execute and whether their results match the indexed source.
+This audit records local Open Kioku 2.0.1 runs against fixed revisions of
+public repositories under permissive open-source licenses. It checks whether
+commands merely execute and whether their results match the indexed source.
 
-Third-party project names are intentionally omitted. The document focuses only
-on Open Kioku behavior across repository and language profiles.
+Third-party project names and revision identifiers are intentionally omitted
+from this public summary. The document focuses only on Open Kioku behavior
+across repository and language profiles, so it is an audit record rather than a
+standalone reproduction recipe.
 
 ## Environment
 
@@ -62,7 +64,7 @@ target/release/ok --repo /absolute/path/to/python-ai-repo \
 ```
 
 Open Kioku returned the correct Python class definition at line 107 with high
-tree-sitter confidence. The result was checked directly against the pinned
+tree-sitter confidence. The result was checked directly against the fixed
 checkout.
 
 ### Source-checked planning task
@@ -75,7 +77,7 @@ For a concrete prefix-cache behavior change, the plan found:
 - one end-to-end reset test
 - one focused prefix-caching unit test
 
-The returned paths and line ranges were checked directly against the pinned
+The returned paths and line ranges were checked directly against the fixed
 checkout.
 
 ### Search quality

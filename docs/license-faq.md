@@ -1,34 +1,31 @@
 # License FAQ
 
 Open Kioku is licensed under the [Elastic License 2.0 (ELv2)](../LICENSE).
-This page answers common questions in plain English.
+This page summarizes the license text in plain English.
 
 > **Disclaimer:** This FAQ is informational, not legal advice. When in doubt,
-> read the [full license text](../LICENSE) or consult your legal team.
+> read the [full license text](../LICENSE). Ask qualified counsel about a
+> specific product, service, or distribution model.
 
 ---
 
-## What You CAN Do
+## License Grants
 
-| Use Case | Allowed? |
+| License grant | Summary |
 |---|---|
-| Use Open Kioku at your company | ✅ Yes |
-| Use it in your CI/CD pipelines | ✅ Yes |
-| Build internal tools on top of it | ✅ Yes |
-| Modify the source code | ✅ Yes |
-| Distribute copies (with license and notices intact) | ✅ Yes |
-| Use it for personal projects | ✅ Yes |
-| Use it for commercial projects | ✅ Yes |
-| Bundle it into your development workflow | ✅ Yes |
-| Run it on your own servers for your own team | ✅ Yes |
+| Use and copy | The license grants rights to use and copy the software, subject to its conditions and limitations. |
+| Modify | The license grants rights to prepare derivative works. Modified copies must carry prominent modification notices. |
+| Distribute | The license grants distribution rights. Recipients must also receive a copy of the license terms. |
+| Make available | The license grants this right, subject to the hosted-service limitation below. |
+| Patent license | The license includes a patent grant with stated exclusions and termination conditions. |
 
-## What You CANNOT Do
+## License Limitations
 
 | Restriction | Details |
 |---|---|
-| Offer Open Kioku as a hosted/managed service | ❌ You may not provide it to third parties as a hosted or managed service that exposes a substantial set of its features. |
-| Remove or obscure license notices | ❌ You must keep all copyright and licensing notices intact. |
-| Circumvent license key functionality | ❌ You may not move, change, disable, or circumvent license key mechanisms. |
+| Hosted or managed service | You may not provide the software to third parties as a hosted or managed service where users can access a substantial set of its features or functionality. |
+| License-key functionality | You may not move, change, disable, or circumvent license-key functionality or remove or obscure protected functionality. |
+| Notices | You may not alter, remove, or obscure the licensor's licensing, copyright, or other notices. |
 
 ---
 
@@ -36,28 +33,28 @@ This page answers common questions in plain English.
 
 ### Can I use Open Kioku at my company?
 
-**Yes.** You can install it on developer machines, run it in CI, and use it as
-part of your internal development workflow. There is no limit on the number of
-developers or projects.
+The license grants use and copying rights subject to its conditions and
+limitations. The license text does not state a per-developer or per-project
+limit.
 
 ### Can I modify it?
 
-**Yes.** You can modify the source code for your own use. If you distribute
-modified copies, you must include prominent notices stating that you have
-modified the software, and you must include the license and copyright notices.
+The license grants the right to prepare derivative works. If you distribute
+modified copies, include prominent notices stating that you modified the
+software, preserve the required notices, and provide recipients with the
+license terms.
 
 ### Can I build a product that uses Open Kioku internally?
 
-**Yes.** You can use Open Kioku as a component of a larger product, as long as
-you are not offering Open Kioku itself as a hosted/managed service to third
-parties.
+The license grants broad use rights, but whether a particular product design
+falls within the hosted-service limitation depends on how third parties access
+Open Kioku's features. Review the license text for the specific design.
 
 ### Can I offer a SaaS product built with Open Kioku?
 
-**It depends.** If your SaaS product _uses_ Open Kioku internally (e.g., to
-power code analysis behind the scenes), that is fine. If your SaaS product
-_is_ Open Kioku — meaning it provides third-party users with access to a
-substantial set of Open Kioku's features as a service — that is not permitted.
+The relevant question is whether the service provides third parties with
+access to a substantial set of Open Kioku's features or functionality. This
+FAQ does not determine whether a specific SaaS architecture crosses that line.
 
 ### Is ELv2 an OSI-approved open-source license?
 
@@ -68,30 +65,21 @@ means it does not meet the OSI Open Source Definition.
 
 ### Can I contribute back?
 
-**Yes, please!** Contributions are welcome under the same license. See
+Contributions are welcome under the same license. See
 [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
 
 ---
 
-## Comparison to Common Licenses
+## Classification
 
-| | MIT | Apache-2.0 | AGPL-3.0 | ELv2 (this project) |
-|---|---|---|---|---|
-| Use commercially | ✅ | ✅ | ✅ | ✅ |
-| Modify | ✅ | ✅ | ✅ | ✅ |
-| Distribute | ✅ | ✅ | ✅ (with source) | ✅ (with notices) |
-| Offer as hosted service | ✅ | ✅ | ✅ (with source) | ❌ |
-| Patent grant | ❌ | ✅ | ✅ | ✅ |
-| Copyleft | ❌ | ❌ | ✅ (strong) | ❌ |
-| OSI-approved | ✅ | ✅ | ✅ | ❌ |
-
-**Key takeaway:** ELv2 is as permissive as Apache-2.0 for the vast majority of
-users. The only additional restriction is that you cannot offer the software
-itself as a hosted/managed service to third parties.
+ELv2 is a source-available license, not an OSI-approved open-source license.
+Do not describe Open Kioku as Apache-2.0, MIT, AGPL, or as having equivalent
+permissions. The controlling terms are the repository's ELv2 license text.
 
 ---
 
 ## Full License Text
 
 The complete Elastic License 2.0 text is in the repository root:
-[LICENSE](../LICENSE)
+[LICENSE](../LICENSE). Elastic also publishes the
+[official ELv2 text and FAQ](https://www.elastic.co/licensing/elastic-license).
