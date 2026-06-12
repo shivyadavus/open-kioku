@@ -22,7 +22,7 @@ Most coding agents start by crawling files and guessing which tests matter.
 
 Open Kioku indexes the repo locally, then gives the agent an evidence-backed pre-edit plan: primary files, relevant symbols, likely impact, validation candidates, and the MCP tool calls to use next.
 
-For launch proof, `ok prove` generates a shareable report with task scores and redacted path shapes, without source snippets. The larger proof is a local Elasticsearch run: 36,640 files, 495,919 symbols, 509,665 chunks, 159,483 tests, 36,363 static analysis facts, and 1,015,502 graph edges.
+For launch proof, `ok prove` generates a shareable report with task scores and redacted path shapes, without source snippets. The larger proof validates Open Kioku against the public [Elasticsearch repository at `f7b6962`](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1): 36,640 files, 495,919 symbols, 509,665 chunks, 159,483 tests, 36,363 static analysis facts, and 1,015,502 graph edges.
 
 It runs over local stdio, is read-only by default, and does not require a hosted index or embeddings API.
 
@@ -37,6 +37,6 @@ ok demo --force
 
 ## Links
 
-- Demo: https://openkioku.com/
+- Demo: https://www.openkioku.com/
 - npm: https://www.npmjs.com/package/open-kioku
 - Repo: https://github.com/shivyadavus/open-kioku

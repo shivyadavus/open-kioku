@@ -1,14 +1,18 @@
 # Large Repo Proof
 
-This proof records a local validation run against `/Users/shivyadav/dev/elasticsearch`.
-It is not a marketing benchmark; it is evidence that Open Kioku can index and use a
-large Java/Gradle repository with local-only code intelligence.
+This proof records a local validation run against a checkout of the public
+[Elasticsearch repository](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1).
+It is not a marketing benchmark; it is evidence that Open Kioku can index and use
+a large Java/Gradle repository with local-only code intelligence.
 
 ## Environment
 
 - Date: 2026-06-04
+- Open Kioku version: 1.0.3
+- Open Kioku source revision: `793d241f0c7e280a609020ac805876379e8a7a11`
 - Command under test: `target/release/ok`
-- Repository: Elasticsearch local checkout
+- Repository: `elastic/elasticsearch`
+- Repository revision: [`f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1`](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1)
 - SCIP mode: `auto`
 - SCIP Java availability: not installed on PATH during this run
 
@@ -159,3 +163,6 @@ This run shows that Open Kioku can:
 Known gap from this run: SCIP Java was not installed, so exact Java references
 were unavailable. Installing `scip-java` and re-indexing should improve direct
 impact precision beyond the current heuristic/static-analysis layer.
+
+Elasticsearch is a trademark of Elasticsearch B.V. Open Kioku is not affiliated
+with or endorsed by Elastic.

@@ -38,7 +38,8 @@ search_code -> get_definition -> impact_analysis -> find_tests_for_change -> pla
 
 The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
 
-Verified on a local Elasticsearch checkout:
+Validated on a local checkout of the public
+[Elasticsearch repository at `f7b6962`](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1):
 
 ```text
 36,640 files
@@ -58,7 +59,7 @@ For a Java/Gradle task, Open Kioku returned scoped validation commands such as:
 
 Proof: [`docs/large-repo-proof.md`](docs/large-repo-proof.md), [`docs/proof.md`](docs/proof.md), and [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
-Hosted demo: https://openkioku.com/
+Hosted demo: https://www.openkioku.com/
 Stable CLI + MCP contracts documented in [`STABILITY.md`](STABILITY.md).
 
 ### Example Pre-Edit Plan Output
