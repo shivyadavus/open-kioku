@@ -416,7 +416,10 @@ Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
 ## License
 
-Open Kioku is licensed under [Elastic License 2.0](LICENSE). In short: free to use, modify, and distribute — you just cannot offer it as a hosted managed service. See [`docs/license-faq.md`](docs/license-faq.md) for a plain-English explainer of what is and is not allowed.
+Open Kioku is licensed under the [Elastic License 2.0](LICENSE), a
+source-available license with hosted-service, license-key, and notice
+limitations. Review the license text and the
+[`docs/license-faq.md`](docs/license-faq.md) summary for details.
 
 ## Development
 
