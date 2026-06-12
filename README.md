@@ -38,26 +38,32 @@ search_code -> get_definition -> impact_analysis -> find_tests_for_change -> pla
 
 The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
 
-Validated on a local checkout of the public
-[Elasticsearch repository at `f7b6962`](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1):
+Tested across several large public repositories under permissive open-source
+licenses. These metrics are from one representative Open Kioku 2.0.1 run:
 
 ```text
-36,640 files
-495,919 symbols
-509,665 chunks
-159,483 indexed tests
-483,296 imports
-36,363 language-specific static analysis facts
-1,015,502 graph edges
+4,623 files
+46,738 symbols
+49,459 chunks
+8,945 indexed tests
+79,426 graph edges
+33.1 seconds to index
 ```
 
-For a Java/Gradle task, Open Kioku returned scoped validation commands such as:
+For a concrete prefix-cache task, Open Kioku found the implementation, related
+entry points, and focused tests including:
 
 ```text
-./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests
+core/cache_manager.py:491-505
+tests/core/test_reset_cache_e2e.py:14-69
+tests/core/test_prefix_caching.py:1923-1960
 ```
 
-Proof: [`docs/large-repo-proof.md`](docs/large-repo-proof.md), [`docs/proof.md`](docs/proof.md), and [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+The same audit records Python, TypeScript, and C++ coverage, including current
+language and exact-reference limitations. Proof:
+[`docs/large-repo-proof.md`](docs/large-repo-proof.md),
+[`docs/proof.md`](docs/proof.md), and
+[`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Hosted demo: https://www.openkioku.com/
 Stable CLI + MCP contracts documented in [`STABILITY.md`](STABILITY.md).

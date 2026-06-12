@@ -1,168 +1,133 @@
-# Large Repo Proof
+# Public Repository Proof
 
-This proof records a local validation run against a checkout of the public
-[Elasticsearch repository](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1).
-It is not a marketing benchmark; it is evidence that Open Kioku can index and use
-a large Java/Gradle repository with local-only code intelligence.
+This audit records local Open Kioku 2.0.1 runs against pinned public
+repositories under permissive open-source licenses. It checks whether commands
+merely execute and whether their results match the indexed source.
+
+Third-party project names are intentionally omitted. The document focuses only
+on Open Kioku behavior across repository and language profiles.
 
 ## Environment
 
-- Date: 2026-06-04
-- Open Kioku version: 1.0.3
-- Open Kioku source revision: `793d241f0c7e280a609020ac805876379e8a7a11`
-- Command under test: `target/release/ok`
-- Repository: `elastic/elasticsearch`
-- Repository revision: [`f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1`](https://github.com/elastic/elasticsearch/tree/f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1)
-- SCIP mode: `auto`
-- SCIP Java availability: not installed on PATH during this run
+- Date: 2026-06-12
+- Open Kioku version: 2.0.1
+- Open Kioku source revision: `a3703cf`
+- Binary: `target/release/ok`
+- Platform: macOS
+- SCIP mode: off
+- Semantic search: disabled
 
-## Index Command
+SCIP was intentionally disabled to test the default local tree-sitter,
+lexical-search, graph, impact, test-selection, context, and planning path.
+Exact reference quality should improve when a repository-specific SCIP index is
+available.
+
+## Results
+
+| Repository profile | License and state | Files | Symbols | Chunks | Tests | Graph edges | Index time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Python AI inference system | Apache-2.0, active | 4,623 | 46,738 | 49,459 | 8,945 | 79,426 | 33.1s |
+| TypeScript coding tool | Apache-2.0, archived | 2,276 | 33,031 | 34,664 | 7,288 | 40,965 | 12.5s |
+| C++ AI runtime | MIT, active | 591 | 5,837 | 6,257 | 589 | 7,937 | 3.5s |
+
+Counts are the files supported and accepted by the current Open Kioku indexing
+configuration, not every file present in each Git checkout.
+
+## Primary Python Proof
+
+Index command:
 
 ```sh
-target/release/ok index /Users/shivyadav/dev/elasticsearch --with-scip auto
+target/release/ok index /absolute/path/to/python-ai-repo --with-scip off
 ```
 
 Result:
 
 ```text
-index[complete] index ready, elapsed=467.0s
-Indexed 36640 files, 495919 symbols, 509665 chunks
-SCIP: mode Auto, imported 0 index(es), 0 exact references
-SCIP java: Skipped - scip-java is not installed or not on PATH
+index[store] writing 4623 files, 46738 symbols, 49459 chunks, 46738 occurrences, 60 analysis facts
+index[graph] writing 54954 graph nodes and 79426 graph edges
+index[complete] index ready, elapsed=33.1s
+Indexed 4623 files, 46738 symbols, 49459 chunks
 ```
 
-The enriched graph write reported:
+`ok doctor` reported a healthy index, 8,945 tests, 34,169 imports, and a
+responsive MCP initialize request. It also correctly warned that exact SCIP
+references were unavailable.
 
-```text
-writing 565677 graph nodes and 1015502 graph edges
-```
-
-## Status Snapshot
+### Source-checked definition
 
 ```sh
-target/release/ok --repo /Users/shivyadav/dev/elasticsearch status --markdown
+target/release/ok --repo /absolute/path/to/python-ai-repo \
+  symbol definition ModelConfig
 ```
 
-Key metrics:
+Open Kioku returned the correct Python class definition at line 107 with high
+tree-sitter confidence. The result was checked directly against the pinned
+checkout.
 
-| Metric | Value |
-| --- | ---: |
-| Files | 36640 |
-| Symbols | 495919 |
-| Chunks | 509665 |
-| Tests | 159483 |
-| Imports | 483296 |
-| SCIP indexes imported | 0 |
-| SCIP exact references | 0 |
-| Static analysis facts | 36363 |
+### Source-checked planning task
 
-Local signal notes:
+For a concrete prefix-cache behavior change, the plan found:
 
-- build systems detected: gradle
-- language static analysis facts detected: 36363
+- the cache-manager implementation
+- the lower-level block-pool implementation
+- two public entry points
+- one end-to-end reset test
+- one focused prefix-caching unit test
 
-Quality notes:
+The returned paths and line ranges were checked directly against the pinned
+checkout.
 
-- SCIP was enabled but no SCIP index was imported
-- exact reference coverage is unavailable; impact and test selection are heuristic
+### Search quality
 
-## Setup Audit
+A prefix-cache eviction query returned the relevant cache implementation,
+end-to-end reset test, and prefix-caching tests. A distributed-worker query
+returned implementations under the repository's distributed and worker
+modules.
 
-```sh
-target/release/ok setup audit /Users/shivyadav/dev/elasticsearch --markdown
-```
+### Python limitations
 
-Default quality signals:
+- Exact Python references were unavailable because no SCIP index was supplied.
+- File-only test selection returned neighboring cache tests but missed the two
+  strongest reset-prefix-cache tests.
+- A concrete task prompt corrected that weakness and found both focused tests.
+- A broad model-validation prompt selected unrelated validation code. Task
+  wording still matters without exact references.
 
-| Status | Signal | Evidence |
-| --- | --- | --- |
-| pass | build | detected gradle |
-| pass | tests | 159483 indexed test target(s) |
-| pass | imports | 483296 indexed import edge(s) |
-| pass | static | 36363 language-specific static analysis fact(s) |
-| pass | validation | Gradle-scoped validation commands enabled for indexed Java test paths |
+## TypeScript Proof
 
-Advanced providers were not required for default readiness. No CodeQL, BSP, LSP,
-coverage, or JUnit artifacts were treated as mandatory.
+The TypeScript audit correctly resolved a proxy-bypass function to its source
+definition and returned five indexed occurrences, including its import, call
+site, and nearby tests.
 
-## Graph Evidence
+Limitation: generic file-based test selection returned many unrelated
+`util`-named test symbols. The exact nearby test file exists, but without SCIP
+the ranking was too lexical to use as a strong product claim.
 
-SQLite graph edge counts after indexing:
+## C++ Coverage Finding
 
-```text
-Defines      495919
-Imports      483220
-Extends       25821
-Implements    10492
-ReadsConfig      50
-```
+The C++ audit exposed a current language-coverage limitation. The default
+parser set indexed supporting Python, TypeScript, JavaScript, and Rust files
+while missing important C++ definitions.
 
-Evidence source distribution:
+A real C++ function present in the source returned `symbol not found`.
+Impact and test selection for that implementation file also returned no useful
+downstream evidence.
 
-```text
-static_analysis  519583
-tree_sitter      495221
-heuristic           698
-```
-
-This means the graph is not only symbol definitions. It also carries local static
-analysis facts such as imports, inheritance, implemented interfaces, and config
-reads.
-
-## Planning Smoke
-
-```sh
-target/release/ok --repo /Users/shivyadav/dev/elasticsearch \
-  plan "AssignmentPlanner allocation planning" --format toon --limit 8
-```
-
-Relevant validation output:
-
-```text
-AssignmentPlannerTests |
-  ./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests |
-  High |
-  test-like path, annotation, or naming convention; Gradle-scoped test command; test metadata matches changed file stem; test metadata shares path token
-
-MlAssignmentPlannerUpgradeIT |
-  ./gradlew :x-pack:qa:rolling-upgrade:internalClusterTest --tests org.elasticsearch.upgrades.MlAssignmentPlannerUpgradeIT |
-  High |
-  test-like path, annotation, or naming convention; Gradle-scoped test command; test metadata matches changed file stem; test metadata shares path token
-
-ZoneAwareAssignmentPlannerTests |
-  ./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.ZoneAwareAssignmentPlannerTests |
-  High |
-  test-like path, annotation, or naming convention; Gradle-scoped test command; test metadata matches changed file stem; test metadata shares path token
-```
-
-## Runtime Evidence Smoke
-
-Runtime analysis is opt-in and local. A fixture with `.ok/runtime/spans.jsonl`
-containing source file paths, `http.route`, `http.request.method`, and
-`db.statement` produced:
-
-```text
-Static analysis facts | 4
-Runtime analysis facts | 2
-Graph edges: ExposesEndpoint, ReadsTable, ReadsConfig, Extends, Implements, Imports
-```
-
-Open Kioku did not install or run a runtime agent. It only consumed local runtime
-artifacts supplied by the repository owner.
+This is a documented product gap. C++ repositories should not be presented as
+a successful proof until first-class C/C++ parsing or a suitable
+exact-reference index is available.
 
 ## Interpretation
 
-This run shows that Open Kioku can:
+The strongest current public proof combines:
 
-- index a multi-GB Java repository locally
-- persist large symbol, test, import, and graph indexes
-- add language-specific static analysis facts without external providers
-- keep optional providers optional
-- produce scoped validation commands for large Gradle projects
+- a current, active AI infrastructure codebase
+- a standard permissive open-source license
+- healthy indexing with visible progress
+- source-checked Python definitions and search results
+- a concrete planning task that found implementation and focused tests
+- explicit disclosure of where no-SCIP test selection remains noisy
 
-Known gap from this run: SCIP Java was not installed, so exact Java references
-were unavailable. Installing `scip-java` and re-indexing should improve direct
-impact precision beyond the current heuristic/static-analysis layer.
-
-Elasticsearch is a trademark of Elasticsearch B.V. Open Kioku is not affiliated
-with or endorsed by Elastic.
+The cross-repository audit also sets a clear boundary: TypeScript definition and
+reference lookup works, while C++ coverage is not yet strong enough to claim.
