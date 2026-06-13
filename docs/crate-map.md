@@ -1,6 +1,6 @@
 # Crate Map
 
-Open Kioku is a Rust workspace with **43 crates**. This document maps every
+Open Kioku is a Rust workspace with **44 crates**. This document maps every
 crate to its architectural layer, describes what it does, and tells you where to
 start for common contribution tasks.
 
@@ -64,6 +64,7 @@ graph TD
     end
 
     subgraph Shared["Shared"]
+        Contract["open-kioku-contract"]
         Core["open-kioku-core"]
         Config["open-kioku-config"]
         Errors["open-kioku-errors"]
@@ -189,6 +190,7 @@ graph TD
 
 | Crate | Description |
 |---|---|
+| `open-kioku-contract` | Versioned change-contract schema, validation, and JSON Schema export. Has no dependency on CLI, MCP, patch, plan, or persistence crates. |
 | `open-kioku-core` | Domain types shared across the entire workspace (symbols, spans, file info). Has no dependency on CLI or MCP. |
 | `open-kioku-config` | Configuration loading, defaults, and validation. |
 | `open-kioku-errors` | Shared error types and result aliases. |
@@ -211,6 +213,7 @@ graph TD
 | Improve context packs | `open-kioku-context` | Token budgeting and ranking |
 | Add an integration | Create a new `open-kioku-*` crate | Keep optional deps isolated |
 | Fix a domain type | `open-kioku-core` | Shared types live here |
+| Change the durable change-contract schema | `open-kioku-contract` | Contract versioning and validation live here |
 | Fix an error type | `open-kioku-errors` | All shared errors live here |
 
 ---

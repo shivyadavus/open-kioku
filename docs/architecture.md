@@ -8,7 +8,11 @@ Open Kioku is organized as a Rust workspace with strict dependency direction:
 4. Storage layer: `open-kioku-storage`, `open-kioku-storage-sqlite`, `open-kioku-storage-kv`, `open-kioku-search-regex`, `open-kioku-search-tantivy`.
 5. Optional integrations: `open-kioku-scip`, `open-kioku-lsp`, `open-kioku-semantic`, `open-kioku-qdrant`, `open-kioku-github`, `open-kioku-jira`, `open-kioku-sentry`, `open-kioku-aws`.
 
-`open-kioku-core` owns shared domain types and has no dependency on CLI or MCP. `open-kioku-errors` owns shared errors. All user and agent interfaces consume the same indexing and storage contracts.
+`open-kioku-contract` owns the versioned change-contract schema and validation
+primitives without depending on CLI, MCP, patch, plan, or persistence crates.
+`open-kioku-core` owns shared domain types and has no dependency on CLI or MCP.
+`open-kioku-errors` owns shared errors. All user and agent interfaces consume
+the same indexing and storage contracts.
 
 ```text
 CLI/MCP/Daemon

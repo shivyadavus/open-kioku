@@ -1232,6 +1232,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-kioku-contract"
+version = "2.0.1"
+dependencies = [
+ "chrono",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "open-kioku-core"
 version = "2.0.1"
 dependencies = [

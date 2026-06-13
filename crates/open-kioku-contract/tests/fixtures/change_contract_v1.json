@@ -1,0 +1,70 @@
+{
+  "id": "contract-issue-60",
+  "version": "v1",
+  "task": "Define the first durable Open Kioku change contract schema",
+  "evidence_refs": [
+    "issue:60",
+    "file:docs/architecture.md"
+  ],
+  "primary_files": [
+    "crates/open-kioku-contract/src/lib.rs"
+  ],
+  "secondary_files": [
+    "docs/change-contract.md"
+  ],
+  "forbidden_files": [],
+  "impacted_symbols": [
+    "open_kioku_contract::ChangeContractV1",
+    "open_kioku_contract::schema"
+  ],
+  "required_tests": [
+    {
+      "target": "open-kioku-contract unit and fixture tests",
+      "reason": "The authoritative schema and validation behavior must remain stable",
+      "evidence_refs": [
+        "issue:60"
+      ]
+    }
+  ],
+  "architecture_constraints": [
+    {
+      "rule": "contract-crate-is-low-level",
+      "severity": "required",
+      "reason": "The contract crate must not depend on CLI, MCP, patch, or plan crates",
+      "evidence_refs": [
+        "issue:60"
+      ]
+    }
+  ],
+  "validation_commands": [
+    {
+      "command": "cargo test -p open-kioku-contract",
+      "reason": "Validate schema generation, compatibility, and rejection behavior"
+    }
+  ],
+  "risk": {
+    "level": "medium",
+    "score": 0.45,
+    "reasons": [
+      "The v1 schema becomes a compatibility boundary for later trust-layer work"
+    ]
+  },
+  "confidence": {
+    "level": "high",
+    "score": 0.85,
+    "basis": [
+      "The schema is derived directly from issue #60 and epic #53"
+    ],
+    "uncertainty": [
+      "Builder and persistence requirements are intentionally deferred"
+    ]
+  },
+  "timestamps": {
+    "created_at": "2026-06-12T10:00:00Z",
+    "updated_at": "2026-06-12T10:00:00Z"
+  },
+  "source_plan_ref": {
+    "id": "plan-issue-60",
+    "digest": "sha256:ae423d9b5953a03c7d721345104a77c8533b1a89340758649437945e43b55a9a"
+  }
+}
