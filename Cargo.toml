@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/open-kioku-contract",
   "crates/open-kioku-core",
   "crates/open-kioku-config",
   "crates/open-kioku-errors",
