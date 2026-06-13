@@ -11,6 +11,7 @@
       "get_implementations",
       "get_callers",
       "get_callees",
+      "history_provenance_lookup",
       "explain_flow",
       "map_stacktrace_to_code",
       "find_errors_for_symbol",
@@ -448,6 +449,41 @@
         },
         "maturity": "stable",
         "name": "impact_analysis"
+      },
+      {
+        "description": "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.",
+        "experimental": true,
+        "inputSchema": {
+          "oneOf": [
+            {
+              "required": [
+                "path"
+              ]
+            },
+            {
+              "required": [
+                "symbol"
+              ]
+            }
+          ],
+          "properties": {
+            "limit": {
+              "description": "Maximum recent touches to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            },
+            "path": {
+              "description": "Repository-relative path to inspect.",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "Exact symbol name, qualified name, or symbol ID to inspect.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "history_provenance_lookup"
       },
       {
         "description": "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.",

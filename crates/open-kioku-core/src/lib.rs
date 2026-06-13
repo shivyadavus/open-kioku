@@ -698,7 +698,55 @@ pub struct GitSymbolTouch {
     pub qualified_name: String,
     pub file_path: PathBuf,
     pub change_kind: GitChangeKind,
+    #[serde(default)]
+    pub line_ranges: Vec<LineRange>,
+    #[serde(default = "default_history_confidence")]
+    pub confidence: Confidence,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
     pub touched_at: DateTime<Utc>,
+}
+
+fn default_history_confidence() -> Confidence {
+    Confidence::Low
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProvenanceTouch {
+    pub commit: GitCommitRecord,
+    pub path: PathBuf,
+    pub previous_path: Option<PathBuf>,
+    pub symbol_id: Option<SymbolId>,
+    pub qualified_name: Option<String>,
+    pub change_kind: GitChangeKind,
+    pub line_ranges: Vec<LineRange>,
+    pub confidence: Confidence,
+    pub uncertainty: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FileProvenance {
+    pub path: PathBuf,
+    pub first_seen: Option<ProvenanceTouch>,
+    pub last_touched: Option<ProvenanceTouch>,
+    pub recent_touches: Vec<ProvenanceTouch>,
+    pub confidence: Confidence,
+    pub truncated: bool,
+    pub uncertainty: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolProvenance {
+    pub symbol_id: SymbolId,
+    pub qualified_name: String,
+    pub file_path: PathBuf,
+    pub range: Option<LineRange>,
+    pub first_seen: Option<ProvenanceTouch>,
+    pub last_touched: Option<ProvenanceTouch>,
+    pub recent_touches: Vec<ProvenanceTouch>,
+    pub confidence: Confidence,
+    pub truncated: bool,
+    pub uncertainty: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1233,8 +1281,8 @@ mod tests {
     use super::{
         reconcile_score_breakdown, score_component_total, Confidence, ConfidenceBreakdown,
         ConfidenceSignalInput, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
-        HistoryRecordId, HistorySnapshot, HistorySummary, Owner, ScoreComponent,
-        HISTORY_SCHEMA_VERSION,
+        GitSymbolTouch, HistoryRecordId, HistorySnapshot, HistorySummary, Owner, ScoreComponent,
+        SymbolId, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
 
@@ -1410,5 +1458,24 @@ mod tests {
         assert!(summary.recent_commits.is_empty());
         assert!(!summary.uncertainty.is_empty());
         assert!(summary.uncertainty[0].contains("no persisted history evidence"));
+    }
+
+    #[test]
+    fn legacy_symbol_touch_json_remains_compatible() {
+        let decoded: GitSymbolTouch = serde_json::from_value(serde_json::json!({
+            "id": "touch",
+            "commit_id": "abc123",
+            "symbol_id": "symbol",
+            "qualified_name": "crate::symbol",
+            "file_path": "src/lib.rs",
+            "change_kind": "modified",
+            "touched_at": "2026-06-01T12:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(decoded.symbol_id, Some(SymbolId::new("symbol")));
+        assert!(decoded.line_ranges.is_empty());
+        assert_eq!(decoded.confidence, Confidence::Low);
+        assert!(decoded.uncertainty.is_empty());
     }
 }
