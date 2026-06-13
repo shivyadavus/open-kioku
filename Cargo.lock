@@ -1443,6 +1443,7 @@ dependencies = [
  "chrono",
  "clap",
  "open-kioku-context",
+ "open-kioku-contract",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-format",
@@ -1451,6 +1452,7 @@ dependencies = [
  "open-kioku-storage-sqlite",
  "open-kioku-tests",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
