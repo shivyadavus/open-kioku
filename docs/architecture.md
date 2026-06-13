@@ -27,3 +27,10 @@ CLI/MCP/Daemon
 The implemented path supports `init`, `index`, `status`, tree-sitter-backed extraction, SCIP binary import, persisted SQLite occurrences and graph facts, disk-backed Tantivy lexical search, symbol discovery, file/symbol explanation, graph path lookup, impact reports, test recommendations, context packs, patch plans, and a read-only JSON-RPC MCP server.
 
 LSP, semantic search, Qdrant, daemon watch mode, and runtime integrations are explicit extension crates. They return disabled/unsupported diagnostics unless configured, so callers do not mistake missing capabilities for authoritative facts.
+
+Repository-owned architecture policy is loaded canonically from
+`.open-kioku/architecture.toml`, with `[architecture.policy]` in `ok.toml` as a
+compatibility alias. See [Architecture policy](architecture-policy.md) for the
+v1 schema, deterministic conflict behavior, and experimental validation/print
+commands. Existing repositories without policy continue to use heuristic
+architecture detection.

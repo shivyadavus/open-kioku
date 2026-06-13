@@ -1,0 +1,51 @@
+version = "v1"
+
+[[layers]]
+id = "api"
+description = "Public request and response boundary"
+paths = ["crates/*-api/**"]
+
+[[layers]]
+id = "service"
+description = "Application orchestration"
+paths = ["crates/*-service/**"]
+
+[[layers]]
+id = "storage"
+description = "Persistence implementations"
+paths = ["crates/*-storage/**"]
+
+[[contexts]]
+id = "identity"
+description = "Identity and access bounded context"
+paths = ["crates/identity-*/**"]
+
+[[dependency_rules]]
+id = "api-must-not-depend-on-storage"
+from = "api"
+to = "storage"
+action = "forbid"
+severity = "error"
+reason = "API code must depend on service abstractions instead of persistence"
+
+[[dependency_rules]]
+id = "api-may-depend-on-service"
+from = "api"
+to = "service"
+action = "allow"
+severity = "info"
+reason = "API handlers may invoke application services"
+
+[[public_api_rules]]
+id = "service-public-api"
+component = "service"
+public_globs = ["crates/*-service/src/lib.rs", "crates/*-service/src/public/**"]
+internal_globs = ["crates/*-service/src/internal/**"]
+severity = "warning"
+reason = "Consumers should use the documented service facade"
+
+[[exemptions]]
+id = "generated-api-clients"
+rules = ["service-public-api"]
+paths = ["crates/*-service/src/generated/**"]
+reason = "Generated clients expose implementation-specific transport types"

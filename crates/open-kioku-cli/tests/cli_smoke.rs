@@ -70,6 +70,98 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 }
 
 #[test]
+fn architecture_policy_validate_and_print_are_index_independent() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let policy_dir = repo.join(".open-kioku");
+    fs::create_dir_all(&policy_dir).unwrap();
+    fs::write(
+        policy_dir.join("architecture.toml"),
+        include_str!("../../../examples/architecture-policy.toml"),
+    )
+    .unwrap();
+
+    let validation = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("policy")
+            .arg("validate");
+        command
+    });
+    let validation: serde_json::Value = serde_json::from_str(&validation).unwrap();
+    assert_eq!(validation["valid"], true);
+    assert_eq!(validation["configured"], true);
+    assert_eq!(validation["source"], "canonical");
+    assert_eq!(validation["policy"]["version"], "v1");
+
+    let printed = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("policy")
+            .arg("print");
+        command
+    });
+    assert!(printed.contains("# source: canonical"));
+    assert!(printed.contains("version = \"v1\""));
+    assert!(printed.contains("api-must-not-depend-on-storage"));
+
+    let explicit = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("policy")
+            .arg("validate")
+            .arg("--path")
+            .arg(".open-kioku/architecture.toml");
+        command
+    });
+    let explicit: serde_json::Value = serde_json::from_str(&explicit).unwrap();
+    assert_eq!(explicit["source"], "explicit");
+
+    let no_policy = run({
+        let empty = tempfile::tempdir().unwrap();
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(empty.path())
+            .arg("architecture")
+            .arg("policy")
+            .arg("validate");
+        command
+    });
+    assert!(no_policy.contains("Heuristic architecture detection remains active"));
+
+    fs::write(
+        policy_dir.join("architecture.toml"),
+        include_str!("../../../examples/architecture-policy.toml")
+            .replace("severity = \"error\"", "severity = \"urgent\""),
+    )
+    .unwrap();
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("policy")
+            .arg("validate");
+        command
+    });
+    assert!(stderr.contains("architecture.toml"));
+    assert!(stderr.contains("unknown variant `urgent`"));
+}
+
+#[test]
 fn init_index_search_and_doctor_work_together() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();

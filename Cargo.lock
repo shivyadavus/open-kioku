@@ -1193,6 +1193,7 @@ dependencies = [
 name = "open-kioku-config"
 version = "2.0.1"
 dependencies = [
+ "globset",
  "open-kioku-errors",
  "serde",
  "tempfile",
