@@ -348,7 +348,7 @@ from private repos.
 
 Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `history`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance: [`docs/history-provenance.md`](docs/history-provenance.md). Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 

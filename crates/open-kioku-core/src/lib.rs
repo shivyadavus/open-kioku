@@ -719,10 +719,8 @@ pub struct ProvenanceTouch {
     pub symbol_id: Option<SymbolId>,
     pub qualified_name: Option<String>,
     pub change_kind: GitChangeKind,
-    #[serde(default)]
     pub line_ranges: Vec<LineRange>,
     pub confidence: Confidence,
-    #[serde(default)]
     pub uncertainty: Vec<String>,
 }
 
@@ -731,11 +729,9 @@ pub struct FileProvenance {
     pub path: PathBuf,
     pub first_seen: Option<ProvenanceTouch>,
     pub last_touched: Option<ProvenanceTouch>,
-    #[serde(default)]
     pub recent_touches: Vec<ProvenanceTouch>,
     pub confidence: Confidence,
     pub truncated: bool,
-    #[serde(default)]
     pub uncertainty: Vec<String>,
 }
 
@@ -747,11 +743,9 @@ pub struct SymbolProvenance {
     pub range: Option<LineRange>,
     pub first_seen: Option<ProvenanceTouch>,
     pub last_touched: Option<ProvenanceTouch>,
-    #[serde(default)]
     pub recent_touches: Vec<ProvenanceTouch>,
     pub confidence: Confidence,
     pub truncated: bool,
-    #[serde(default)]
     pub uncertainty: Vec<String>,
 }
 
@@ -1467,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_symbol_touch_json_defaults_new_mapping_evidence() {
+    fn legacy_symbol_touch_json_remains_compatible() {
         let decoded: GitSymbolTouch = serde_json::from_value(serde_json::json!({
             "id": "touch",
             "commit_id": "abc123",
