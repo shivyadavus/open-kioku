@@ -41,14 +41,24 @@ snapshot in one transaction. Invalid snapshots leave the previous history
 untouched. Normal `replace_index` calls do not delete these tables, so file and
 symbol re-indexing cannot accidentally erase historical evidence.
 
+When history is enabled, index and watch flows read at most
+`history.max_commits` local commits using NUL-delimited Git output. They persist
+commit SHA, parents, author and committer identity, authored and committed
+timestamps, summary/message, and every touched path. Rename and copy statuses
+preserve the previous path. Empty repositories and shallow clones produce the
+history that is locally available without requiring network access.
+
 Existing `analysis_facts` rows with `source_type = "git_history"` remain
 supported during migration. Typed history queries read the dedicated tables and
 do not reconstruct commit, touch, co-change, or reviewer records from message
-strings.
+strings. Existing co-change analysis facts are derived from the same parsed
+commit window and remain capped for ranking compatibility; large commits above
+`history.max_files_per_commit` are excluded only from pairwise co-change
+generation, not from commit or file-touch persistence.
 
 History summaries report truncation and missing symbol/reviewer evidence as
-explicit uncertainty. Local git ingestion is not part of this storage layer; it
-is supplied by the historical ingest pipeline.
+explicit uncertainty. Symbol touches and reviewer evidence are not inferred by
+this ingest stage; those are supplied by later provenance and ownership work.
 
 ## Search
 

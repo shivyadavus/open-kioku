@@ -160,7 +160,7 @@ graph TD
 | `open-kioku-symbols` | Symbol table: definitions, references, and occurrence tracking. |
 | `open-kioku-graph` | Builds and queries the code dependency / call graph. |
 | `open-kioku-architecture` | High-level architectural analysis (module boundaries, layering). |
-| `open-kioku-git` | Git integration: diff extraction, blame, commit history. |
+| `open-kioku-git` | Bounded local Git commit/file-touch ingest, rename parsing, and co-change derivation. |
 | `open-kioku-watch` | File-system watcher for incremental re-indexing. |
 
 ### Storage Layer
