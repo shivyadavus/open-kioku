@@ -13,6 +13,9 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+pub mod contract_builder;
+pub use contract_builder::ContractBuilder;
+
 const DEFAULT_CONTEXT_LIMIT: usize = 12;
 const MAX_PRIMARY_CONTEXT: usize = 8;
 const MAX_SYMBOLS: usize = 8;

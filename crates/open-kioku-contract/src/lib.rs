@@ -7,6 +7,12 @@ use std::fmt;
 use std::path::Path;
 use thiserror::Error;
 
+pub mod builder;
+pub use builder::{
+    ContractBoundary, ContractBuildInput, ContractBuildMetadata, ContractConfidenceSummary,
+    ContractRiskSummary,
+};
+
 /// The schema version written into every persisted or exchanged contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
