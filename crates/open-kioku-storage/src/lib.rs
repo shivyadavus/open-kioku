@@ -1,9 +1,9 @@
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GitCochangeEdge, GitCommitRecord,
-    GraphEdge, GraphNode, HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest,
-    SearchResult, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge,
+    GitCommitRecord, GraphEdge, GraphNode, HistorySnapshot, HistorySummary, ImpactReport, Import,
+    IndexManifest, SearchResult, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
-use open_kioku_errors::Result;
+use open_kioku_errors::{OkError, Result};
 use std::path::Path;
 
 pub trait MetadataStore: Send + Sync {
@@ -88,6 +88,20 @@ pub trait GraphStore: Send + Sync {
 pub trait HistoryStore: Send + Sync {
     fn put_history_snapshot(&self, snapshot: &HistorySnapshot) -> Result<()>;
     fn history_for_file(&self, path: &Path, limit: usize) -> Result<HistorySummary>;
+    fn provenance_for_path(&self, _path: &Path, _limit: usize) -> Result<FileProvenance> {
+        Err(OkError::Unsupported(
+            "file provenance lookup is not implemented by this history store".into(),
+        ))
+    }
+    fn provenance_for_symbol(
+        &self,
+        _symbol_id: &SymbolId,
+        _limit: usize,
+    ) -> Result<SymbolProvenance> {
+        Err(OkError::Unsupported(
+            "symbol provenance lookup is not implemented by this history store".into(),
+        ))
+    }
     fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>>;
     fn recent_commits(&self, limit: usize) -> Result<Vec<GitCommitRecord>>;
 }

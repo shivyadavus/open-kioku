@@ -906,7 +906,7 @@ fn index_captures_git_history() {
 
     let store_path = repo.join(".ok/index.sqlite");
     let store = open_kioku_storage_sqlite::SqliteStore::open(store_path).unwrap();
-    use open_kioku_storage::HistoryStore;
+    use open_kioku_storage::{HistoryStore, MetadataStore};
     let commits = store.recent_commits(10).unwrap();
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[0].summary, "second commit");
@@ -917,4 +917,108 @@ fn index_captures_git_history() {
         .unwrap();
     assert_eq!(summary.recent_commits.len(), 1);
     assert_eq!(summary.recent_commits[0].summary, "first commit");
+
+    let file_provenance = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("provenance")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let file_provenance: serde_json::Value = serde_json::from_str(&file_provenance).unwrap();
+    assert_eq!(
+        file_provenance["first_seen"]["commit"]["summary"],
+        "first commit"
+    );
+    assert_eq!(
+        file_provenance["last_touched"]["commit"]["summary"],
+        "first commit"
+    );
+
+    let symbol_provenance = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("provenance")
+            .arg("--symbol")
+            .arg("a");
+        command
+    });
+    let symbol_provenance: serde_json::Value = serde_json::from_str(&symbol_provenance).unwrap();
+    assert_eq!(
+        symbol_provenance["recent_touches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        symbol_provenance["recent_touches"][0]["commit"]["author"]["name"],
+        "Test User"
+    );
+    assert!(!symbol_provenance["uncertainty"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let symbol_id = store
+        .list_symbols(Some("a"), 10, 0)
+        .unwrap()
+        .into_iter()
+        .find(|symbol| symbol.name == "a")
+        .unwrap()
+        .id;
+    let symbol_by_id = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("provenance")
+            .arg("--symbol")
+            .arg(&symbol_id.0);
+        command
+    });
+    let symbol_by_id: serde_json::Value = serde_json::from_str(&symbol_by_id).unwrap();
+    assert_eq!(symbol_by_id["symbol_id"], symbol_id.0);
+
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"history_provenance_lookup","arguments":{"path":"src/a.rs","limit":5}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["first_seen"]["commit"]["summary"],
+        "first commit"
+    );
+
+    let mcp_symbol = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"history_provenance_lookup","arguments":{{"symbol":"{}","limit":5}}}}}}"#,
+            symbol_id.0
+        ),
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_symbol.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["symbol_id"],
+        symbol_id.0
+    );
 }

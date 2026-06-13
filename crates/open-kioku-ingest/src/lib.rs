@@ -4,9 +4,9 @@ use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
-    GitCommitId, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot, Import,
-    IndexManifest, IndexQuality, LineRange, Repository, RepositoryId, Symbol, SymbolOccurrence,
-    TestTarget, HISTORY_SCHEMA_VERSION,
+    GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot,
+    Import, IndexManifest, IndexQuality, LineRange, Repository, RepositoryId, Symbol,
+    SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -183,6 +183,7 @@ impl Indexer {
             collect_git_history(
                 &root,
                 &files,
+                &symbols,
                 config.history.max_commits,
                 config.history.max_files_per_commit,
             )?
@@ -515,10 +516,13 @@ impl GitHistoryIngest {
 fn collect_git_history(
     root: &Path,
     files: &[File],
+    symbols: &[Symbol],
     max_commits: usize,
     max_files_per_commit: usize,
 ) -> Result<GitHistoryIngest> {
     let history = open_kioku_git::commit_history(root, max_commits)?;
+    let patches = open_kioku_git::commit_patches(root, max_commits)?;
+    let symbol_touches = map_symbol_touches(files, symbols, &history, &patches);
     let cochange_records =
         open_kioku_git::cochange_records_from_history(&history, max_files_per_commit);
     let cochange_edges = cochange_records
@@ -558,12 +562,259 @@ fn collect_git_history(
             schema_version: HISTORY_SCHEMA_VERSION,
             commits: history.commits,
             file_touches: history.file_touches,
-            symbol_touches: Vec::new(),
+            symbol_touches,
             cochange_edges,
             reviewer_evidence: Vec::new(),
         },
         analysis_facts,
     })
+}
+
+fn map_symbol_touches(
+    files: &[File],
+    symbols: &[Symbol],
+    history: &open_kioku_git::CommitHistory,
+    patches: &[open_kioku_git::CommitPatch],
+) -> Vec<GitSymbolTouch> {
+    #[derive(Clone)]
+    struct MappedTouch {
+        commit_id: GitCommitId,
+        symbol: Symbol,
+        file_path: std::path::PathBuf,
+        change_kind: open_kioku_core::GitChangeKind,
+        touched_at: chrono::DateTime<Utc>,
+        line_ranges: Vec<LineRange>,
+        confidence: Confidence,
+        uncertainty: Vec<String>,
+    }
+
+    let files_by_path = files
+        .iter()
+        .map(|file| (normalize_history_path(&file.path), file))
+        .collect::<HashMap<_, _>>();
+    let file_paths_by_id = files
+        .iter()
+        .map(|file| (file.id.clone(), normalize_history_path(&file.path)))
+        .collect::<HashMap<_, _>>();
+    let mut canonical_by_path = files_by_path
+        .keys()
+        .map(|path| (path.clone(), path.clone()))
+        .collect::<HashMap<_, _>>();
+
+    for touch in &history.file_touches {
+        let path = normalize_history_path(&touch.path);
+        let Some(canonical) = canonical_by_path.get(&path).cloned() else {
+            continue;
+        };
+        if let Some(previous_path) = &touch.previous_path {
+            canonical_by_path.insert(normalize_history_path(previous_path), canonical);
+        }
+    }
+
+    let mut symbols_by_path = HashMap::<String, Vec<&Symbol>>::new();
+    for symbol in symbols {
+        let Some(path) = file_paths_by_id.get(&symbol.file_id) else {
+            continue;
+        };
+        symbols_by_path
+            .entry(path.clone())
+            .or_default()
+            .push(symbol);
+    }
+    for symbols in symbols_by_path.values_mut() {
+        symbols.sort_by(|left, right| {
+            left.range
+                .as_ref()
+                .map(symbol_range_width)
+                .cmp(&right.range.as_ref().map(symbol_range_width))
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        });
+    }
+
+    let commits = history
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.id.0.as_str(), (index, commit)))
+        .collect::<HashMap<_, _>>();
+    let file_touches = history
+        .file_touches
+        .iter()
+        .map(|touch| {
+            (
+                (
+                    touch.commit_id.0.as_str(),
+                    normalize_history_path(&touch.path),
+                ),
+                touch,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut mapped = HashMap::<(String, String), MappedTouch>::new();
+
+    for commit_patch in patches {
+        let Some((commit_index, commit)) = commits.get(commit_patch.commit_id.0.as_str()) else {
+            continue;
+        };
+        for file_patch in &commit_patch.files {
+            let observed_path = normalize_history_path(&file_patch.path);
+            let Some(canonical_path) = canonical_by_path.get(&observed_path) else {
+                continue;
+            };
+            let Some(path_symbols) = symbols_by_path.get(canonical_path) else {
+                continue;
+            };
+            let change_kind = file_touches
+                .get(&(commit_patch.commit_id.0.as_str(), observed_path.clone()))
+                .map(|touch| touch.change_kind)
+                .unwrap_or(open_kioku_core::GitChangeKind::Unknown);
+
+            for changed_range in &file_patch.line_ranges {
+                let mut candidates = path_symbols
+                    .iter()
+                    .copied()
+                    .filter(|symbol| {
+                        symbol
+                            .range
+                            .as_ref()
+                            .is_some_and(|range| ranges_overlap(range, changed_range))
+                    })
+                    .collect::<Vec<_>>();
+                let Some(min_width) = candidates
+                    .iter()
+                    .filter_map(|symbol| symbol.range.as_ref().map(symbol_range_width))
+                    .min()
+                else {
+                    continue;
+                };
+                candidates.retain(|symbol| {
+                    symbol
+                        .range
+                        .as_ref()
+                        .is_some_and(|range| symbol_range_width(range) == min_width)
+                });
+                candidates.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
+                let ambiguous = candidates.len() > 1;
+
+                for symbol in candidates {
+                    let symbol_range = symbol
+                        .range
+                        .as_ref()
+                        .expect("mapped symbol candidate has a line range");
+                    let mapped_range = LineRange {
+                        start: changed_range.start.max(symbol_range.start),
+                        end: changed_range.end.min(symbol_range.end),
+                    };
+                    let mut confidence = if *commit_index == 0 {
+                        Confidence::High
+                    } else {
+                        Confidence::Medium
+                    };
+                    confidence = lower_confidence(confidence, symbol.confidence);
+                    let mut uncertainty = Vec::new();
+                    if *commit_index > 0 {
+                        uncertainty.push(
+                            "historical patch coordinates were mapped onto the current symbol range; later edits may have shifted boundaries"
+                                .into(),
+                        );
+                    }
+                    if ambiguous {
+                        confidence = Confidence::Low;
+                        uncertainty.push(
+                            "the changed line range overlaps multiple equally specific current symbols"
+                                .into(),
+                        );
+                    }
+                    if observed_path != *canonical_path {
+                        uncertainty.push(format!(
+                            "the historical path `{observed_path}` was mapped through rename history to `{canonical_path}`"
+                        ));
+                    }
+
+                    let key = (commit_patch.commit_id.0.clone(), symbol.id.0.clone());
+                    let entry = mapped.entry(key).or_insert_with(|| MappedTouch {
+                        commit_id: commit_patch.commit_id.clone(),
+                        symbol: symbol.clone(),
+                        file_path: std::path::PathBuf::from(canonical_path),
+                        change_kind,
+                        touched_at: commit.committed_at,
+                        line_ranges: Vec::new(),
+                        confidence,
+                        uncertainty: Vec::new(),
+                    });
+                    entry.line_ranges.push(mapped_range);
+                    entry.confidence = lower_confidence(entry.confidence, confidence);
+                    entry.uncertainty.extend(uncertainty);
+                }
+            }
+        }
+    }
+
+    let commit_order = history
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.id.0.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut touches = mapped
+        .into_values()
+        .map(|mut touch| {
+            touch
+                .line_ranges
+                .sort_by_key(|range| (range.start, range.end));
+            touch.line_ranges.dedup();
+            touch.uncertainty.sort();
+            touch.uncertainty.dedup();
+            GitSymbolTouch {
+                id: HistoryRecordId::new(stable_id(&format!(
+                    "git-symbol-touch:{}:{}",
+                    touch.commit_id.0, touch.symbol.id.0
+                ))),
+                commit_id: touch.commit_id,
+                symbol_id: Some(touch.symbol.id),
+                qualified_name: touch.symbol.qualified_name,
+                file_path: touch.file_path,
+                change_kind: touch.change_kind,
+                line_ranges: touch.line_ranges,
+                confidence: touch.confidence,
+                uncertainty: touch.uncertainty,
+                touched_at: touch.touched_at,
+            }
+        })
+        .collect::<Vec<_>>();
+    touches.sort_by(|left, right| {
+        commit_order
+            .get(left.commit_id.0.as_str())
+            .cmp(&commit_order.get(right.commit_id.0.as_str()))
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+    });
+    touches
+}
+
+fn symbol_range_width(range: &LineRange) -> u32 {
+    range.end.saturating_sub(range.start)
+}
+
+fn ranges_overlap(left: &LineRange, right: &LineRange) -> bool {
+    left.start <= right.end && right.start <= left.end
+}
+
+fn lower_confidence(left: Confidence, right: Confidence) -> Confidence {
+    if confidence_rank(left) <= confidence_rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+        Confidence::Exact => 3,
+    }
 }
 
 fn git_history_facts(
@@ -1177,11 +1428,13 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_occurrences, Indexer};
+    use super::{derive_occurrences, map_symbol_touches, Indexer};
+    use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
-        CodeChunk, Confidence, EvidenceSourceType, FileId, Language, LineRange, Symbol, SymbolId,
-        SymbolKind,
+        CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitChangeKind, GitCommitId,
+        GitCommitRecord, GitFileTouch, HistoryRecordId, Language, LineRange, Owner, RepositoryId,
+        Symbol, SymbolId, SymbolKind,
     };
     use std::process::Command;
 
@@ -1327,6 +1580,11 @@ class ExampleTests extends BaseTests {
                 && fact.target == "tests/auth_test.rs"));
         assert_eq!(history.commits.len(), 1);
         assert_eq!(history.file_touches.len(), 2);
+        assert_eq!(history.symbol_touches.len(), 2);
+        assert!(history
+            .symbol_touches
+            .iter()
+            .all(|touch| touch.confidence == Confidence::High && !touch.line_ranges.is_empty()));
         assert!(!history.cochange_edges.is_empty());
 
         let mut disabled = enabled;
@@ -1341,6 +1599,130 @@ class ExampleTests extends BaseTests {
             .any(|fact| fact.source_type == EvidenceSourceType::GitHistory));
         assert!(history.commits.is_empty());
         assert!(history.file_touches.is_empty());
+    }
+
+    #[test]
+    fn symbol_mapping_marks_ambiguous_historical_ranges_as_uncertain() {
+        let file = File {
+            id: FileId::new("file"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/new.rs".into(),
+            language: Language::Rust,
+            size_bytes: 10,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbols = vec![
+            Symbol {
+                id: SymbolId::new("outer"),
+                name: "Outer".into(),
+                qualified_name: "crate::Outer".into(),
+                kind: SymbolKind::Class,
+                file_id: file.id.clone(),
+                range: Some(LineRange { start: 1, end: 20 }),
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            },
+            Symbol {
+                id: SymbolId::new("left"),
+                name: "left".into(),
+                qualified_name: "crate::Outer::left".into(),
+                kind: SymbolKind::Method,
+                file_id: file.id.clone(),
+                range: Some(LineRange { start: 5, end: 10 }),
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            },
+            Symbol {
+                id: SymbolId::new("right"),
+                name: "right".into(),
+                qualified_name: "crate::Outer::right".into(),
+                kind: SymbolKind::Method,
+                file_id: file.id.clone(),
+                range: Some(LineRange { start: 5, end: 10 }),
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            },
+        ];
+        let newer_at = Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap();
+        let older_at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let newer = history_commit("newer", newer_at);
+        let older = history_commit("older", older_at);
+        let history = open_kioku_git::CommitHistory {
+            commits: vec![newer.clone(), older.clone()],
+            file_touches: vec![
+                GitFileTouch {
+                    id: HistoryRecordId::new("rename"),
+                    commit_id: newer.id.clone(),
+                    path: "src/new.rs".into(),
+                    previous_path: Some("src/old.rs".into()),
+                    change_kind: GitChangeKind::Renamed,
+                    additions: None,
+                    deletions: None,
+                    touched_at: newer_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("older-touch"),
+                    commit_id: older.id.clone(),
+                    path: "src/old.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: None,
+                    deletions: None,
+                    touched_at: older_at,
+                },
+            ],
+        };
+        let patches = vec![open_kioku_git::CommitPatch {
+            commit_id: older.id,
+            files: vec![open_kioku_git::FilePatch {
+                path: "src/old.rs".into(),
+                previous_path: None,
+                line_ranges: vec![LineRange { start: 3, end: 12 }],
+            }],
+        }];
+
+        let touches = map_symbol_touches(&[file], &symbols, &history, &patches);
+
+        assert_eq!(touches.len(), 2);
+        assert!(touches
+            .iter()
+            .all(|touch| touch.confidence == Confidence::Low));
+        assert!(touches.iter().all(|touch| touch
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("multiple equally specific"))));
+        assert!(touches.iter().all(|touch| touch
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("mapped through rename history"))));
+        assert!(touches
+            .iter()
+            .all(|touch| touch.symbol_id.as_ref() != Some(&SymbolId::new("outer"))));
+        assert!(touches
+            .iter()
+            .all(|touch| touch.line_ranges == vec![LineRange { start: 5, end: 10 }]));
+    }
+
+    fn history_commit(id: &str, at: chrono::DateTime<Utc>) -> GitCommitRecord {
+        GitCommitRecord {
+            id: GitCommitId::new(id),
+            parent_ids: Vec::new(),
+            author: Owner {
+                name: "Test User".into(),
+                email: Some("test@example.com".into()),
+            },
+            committer: None,
+            authored_at: at,
+            committed_at: at,
+            summary: id.into(),
+            message: id.into(),
+            file_count: 1,
+        }
     }
 
     fn git(root: &std::path::Path, args: &[&str]) {

@@ -3,7 +3,7 @@ use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_core::{Confidence, ContextHandleId, PlanReport};
+use open_kioku_core::{Confidence, ContextHandleId, PlanReport, SymbolId};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{ChangeVerifier, PatchPlanner, VerifyChangeInput};
@@ -12,7 +12,7 @@ use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::disabled_response;
-use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
+use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
@@ -224,6 +224,25 @@ async fn dispatch(
         "impact_analysis" => {
             let path = required_str(&params, "path")?;
             Ok(json!(ImpactEngine::new(store).for_file(Path::new(path))?))
+        }
+        "history_provenance_lookup" => {
+            let path = params.get("path").and_then(Value::as_str);
+            let symbol = params.get("symbol").and_then(Value::as_str);
+            match (path, symbol) {
+                (Some(path), None) => Ok(json!(
+                    store.provenance_for_path(Path::new(path), limit(&params))?
+                )),
+                (None, Some(query)) => {
+                    let symbol = resolve_history_symbol(store, query)?;
+                    Ok(json!(
+                        store.provenance_for_symbol(&symbol.id, limit(&params))?
+                    ))
+                }
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("provide exactly one of `path` or `symbol`")
+                }
+                (None, None) => anyhow::bail!("missing required `path` or `symbol` argument"),
+            }
         }
         "find_tests_for_change" | "recommend_validation_plan" => {
             let path = required_str(&params, "path")?;
@@ -547,6 +566,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("get_symbol_context", "Retrieve the comprehensive context of a symbol, including definition details, range, file context, and documentation if available.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol."}}})),
         ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected.", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name."}}})),
         ("impact_analysis", "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze."}}})),
+        ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
         ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for."},"limit":{"type":"integer","description":"Maximum number of context results to include. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The output format of the context pack."}}})),
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
@@ -628,6 +648,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "get_implementations"
         | "get_callers"
         | "get_callees"
+        | "history_provenance_lookup"
         | "explain_flow"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
@@ -694,6 +715,42 @@ fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<
     Ok(query.to_string())
 }
 
+fn resolve_history_symbol(
+    store: &dyn MetadataStore,
+    query: &str,
+) -> anyhow::Result<open_kioku_core::Symbol> {
+    if let Some(symbol) = store.symbol_by_id(&SymbolId::new(query))? {
+        return Ok(symbol);
+    }
+    let candidates = store.list_symbols(Some(query), 101, 0)?;
+    let exact = candidates
+        .iter()
+        .filter(|symbol| symbol.name == query || symbol.qualified_name == query)
+        .cloned()
+        .collect::<Vec<_>>();
+    match exact.as_slice() {
+        [symbol] => Ok(symbol.clone()),
+        [] if candidates.len() == 1 => Ok(candidates[0].clone()),
+        [] if candidates.is_empty() => anyhow::bail!("symbol not found: {query}"),
+        matches => {
+            let ambiguous = if matches.is_empty() {
+                &candidates
+            } else {
+                matches
+            };
+            let names = ambiguous
+                .iter()
+                .take(10)
+                .map(|symbol| format!("{} [{}]", symbol.qualified_name, symbol.id.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "symbol query `{query}` is ambiguous; use a qualified name or symbol ID: {names}"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +797,11 @@ mod tests {
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
         assert!(tools_ro.iter().all(|t| t["name"] != "apply_patch"));
+        let provenance = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "history_provenance_lookup")
+            .unwrap();
+        assert_eq!(provenance["maturity"], "experimental");
 
         let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;

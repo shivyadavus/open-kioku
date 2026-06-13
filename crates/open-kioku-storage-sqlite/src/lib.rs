@@ -1,7 +1,9 @@
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GitCochangeEdge, GitCommitId,
-    GitCommitRecord, GraphEdge, GraphNode, HistoryRecordId, HistorySnapshot, HistorySummary,
-    Import, IndexManifest, Symbol, SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
+    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, FileProvenance,
+    GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge,
+    GraphNode, HistoryRecordId, HistorySnapshot, HistorySummary, Import, IndexManifest,
+    ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
@@ -903,6 +905,234 @@ impl HistoryStore for SqliteStore {
         })
     }
 
+    fn provenance_for_path(&self, path: &Path, limit: usize) -> Result<FileProvenance> {
+        let normalized_path = history_path(path)?;
+        if limit == 0 {
+            return Ok(FileProvenance {
+                path: path.to_path_buf(),
+                first_seen: None,
+                last_touched: None,
+                recent_touches: Vec::new(),
+                confidence: Confidence::Low,
+                truncated: false,
+                uncertainty: vec!["provenance query limit is zero".into()],
+            });
+        }
+
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let query_limit = history_query_limit(limit);
+        let aliases = "
+            WITH RECURSIVE aliases(path) AS (
+              SELECT ?1
+              UNION
+              SELECT t.previous_path
+              FROM git_file_touches t JOIN aliases a ON t.path = a.path
+              WHERE t.previous_path IS NOT NULL
+              UNION
+              SELECT t.path
+              FROM git_file_touches t JOIN aliases a ON t.previous_path = a.path
+            )";
+        let recent_sql = format!(
+            "{aliases}
+             SELECT DISTINCT t.json, c.json
+             FROM git_file_touches t
+             JOIN git_commits c ON c.id = t.commit_id
+             WHERE t.path IN aliases OR t.previous_path IN aliases
+             ORDER BY t.touched_at DESC, t.id
+             LIMIT ?2"
+        );
+        let mut recent_stmt = conn.prepare(&recent_sql).map_err(storage_err)?;
+        let rows = recent_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_err)?;
+        let mut recent_touches = collect_provenance_rows(rows, file_provenance_touch)?;
+        let truncated = recent_touches.len() > limit;
+        recent_touches.truncate(limit);
+
+        let first_sql = format!(
+            "{aliases}
+             SELECT DISTINCT t.json, c.json
+             FROM git_file_touches t
+             JOIN git_commits c ON c.id = t.commit_id
+             WHERE t.path IN aliases OR t.previous_path IN aliases
+             ORDER BY t.touched_at ASC, t.id
+             LIMIT 1"
+        );
+        let first_seen = conn
+            .query_row(&first_sql, params![&normalized_path], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()
+            .map_err(storage_err)?
+            .map(|(touch, commit)| file_provenance_touch(&touch, &commit))
+            .transpose()?;
+        let last_touched = recent_touches.first().cloned();
+        let mut uncertainty = Vec::new();
+        if first_seen.is_none() {
+            uncertainty.push("no persisted commit provenance is available for this path".into());
+        } else if first_seen
+            .as_ref()
+            .is_some_and(|touch| touch.change_kind != open_kioku_core::GitChangeKind::Added)
+        {
+            uncertainty.push(
+                "first_seen is the earliest persisted touch in the configured local history window, not a proven file-creation commit"
+                    .into(),
+            );
+        }
+        if truncated {
+            uncertainty.push(format!(
+                "recent provenance is truncated to {limit} touch records"
+            ));
+        }
+
+        let confidence = if uncertainty.is_empty() {
+            Confidence::Exact
+        } else if last_touched.is_some() {
+            Confidence::High
+        } else {
+            Confidence::Low
+        };
+        Ok(FileProvenance {
+            path: path.to_path_buf(),
+            first_seen,
+            last_touched,
+            recent_touches,
+            confidence,
+            truncated,
+            uncertainty,
+        })
+    }
+
+    fn provenance_for_symbol(
+        &self,
+        symbol_id: &SymbolId,
+        limit: usize,
+    ) -> Result<SymbolProvenance> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let symbol_json: Option<String> = conn
+            .query_row(
+                "SELECT json FROM symbols WHERE id = ?1",
+                params![&symbol_id.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        let Some(symbol_json) = symbol_json else {
+            return Err(OkError::SymbolNotFound(symbol_id.0.clone()));
+        };
+        let symbol: Symbol = serde_json::from_str(&symbol_json)?;
+        let file_path: String = conn
+            .query_row(
+                "SELECT path FROM files WHERE id = ?1",
+                params![&symbol.file_id.0],
+                |row| row.get(0),
+            )
+            .map_err(storage_err)?;
+        if limit == 0 {
+            return Ok(SymbolProvenance {
+                symbol_id: symbol.id,
+                qualified_name: symbol.qualified_name,
+                file_path: PathBuf::from(file_path),
+                range: symbol.range,
+                first_seen: None,
+                last_touched: None,
+                recent_touches: Vec::new(),
+                confidence: Confidence::Low,
+                truncated: false,
+                uncertainty: vec!["provenance query limit is zero".into()],
+            });
+        }
+
+        let query_limit = history_query_limit(limit);
+        let mut recent_stmt = conn
+            .prepare(
+                "SELECT t.json, c.json
+                 FROM git_symbol_touches t
+                 JOIN git_commits c ON c.id = t.commit_id
+                 WHERE t.symbol_id = ?1
+                 ORDER BY t.touched_at DESC, t.id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let rows = recent_stmt
+            .query_map(params![&symbol_id.0, query_limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_err)?;
+        let mut recent_touches = collect_provenance_rows(rows, symbol_provenance_touch)?;
+        let truncated = recent_touches.len() > limit;
+        recent_touches.truncate(limit);
+        let first_seen = conn
+            .query_row(
+                "SELECT t.json, c.json
+                 FROM git_symbol_touches t
+                 JOIN git_commits c ON c.id = t.commit_id
+                 WHERE t.symbol_id = ?1
+                 ORDER BY t.touched_at ASC, t.id
+                 LIMIT 1",
+                params![&symbol_id.0],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(storage_err)?
+            .map(|(touch, commit)| symbol_provenance_touch(&touch, &commit))
+            .transpose()?;
+        let last_touched = recent_touches.first().cloned();
+        let mut uncertainty = recent_touches
+            .iter()
+            .flat_map(|touch| touch.uncertainty.clone())
+            .collect::<Vec<_>>();
+        if let Some(first_seen) = &first_seen {
+            uncertainty.extend(first_seen.uncertainty.clone());
+            uncertainty.push(
+                "first_seen is the earliest line-mapped touch in the configured local history window; it may not be the symbol-introduction commit"
+                    .into(),
+            );
+        } else {
+            uncertainty
+                .push("no persisted line-level commit mapping is available for this symbol".into());
+        }
+        if symbol.range.is_none() {
+            uncertainty.push(
+                "the indexed symbol has no line range, so commit hunks cannot be mapped".into(),
+            );
+        }
+        if truncated {
+            uncertainty.push(format!(
+                "recent provenance is truncated to {limit} touch records"
+            ));
+        }
+        uncertainty.sort();
+        uncertainty.dedup();
+        let confidence = recent_touches
+            .iter()
+            .map(|touch| touch.confidence)
+            .chain(first_seen.iter().map(|touch| touch.confidence))
+            .reduce(lower_history_confidence)
+            .unwrap_or(Confidence::Low);
+
+        Ok(SymbolProvenance {
+            symbol_id: symbol.id,
+            qualified_name: symbol.qualified_name,
+            file_path: PathBuf::from(file_path),
+            range: symbol.range,
+            first_seen,
+            last_touched,
+            recent_touches,
+            confidence,
+            truncated,
+            uncertainty,
+        })
+    }
+
     fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -946,6 +1176,70 @@ impl HistoryStore for SqliteStore {
             })
             .map_err(storage_err)?;
         collect_json(rows)
+    }
+}
+
+fn collect_provenance_rows<F>(
+    rows: rusqlite::MappedRows<'_, F>,
+    decode: fn(&str, &str) -> Result<ProvenanceTouch>,
+) -> Result<Vec<ProvenanceTouch>>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, String)>,
+{
+    let mut touches = Vec::new();
+    for row in rows {
+        let (touch, commit) = row.map_err(storage_err)?;
+        touches.push(decode(&touch, &commit)?);
+    }
+    Ok(touches)
+}
+
+fn file_provenance_touch(touch: &str, commit: &str) -> Result<ProvenanceTouch> {
+    let touch: GitFileTouch = serde_json::from_str(touch)?;
+    let commit: GitCommitRecord = serde_json::from_str(commit)?;
+    Ok(ProvenanceTouch {
+        commit,
+        path: touch.path,
+        previous_path: touch.previous_path,
+        symbol_id: None,
+        qualified_name: None,
+        change_kind: touch.change_kind,
+        line_ranges: Vec::new(),
+        confidence: Confidence::Exact,
+        uncertainty: Vec::new(),
+    })
+}
+
+fn symbol_provenance_touch(touch: &str, commit: &str) -> Result<ProvenanceTouch> {
+    let touch: GitSymbolTouch = serde_json::from_str(touch)?;
+    let commit: GitCommitRecord = serde_json::from_str(commit)?;
+    Ok(ProvenanceTouch {
+        commit,
+        path: touch.file_path,
+        previous_path: None,
+        symbol_id: touch.symbol_id,
+        qualified_name: Some(touch.qualified_name),
+        change_kind: touch.change_kind,
+        line_ranges: touch.line_ranges,
+        confidence: touch.confidence,
+        uncertainty: touch.uncertainty,
+    })
+}
+
+fn lower_history_confidence(left: Confidence, right: Confidence) -> Confidence {
+    if history_confidence_rank(left) <= history_confidence_rank(right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn history_confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+        Confidence::Exact => 3,
     }
 }
 
@@ -1463,6 +1757,9 @@ mod tests {
                 qualified_name: "crate::history_for_file".into(),
                 file_path: "src/lib.rs".into(),
                 change_kind: GitChangeKind::Modified,
+                line_ranges: vec![LineRange { start: 4, end: 8 }],
+                confidence: Confidence::Medium,
+                uncertainty: vec!["historical coordinates may have shifted".into()],
                 touched_at: newer_at,
             }],
             cochange_edges: vec![
@@ -1633,6 +1930,108 @@ mod tests {
             .uncertainty
             .iter()
             .any(|note| note.contains("truncated")));
+    }
+
+    #[test]
+    fn provenance_queries_return_first_last_and_explicit_symbol_uncertainty() {
+        let store = make_store();
+        let file = make_file("file-1", "src/lib.rs");
+        let symbol = make_symbol("symbol-1", "history_for_file", "file-1");
+        let mut unmapped_symbol = make_symbol("symbol-2", "unmapped", "file-1");
+        unmapped_symbol.range = None;
+        let manifest = make_manifest();
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: std::slice::from_ref(&file),
+                symbols: &[symbol.clone(), unmapped_symbol.clone()],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+            })
+            .unwrap();
+        store.put_history_snapshot(&history_snapshot()).unwrap();
+
+        let file_provenance = store
+            .provenance_for_path(std::path::Path::new("src/lib.rs"), 10)
+            .unwrap();
+        assert_eq!(
+            file_provenance
+                .first_seen
+                .as_ref()
+                .map(|touch| touch.commit.id.0.as_str()),
+            Some("older")
+        );
+        assert_eq!(
+            file_provenance
+                .last_touched
+                .as_ref()
+                .map(|touch| touch.commit.id.0.as_str()),
+            Some("newer")
+        );
+        assert_eq!(file_provenance.recent_touches.len(), 2);
+        assert_eq!(file_provenance.confidence, Confidence::Exact);
+
+        let symbol_provenance = store.provenance_for_symbol(&symbol.id, 10).unwrap();
+        assert_eq!(symbol_provenance.recent_touches.len(), 1);
+        assert_eq!(symbol_provenance.confidence, Confidence::Medium);
+        assert_eq!(
+            symbol_provenance.recent_touches[0].commit.author.name,
+            "Newer Author"
+        );
+        assert_eq!(
+            symbol_provenance.recent_touches[0].line_ranges,
+            vec![LineRange { start: 4, end: 8 }]
+        );
+        assert!(symbol_provenance
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("earliest line-mapped touch")));
+
+        let unmapped = store
+            .provenance_for_symbol(&unmapped_symbol.id, 10)
+            .unwrap();
+        assert!(unmapped.first_seen.is_none());
+        assert!(unmapped.last_touched.is_none());
+        assert!(unmapped.recent_touches.is_empty());
+        assert_eq!(unmapped.confidence, Confidence::Low);
+        assert!(unmapped
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("no persisted line-level commit mapping")));
+        assert!(unmapped
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("has no line range")));
+    }
+
+    #[test]
+    fn path_provenance_follows_rename_aliases_in_both_directions() {
+        let store = make_store();
+        let mut snapshot = history_snapshot();
+        snapshot.file_touches[0].path = "src/old.rs".into();
+        snapshot.file_touches[1].previous_path = Some("src/old.rs".into());
+        snapshot.file_touches[1].change_kind = GitChangeKind::Renamed;
+        store.put_history_snapshot(&snapshot).unwrap();
+
+        let current = store
+            .provenance_for_path(std::path::Path::new("src/lib.rs"), 10)
+            .unwrap();
+        let historical = store
+            .provenance_for_path(std::path::Path::new("src/old.rs"), 10)
+            .unwrap();
+
+        assert_eq!(current.recent_touches.len(), 2);
+        assert_eq!(historical.recent_touches.len(), 2);
+        assert_eq!(
+            current
+                .first_seen
+                .as_ref()
+                .map(|touch| touch.path.as_path()),
+            Some(std::path::Path::new("src/old.rs"))
+        );
     }
 
     #[test]

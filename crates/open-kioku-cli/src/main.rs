@@ -7,7 +7,8 @@ use open_kioku_config::{
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
-    Confidence, ContextHandleId, EvidenceSourceType, IndexManifest, PlanReport, ScoreComponent,
+    Confidence, ContextHandleId, EvidenceSourceType, FileProvenance, IndexManifest, PlanReport,
+    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -179,6 +180,11 @@ enum Command {
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommand,
+    },
+    /// Experimental typed Git provenance lookup.
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
     },
     Patch {
         #[command(subcommand)]
@@ -440,6 +446,19 @@ enum ArchitecturePolicyCommand {
         path: Option<PathBuf>,
     },
     Print,
+}
+
+#[derive(Subcommand)]
+enum HistoryCommand {
+    Provenance {
+        #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
+        path: Option<PathBuf>,
+        /// Exact symbol name, qualified name, or symbol ID.
+        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
+        symbol: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1556,6 +1575,33 @@ async fn main() -> anyhow::Result<()> {
                 output(cli.json, &summary.violations, || {})?;
             }
         },
+        Command::History { command } => {
+            let store = open_store(&repo)?;
+            match command {
+                HistoryCommand::Provenance {
+                    path,
+                    symbol,
+                    limit,
+                } => {
+                    if let Some(path) = path {
+                        let provenance = store.provenance_for_path(&path, limit)?;
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&provenance)?);
+                        } else {
+                            print_file_provenance(&provenance);
+                        }
+                    } else if let Some(query) = symbol {
+                        let symbol = resolve_provenance_symbol(&store, &query)?;
+                        let provenance = store.provenance_for_symbol(&symbol.id, limit)?;
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&provenance)?);
+                        } else {
+                            print_symbol_provenance(&provenance);
+                        }
+                    }
+                }
+            }
+        }
         Command::Patch { command } => {
             let config = OkConfig::load_from_repo(&repo)?;
             let store = open_store(&repo)?;
@@ -5451,6 +5497,130 @@ fn print_semantic_status(status: &open_kioku_semantic::SemanticStatus) {
             println!("- {note}");
         }
     }
+}
+
+fn resolve_provenance_symbol(store: &dyn MetadataStore, query: &str) -> anyhow::Result<Symbol> {
+    if let Some(symbol) = store.symbol_by_id(&SymbolId::new(query))? {
+        return Ok(symbol);
+    }
+    let candidates = store.list_symbols(Some(query), 101, 0)?;
+    let exact = candidates
+        .iter()
+        .filter(|symbol| symbol.name == query || symbol.qualified_name == query)
+        .cloned()
+        .collect::<Vec<_>>();
+    match exact.as_slice() {
+        [symbol] => Ok(symbol.clone()),
+        [] if candidates.len() == 1 => Ok(candidates[0].clone()),
+        [] if candidates.is_empty() => Err(anyhow::anyhow!("symbol not found: {query}")),
+        matches => {
+            let ambiguous = if matches.is_empty() {
+                &candidates
+            } else {
+                matches
+            };
+            let names = ambiguous
+                .iter()
+                .take(10)
+                .map(|symbol| format!("{} [{}]", symbol.qualified_name, symbol.id.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(
+                "symbol query `{query}` is ambiguous; use a qualified name or symbol ID: {names}"
+            ))
+        }
+    }
+}
+
+fn print_file_provenance(provenance: &FileProvenance) {
+    println!("File provenance: {}", provenance.path.display());
+    print_provenance_summary(
+        provenance.first_seen.as_ref(),
+        provenance.last_touched.as_ref(),
+        &provenance.recent_touches,
+        provenance.confidence,
+        provenance.truncated,
+        &provenance.uncertainty,
+    );
+}
+
+fn print_symbol_provenance(provenance: &SymbolProvenance) {
+    println!("Symbol provenance: {}", provenance.qualified_name);
+    println!("File: {}", provenance.file_path.display());
+    if let Some(range) = &provenance.range {
+        println!("Current range: {}-{}", range.start, range.end);
+    } else {
+        println!("Current range: unavailable");
+    }
+    print_provenance_summary(
+        provenance.first_seen.as_ref(),
+        provenance.last_touched.as_ref(),
+        &provenance.recent_touches,
+        provenance.confidence,
+        provenance.truncated,
+        &provenance.uncertainty,
+    );
+}
+
+fn print_provenance_summary(
+    first_seen: Option<&ProvenanceTouch>,
+    last_touched: Option<&ProvenanceTouch>,
+    recent_touches: &[ProvenanceTouch],
+    confidence: Confidence,
+    truncated: bool,
+    uncertainty: &[String],
+) {
+    println!("Confidence: {confidence:?}");
+    match first_seen {
+        Some(touch) => println!("First seen: {}", format_provenance_touch(touch)),
+        None => println!("First seen: unavailable"),
+    }
+    match last_touched {
+        Some(touch) => println!("Last touched: {}", format_provenance_touch(touch)),
+        None => println!("Last touched: unavailable"),
+    }
+    println!("Recent touches:");
+    for touch in recent_touches {
+        println!("- {}", format_provenance_touch(touch));
+    }
+    if recent_touches.is_empty() {
+        println!("- none");
+    }
+    if truncated {
+        println!("Results are truncated.");
+    }
+    if !uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in uncertainty {
+            println!("- {note}");
+        }
+    }
+}
+
+fn format_provenance_touch(touch: &ProvenanceTouch) -> String {
+    let ranges = if touch.line_ranges.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " lines {}",
+            touch
+                .line_ranges
+                .iter()
+                .map(|range| format!("{}-{}", range.start, range.end))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    format!(
+        "{} {} {} <{}> {:?}{} - {}",
+        touch.commit.id,
+        touch.commit.authored_at,
+        touch.commit.author.name,
+        touch.commit.author.email.as_deref().unwrap_or("unknown"),
+        touch.change_kind,
+        ranges,
+        touch.commit.summary
+    )
 }
 
 fn resolve_repo(global: &Path, command: PathBuf) -> PathBuf {

@@ -99,6 +99,7 @@ Stable source-read tools:
 
 Experimental tools:
 
+- `history_provenance_lookup`: returns bounded first-seen, last-touched, and recent commit provenance for exactly one `path` or `symbol`, including confidence and uncertainty. `symbol` accepts an exact name, qualified name, or symbol ID.
 - `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
 - `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
 - `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.

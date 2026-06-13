@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
-    GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, HistoryRecordId, Owner,
+    GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, HistoryRecordId, LineRange, Owner,
 };
 use open_kioku_errors::{OkError, Result};
 use std::collections::HashMap;
@@ -35,6 +35,19 @@ pub struct CochangeRecord {
     pub recency_weight: f32,
     pub test_corun: bool,
     pub commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitPatch {
+    pub commit_id: GitCommitId,
+    pub files: Vec<FilePatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePatch {
+    pub path: PathBuf,
+    pub previous_path: Option<PathBuf>,
+    pub line_ranges: Vec<LineRange>,
 }
 
 pub fn discover_root(start: impl AsRef<Path>) -> Result<PathBuf> {
@@ -131,6 +144,50 @@ pub fn commit_history(root: impl AsRef<Path>, max_commits: usize) -> Result<Comm
         )));
     }
     parse_commit_history(&output.stdout)
+}
+
+pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<CommitPatch>> {
+    let root = root.as_ref();
+    if !root.join(".git").exists() || max_commits == 0 {
+        return Ok(Vec::new());
+    }
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git patch scan failed: {err}")))?;
+    if !head.status.success() {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.quotePath=true"])
+        .arg("log")
+        .arg(format!("--max-count={max_commits}"))
+        .args([
+            "--no-show-signature",
+            "--no-color",
+            "--no-decorate",
+            "--encoding=UTF-8",
+            "--find-renames",
+            "--format=%x1e%H%x00",
+            "--patch",
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+        ])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git patch scan failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git patch scan failed: {}",
+            stderr.trim()
+        )));
+    }
+    parse_commit_patches(&output.stdout)
 }
 
 pub fn cochange_records_from_history(
@@ -247,6 +304,182 @@ fn parse_commit_history(raw: &[u8]) -> Result<CommitHistory> {
         history.file_touches.append(&mut touches);
     }
     Ok(history)
+}
+
+fn parse_commit_patches(raw: &[u8]) -> Result<Vec<CommitPatch>> {
+    let mut commits = Vec::new();
+    let starts = patch_record_starts(raw);
+    if starts.is_empty() && !raw.is_empty() {
+        return Err(OkError::Repository(
+            "git patch output is missing a commit record".into(),
+        ));
+    }
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(raw.len());
+        let record = &raw[start + 1..end];
+        let Some(metadata_end) = record.iter().position(|byte| *byte == 0) else {
+            return Err(OkError::Repository(
+                "git patch record is missing its commit delimiter".into(),
+            ));
+        };
+        let commit_id = GitCommitId::new(git_text(&record[..metadata_end], "commit id")?);
+        let patch = git_text(&record[metadata_end + 1..], "patch")?;
+        commits.push(CommitPatch {
+            commit_id,
+            files: parse_file_patches(&patch)?,
+        });
+    }
+    Ok(commits)
+}
+
+fn patch_record_starts(raw: &[u8]) -> Vec<usize> {
+    raw.iter()
+        .enumerate()
+        .filter_map(|(index, byte)| {
+            if *byte != COMMIT_RECORD_SEPARATOR {
+                return None;
+            }
+            let commit_start = index + 1;
+            [40, 64].into_iter().find_map(|length| {
+                let commit_end = commit_start + length;
+                (raw.get(commit_end) == Some(&0)
+                    && raw
+                        .get(commit_start..commit_end)
+                        .is_some_and(|commit| commit.iter().all(u8::is_ascii_hexdigit)))
+                .then_some(index)
+            })
+        })
+        .collect()
+}
+
+fn parse_file_patches(patch: &str) -> Result<Vec<FilePatch>> {
+    #[derive(Default)]
+    struct PendingPatch {
+        path: Option<PathBuf>,
+        previous_path: Option<PathBuf>,
+        line_ranges: Vec<LineRange>,
+    }
+
+    fn finish(patches: &mut Vec<FilePatch>, pending: &mut PendingPatch) {
+        if let Some(path) = pending.path.take() {
+            patches.push(FilePatch {
+                path,
+                previous_path: pending.previous_path.take(),
+                line_ranges: std::mem::take(&mut pending.line_ranges),
+            });
+        } else {
+            pending.previous_path = None;
+            pending.line_ranges.clear();
+        }
+    }
+
+    let mut patches = Vec::new();
+    let mut pending = PendingPatch::default();
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            finish(&mut patches, &mut pending);
+        } else if let Some(value) = line.strip_prefix("rename from ") {
+            pending.previous_path = Some(parse_patch_path(value, None)?);
+        } else if let Some(value) = line.strip_prefix("rename to ") {
+            pending.path = Some(parse_patch_path(value, None)?);
+        } else if let Some(value) = line.strip_prefix("+++ ") {
+            if value != "/dev/null" {
+                pending.path = Some(parse_patch_path(value, Some("b/"))?);
+            }
+        } else if line.starts_with("@@ ") {
+            if let Some(range) = parse_new_hunk_range(line)? {
+                pending.line_ranges.push(range);
+            }
+        }
+    }
+    finish(&mut patches, &mut pending);
+    Ok(patches)
+}
+
+fn parse_new_hunk_range(header: &str) -> Result<Option<LineRange>> {
+    let marker = header
+        .split_whitespace()
+        .find(|part| part.starts_with('+'))
+        .ok_or_else(|| OkError::Repository(format!("git patch hunk is malformed: `{header}`")))?;
+    let value = marker.trim_start_matches('+');
+    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+    let start = start.parse::<u32>().map_err(|err| {
+        OkError::Repository(format!("git patch hunk start `{start}` is invalid: {err}"))
+    })?;
+    let count = count.parse::<u32>().map_err(|err| {
+        OkError::Repository(format!("git patch hunk count `{count}` is invalid: {err}"))
+    })?;
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(LineRange {
+        start,
+        end: start.saturating_add(count - 1),
+    }))
+}
+
+fn parse_patch_path(value: &str, prefix: Option<&str>) -> Result<PathBuf> {
+    let decoded = if value.starts_with('"') {
+        decode_git_quoted_path(value)?
+    } else {
+        value.to_string()
+    };
+    let decoded = prefix
+        .and_then(|prefix| decoded.strip_prefix(prefix))
+        .unwrap_or(&decoded);
+    Ok(PathBuf::from(decoded))
+}
+
+fn decode_git_quoted_path(value: &str) -> Result<String> {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Err(OkError::Repository(format!(
+            "git patch path has invalid quoting: `{value}`"
+        )));
+    };
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut chars = inner.as_bytes().iter().copied().peekable();
+    while let Some(byte) = chars.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let escaped = chars.next().ok_or_else(|| {
+            OkError::Repository(format!("git patch path has a trailing escape: `{value}`"))
+        })?;
+        match escaped {
+            b'\\' | b'"' => bytes.push(escaped),
+            b'a' => bytes.push(0x07),
+            b'b' => bytes.push(0x08),
+            b't' => bytes.push(b'\t'),
+            b'n' => bytes.push(b'\n'),
+            b'v' => bytes.push(0x0b),
+            b'f' => bytes.push(0x0c),
+            b'r' => bytes.push(b'\r'),
+            b'0'..=b'7' => {
+                let mut octal = vec![escaped];
+                for _ in 0..2 {
+                    if chars.peek().is_some_and(|byte| matches!(byte, b'0'..=b'7')) {
+                        octal.push(chars.next().expect("peeked octal byte"));
+                    } else {
+                        break;
+                    }
+                }
+                let decoded = std::str::from_utf8(&octal)
+                    .ok()
+                    .and_then(|value| u8::from_str_radix(value, 8).ok())
+                    .ok_or_else(|| {
+                        OkError::Repository("git patch path contains invalid octal escape".into())
+                    })?;
+                bytes.push(decoded);
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|err| OkError::Repository(format!("git patch path is not UTF-8: {err}")))
 }
 
 fn parse_file_touches(
@@ -367,7 +600,9 @@ fn is_test_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cochange_records, commit_history};
+    use super::{
+        cochange_records, commit_history, commit_patches, parse_commit_patches, parse_file_patches,
+    };
     use open_kioku_core::GitChangeKind;
     use std::fs;
     use std::path::Path;
@@ -493,6 +728,75 @@ mod tests {
         let history = commit_history(&shallow, 10).unwrap();
         assert_eq!(history.commits.len(), 1);
         assert_eq!(history.commits[0].summary, "two");
+    }
+
+    #[test]
+    fn commit_patches_capture_zero_context_line_ranges_and_renames() {
+        let dir = initialized_repo();
+        write(
+            dir.path(),
+            "src/old.rs",
+            "fn alpha() {\n    one();\n}\n\nfn beta() {\n    two();\n}\n",
+        );
+        commit_all(dir.path(), "add symbols");
+        run(dir.path(), &["mv", "src/old.rs", "src/new.rs"]);
+        write(
+            dir.path(),
+            "src/new.rs",
+            "fn alpha() {\n    changed();\n}\n\nfn beta() {\n    two();\n    added();\n}\n",
+        );
+        commit_all(dir.path(), "rename and modify");
+
+        let patches = commit_patches(dir.path(), 1).unwrap();
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].files.len(), 1);
+        let file = &patches[0].files[0];
+        assert_eq!(file.path, Path::new("src/new.rs"));
+        assert_eq!(file.previous_path.as_deref(), Some(Path::new("src/old.rs")));
+        assert_eq!(
+            file.line_ranges,
+            vec![
+                open_kioku_core::LineRange { start: 2, end: 2 },
+                open_kioku_core::LineRange { start: 7, end: 7 }
+            ]
+        );
+    }
+
+    #[test]
+    fn patch_parser_decodes_quoted_paths_and_ignores_deletion_ranges() {
+        let patches = parse_file_patches(
+            "diff --git \"a/src/space\\040name.rs\" \"b/src/space\\040name.rs\"\n\
+             --- \"a/src/space\\040name.rs\"\n\
+             +++ \"b/src/space\\040name.rs\"\n\
+             @@ -3,2 +3,0 @@\n\
+             @@ -8 +6,2 @@\n",
+        )
+        .unwrap();
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].path, Path::new("src/space name.rs"));
+        assert_eq!(
+            patches[0].line_ranges,
+            vec![open_kioku_core::LineRange { start: 6, end: 7 }]
+        );
+    }
+
+    #[test]
+    fn patch_parser_ignores_record_separator_bytes_inside_diff_content() {
+        let mut raw = b"\x1e0123456789abcdef0123456789abcdef01234567\x00diff --git a/a.rs b/a.rs\n\
+              +++ b/a.rs\n\
+              @@ -0,0 +1 @@\n\
+              +embedded "
+            .to_vec();
+        raw.push(0x1e);
+        raw.extend_from_slice(b" byte\n");
+
+        let patches = parse_commit_patches(&raw).unwrap();
+
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].files.len(), 1);
+        assert_eq!(patches[0].files[0].path, Path::new("a.rs"));
     }
 
     fn initialized_repo() -> tempfile::TempDir {

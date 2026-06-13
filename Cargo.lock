@@ -1579,6 +1579,7 @@ name = "open-kioku-storage-sqlite"
 version = "2.0.1"
 dependencies = [
  "chrono",
+ "criterion",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-storage",
