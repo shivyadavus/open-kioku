@@ -148,7 +148,6 @@ impl Default for OkConfig {
             },
             architecture: ArchitectureConfig {
                 rules: default_architecture_rules(),
-                policy: None,
             },
         }
     }
@@ -317,8 +316,6 @@ pub struct PathsConfig {
 pub struct ArchitectureConfig {
     #[serde(default = "default_architecture_rules")]
     pub rules: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<ArchitecturePolicy>,
 }
 
 impl OkConfig {
@@ -326,10 +323,7 @@ impl OkConfig {
         let repo = repo.as_ref();
         let path = repo.join("ok.toml");
         if !path.exists() {
-            let mut config = Self::default();
-            config.architecture.policy = load_architecture_policy(repo)?;
-            config.validate()?;
-            return Ok(config);
+            return Ok(Self::default());
         }
         let raw = fs::read_to_string(&path)?;
         let mut config: Self = toml::from_str(&raw)
@@ -337,7 +331,6 @@ impl OkConfig {
         config.apply_builtin_excludes();
         config.normalize_scip();
         config.apply_env_overrides();
-        config.architecture.policy = load_architecture_policy(repo)?;
         config.validate()?;
         Ok(config)
     }
@@ -380,9 +373,6 @@ impl OkConfig {
             return Err(OkError::Config(
                 "semantic.dimensions must be greater than zero".into(),
             ));
-        }
-        if let Some(policy) = &self.architecture.policy {
-            policy.validate(COMPATIBILITY_ARCHITECTURE_POLICY_PATH)?;
         }
         Ok(())
     }
@@ -517,7 +507,7 @@ pub fn parse_size(value: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::ScipMode;
-    use super::{parse_size, ArchitectureConfig, OkConfig, PolicySource};
+    use super::{load_architecture_policy, parse_size, OkConfig, PolicySource};
     use std::env;
 
     #[test]
@@ -542,42 +532,33 @@ mod tests {
     }
 
     #[test]
-    fn embedded_policy_preserves_legacy_rules_default() {
-        let architecture: ArchitectureConfig = toml::from_str(
+    fn embedded_policy_preserves_full_config_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        OkConfig::write_default(&path).unwrap();
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw = raw.replace("rules = \".ok/architecture-rules.yml\"\n", "");
+        raw.push_str(
             r#"
-[policy]
+[architecture.policy]
 version = "v1"
 
-[[policy.layers]]
+[[architecture.policy.layers]]
 id = "api"
 paths = ["crates/api/**"]
 "#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            architecture.rules,
-            std::path::Path::new(".ok/architecture-rules.yml")
         );
-        assert!(architecture.policy.is_some());
-    }
-
-    #[test]
-    fn repo_config_exposes_canonical_architecture_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        OkConfig::write_default(dir.path().join("ok.toml")).unwrap();
-        let policy_path = dir.path().join(".open-kioku/architecture.toml");
-        std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            policy_path,
-            include_str!("../../../examples/architecture-policy.toml"),
-        )
-        .unwrap();
+        std::fs::write(&path, raw).unwrap();
 
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
-        let policy = loaded.architecture.policy.unwrap();
-        assert_eq!(policy.source, PolicySource::Canonical);
-        assert_eq!(policy.layers.len(), 3);
+        assert_eq!(
+            loaded.architecture.rules,
+            std::path::Path::new(".ok/architecture-rules.yml")
+        );
+
+        let policy = load_architecture_policy(dir.path()).unwrap().unwrap();
+        assert_eq!(policy.source, PolicySource::Compatibility);
+        assert_eq!(policy.layers.len(), 1);
     }
 
     #[test]
