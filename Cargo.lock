@@ -1143,6 +1143,8 @@ dependencies = [
 name = "open-kioku-architecture"
 version = "2.0.1"
 dependencies = [
+ "globset",
+ "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-storage",
@@ -1334,6 +1336,7 @@ dependencies = [
  "chrono",
  "globset",
  "ignore",
+ "open-kioku-architecture",
  "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
