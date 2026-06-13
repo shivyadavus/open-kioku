@@ -1,3 +1,12 @@
+mod architecture_policy;
+
+pub use architecture_policy::{
+    load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy,
+    DependencyAction, DependencyRule, ExemptionRule, PolicyContext, PolicyLayer, PolicySource,
+    PolicyVersion, PublicApiRule, Severity, CANONICAL_ARCHITECTURE_POLICY_PATH,
+    COMPATIBILITY_ARCHITECTURE_POLICY_PATH,
+};
+
 use open_kioku_errors::{OkError, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -138,7 +147,7 @@ impl Default for OkConfig {
                 ],
             },
             architecture: ArchitectureConfig {
-                rules: ".ok/architecture-rules.yml".into(),
+                rules: default_architecture_rules(),
             },
         }
     }
@@ -305,18 +314,20 @@ pub struct PathsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitectureConfig {
+    #[serde(default = "default_architecture_rules")]
     pub rules: PathBuf,
 }
 
 impl OkConfig {
     pub fn load_from_repo(repo: impl AsRef<Path>) -> Result<Self> {
-        let path = repo.as_ref().join("ok.toml");
+        let repo = repo.as_ref();
+        let path = repo.join("ok.toml");
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(path)?;
-        let mut config: Self =
-            toml::from_str(&raw).map_err(|err| OkError::Config(err.to_string()))?;
+        let raw = fs::read_to_string(&path)?;
+        let mut config: Self = toml::from_str(&raw)
+            .map_err(|err| OkError::Config(format!("{}: {err}", path.display())))?;
         config.apply_builtin_excludes();
         config.normalize_scip();
         config.apply_env_overrides();
@@ -470,6 +481,10 @@ fn default_semantic_batch_size() -> usize {
     64
 }
 
+fn default_architecture_rules() -> PathBuf {
+    ".ok/architecture-rules.yml".into()
+}
+
 pub fn parse_size(value: &str) -> Result<u64> {
     let trimmed = value.trim().to_ascii_lowercase();
     let split_at = trimmed
@@ -492,7 +507,7 @@ pub fn parse_size(value: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::ScipMode;
-    use super::{parse_size, OkConfig};
+    use super::{load_architecture_policy, parse_size, OkConfig, PolicySource};
     use std::env;
 
     #[test]
@@ -514,6 +529,36 @@ mod tests {
             .paths
             .iter()
             .any(|path| path == std::path::Path::new("index.scip")));
+    }
+
+    #[test]
+    fn embedded_policy_preserves_full_config_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        OkConfig::write_default(&path).unwrap();
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw = raw.replace("rules = \".ok/architecture-rules.yml\"\n", "");
+        raw.push_str(
+            r#"
+[architecture.policy]
+version = "v1"
+
+[[architecture.policy.layers]]
+id = "api"
+paths = ["crates/api/**"]
+"#,
+        );
+        std::fs::write(&path, raw).unwrap();
+
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        assert_eq!(
+            loaded.architecture.rules,
+            std::path::Path::new(".ok/architecture-rules.yml")
+        );
+
+        let policy = load_architecture_policy(dir.path()).unwrap().unwrap();
+        assert_eq!(policy.source, PolicySource::Compatibility);
+        assert_eq!(policy.layers.len(), 1);
     }
 
     #[test]
