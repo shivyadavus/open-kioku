@@ -24,7 +24,9 @@ use open_kioku_ranking::{
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
-use open_kioku_storage::{GraphStore, IndexData, MetadataStore, OkStore, SearchIndex};
+use open_kioku_storage::{
+    GraphStore, HistoryStore, IndexData, MetadataStore, OkStore, SearchIndex,
+};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
@@ -4774,9 +4776,13 @@ fn index_repo_with_config(
     let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
     let _lock = IndexWriteLock::acquire(repo, &reporter)?;
     let index_reporter = Arc::clone(&reporter);
-    let snapshot = Indexer::default().index_repo_with_progress(repo, &config, move |progress| {
-        report_index_progress(&index_reporter, progress);
-    })?;
+    let (snapshot, history) = Indexer::default().index_repo_with_history_and_progress(
+        repo,
+        &config,
+        move |progress| {
+            report_index_progress(&index_reporter, progress);
+        },
+    )?;
     report_index_stage(
         &reporter,
         "store",
@@ -4800,6 +4806,17 @@ fn index_repo_with_config(
         occurrences: &snapshot.occurrences,
         analysis_facts: &snapshot.analysis_facts,
     })?;
+    report_index_stage(
+        &reporter,
+        "history",
+        format!(
+            "writing {} commits, {} file touches, {} cochange edges",
+            history.commits.len(),
+            history.file_touches.len(),
+            history.cochange_edges.len()
+        ),
+    );
+    store.put_history_snapshot(&history)?;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
     let graph = InMemoryGraph::from_index_with_analysis(
         &snapshot.files,

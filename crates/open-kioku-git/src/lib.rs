@@ -1,8 +1,31 @@
+use chrono::{DateTime, Utc};
+use open_kioku_core::{
+    GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, HistoryRecordId, Owner,
+};
 use open_kioku_errors::{OkError, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const COMMIT_RECORD_SEPARATOR: u8 = 0x1e;
+const GIT_COMMIT_FORMAT: &str =
+    "--format=%x1e%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%B%x00";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitHistory {
+    pub commits: Vec<GitCommitRecord>,
+    pub file_touches: Vec<GitFileTouch>,
+}
+
+impl CommitHistory {
+    pub fn empty() -> Self {
+        Self {
+            commits: Vec::new(),
+            file_touches: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CochangeRecord {
@@ -61,41 +84,74 @@ pub fn cochange_records(
     max_commits: usize,
     max_files_per_commit: usize,
 ) -> Result<Vec<CochangeRecord>> {
+    let history = commit_history(root, max_commits)?;
+    Ok(cochange_records_from_history(
+        &history,
+        max_files_per_commit,
+    ))
+}
+
+pub fn commit_history(root: impl AsRef<Path>, max_commits: usize) -> Result<CommitHistory> {
     let root = root.as_ref();
-    if !root.join(".git").exists() || max_commits == 0 || max_files_per_commit < 2 {
-        return Ok(Vec::new());
+    if !root.join(".git").exists() || max_commits == 0 {
+        return Ok(CommitHistory::empty());
+    }
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git history scan failed: {err}")))?;
+    if !head.status.success() {
+        return Ok(CommitHistory::empty());
     }
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("log")
         .arg(format!("--max-count={max_commits}"))
-        .arg("--name-only")
-        .arg("--pretty=format:commit:%H")
+        .args([
+            "--no-show-signature",
+            "--no-color",
+            "--no-decorate",
+            "--encoding=UTF-8",
+            "--date=iso-strict",
+            "--find-renames",
+            GIT_COMMIT_FORMAT,
+            "--name-status",
+            "-z",
+        ])
         .output()
         .map_err(|err| OkError::Repository(format!("git history scan failed: {err}")))?;
     if !output.status.success() {
-        return Ok(Vec::new());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git history scan failed: {}",
+            stderr.trim()
+        )));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut commits = Vec::new();
-    let mut current_sha: Option<String> = None;
-    let mut current_files = Vec::new();
-    for line in stdout.lines() {
-        if let Some(sha) = line.strip_prefix("commit:") {
-            push_commit(&mut commits, current_sha.take(), &mut current_files);
-            current_sha = Some(sha.trim().to_string());
-        } else {
-            let path = line.trim();
-            if is_history_path(path) {
-                current_files.push(PathBuf::from(path));
-            }
-        }
-    }
-    push_commit(&mut commits, current_sha, &mut current_files);
+    parse_commit_history(&output.stdout)
+}
 
+pub fn cochange_records_from_history(
+    history: &CommitHistory,
+    max_files_per_commit: usize,
+) -> Vec<CochangeRecord> {
+    if max_files_per_commit < 2 {
+        return Vec::new();
+    }
+    let mut files_by_commit = HashMap::<&str, Vec<PathBuf>>::new();
+    for touch in &history.file_touches {
+        files_by_commit
+            .entry(touch.commit_id.0.as_str())
+            .or_default()
+            .push(touch.path.clone());
+    }
     let mut pairs: HashMap<(PathBuf, PathBuf), CochangeRecord> = HashMap::new();
-    for (idx, (sha, mut files)) in commits.into_iter().enumerate() {
+    for (idx, commit) in history.commits.iter().enumerate() {
+        let mut files = files_by_commit
+            .remove(commit.id.0.as_str())
+            .unwrap_or_default();
         files.sort();
         files.dedup();
         if files.len() < 2 || files.len() > max_files_per_commit {
@@ -120,7 +176,7 @@ pub fn cochange_records(
                 entry.recency_weight += recency_weight;
                 entry.test_corun |= is_test_path(right);
                 if entry.commits.len() < 5 {
-                    entry.commits.push(sha.clone());
+                    entry.commits.push(commit.id.0.clone());
                 }
             }
         }
@@ -134,25 +190,167 @@ pub fn cochange_records(
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.cochanged_path.cmp(&b.cochanged_path))
     });
-    Ok(records)
+    records
 }
 
-fn push_commit(
-    commits: &mut Vec<(String, Vec<PathBuf>)>,
-    sha: Option<String>,
-    files: &mut Vec<PathBuf>,
-) {
-    if let Some(sha) = sha {
-        commits.push((sha, std::mem::take(files)));
+fn parse_commit_history(raw: &[u8]) -> Result<CommitHistory> {
+    let mut history = CommitHistory::empty();
+    for record in raw
+        .split(|byte| *byte == COMMIT_RECORD_SEPARATOR)
+        .filter(|record| !record.is_empty())
+    {
+        let fields = record.splitn(11, |byte| *byte == 0).collect::<Vec<_>>();
+        if fields.len() != 11 {
+            return Err(OkError::Repository(format!(
+                "git history record has {} fields; expected commit metadata and file statuses",
+                fields.len()
+            )));
+        }
+        let sha = git_text(fields[0], "commit id")?;
+        let parent_ids = git_text(fields[1], "parent commit ids")?
+            .split_whitespace()
+            .map(|id| GitCommitId::new(id.to_string()))
+            .collect::<Vec<_>>();
+        let author = owner(
+            git_text(fields[2], "author name")?,
+            git_text(fields[3], "author email")?,
+            "author",
+        )?;
+        let authored_at = git_timestamp(fields[4], "authored timestamp")?;
+        let committer = owner(
+            git_text(fields[5], "committer name")?,
+            git_text(fields[6], "committer email")?,
+            "committer",
+        )?;
+        let committed_at = git_timestamp(fields[7], "committed timestamp")?;
+        let mut summary = git_text(fields[8], "commit summary")?;
+        let message = git_text(fields[9], "commit message")?
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        if summary.trim().is_empty() {
+            summary = message.lines().next().unwrap_or_default().to_string();
+        }
+        let commit_id = GitCommitId::new(sha);
+        let mut touches = parse_file_touches(fields[10], &commit_id, committed_at)?;
+        let file_count = touches.len();
+        history.commits.push(GitCommitRecord {
+            id: commit_id,
+            parent_ids,
+            author,
+            committer: Some(committer),
+            authored_at,
+            committed_at,
+            summary,
+            message,
+            file_count,
+        });
+        history.file_touches.append(&mut touches);
+    }
+    Ok(history)
+}
+
+fn parse_file_touches(
+    raw: &[u8],
+    commit_id: &GitCommitId,
+    touched_at: DateTime<Utc>,
+) -> Result<Vec<GitFileTouch>> {
+    let mut tokens = raw.split(|byte| *byte == 0);
+    let mut touches = Vec::new();
+    while let Some(status) = next_status(&mut tokens) {
+        let change_kind = change_kind(status);
+        let rename_or_copy = matches!(change_kind, GitChangeKind::Renamed | GitChangeKind::Copied);
+        let first_path = next_path(&mut tokens, commit_id, status)?;
+        let (path, previous_path) = if rename_or_copy {
+            let current_path = next_path(&mut tokens, commit_id, status)?;
+            (current_path, Some(first_path))
+        } else {
+            (first_path, None)
+        };
+        let id = HistoryRecordId::new(format!("file-touch:{}:{}", commit_id.0, touches.len()));
+        touches.push(GitFileTouch {
+            id,
+            commit_id: commit_id.clone(),
+            path,
+            previous_path,
+            change_kind,
+            additions: None,
+            deletions: None,
+            touched_at,
+        });
+    }
+    Ok(touches)
+}
+
+fn next_status<'a>(tokens: &mut impl Iterator<Item = &'a [u8]>) -> Option<&'a [u8]> {
+    tokens
+        .map(trim_status_prefix)
+        .find(|token| !token.is_empty())
+}
+
+fn next_path<'a>(
+    tokens: &mut impl Iterator<Item = &'a [u8]>,
+    commit_id: &GitCommitId,
+    status: &[u8],
+) -> Result<PathBuf> {
+    let path = tokens.find(|token| !token.is_empty()).ok_or_else(|| {
+        OkError::Repository(format!(
+            "git history record for commit `{commit_id}` is missing a path after status `{}`",
+            String::from_utf8_lossy(status)
+        ))
+    })?;
+    Ok(PathBuf::from(git_text(path, "changed path")?))
+}
+
+fn trim_status_prefix(mut value: &[u8]) -> &[u8] {
+    while value
+        .first()
+        .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+    {
+        value = &value[1..];
+    }
+    value
+}
+
+fn change_kind(status: &[u8]) -> GitChangeKind {
+    match status.first().copied() {
+        Some(b'A') => GitChangeKind::Added,
+        Some(b'M') => GitChangeKind::Modified,
+        Some(b'D') => GitChangeKind::Deleted,
+        Some(b'R') => GitChangeKind::Renamed,
+        Some(b'C') => GitChangeKind::Copied,
+        Some(b'T') => GitChangeKind::TypeChanged,
+        _ => GitChangeKind::Unknown,
     }
 }
 
-fn is_history_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.ends_with('/')
-        && !path.starts_with(".git/")
-        && !path.starts_with(".ok/")
-        && !path.contains("=>")
+fn owner(name: String, email: String, role: &str) -> Result<Owner> {
+    let name = name.trim().to_string();
+    let email = email.trim().to_string();
+    let name = if name.is_empty() { email.clone() } else { name };
+    if name.is_empty() {
+        return Err(OkError::Repository(format!(
+            "git history {role} identity is empty"
+        )));
+    }
+    Ok(Owner {
+        name,
+        email: (!email.is_empty()).then_some(email),
+    })
+}
+
+fn git_timestamp(raw: &[u8], field: &str) -> Result<DateTime<Utc>> {
+    let value = git_text(raw, field)?;
+    DateTime::parse_from_rfc3339(&value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|err| {
+            OkError::Repository(format!("git history {field} `{value}` is invalid: {err}"))
+        })
+}
+
+fn git_text(raw: &[u8], field: &str) -> Result<String> {
+    String::from_utf8(raw.to_vec()).map_err(|err| {
+        OkError::Repository(format!("git history {field} is not valid UTF-8: {err}"))
+    })
 }
 
 fn is_test_path(path: &Path) -> bool {
@@ -169,7 +367,10 @@ fn is_test_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::cochange_records;
+    use super::{cochange_records, commit_history};
+    use open_kioku_core::GitChangeKind;
+    use std::fs;
+    use std::path::Path;
     use std::process::Command;
 
     #[test]
@@ -218,13 +419,103 @@ mod tests {
         assert_eq!(new_pair.commit_count, 1);
     }
 
-    fn write(root: &std::path::Path, path: &str, content: &str) {
-        let path = root.join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
+    #[test]
+    fn commit_history_respects_window_and_keeps_every_file_touch() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/old.rs", "fn old() {}\n");
+        commit_all(dir.path(), "old");
+        write(dir.path(), "src/a.rs", "fn a() {}\n");
+        write(dir.path(), "src/b.rs", "fn b() {}\n");
+        write(dir.path(), "tests/a_test.rs", "#[test] fn a() {}\n");
+        commit_all(dir.path(), "multi-file change");
+
+        let history = commit_history(dir.path(), 1).unwrap();
+
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].summary, "multi-file change");
+        assert_eq!(history.commits[0].author.name, "Test User");
+        assert_eq!(
+            history.commits[0].author.email.as_deref(),
+            Some("test@example.com")
+        );
+        assert_eq!(history.commits[0].file_count, 3);
+        assert_eq!(history.file_touches.len(), 3);
+        assert!(history
+            .file_touches
+            .iter()
+            .all(|touch| touch.commit_id == history.commits[0].id));
     }
 
-    fn run(root: &std::path::Path, args: &[&str]) {
+    #[test]
+    fn commit_history_captures_renames() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/old.rs", "fn renamed() {}\n");
+        commit_all(dir.path(), "add old path");
+        run(dir.path(), &["mv", "src/old.rs", "src/new.rs"]);
+        commit_all(dir.path(), "rename path");
+
+        let history = commit_history(dir.path(), 1).unwrap();
+        let touch = history.file_touches.first().unwrap();
+
+        assert_eq!(touch.change_kind, GitChangeKind::Renamed);
+        assert_eq!(
+            touch.previous_path.as_deref(),
+            Some(Path::new("src/old.rs"))
+        );
+        assert_eq!(touch.path, Path::new("src/new.rs"));
+    }
+
+    #[test]
+    fn commit_history_handles_empty_and_shallow_repositories() {
+        let empty = initialized_repo();
+        assert_eq!(
+            commit_history(empty.path(), 10).unwrap(),
+            super::CommitHistory::empty()
+        );
+
+        let origin = initialized_repo();
+        write(origin.path(), "src/one.rs", "fn one() {}\n");
+        commit_all(origin.path(), "one");
+        write(origin.path(), "src/two.rs", "fn two() {}\n");
+        commit_all(origin.path(), "two");
+
+        let clone_parent = tempfile::tempdir().unwrap();
+        let shallow = clone_parent.path().join("shallow");
+        let source = format!("file://{}", origin.path().canonicalize().unwrap().display());
+        let status = Command::new("git")
+            .args(["clone", "--quiet", "--depth", "1"])
+            .arg(source)
+            .arg(&shallow)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let history = commit_history(&shallow, 10).unwrap();
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].summary, "two");
+    }
+
+    fn initialized_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path(), &["init", "--quiet"]);
+        run(dir.path(), &["config", "user.email", "test@example.com"]);
+        run(dir.path(), &["config", "user.name", "Test User"]);
+        run(dir.path(), &["config", "commit.gpgsign", "false"]);
+        dir
+    }
+
+    fn commit_all(root: &Path, message: &str) {
+        run(root, &["add", "."]);
+        run(root, &["commit", "--quiet", "-m", message]);
+    }
+
+    fn write(root: &Path, path: &str, content: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn run(root: &Path, args: &[&str]) {
         let status = Command::new("git")
             .arg("-C")
             .arg(root)
