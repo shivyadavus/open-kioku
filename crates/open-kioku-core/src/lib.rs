@@ -790,6 +790,25 @@ pub struct ArchitectureComponent {
     pub evidence: Vec<Evidence>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyComponentMatch {
+    pub component_id: String,
+    pub matched_glob: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedArchitectureNode {
+    pub file_path: PathBuf,
+    pub symbol_id: Option<SymbolId>,
+    pub components: Vec<PolicyComponentMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnmappedPolicyTarget {
+    pub file_path: PathBuf,
+    pub symbol_id: Option<SymbolId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IndexManifest {
     pub repository: Repository,
@@ -826,6 +845,8 @@ pub struct IndexQuality {
     pub runtime_analysis_facts: usize,
     #[serde(default)]
     pub git_history_facts: usize,
+    #[serde(default)]
+    pub architecture_facts: usize,
     #[serde(default)]
     pub semantic_provider_notes: Vec<String>,
     pub quality_notes: Vec<String>,
@@ -881,6 +902,7 @@ pub enum GraphEdgeType {
     OwnedBy,
     ChangedBy,
     FailedIn,
+    BelongsTo,
     MentionedIn,
     RelatedToTicket,
 }

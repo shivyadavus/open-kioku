@@ -13,6 +13,8 @@ categories.workspace = true
 [dependencies]
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
+open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
 open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
+globset = "0.4.18"
 serde.workspace = true
 
