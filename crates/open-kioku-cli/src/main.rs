@@ -1542,17 +1542,17 @@ async fn main() -> anyhow::Result<()> {
             }
             ArchitectureCommand::Detect => {
                 let store = open_store(&repo)?;
-                let summary = ArchitectureDetector::new(&store).detect()?;
+                let summary = ArchitectureDetector::new(&store, None).detect()?;
                 output(cli.json, &summary, || {})?;
             }
             ArchitectureCommand::Boundaries => {
                 let store = open_store(&repo)?;
-                let summary = ArchitectureDetector::new(&store).detect()?;
+                let summary = ArchitectureDetector::new(&store, None).detect()?;
                 output(cli.json, &summary.components, || {})?;
             }
             ArchitectureCommand::Violations => {
                 let store = open_store(&repo)?;
-                let summary = ArchitectureDetector::new(&store).detect()?;
+                let summary = ArchitectureDetector::new(&store, None).detect()?;
                 output(cli.json, &summary.violations, || {})?;
             }
         },

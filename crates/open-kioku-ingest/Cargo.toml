@@ -16,6 +16,7 @@ globset.workspace = true
 ignore.workspace = true
 open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
+open-kioku-architecture = { version = "2.0.0", path = "../open-kioku-architecture" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 open-kioku-git = { version = "2.0.0", path = "../open-kioku-git" }
 open-kioku-languages = { version = "2.0.0", path = "../open-kioku-languages" }
