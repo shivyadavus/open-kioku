@@ -1,6 +1,9 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::{OkConfig, RankingConfig, ScipMode};
+use open_kioku_config::{
+    load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
+    PolicySource, RankingConfig, ScipMode,
+};
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
@@ -421,6 +424,20 @@ enum ArchitectureCommand {
     Detect,
     Boundaries,
     Violations,
+    /// Experimental repository-owned architecture policy commands.
+    Policy {
+        #[command(subcommand)]
+        command: ArchitecturePolicyCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArchitecturePolicyCommand {
+    Validate {
+        #[arg(long, value_name = "POLICY_TOML")]
+        path: Option<PathBuf>,
+    },
+    Print,
 }
 
 #[derive(Subcommand)]
@@ -847,6 +864,16 @@ struct ScipIndexerReport {
     command: String,
     output_path: PathBuf,
     note: String,
+}
+
+#[derive(Serialize)]
+struct ArchitecturePolicyOutput {
+    valid: bool,
+    configured: bool,
+    source: Option<PolicySource>,
+    paths: Vec<PathBuf>,
+    policy: Option<ArchitecturePolicy>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1507,15 +1534,26 @@ async fn main() -> anyhow::Result<()> {
                 println!("Repo: https://github.com/shivyadavus/open-kioku");
             }
         }
-        Command::Architecture { command } => {
-            let store = open_store(&repo)?;
-            let summary = ArchitectureDetector::new(&store).detect()?;
-            match command {
-                ArchitectureCommand::Detect => output(cli.json, &summary, || {})?,
-                ArchitectureCommand::Boundaries => output(cli.json, &summary.components, || {})?,
-                ArchitectureCommand::Violations => output(cli.json, &summary.violations, || {})?,
+        Command::Architecture { command } => match command {
+            ArchitectureCommand::Policy { command } => {
+                handle_architecture_policy_command(cli.json, &repo, command)?;
             }
-        }
+            ArchitectureCommand::Detect => {
+                let store = open_store(&repo)?;
+                let summary = ArchitectureDetector::new(&store).detect()?;
+                output(cli.json, &summary, || {})?;
+            }
+            ArchitectureCommand::Boundaries => {
+                let store = open_store(&repo)?;
+                let summary = ArchitectureDetector::new(&store).detect()?;
+                output(cli.json, &summary.components, || {})?;
+            }
+            ArchitectureCommand::Violations => {
+                let store = open_store(&repo)?;
+                let summary = ArchitectureDetector::new(&store).detect()?;
+                output(cli.json, &summary.violations, || {})?;
+            }
+        },
         Command::Patch { command } => {
             let config = OkConfig::load_from_repo(&repo)?;
             let store = open_store(&repo)?;
@@ -1650,6 +1688,79 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+fn handle_architecture_policy_command(
+    json: bool,
+    repo: &Path,
+    command: ArchitecturePolicyCommand,
+) -> anyhow::Result<()> {
+    match command {
+        ArchitecturePolicyCommand::Validate { path } => {
+            let (policy, paths) = if let Some(path) = path {
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    repo.join(path)
+                };
+                (Some(load_architecture_policy_from_path(&path)?), vec![path])
+            } else {
+                let policy = load_architecture_policy(repo)?;
+                let paths = policy
+                    .as_ref()
+                    .map(|policy| policy.source_paths(repo))
+                    .unwrap_or_default();
+                (policy, paths)
+            };
+            let output = architecture_policy_output(policy, paths);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("{}", output.message);
+            }
+        }
+        ArchitecturePolicyCommand::Print => {
+            let policy = load_architecture_policy(repo)?;
+            let paths = policy
+                .as_ref()
+                .map(|policy| policy.source_paths(repo))
+                .unwrap_or_default();
+            let output = architecture_policy_output(policy, paths);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if let Some(policy) = &output.policy {
+                println!("# source: {}", output.source.unwrap_or_default());
+                for path in &output.paths {
+                    println!("# path: {}", path.display());
+                }
+                print!("{}", policy.to_toml()?);
+            } else {
+                println!("{}", output.message);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn architecture_policy_output(
+    policy: Option<ArchitecturePolicy>,
+    paths: Vec<PathBuf>,
+) -> ArchitecturePolicyOutput {
+    let source = policy.as_ref().map(|policy| policy.source);
+    let configured = policy.is_some();
+    let message = if let Some(source) = source {
+        format!("Architecture policy is valid ({source}).")
+    } else {
+        "No architecture policy configured. Heuristic architecture detection remains active.".into()
+    };
+    ArchitecturePolicyOutput {
+        valid: true,
+        configured,
+        source,
+        paths,
+        policy,
+        message,
+    }
 }
 
 fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {

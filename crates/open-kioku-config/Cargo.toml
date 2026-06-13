@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+globset.workspace = true
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 serde.workspace = true
 toml.workspace = true

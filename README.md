@@ -405,7 +405,8 @@ This is a 44-crate Cargo workspace. Important crates:
 - `open-kioku-impact`: file impact analysis.
 - `open-kioku-tests`: validation target selection.
 
-Architecture docs: [`docs/architecture.md`](docs/architecture.md)
+Architecture docs: [`docs/architecture.md`](docs/architecture.md) and
+[`docs/architecture-policy.md`](docs/architecture-policy.md)
 
 Crate map: [`docs/crate-map.md`](docs/crate-map.md)
 
