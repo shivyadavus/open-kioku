@@ -1081,6 +1081,100 @@ fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOc
     occurrences
 }
 
+fn collect_architecture_facts(
+    resolver: &open_kioku_architecture::PolicyResolver,
+    files: &[File],
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    use open_kioku_core::{Confidence, EvidenceSourceType, GraphEdgeType, GraphNodeType};
+    let mut facts = Vec::new();
+
+    // Process files
+    for file in files {
+        let path = file.path.display().to_string();
+        let matches = resolver.resolve_file(&path);
+        if matches.is_empty() {
+            facts.push(AnalysisFact {
+                id: stable_id(&format!("arch:unmapped:file:{}", path)),
+                file_id: file.id.clone(),
+                symbol_id: None,
+                target: "UNMAPPED_ARCHITECTURE".into(),
+                target_kind: GraphNodeType::ArchitectureComponent,
+                edge_type: GraphEdgeType::BelongsTo,
+                range: None,
+                confidence: Confidence::Exact,
+                source: "policy_resolver".into(),
+                source_type: EvidenceSourceType::Heuristic,
+                message: "file does not match any architecture policy globs".into(),
+            });
+        } else {
+            for comp_match in matches {
+                facts.push(AnalysisFact {
+                    id: stable_id(&format!("arch:file:{}:{}", path, comp_match.component_id)),
+                    file_id: file.id.clone(),
+                    symbol_id: None,
+                    target: comp_match.component_id.clone(),
+                    target_kind: GraphNodeType::ArchitectureComponent,
+                    edge_type: GraphEdgeType::BelongsTo,
+                    range: None,
+                    confidence: Confidence::Exact,
+                    source: format!("glob:{}", comp_match.matched_glob),
+                    source_type: EvidenceSourceType::Heuristic,
+                    message: "file mapped to architecture component via policy".into(),
+                });
+            }
+        }
+    }
+
+    // Process symbols
+    let mut files_by_id = std::collections::HashMap::new();
+    for file in files {
+        files_by_id.insert(file.id.clone(), file.path.display().to_string());
+    }
+
+    for symbol in symbols {
+        if let Some(path) = files_by_id.get(&symbol.file_id) {
+            let matches = resolver.resolve_file(path);
+            if matches.is_empty() {
+                facts.push(AnalysisFact {
+                    id: stable_id(&format!("arch:unmapped:symbol:{}", symbol.id.0)),
+                    file_id: symbol.file_id.clone(),
+                    symbol_id: Some(symbol.id.clone()),
+                    target: "UNMAPPED_ARCHITECTURE".into(),
+                    target_kind: GraphNodeType::ArchitectureComponent,
+                    edge_type: GraphEdgeType::BelongsTo,
+                    range: symbol.range.clone(),
+                    confidence: Confidence::Exact,
+                    source: "policy_resolver".into(),
+                    source_type: EvidenceSourceType::Heuristic,
+                    message: "symbol does not match any architecture policy globs".into(),
+                });
+            } else {
+                for comp_match in matches {
+                    facts.push(AnalysisFact {
+                        id: stable_id(&format!(
+                            "arch:symbol:{}:{}",
+                            symbol.id.0, comp_match.component_id
+                        )),
+                        file_id: symbol.file_id.clone(),
+                        symbol_id: Some(symbol.id.clone()),
+                        target: comp_match.component_id.clone(),
+                        target_kind: GraphNodeType::ArchitectureComponent,
+                        edge_type: GraphEdgeType::BelongsTo,
+                        range: symbol.range.clone(),
+                        confidence: Confidence::Exact,
+                        source: format!("glob:{}", comp_match.matched_glob),
+                        source_type: EvidenceSourceType::Heuristic,
+                        message: "symbol mapped to architecture component via policy".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    dedupe_analysis_facts(facts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{derive_occurrences, Indexer};
@@ -1260,98 +1354,3 @@ class ExampleTests extends BaseTests {
     }
 }
 
-fn collect_architecture_facts(
-    resolver: &open_kioku_architecture::PolicyResolver,
-    files: &[File],
-    symbols: &[Symbol],
-) -> Vec<AnalysisFact> {
-    use open_kioku_core::{Confidence, EvidenceSourceType, GraphEdgeType, GraphNodeType};
-    let mut facts = Vec::new();
-
-    // Process files
-    for file in files {
-        let path = file.path.display().to_string();
-        let matches = resolver.resolve_file(&path);
-        if matches.is_empty() {
-            // Note: we could emit an unmapped target fact here, but the issue says "Mark unmapped files or symbols explicitly".
-            // We can emit an AnalysisFact indicating Unmapped to surface it in the graph.
-            facts.push(AnalysisFact {
-                id: stable_id(&format!("arch:unmapped:file:{}", path)),
-                file_id: file.id.clone(),
-                symbol_id: None,
-                target: "UNMAPPED_ARCHITECTURE".into(),
-                target_kind: GraphNodeType::ArchitectureComponent,
-                edge_type: GraphEdgeType::BelongsTo,
-                range: None,
-                confidence: Confidence::Exact,
-                source: "policy_resolver".into(),
-                source_type: EvidenceSourceType::Heuristic, // or Policy
-                message: "file does not match any architecture policy globs".into(),
-            });
-        } else {
-            for comp_match in matches {
-                facts.push(AnalysisFact {
-                    id: stable_id(&format!("arch:file:{}:{}", path, comp_match.component_id)),
-                    file_id: file.id.clone(),
-                    symbol_id: None,
-                    target: comp_match.component_id.clone(),
-                    target_kind: GraphNodeType::ArchitectureComponent,
-                    edge_type: GraphEdgeType::BelongsTo,
-                    range: None,
-                    confidence: Confidence::Exact,
-                    source: format!("glob:{}", comp_match.matched_glob),
-                    source_type: EvidenceSourceType::Heuristic,
-                    message: "file mapped to architecture component via policy".into(),
-                });
-            }
-        }
-    }
-
-    // Process symbols
-    let mut files_by_id = std::collections::HashMap::new();
-    for file in files {
-        files_by_id.insert(file.id.clone(), file.path.display().to_string());
-    }
-
-    for symbol in symbols {
-        if let Some(path) = files_by_id.get(&symbol.file_id) {
-            let matches = resolver.resolve_file(path);
-            if matches.is_empty() {
-                facts.push(AnalysisFact {
-                    id: stable_id(&format!("arch:unmapped:symbol:{}", symbol.id.0)),
-                    file_id: symbol.file_id.clone(),
-                    symbol_id: Some(symbol.id.clone()),
-                    target: "UNMAPPED_ARCHITECTURE".into(),
-                    target_kind: GraphNodeType::ArchitectureComponent,
-                    edge_type: GraphEdgeType::BelongsTo,
-                    range: symbol.range.clone(),
-                    confidence: Confidence::Exact,
-                    source: "policy_resolver".into(),
-                    source_type: EvidenceSourceType::Heuristic,
-                    message: "symbol does not match any architecture policy globs".into(),
-                });
-            } else {
-                for comp_match in matches {
-                    facts.push(AnalysisFact {
-                        id: stable_id(&format!(
-                            "arch:symbol:{}:{}",
-                            symbol.id.0, comp_match.component_id
-                        )),
-                        file_id: symbol.file_id.clone(),
-                        symbol_id: Some(symbol.id.clone()),
-                        target: comp_match.component_id.clone(),
-                        target_kind: GraphNodeType::ArchitectureComponent,
-                        edge_type: GraphEdgeType::BelongsTo,
-                        range: symbol.range.clone(),
-                        confidence: Confidence::Exact,
-                        source: format!("glob:{}", comp_match.matched_glob),
-                        source_type: EvidenceSourceType::Heuristic,
-                        message: "symbol mapped to architecture component via policy".into(),
-                    });
-                }
-            }
-        }
-    }
-
-    dedupe_analysis_facts(facts)
-}
