@@ -232,7 +232,7 @@ async fn dispatch(
             ))
         }
         "detect_architecture" | "architecture_boundaries" | "architecture_violations" => {
-            Ok(json!(ArchitectureDetector::new(store).detect()?))
+            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
         }
         "get_definition" | "get_symbol_context" | "explain_symbol" => {
             let query = required_str(&params, "query")?;
@@ -285,7 +285,7 @@ async fn dispatch(
             Ok(json!({"file": file, "chunks": chunks}))
         }
         "explain_flow" | "summarize_architecture" => {
-            Ok(json!(ArchitectureDetector::new(store).detect()?))
+            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
         }
         "explain_test_coverage" => {
             let path = params

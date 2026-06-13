@@ -198,6 +198,22 @@ impl Indexer {
             total_files: Some(files.len()),
         });
         let mut occurrences = derive_occurrences(&chunks, &symbols);
+
+        let mut arch_fact_count = 0;
+        if let Ok(Some(policy)) = open_kioku_config::load_architecture_policy(&root) {
+            if let Ok(resolver) = open_kioku_architecture::PolicyResolver::new(&policy) {
+                on_progress(IndexProgress {
+                    phase: "architecture",
+                    scanned_files: files.len(),
+                    indexed_files: files.len(),
+                    total_files: Some(files.len()),
+                });
+                let arch_facts = collect_architecture_facts(&resolver, &files, &symbols);
+                arch_fact_count = arch_facts.len();
+                analysis_facts.extend(arch_facts);
+            }
+        }
+
         let mut scip_report = None;
         if config.scip.enabled {
             on_progress(IndexProgress {
@@ -231,6 +247,7 @@ impl Indexer {
                 static_facts: static_analysis_facts,
                 runtime_facts: runtime_analysis_facts,
                 git_history_facts: git_history_fact_count,
+                architecture_facts: arch_fact_count,
             },
         );
         let manifest = IndexManifest {
@@ -352,6 +369,7 @@ struct AnalysisCounts {
     static_facts: usize,
     runtime_facts: usize,
     git_history_facts: usize,
+    architecture_facts: usize,
 }
 
 fn index_quality(
@@ -403,6 +421,12 @@ fn index_quality(
             analysis.git_history_facts
         ));
     }
+    if analysis.architecture_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "architecture policy resolution facts detected: {}",
+            analysis.architecture_facts
+        ));
+    }
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
     if let Some(report) = scip_report {
         if report.imported_paths.is_empty() {
@@ -442,6 +466,7 @@ fn index_quality(
             static_analysis_facts: analysis.static_facts,
             runtime_analysis_facts: analysis.runtime_facts,
             git_history_facts: analysis.git_history_facts,
+            architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
             quality_notes,
         }
@@ -466,6 +491,7 @@ fn index_quality(
             static_analysis_facts: analysis.static_facts,
             runtime_analysis_facts: analysis.runtime_facts,
             git_history_facts: analysis.git_history_facts,
+            architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
             quality_notes,
         }
@@ -1053,6 +1079,100 @@ fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOc
             && a.is_definition == b.is_definition
     });
     occurrences
+}
+
+fn collect_architecture_facts(
+    resolver: &open_kioku_architecture::PolicyResolver,
+    files: &[File],
+    symbols: &[Symbol],
+) -> Vec<AnalysisFact> {
+    use open_kioku_core::{Confidence, EvidenceSourceType, GraphEdgeType, GraphNodeType};
+    let mut facts = Vec::new();
+
+    // Process files
+    for file in files {
+        let path = file.path.display().to_string();
+        let matches = resolver.resolve_file(&path);
+        if matches.is_empty() {
+            facts.push(AnalysisFact {
+                id: stable_id(&format!("arch:unmapped:file:{}", path)),
+                file_id: file.id.clone(),
+                symbol_id: None,
+                target: "UNMAPPED_ARCHITECTURE".into(),
+                target_kind: GraphNodeType::ArchitectureComponent,
+                edge_type: GraphEdgeType::BelongsTo,
+                range: None,
+                confidence: Confidence::Exact,
+                source: "policy_resolver".into(),
+                source_type: EvidenceSourceType::Heuristic,
+                message: "file does not match any architecture policy globs".into(),
+            });
+        } else {
+            for comp_match in matches {
+                facts.push(AnalysisFact {
+                    id: stable_id(&format!("arch:file:{}:{}", path, comp_match.component_id)),
+                    file_id: file.id.clone(),
+                    symbol_id: None,
+                    target: comp_match.component_id.clone(),
+                    target_kind: GraphNodeType::ArchitectureComponent,
+                    edge_type: GraphEdgeType::BelongsTo,
+                    range: None,
+                    confidence: Confidence::Exact,
+                    source: format!("glob:{}", comp_match.matched_glob),
+                    source_type: EvidenceSourceType::Heuristic,
+                    message: "file mapped to architecture component via policy".into(),
+                });
+            }
+        }
+    }
+
+    // Process symbols
+    let mut files_by_id = std::collections::HashMap::new();
+    for file in files {
+        files_by_id.insert(file.id.clone(), file.path.display().to_string());
+    }
+
+    for symbol in symbols {
+        if let Some(path) = files_by_id.get(&symbol.file_id) {
+            let matches = resolver.resolve_file(path);
+            if matches.is_empty() {
+                facts.push(AnalysisFact {
+                    id: stable_id(&format!("arch:unmapped:symbol:{}", symbol.id.0)),
+                    file_id: symbol.file_id.clone(),
+                    symbol_id: Some(symbol.id.clone()),
+                    target: "UNMAPPED_ARCHITECTURE".into(),
+                    target_kind: GraphNodeType::ArchitectureComponent,
+                    edge_type: GraphEdgeType::BelongsTo,
+                    range: symbol.range.clone(),
+                    confidence: Confidence::Exact,
+                    source: "policy_resolver".into(),
+                    source_type: EvidenceSourceType::Heuristic,
+                    message: "symbol does not match any architecture policy globs".into(),
+                });
+            } else {
+                for comp_match in matches {
+                    facts.push(AnalysisFact {
+                        id: stable_id(&format!(
+                            "arch:symbol:{}:{}",
+                            symbol.id.0, comp_match.component_id
+                        )),
+                        file_id: symbol.file_id.clone(),
+                        symbol_id: Some(symbol.id.clone()),
+                        target: comp_match.component_id.clone(),
+                        target_kind: GraphNodeType::ArchitectureComponent,
+                        edge_type: GraphEdgeType::BelongsTo,
+                        range: symbol.range.clone(),
+                        confidence: Confidence::Exact,
+                        source: format!("glob:{}", comp_match.matched_glob),
+                        source_type: EvidenceSourceType::Heuristic,
+                        message: "symbol mapped to architecture component via policy".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    dedupe_analysis_facts(facts)
 }
 
 #[cfg(test)]

@@ -1,0 +1,40 @@
+name: Product Hunt Launch Feedback & Ideas
+description: Share your thoughts, feedback, or ideas from our Product Hunt launch!
+title: "[Launch Feedback]: "
+labels: ["integration", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for checking out Open Kioku on Product Hunt! 🚀
+        We'd love to hear how you are using the local MCP server and what we can improve to make your AI agent workflow even smoother.
+
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Launch Feedback / Experience
+      description: How was your experience setting up and using Open Kioku? What worked well, and what could be improved?
+      placeholder: |
+        I installed Open Kioku via Homebrew, configured Cursor, and it was able to index my repo in X seconds...
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggest
+    attributes:
+      label: Feature Suggestions or Ideas
+      description: What features or improvements would you like to see next? (e.g., specific language support, IDE integration improvements, custom filters)
+      placeholder: |
+        It would be awesome if we had first-class support for...
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Info
+      description: What IDE/Client are you using? (Cursor, Claude Code, Windsurf, Zed, etc.) and what OS?
+      placeholder: |
+        Cursor, macOS (M3)
+    validations:
+      required: false
