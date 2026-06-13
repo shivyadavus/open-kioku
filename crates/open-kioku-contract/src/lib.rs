@@ -13,6 +13,12 @@ pub use builder::{
     ContractRiskSummary,
 };
 
+pub mod store;
+pub use store::{
+    ContractStore, ContractStoreIndexEntry, ContractVerificationRecord, FsContractStore,
+    StoreError, StoredContractRecord,
+};
+
 /// The schema version written into every persisted or exchanged contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
