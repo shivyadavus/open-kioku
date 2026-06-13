@@ -4,7 +4,7 @@ use open_kioku_errors::{OkError, Result};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
-use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
+use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
 use open_kioku_storage_sqlite::SqliteStore;
 use std::path::{Component, Path};
 use std::sync::mpsc;
@@ -79,7 +79,7 @@ pub fn reindex_repo(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let root = root.as_ref();
     let started = Instant::now();
     let config = OkConfig::load_from_repo(root)?;
-    let snapshot = Indexer::default().index_repo(root, &config)?;
+    let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
     let store = SqliteStore::open(root.join(".ok/index.sqlite"))?;
     store.replace_index(IndexData {
         manifest: &snapshot.manifest,
@@ -91,6 +91,7 @@ pub fn reindex_repo(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         occurrences: &snapshot.occurrences,
         analysis_facts: &snapshot.analysis_facts,
     })?;
+    store.put_history_snapshot(&history)?;
 
     let graph = InMemoryGraph::from_index_with_analysis(
         &snapshot.files,
@@ -150,6 +151,7 @@ fn watch_err(err: notify::Error) -> OkError {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     #[test]
     fn filters_internal_index_paths() {
@@ -171,6 +173,12 @@ mod tests {
         )
         .unwrap();
         OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "watch@example.com"]);
+        git(repo, &["config", "user.name", "Watch Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "initial source"]);
 
         let status = reindex_repo(repo).unwrap();
 
@@ -184,6 +192,9 @@ mod tests {
         assert!(chunks
             .iter()
             .any(|chunk| chunk.text.contains("issue_token")));
+        assert_eq!(store.recent_commits(10).unwrap().len(), 1);
+        let history = store.history_for_file(Path::new("src/lib.rs"), 10).unwrap();
+        assert_eq!(history.file_touches.len(), 1);
 
         let search = open_kioku_search_tantivy::TantivySearchIndex::open_or_create(
             repo.join(".ok/search/tantivy"),
@@ -191,5 +202,15 @@ mod tests {
         .unwrap();
         let results = open_kioku_storage::SearchIndex::search(&search, "issue_token", 5).unwrap();
         assert!(!results.is_empty());
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
     }
 }
