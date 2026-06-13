@@ -859,3 +859,60 @@ fn prove_generates_shareable_report_without_source_snippets() {
     assert!(json.contains("\"source_snippets_included\": false"));
     assert!(json.contains("\"tasks_scored\": 1"));
 }
+
+#[test]
+fn index_captures_git_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git command failed: {:?}", args);
+    };
+
+    git(&["init", "--quiet"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test User"]);
+    git(&["config", "commit.gpgsign", "false"]);
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "first commit"]);
+
+    fs::write(repo.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "second commit"]);
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+
+    let index_output = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(index_output.contains("Indexed"));
+
+    let store_path = repo.join(".ok/index.sqlite");
+    let store = open_kioku_storage_sqlite::SqliteStore::open(store_path).unwrap();
+    use open_kioku_storage::HistoryStore;
+    let commits = store.recent_commits(10).unwrap();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].summary, "second commit");
+    assert_eq!(commits[1].summary, "first commit");
+
+    let summary = store
+        .history_for_file(std::path::Path::new("src/a.rs"), 10)
+        .unwrap();
+    assert_eq!(summary.recent_commits.len(), 1);
+    assert_eq!(summary.recent_commits[0].summary, "first commit");
+}

@@ -3,9 +3,10 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
-    GraphNodeType, Import, IndexManifest, IndexQuality, LineRange, Repository, RepositoryId,
-    Symbol, SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
+    GitCommitId, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot, Import,
+    IndexManifest, IndexQuality, LineRange, Repository, RepositoryId, Symbol, SymbolOccurrence,
+    TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -20,6 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
 #[derive(Debug, Clone)]
 pub struct IndexSnapshot {
@@ -59,12 +62,33 @@ impl Indexer {
         self.index_repo_with_progress(root, config, |_| {})
     }
 
+    pub fn index_repo_with_history(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+    ) -> Result<(IndexSnapshot, HistorySnapshot)> {
+        self.index_repo_with_history_and_progress(root, config, |_| {})
+    }
+
     pub fn index_repo_with_progress<F>(
         &self,
         root: impl AsRef<Path>,
         config: &OkConfig,
         on_progress: F,
     ) -> Result<IndexSnapshot>
+    where
+        F: Fn(IndexProgress) + Sync,
+    {
+        self.index_repo_with_history_and_progress(root, config, on_progress)
+            .map(|(snapshot, _history)| snapshot)
+    }
+
+    pub fn index_repo_with_history_and_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+        on_progress: F,
+    ) -> Result<(IndexSnapshot, HistorySnapshot)>
     where
         F: Fn(IndexProgress) + Sync,
     {
@@ -149,18 +173,24 @@ impl Indexer {
         let runtime_facts = collect_runtime_analysis_facts(&root, &files)?;
         let runtime_analysis_facts = runtime_facts.len();
         analysis_facts.extend(runtime_facts);
-        let git_history_facts = if config.history.enabled {
-            collect_git_history_facts(
+        on_progress(IndexProgress {
+            phase: "history",
+            scanned_files: files.len(),
+            indexed_files: files.len(),
+            total_files: Some(files.len()),
+        });
+        let git_history = if config.history.enabled {
+            collect_git_history(
                 &root,
                 &files,
                 config.history.max_commits,
                 config.history.max_files_per_commit,
             )?
         } else {
-            Vec::new()
+            GitHistoryIngest::empty()
         };
-        let git_history_fact_count = git_history_facts.len();
-        analysis_facts.extend(git_history_facts);
+        let git_history_fact_count = git_history.analysis_facts.len();
+        analysis_facts.extend(git_history.analysis_facts);
         on_progress(IndexProgress {
             phase: "occurrences",
             scanned_files: files.len(),
@@ -212,17 +242,20 @@ impl Indexer {
             schema_version: 1,
             quality,
         };
-        Ok(IndexSnapshot {
-            manifest,
-            files,
-            symbols,
-            chunks,
-            tests,
-            imports,
-            occurrences,
-            analysis_facts,
-            scip: scip_report,
-        })
+        Ok((
+            IndexSnapshot {
+                manifest,
+                files,
+                symbols,
+                chunks,
+                tests,
+                imports,
+                occurrences,
+                analysis_facts,
+                scip: scip_report,
+            },
+            git_history.snapshot,
+        ))
     }
 
     fn scan_files(
@@ -439,17 +472,82 @@ fn index_quality(
     }
 }
 
-fn collect_git_history_facts(
+struct GitHistoryIngest {
+    snapshot: HistorySnapshot,
+    analysis_facts: Vec<AnalysisFact>,
+}
+
+impl GitHistoryIngest {
+    fn empty() -> Self {
+        Self {
+            snapshot: HistorySnapshot::empty(),
+            analysis_facts: Vec::new(),
+        }
+    }
+}
+
+fn collect_git_history(
     root: &Path,
     files: &[File],
     max_commits: usize,
     max_files_per_commit: usize,
-) -> Result<Vec<AnalysisFact>> {
+) -> Result<GitHistoryIngest> {
+    let history = open_kioku_git::commit_history(root, max_commits)?;
+    let cochange_records =
+        open_kioku_git::cochange_records_from_history(&history, max_files_per_commit);
+    let cochange_edges = cochange_records
+        .iter()
+        .take(MAX_HISTORY_COCHANGE_EDGES)
+        .map(|record| GitCochangeEdge {
+            id: HistoryRecordId::new(stable_id(&format!(
+                "git-cochange:{}:{}",
+                record.path.display(),
+                record.cochanged_path.display()
+            ))),
+            path: record.path.clone(),
+            cochanged_path: record.cochanged_path.clone(),
+            commit_count: record.commit_count,
+            recency_weight: record.recency_weight,
+            last_changed_at: record
+                .commits
+                .first()
+                .and_then(|commit_id| {
+                    history
+                        .commits
+                        .iter()
+                        .find(|commit| commit.id.0 == *commit_id)
+                })
+                .map(|commit| commit.committed_at),
+            sample_commits: record
+                .commits
+                .iter()
+                .map(|commit_id| GitCommitId::new(commit_id.clone()))
+                .collect(),
+            test_corun: record.test_corun,
+        })
+        .collect::<Vec<_>>();
+    let analysis_facts = git_history_facts(files, &cochange_records);
+    Ok(GitHistoryIngest {
+        snapshot: HistorySnapshot {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: history.commits,
+            file_touches: history.file_touches,
+            symbol_touches: Vec::new(),
+            cochange_edges,
+            reviewer_evidence: Vec::new(),
+        },
+        analysis_facts,
+    })
+}
+
+fn git_history_facts(
+    files: &[File],
+    records: &[open_kioku_git::CochangeRecord],
+) -> Vec<AnalysisFact> {
     let files_by_path = files
         .iter()
         .map(|file| (normalize_history_path(&file.path), file))
         .collect::<HashMap<_, _>>();
-    let records = open_kioku_git::cochange_records(root, max_commits, max_files_per_commit)?;
     let mut facts = Vec::new();
     for record in records {
         let Some(file) = files_by_path.get(&normalize_history_path(&record.path)) else {
@@ -491,7 +589,7 @@ fn collect_git_history_facts(
             break;
         }
     }
-    Ok(dedupe_analysis_facts(facts))
+    dedupe_analysis_facts(facts)
 }
 
 fn detect_build_systems(root: &Path) -> Vec<String> {
@@ -1098,22 +1196,31 @@ class ExampleTests extends BaseTests {
 
         let mut enabled = OkConfig::default();
         enabled.scip.enabled = false;
-        let snapshot = Indexer::default().index_repo(root, &enabled).unwrap();
+        let (snapshot, history) = Indexer::default()
+            .index_repo_with_history(root, &enabled)
+            .unwrap();
         assert!(snapshot.manifest.quality.git_history_facts > 0);
         assert!(snapshot
             .analysis_facts
             .iter()
             .any(|fact| fact.source_type == EvidenceSourceType::GitHistory
                 && fact.target == "tests/auth_test.rs"));
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.file_touches.len(), 2);
+        assert!(!history.cochange_edges.is_empty());
 
         let mut disabled = enabled;
         disabled.history.enabled = false;
-        let snapshot = Indexer::default().index_repo(root, &disabled).unwrap();
+        let (snapshot, history) = Indexer::default()
+            .index_repo_with_history(root, &disabled)
+            .unwrap();
         assert_eq!(snapshot.manifest.quality.git_history_facts, 0);
         assert!(!snapshot
             .analysis_facts
             .iter()
             .any(|fact| fact.source_type == EvidenceSourceType::GitHistory));
+        assert!(history.commits.is_empty());
+        assert!(history.file_touches.is_empty());
     }
 
     fn git(root: &std::path::Path, args: &[&str]) {
