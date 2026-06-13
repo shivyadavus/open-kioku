@@ -167,8 +167,8 @@ graph TD
 
 | Crate | Description |
 |---|---|
-| `open-kioku-storage` | Abstract storage trait. All concrete backends implement this. |
-| `open-kioku-storage-sqlite` | SQLite-backed persistent storage for symbols, graph facts, and metadata. |
+| `open-kioku-storage` | Abstract metadata, graph, history, and search storage traits. |
+| `open-kioku-storage-sqlite` | SQLite-backed persistent storage for symbols, graph facts, metadata, and typed history evidence. |
 | `open-kioku-storage-kv` | Lightweight key-value store for caching and ephemeral data. |
 | `open-kioku-search` | Abstract search trait for full-text and symbol search. |
 | `open-kioku-search-regex` | Regex-based search backend (zero dependencies, always available). |
@@ -208,7 +208,8 @@ graph TD
 | Improve search ranking | `open-kioku-ranking` | Signal weights and scoring logic |
 | Fix a parsing bug | `open-kioku-parse`, `open-kioku-tree-sitter` | AST traversal and symbol extraction |
 | Change how impact analysis works | `open-kioku-impact` | Blast-radius computation |
-| Add a storage backend | `open-kioku-storage` | Implement the `Storage` trait |
+| Add a storage backend | `open-kioku-storage` | Implement the relevant metadata, graph, history, or search traits |
+| Change typed history persistence | `open-kioku-core`, `open-kioku-storage`, `open-kioku-storage-sqlite` | History records, query contracts, and SQLite migrations live here |
 | Add a search backend | `open-kioku-search` | Implement the `Search` trait |
 | Improve context packs | `open-kioku-context` | Token budgeting and ranking |
 | Add an integration | Create a new `open-kioku-*` crate | Keep optional deps isolated |
