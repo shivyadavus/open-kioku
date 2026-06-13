@@ -1353,4 +1353,3 @@ class ExampleTests extends BaseTests {
         assert!(status.success(), "git {args:?} failed");
     }
 }
-
