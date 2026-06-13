@@ -1,6 +1,7 @@
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdge, GraphNode, ImpactReport,
-    Import, IndexManifest, SearchResult, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GitCochangeEdge, GitCommitRecord,
+    GraphEdge, GraphNode, HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest,
+    SearchResult, Symbol, SymbolId, SymbolOccurrence, TestTarget,
 };
 use open_kioku_errors::Result;
 use std::path::Path;
@@ -82,6 +83,13 @@ pub trait GraphStore: Send + Sync {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()>;
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)>;
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
+}
+
+pub trait HistoryStore: Send + Sync {
+    fn put_history_snapshot(&self, snapshot: &HistorySnapshot) -> Result<()>;
+    fn history_for_file(&self, path: &Path, limit: usize) -> Result<HistorySummary>;
+    fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>>;
+    fn recent_commits(&self, limit: usize) -> Result<Vec<GitCommitRecord>>;
 }
 
 pub trait SearchIndex: Send + Sync {

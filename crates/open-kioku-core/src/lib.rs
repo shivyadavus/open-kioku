@@ -36,6 +36,10 @@ id_type!(PatchId);
 id_type!(EvidenceId);
 id_type!(MemoryFactId);
 id_type!(ContextHandleId);
+id_type!(GitCommitId);
+id_type!(HistoryRecordId);
+
+pub const HISTORY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -632,10 +636,150 @@ pub struct RuntimeSignal {
     pub confidence: Confidence,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Owner {
     pub name: String,
     pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewerRole {
+    Reviewer,
+    Approver,
+    Author,
+    Committer,
+    Owner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitCommitRecord {
+    pub id: GitCommitId,
+    #[serde(default)]
+    pub parent_ids: Vec<GitCommitId>,
+    pub author: Owner,
+    pub committer: Option<Owner>,
+    pub authored_at: DateTime<Utc>,
+    pub committed_at: DateTime<Utc>,
+    pub summary: String,
+    pub message: String,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitFileTouch {
+    pub id: HistoryRecordId,
+    pub commit_id: GitCommitId,
+    pub path: PathBuf,
+    pub previous_path: Option<PathBuf>,
+    pub change_kind: GitChangeKind,
+    pub additions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub touched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitSymbolTouch {
+    pub id: HistoryRecordId,
+    pub commit_id: GitCommitId,
+    pub symbol_id: Option<SymbolId>,
+    pub qualified_name: String,
+    pub file_path: PathBuf,
+    pub change_kind: GitChangeKind,
+    pub touched_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitCochangeEdge {
+    pub id: HistoryRecordId,
+    pub path: PathBuf,
+    pub cochanged_path: PathBuf,
+    pub commit_count: usize,
+    pub recency_weight: f32,
+    pub last_changed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub sample_commits: Vec<GitCommitId>,
+    pub test_corun: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerEvidence {
+    pub id: HistoryRecordId,
+    pub commit_id: Option<GitCommitId>,
+    pub path: Option<PathBuf>,
+    pub reviewer: Owner,
+    pub role: ReviewerRole,
+    pub observed_at: DateTime<Utc>,
+    pub source: String,
+    pub confidence: Confidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub commits: Vec<GitCommitRecord>,
+    #[serde(default)]
+    pub file_touches: Vec<GitFileTouch>,
+    #[serde(default)]
+    pub symbol_touches: Vec<GitSymbolTouch>,
+    #[serde(default)]
+    pub cochange_edges: Vec<GitCochangeEdge>,
+    #[serde(default)]
+    pub reviewer_evidence: Vec<ReviewerEvidence>,
+}
+
+impl HistorySnapshot {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: Vec::new(),
+            file_touches: Vec::new(),
+            symbol_touches: Vec::new(),
+            cochange_edges: Vec::new(),
+            reviewer_evidence: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySummary {
+    pub path: PathBuf,
+    pub recent_commits: Vec<GitCommitRecord>,
+    pub file_touches: Vec<GitFileTouch>,
+    pub symbol_touches: Vec<GitSymbolTouch>,
+    pub cochange_neighbors: Vec<GitCochangeEdge>,
+    pub reviewer_evidence: Vec<ReviewerEvidence>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
+impl HistorySummary {
+    pub fn empty(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            recent_commits: Vec::new(),
+            file_touches: Vec::new(),
+            symbol_touches: Vec::new(),
+            cochange_neighbors: Vec::new(),
+            reviewer_evidence: Vec::new(),
+            truncated: false,
+            uncertainty: vec!["no persisted history evidence is available for this path".into()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1066,8 +1210,11 @@ pub struct PatchPlan {
 mod tests {
     use super::{
         reconcile_score_breakdown, score_component_total, Confidence, ConfidenceBreakdown,
-        ConfidenceSignalInput, ScoreComponent,
+        ConfidenceSignalInput, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
+        HistoryRecordId, HistorySnapshot, HistorySummary, Owner, ScoreComponent,
+        HISTORY_SCHEMA_VERSION,
     };
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn reconciliation_adds_delta_to_match_surfaced_score() {
@@ -1186,5 +1333,60 @@ mod tests {
         assert!(breakdown.overall_score <= 0.60);
         assert_ne!(breakdown.overall_enum, Confidence::High);
         assert!(!breakdown.blockers.is_empty());
+    }
+
+    #[test]
+    fn history_snapshot_round_trips_with_versioned_records() {
+        let committed_at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let commit = GitCommitRecord {
+            id: GitCommitId::new("abc123"),
+            parent_ids: vec![GitCommitId::new("parent123")],
+            author: Owner {
+                name: "Ada".into(),
+                email: Some("ada@example.com".into()),
+            },
+            committer: None,
+            authored_at: committed_at,
+            committed_at,
+            summary: "Add typed history".into(),
+            message: "Add typed history\n\nPersist first-class records.".into(),
+            file_count: 1,
+        };
+        let touch = GitFileTouch {
+            id: HistoryRecordId::new("touch-1"),
+            commit_id: commit.id.clone(),
+            path: "src/history.rs".into(),
+            previous_path: None,
+            change_kind: GitChangeKind::Added,
+            additions: Some(42),
+            deletions: Some(0),
+            touched_at: committed_at,
+        };
+        let snapshot = HistorySnapshot {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: vec![commit],
+            file_touches: vec![touch],
+            symbol_touches: Vec::new(),
+            cochange_edges: Vec::new(),
+            reviewer_evidence: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: HistorySnapshot = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded, snapshot);
+        assert_eq!(
+            HistorySnapshot::empty().schema_version,
+            HISTORY_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn empty_history_summary_exposes_uncertainty() {
+        let summary = HistorySummary::empty("src/missing.rs");
+
+        assert!(summary.recent_commits.is_empty());
+        assert!(!summary.uncertainty.is_empty());
+        assert!(summary.uncertainty[0].contains("no persisted history evidence"));
     }
 }
