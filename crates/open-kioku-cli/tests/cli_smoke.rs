@@ -885,6 +885,8 @@ fn index_captures_git_history() {
     git(&["add", "."]);
     git(&["commit", "--quiet", "-m", "first commit"]);
 
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
     fs::write(repo.join("src/b.rs"), "pub fn b() {}\n").unwrap();
     git(&["add", "."]);
     git(&["commit", "--quiet", "-m", "second commit"]);
