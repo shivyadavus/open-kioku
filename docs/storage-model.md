@@ -33,6 +33,8 @@ them in:
 
 - `put_history_snapshot`
 - `history_for_file`
+- `provenance_for_path`
+- `provenance_for_symbol`
 - `cochange_neighbors`
 - `recent_commits`
 
@@ -57,8 +59,12 @@ commit window and remain capped for ranking compatibility; large commits above
 generation, not from commit or file-touch persistence.
 
 History summaries report truncation and missing symbol/reviewer evidence as
-explicit uncertainty. Symbol touches and reviewer evidence are not inferred by
-this ingest stage; those are supplied by later provenance and ownership work.
+explicit uncertainty. Zero-context Git patch hunks are mapped to the most
+specific overlapping current symbol ranges and stored in `git_symbol_touches`.
+Historical coordinate drift, equally specific overlaps, missing symbol ranges,
+rename mapping, and bounded-window first-seen results remain explicit in typed
+provenance confidence and uncertainty fields. Reviewer evidence is supplied by
+later ownership work.
 
 ## Search
 

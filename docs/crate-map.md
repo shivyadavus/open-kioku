@@ -160,7 +160,7 @@ graph TD
 | `open-kioku-symbols` | Symbol table: definitions, references, and occurrence tracking. |
 | `open-kioku-graph` | Builds and queries the code dependency / call graph. |
 | `open-kioku-architecture` | High-level architectural analysis (module boundaries, layering). |
-| `open-kioku-git` | Bounded local Git commit/file-touch ingest, rename parsing, and co-change derivation. |
+| `open-kioku-git` | Bounded local Git commit/file-touch ingest, zero-context patch ranges, rename parsing, and co-change derivation. |
 | `open-kioku-watch` | File-system watcher for incremental re-indexing. |
 
 ### Storage Layer
@@ -168,7 +168,7 @@ graph TD
 | Crate | Description |
 |---|---|
 | `open-kioku-storage` | Abstract metadata, graph, history, and search storage traits. |
-| `open-kioku-storage-sqlite` | SQLite-backed persistent storage for symbols, graph facts, metadata, and typed history evidence. |
+| `open-kioku-storage-sqlite` | SQLite-backed persistent storage and indexed file/symbol provenance lookup for typed history evidence. |
 | `open-kioku-storage-kv` | Lightweight key-value store for caching and ephemeral data. |
 | `open-kioku-search` | Abstract search trait for full-text and symbol search. |
 | `open-kioku-search-regex` | Regex-based search backend (zero dependencies, always available). |

@@ -314,6 +314,8 @@ ok mcp install trae --repo ./open-kioku-demo
 ok --repo /path/to/repo search "token expiration handler"
 ok --repo /path/to/repo symbol definition PolicyGate
 ok --repo /path/to/repo symbol refs PolicyGate
+ok --repo /path/to/repo history provenance --path crates/open-kioku-core/src/lib.rs
+ok --repo /path/to/repo history provenance --symbol PolicyGate
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo context "update MCP docs" --format markdown
@@ -344,9 +346,9 @@ These reports include indexed counts, evidence scores, validation commands, and
 path shapes — but intentionally omit source code, so they are safe to share
 from private repos.
 
-Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `history`, `patch`, `memory`, `mcp`, and `scip`.
 
-Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance: [`docs/history-provenance.md`](docs/history-provenance.md). Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
