@@ -394,7 +394,7 @@ This is a 44-crate Cargo workspace. Important crates:
 - `open-kioku-mcp`: JSON-RPC MCP server over stdio.
 - `open-kioku-ingest`: repository indexing pipeline.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
-- `open-kioku-storage-sqlite`: SQLite metadata and graph storage.
+- `open-kioku-storage-sqlite`: SQLite metadata, graph, and typed history storage.
 - `open-kioku-search-tantivy`: disk-backed BM25 search.
 - `open-kioku-vector`: local vector index contracts and exact-flat backend.
 - `open-kioku-semantic`: local semantic indexing and hybrid search orchestration.
@@ -409,6 +409,8 @@ Architecture docs: [`docs/architecture.md`](docs/architecture.md) and
 [`docs/architecture-policy.md`](docs/architecture-policy.md)
 
 Crate map: [`docs/crate-map.md`](docs/crate-map.md)
+
+Storage model: [`docs/storage-model.md`](docs/storage-model.md)
 
 Semantic search docs: [`docs/semantic-search.md`](docs/semantic-search.md), [`docs/vector-index.md`](docs/vector-index.md), [`docs/embedding-providers.md`](docs/embedding-providers.md), [`docs/hybrid-ranking.md`](docs/hybrid-ranking.md)
 

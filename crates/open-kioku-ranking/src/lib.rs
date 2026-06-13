@@ -409,6 +409,12 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     if !is_source_path(path) {
         return 0.0;
     }
+    if query
+        .map(|query| query_matches_path(query, path))
+        .unwrap_or(false)
+    {
+        return 18.0;
+    }
     let Some(symbol) = &result.symbol else {
         return 0.03;
     };
@@ -428,6 +434,39 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     } else {
         0.03
     }
+}
+
+fn query_matches_path(query: &str, path: &str) -> bool {
+    let query_terms = identifier_terms(query);
+    identifier_terms(path)
+        .into_iter()
+        .filter(|term| !is_structural_path_term(term))
+        .any(|path_term| {
+            query_terms
+                .iter()
+                .any(|query_term| terms_match(query_term, &path_term))
+        })
+}
+
+fn identifier_terms(value: &str) -> Vec<String> {
+    normalize_identifier(value)
+        .split_whitespace()
+        .filter(|term| term.len() >= 3)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn terms_match(left: &str, right: &str) -> bool {
+    left == right
+        || (left.len() >= 6 && right.starts_with(left))
+        || (right.len() >= 6 && left.starts_with(right))
+}
+
+fn is_structural_path_term(term: &str) -> bool {
+    matches!(
+        term,
+        "crates" | "open" | "kioku" | "src" | "lib" | "main" | "mod" | "index"
+    )
 }
 
 fn query_matches_symbol_or_stem(query: &str, symbol_name: &str, stem: &str) -> bool {
@@ -618,5 +657,44 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "boundary_fit" && component.raw_value > 1.0));
+    }
+
+    #[test]
+    fn crate_path_anchor_can_beat_unrelated_higher_lexical_score() {
+        let config = make_result("crates/open-kioku-config/src/lib.rs", 1.0);
+        let unrelated = make_result("crates/open-kioku-storage/src/lib.rs", 4.0);
+        let options = RankingOptions {
+            query: Some("add history configuration defaults".into()),
+            ..RankingOptions::default()
+        };
+
+        let results = rerank_with_options(vec![unrelated, config], &options);
+
+        assert_eq!(
+            results[0].path,
+            Path::new("crates/open-kioku-config/src/lib.rs")
+        );
+        assert!(results[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "boundary_fit" && component.raw_value > 1.0));
+    }
+
+    #[test]
+    fn structural_path_terms_do_not_create_boundary_match() {
+        let source = make_result("crates/open-kioku-config/src/lib.rs", 1.0);
+        let options = RankingOptions {
+            query: Some("change source library".into()),
+            ..RankingOptions::default()
+        };
+
+        let results = rerank_with_options(vec![source], &options);
+        let boundary_fit = results[0]
+            .score_breakdown
+            .iter()
+            .find(|component| component.signal == "boundary_fit")
+            .expect("source files retain the default boundary signal");
+
+        assert_eq!(boundary_fit.raw_value, 0.03);
     }
 }

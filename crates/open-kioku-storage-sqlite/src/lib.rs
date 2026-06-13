@@ -1,12 +1,91 @@
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdge, GraphNode, Import,
-    IndexManifest, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GitCochangeEdge, GitCommitId,
+    GitCommitRecord, GraphEdge, GraphNode, HistoryRecordId, HistorySnapshot, HistorySummary,
+    Import, IndexManifest, Symbol, SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
-use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
+use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+const SQLITE_HISTORY_SCHEMA_VERSION: i64 = HISTORY_SCHEMA_VERSION as i64;
+
+const HISTORY_SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS git_commits (
+  id TEXT PRIMARY KEY,
+  authored_at TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  author_email TEXT,
+  json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_git_commits_committed_at
+  ON git_commits(committed_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_git_commits_author_email
+  ON git_commits(author_email);
+
+CREATE TABLE IF NOT EXISTS git_file_touches (
+  id TEXT PRIMARY KEY,
+  commit_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  previous_path TEXT,
+  touched_at TEXT NOT NULL,
+  json TEXT NOT NULL,
+  FOREIGN KEY(commit_id) REFERENCES git_commits(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_git_file_touches_path
+  ON git_file_touches(path, touched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_file_touches_previous_path
+  ON git_file_touches(previous_path, touched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_file_touches_commit
+  ON git_file_touches(commit_id);
+
+CREATE TABLE IF NOT EXISTS git_symbol_touches (
+  id TEXT PRIMARY KEY,
+  commit_id TEXT NOT NULL,
+  symbol_id TEXT,
+  qualified_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  touched_at TEXT NOT NULL,
+  json TEXT NOT NULL,
+  FOREIGN KEY(commit_id) REFERENCES git_commits(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_git_symbol_touches_file
+  ON git_symbol_touches(file_path, touched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_symbol_touches_symbol
+  ON git_symbol_touches(symbol_id, touched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_symbol_touches_commit
+  ON git_symbol_touches(commit_id);
+
+CREATE TABLE IF NOT EXISTS git_cochange_edges (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  cochanged_path TEXT NOT NULL,
+  commit_count INTEGER NOT NULL,
+  recency_weight REAL NOT NULL,
+  last_changed_at TEXT,
+  json TEXT NOT NULL,
+  UNIQUE(path, cochanged_path)
+);
+CREATE INDEX IF NOT EXISTS idx_git_cochange_edges_path
+  ON git_cochange_edges(path, recency_weight DESC, commit_count DESC);
+
+CREATE TABLE IF NOT EXISTS git_review_events (
+  id TEXT PRIMARY KEY,
+  commit_id TEXT,
+  path TEXT,
+  reviewer_identity TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_git_review_events_path
+  ON git_review_events(path, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_review_events_commit
+  ON git_review_events(commit_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_git_review_events_reviewer
+  ON git_review_events(reviewer_identity, observed_at DESC);
+"#;
 
 pub struct SqliteStore {
     path: PathBuf,
@@ -41,13 +120,15 @@ impl SqliteStore {
 
 impl MetadataStore for SqliteStore {
     fn initialize(&self) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        ensure_supported_history_schema(&conn)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
+            PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS manifests (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               json TEXT NOT NULL
@@ -158,6 +239,7 @@ impl MetadataStore for SqliteStore {
             "#,
         )
         .map_err(storage_err)?;
+        migrate_history_schema(&mut conn)?;
         Ok(())
     }
 
@@ -570,6 +652,303 @@ impl MetadataStore for SqliteStore {
     }
 }
 
+impl HistoryStore for SqliteStore {
+    fn put_history_snapshot(&self, snapshot: &HistorySnapshot) -> Result<()> {
+        validate_history_snapshot(snapshot)?;
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+
+        tx.execute("DELETE FROM git_review_events", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM git_cochange_edges", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM git_symbol_touches", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM git_file_touches", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM git_commits", [])
+            .map_err(storage_err)?;
+
+        for commit in &snapshot.commits {
+            tx.execute(
+                "INSERT INTO git_commits(id, authored_at, committed_at, author_email, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &commit.id.0,
+                    commit.authored_at.to_rfc3339(),
+                    commit.committed_at.to_rfc3339(),
+                    commit.author.email.as_deref(),
+                    serde_json::to_string(commit)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for touch in &snapshot.file_touches {
+            tx.execute(
+                "INSERT INTO git_file_touches(id, commit_id, path, previous_path, touched_at, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    &touch.id.0,
+                    &touch.commit_id.0,
+                    history_path(&touch.path)?,
+                    touch
+                        .previous_path
+                        .as_deref()
+                        .map(history_path)
+                        .transpose()?,
+                    touch.touched_at.to_rfc3339(),
+                    serde_json::to_string(touch)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for touch in &snapshot.symbol_touches {
+            tx.execute(
+                "INSERT INTO git_symbol_touches(id, commit_id, symbol_id, qualified_name, file_path, touched_at, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &touch.id.0,
+                    &touch.commit_id.0,
+                    touch.symbol_id.as_ref().map(|id| id.0.as_str()),
+                    &touch.qualified_name,
+                    history_path(&touch.file_path)?,
+                    touch.touched_at.to_rfc3339(),
+                    serde_json::to_string(touch)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for edge in &snapshot.cochange_edges {
+            tx.execute(
+                "INSERT INTO git_cochange_edges(id, path, cochanged_path, commit_count, recency_weight, last_changed_at, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &edge.id.0,
+                    history_path(&edge.path)?,
+                    history_path(&edge.cochanged_path)?,
+                    usize_to_i64(edge.commit_count, "co-change commit count")?,
+                    edge.recency_weight,
+                    edge.last_changed_at.map(|value| value.to_rfc3339()),
+                    serde_json::to_string(edge)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for evidence in &snapshot.reviewer_evidence {
+            let reviewer_identity = evidence
+                .reviewer
+                .email
+                .as_deref()
+                .unwrap_or(&evidence.reviewer.name);
+            tx.execute(
+                "INSERT INTO git_review_events(id, commit_id, path, reviewer_identity, observed_at, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    &evidence.id.0,
+                    evidence.commit_id.as_ref().map(|id| id.0.as_str()),
+                    evidence.path.as_deref().map(history_path).transpose()?,
+                    reviewer_identity,
+                    evidence.observed_at.to_rfc3339(),
+                    serde_json::to_string(evidence)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+
+        tx.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    fn history_for_file(&self, path: &Path, limit: usize) -> Result<HistorySummary> {
+        let normalized_path = history_path(path)?;
+        if limit == 0 {
+            return Ok(HistorySummary {
+                path: path.to_path_buf(),
+                recent_commits: Vec::new(),
+                file_touches: Vec::new(),
+                symbol_touches: Vec::new(),
+                cochange_neighbors: Vec::new(),
+                reviewer_evidence: Vec::new(),
+                truncated: false,
+                uncertainty: vec!["history query limit is zero".into()],
+            });
+        }
+
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let query_limit = history_query_limit(limit);
+
+        let mut commit_stmt = conn
+            .prepare(
+                "SELECT c.json FROM git_commits c
+                 WHERE EXISTS (
+                   SELECT 1 FROM git_file_touches t
+                   WHERE t.commit_id = c.id AND (t.path = ?1 OR t.previous_path = ?1)
+                 )
+                 ORDER BY c.committed_at DESC, c.id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let commit_rows = commit_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        let (recent_commits, commits_truncated) = collect_limited_json(commit_rows, limit)?;
+
+        let mut file_touch_stmt = conn
+            .prepare(
+                "SELECT json FROM git_file_touches
+                 WHERE path = ?1 OR previous_path = ?1
+                 ORDER BY touched_at DESC, id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let file_touch_rows = file_touch_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        let (file_touches, file_touches_truncated) = collect_limited_json(file_touch_rows, limit)?;
+
+        let mut symbol_touch_stmt = conn
+            .prepare(
+                "SELECT json FROM git_symbol_touches
+                 WHERE file_path = ?1
+                 ORDER BY touched_at DESC, id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let symbol_touch_rows = symbol_touch_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        let (symbol_touches, symbol_touches_truncated) =
+            collect_limited_json(symbol_touch_rows, limit)?;
+
+        let mut cochange_stmt = conn
+            .prepare(
+                "SELECT json FROM git_cochange_edges
+                 WHERE path = ?1
+                 ORDER BY recency_weight DESC, commit_count DESC, cochanged_path
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let cochange_rows = cochange_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        let (cochange_neighbors, cochange_truncated) = collect_limited_json(cochange_rows, limit)?;
+
+        let mut reviewer_stmt = conn
+            .prepare(
+                "SELECT e.json FROM git_review_events e
+                 WHERE e.path = ?1
+                    OR (
+                      e.path IS NULL
+                      AND e.commit_id IN (
+                        SELECT t.commit_id FROM git_file_touches t
+                        WHERE t.path = ?1 OR t.previous_path = ?1
+                      )
+                    )
+                 ORDER BY e.observed_at DESC, e.id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let reviewer_rows = reviewer_stmt
+            .query_map(params![&normalized_path, query_limit], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        let (reviewer_evidence, reviewers_truncated) = collect_limited_json(reviewer_rows, limit)?;
+
+        let truncated = commits_truncated
+            || file_touches_truncated
+            || symbol_touches_truncated
+            || cochange_truncated
+            || reviewers_truncated;
+        let mut uncertainty = Vec::new();
+        if recent_commits.is_empty()
+            && file_touches.is_empty()
+            && symbol_touches.is_empty()
+            && cochange_neighbors.is_empty()
+            && reviewer_evidence.is_empty()
+        {
+            uncertainty.push("no persisted history evidence is available for this path".into());
+        } else {
+            if symbol_touches.is_empty() {
+                uncertainty.push("no symbol-level history is stored for this path".into());
+            }
+            if reviewer_evidence.is_empty() {
+                uncertainty.push("no reviewer or owner evidence is stored for this path".into());
+            }
+        }
+        if truncated {
+            uncertainty.push(format!(
+                "history results are truncated to {limit} records per category"
+            ));
+        }
+
+        Ok(HistorySummary {
+            path: path.to_path_buf(),
+            recent_commits,
+            file_touches,
+            symbol_touches,
+            cochange_neighbors,
+            reviewer_evidence,
+            truncated,
+            uncertainty,
+        })
+    }
+
+    fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let normalized_path = history_path(path)?;
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT json FROM git_cochange_edges
+                 WHERE path = ?1
+                 ORDER BY recency_weight DESC, commit_count DESC, cochanged_path
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(
+                params![normalized_path, limit.min(i64::MAX as usize) as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn recent_commits(&self, limit: usize) -> Result<Vec<GitCommitRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT json FROM git_commits ORDER BY committed_at DESC, id LIMIT ?1")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![limit.min(i64::MAX as usize) as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+}
+
 impl GraphStore for SqliteStore {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
         let mut conn = self
@@ -669,6 +1048,219 @@ impl GraphStore for SqliteStore {
     }
 }
 
+fn migrate_history_schema(conn: &mut Connection) -> Result<()> {
+    ensure_supported_history_schema(conn)?;
+    let tx = conn.transaction().map_err(storage_err)?;
+    tx.execute_batch(HISTORY_SCHEMA_V1).map_err(storage_err)?;
+    tx.pragma_update(None, "user_version", SQLITE_HISTORY_SCHEMA_VERSION)
+        .map_err(storage_err)?;
+    tx.commit().map_err(storage_err)?;
+    Ok(())
+}
+
+fn ensure_supported_history_schema(conn: &Connection) -> Result<()> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_err)?;
+    if version > SQLITE_HISTORY_SCHEMA_VERSION {
+        return Err(OkError::Storage(format!(
+            "sqlite history schema version {version} is newer than supported version {SQLITE_HISTORY_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_history_snapshot(snapshot: &HistorySnapshot) -> Result<()> {
+    if snapshot.schema_version != HISTORY_SCHEMA_VERSION {
+        return Err(OkError::Storage(format!(
+            "unsupported history snapshot schema version {}; expected {}",
+            snapshot.schema_version, HISTORY_SCHEMA_VERSION
+        )));
+    }
+
+    let mut commit_ids = BTreeSet::new();
+    for commit in &snapshot.commits {
+        validate_text("commit id", &commit.id.0)?;
+        if !commit_ids.insert(commit.id.0.clone()) {
+            return Err(OkError::Storage(format!(
+                "duplicate history commit id `{}`",
+                commit.id
+            )));
+        }
+        validate_text("commit author name", &commit.author.name)?;
+        if let Some(committer) = &commit.committer {
+            validate_text("commit committer name", &committer.name)?;
+        }
+        let mut parent_ids = BTreeSet::new();
+        for parent_id in &commit.parent_ids {
+            validate_text("parent commit id", &parent_id.0)?;
+            if !parent_ids.insert(parent_id.0.as_str()) {
+                return Err(OkError::Storage(format!(
+                    "commit `{}` contains duplicate parent `{parent_id}`",
+                    commit.id
+                )));
+            }
+        }
+    }
+
+    let mut file_touch_ids = BTreeSet::new();
+    for touch in &snapshot.file_touches {
+        validate_history_record_id(&touch.id, "file touch", &mut file_touch_ids)?;
+        validate_commit_reference(&touch.commit_id, &commit_ids, "file touch")?;
+        history_path(&touch.path)?;
+        if let Some(previous_path) = &touch.previous_path {
+            history_path(previous_path)?;
+        }
+    }
+
+    let mut symbol_touch_ids = BTreeSet::new();
+    for touch in &snapshot.symbol_touches {
+        validate_history_record_id(&touch.id, "symbol touch", &mut symbol_touch_ids)?;
+        validate_commit_reference(&touch.commit_id, &commit_ids, "symbol touch")?;
+        validate_text("symbol qualified name", &touch.qualified_name)?;
+        history_path(&touch.file_path)?;
+    }
+
+    let mut cochange_ids = BTreeSet::new();
+    let mut cochange_pairs = BTreeSet::new();
+    for edge in &snapshot.cochange_edges {
+        validate_history_record_id(&edge.id, "co-change edge", &mut cochange_ids)?;
+        let path = history_path(&edge.path)?;
+        let cochanged_path = history_path(&edge.cochanged_path)?;
+        if path == cochanged_path {
+            return Err(OkError::Storage(format!(
+                "co-change edge `{}` must connect two different paths",
+                edge.id
+            )));
+        }
+        if !cochange_pairs.insert((path.clone(), cochanged_path.clone())) {
+            return Err(OkError::Storage(format!(
+                "duplicate co-change edge `{path}` -> `{cochanged_path}`"
+            )));
+        }
+        if edge.commit_count == 0 {
+            return Err(OkError::Storage(format!(
+                "co-change edge `{}` must have a positive commit count",
+                edge.id
+            )));
+        }
+        if !edge.recency_weight.is_finite() || edge.recency_weight < 0.0 {
+            return Err(OkError::Storage(format!(
+                "co-change edge `{}` has invalid recency weight {}",
+                edge.id, edge.recency_weight
+            )));
+        }
+        let mut sample_commits = BTreeSet::new();
+        for commit_id in &edge.sample_commits {
+            validate_text("sample commit id", &commit_id.0)?;
+            if !sample_commits.insert(commit_id.0.as_str()) {
+                return Err(OkError::Storage(format!(
+                    "co-change edge `{}` contains duplicate sample commit `{commit_id}`",
+                    edge.id
+                )));
+            }
+        }
+    }
+
+    let mut reviewer_ids = BTreeSet::new();
+    for evidence in &snapshot.reviewer_evidence {
+        validate_history_record_id(&evidence.id, "review event", &mut reviewer_ids)?;
+        validate_text("reviewer name", &evidence.reviewer.name)?;
+        validate_text("review evidence source", &evidence.source)?;
+        if let Some(commit_id) = &evidence.commit_id {
+            validate_text("review commit id", &commit_id.0)?;
+        }
+        if let Some(path) = &evidence.path {
+            history_path(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_history_record_id(
+    id: &HistoryRecordId,
+    kind: &str,
+    ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    validate_text(&format!("{kind} id"), &id.0)?;
+    if !ids.insert(id.0.clone()) {
+        return Err(OkError::Storage(format!("duplicate {kind} id `{id}`")));
+    }
+    Ok(())
+}
+
+fn validate_commit_reference(
+    commit_id: &GitCommitId,
+    commit_ids: &BTreeSet<String>,
+    kind: &str,
+) -> Result<()> {
+    validate_text("commit id", &commit_id.0)?;
+    if !commit_ids.contains(&commit_id.0) {
+        return Err(OkError::Storage(format!(
+            "{kind} references missing commit `{commit_id}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_text(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(OkError::Storage(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn history_path(path: &Path) -> Result<String> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(OkError::Storage(format!(
+            "history path must be a normalized repository-relative path: {}",
+            path.display()
+        )));
+    }
+    let value = path.to_str().ok_or_else(|| {
+        OkError::Storage(format!(
+            "history path must be valid UTF-8: {}",
+            path.display()
+        ))
+    })?;
+    if value.contains('\\') {
+        return Err(OkError::Storage(format!(
+            "history path must use `/` separators: {}",
+            path.display()
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn usize_to_i64(value: usize, field: &str) -> Result<i64> {
+    i64::try_from(value)
+        .map_err(|_| OkError::Storage(format!("{field} exceeds SQLite integer range")))
+}
+
+fn history_query_limit(limit: usize) -> i64 {
+    limit.saturating_add(1).min(i64::MAX as usize) as i64
+}
+
+fn collect_limited_json<T, F>(
+    rows: rusqlite::MappedRows<'_, F>,
+    limit: usize,
+) -> Result<(Vec<T>, bool)>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>,
+    T: serde::de::DeserializeOwned,
+{
+    let mut values = collect_json(rows)?;
+    let truncated = values.len() > limit;
+    values.truncate(limit);
+    Ok((values, truncated))
+}
+
 fn collect_json<T, F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<T>>
 where
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<String>,
@@ -731,13 +1323,16 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::SqliteStore;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use open_kioku_core::{
         AnalysisFact, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
-        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, IndexManifest, IndexQuality, Language,
-        LineRange, NodeId, Repository, RepositoryId, Symbol, SymbolId, SymbolKind,
+        GitChangeKind, GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
+        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
+        IndexManifest, IndexQuality, Language, LineRange, NodeId, Owner, Repository, RepositoryId,
+        ReviewerEvidence, ReviewerRole, Symbol, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
     };
-    use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
+    use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
+    use rusqlite::Connection;
 
     fn make_store() -> SqliteStore {
         SqliteStore::open(":memory:").expect("in-memory store")
@@ -800,6 +1395,268 @@ mod tests {
             schema_version: 1,
             quality: IndexQuality::default(),
         }
+    }
+
+    fn history_snapshot() -> HistorySnapshot {
+        let older_at = Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        let newer_at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let older_id = GitCommitId::new("older");
+        let newer_id = GitCommitId::new("newer");
+        HistorySnapshot {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: vec![
+                GitCommitRecord {
+                    id: older_id.clone(),
+                    parent_ids: Vec::new(),
+                    author: Owner {
+                        name: "Older Author".into(),
+                        email: Some("older@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: older_at,
+                    committed_at: older_at,
+                    summary: "Introduce library".into(),
+                    message: "Introduce library".into(),
+                    file_count: 2,
+                },
+                GitCommitRecord {
+                    id: newer_id.clone(),
+                    parent_ids: vec![older_id.clone()],
+                    author: Owner {
+                        name: "Newer Author".into(),
+                        email: Some("newer@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: newer_at,
+                    committed_at: newer_at,
+                    summary: "Refine library".into(),
+                    message: "Refine library and tests".into(),
+                    file_count: 3,
+                },
+            ],
+            file_touches: vec![
+                GitFileTouch {
+                    id: HistoryRecordId::new("file-touch-older"),
+                    commit_id: older_id.clone(),
+                    path: "src/lib.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Added,
+                    additions: Some(20),
+                    deletions: Some(0),
+                    touched_at: older_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("file-touch-newer"),
+                    commit_id: newer_id.clone(),
+                    path: "src/lib.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: Some(5),
+                    deletions: Some(2),
+                    touched_at: newer_at,
+                },
+            ],
+            symbol_touches: vec![GitSymbolTouch {
+                id: HistoryRecordId::new("symbol-touch-newer"),
+                commit_id: newer_id.clone(),
+                symbol_id: Some(SymbolId::new("symbol-1")),
+                qualified_name: "crate::history_for_file".into(),
+                file_path: "src/lib.rs".into(),
+                change_kind: GitChangeKind::Modified,
+                touched_at: newer_at,
+            }],
+            cochange_edges: vec![
+                GitCochangeEdge {
+                    id: HistoryRecordId::new("cochange-test"),
+                    path: "src/lib.rs".into(),
+                    cochanged_path: "tests/lib_test.rs".into(),
+                    commit_count: 2,
+                    recency_weight: 1.8,
+                    last_changed_at: Some(newer_at),
+                    sample_commits: vec![newer_id.clone(), older_id.clone()],
+                    test_corun: true,
+                },
+                GitCochangeEdge {
+                    id: HistoryRecordId::new("cochange-docs"),
+                    path: "src/lib.rs".into(),
+                    cochanged_path: "docs/library.md".into(),
+                    commit_count: 1,
+                    recency_weight: 0.5,
+                    last_changed_at: Some(older_at),
+                    sample_commits: vec![older_id],
+                    test_corun: false,
+                },
+            ],
+            reviewer_evidence: vec![ReviewerEvidence {
+                id: HistoryRecordId::new("review-newer"),
+                commit_id: Some(newer_id),
+                path: None,
+                reviewer: Owner {
+                    name: "Reviewer".into(),
+                    email: Some("reviewer@example.com".into()),
+                },
+                role: ReviewerRole::Reviewer,
+                observed_at: newer_at,
+                source: "git-trailer:reviewed-by".into(),
+                confidence: Confidence::High,
+            }],
+        }
+    }
+
+    #[test]
+    fn history_migration_upgrades_legacy_database_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                r#"
+                PRAGMA user_version = 0;
+                CREATE TABLE analysis_facts (
+                  id TEXT PRIMARY KEY,
+                  file_id TEXT NOT NULL,
+                  source_type TEXT NOT NULL,
+                  target TEXT NOT NULL,
+                  json TEXT NOT NULL
+                );
+                INSERT INTO analysis_facts(id, file_id, source_type, target, json)
+                VALUES('legacy-git', 'f1', 'git_history', 'tests/lib_test.rs', '{}');
+                "#,
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = SqliteStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let conn = store.connection.lock().unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let history_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                     'git_commits',
+                     'git_file_touches',
+                     'git_symbol_touches',
+                     'git_cochange_edges',
+                     'git_review_events'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_table_count, 5);
+        let legacy_fact_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM analysis_facts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_fact_count, 1);
+    }
+
+    #[test]
+    fn newer_history_schema_is_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.sqlite");
+        let future = Connection::open(&path).unwrap();
+        future
+            .execute_batch(
+                r#"
+                PRAGMA user_version = 2;
+                CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);
+                "#,
+            )
+            .unwrap();
+        drop(future);
+
+        let error = match SqliteStore::open(&path) {
+            Ok(_) => panic!("newer schema should be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("newer than supported version 1"));
+
+        let conn = Connection::open(&path).unwrap();
+        let current_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'manifests'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_table_count, 0);
+        let future_marker_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'future_history_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(future_marker_count, 1);
+    }
+
+    #[test]
+    fn history_snapshot_queries_return_typed_evidence() {
+        let store = make_store();
+        store.put_history_snapshot(&history_snapshot()).unwrap();
+
+        let recent = store.recent_commits(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id.0, "newer");
+
+        let neighbors = store
+            .cochange_neighbors(std::path::Path::new("src/lib.rs"), 10)
+            .unwrap();
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(
+            neighbors[0].cochanged_path,
+            std::path::Path::new("tests/lib_test.rs")
+        );
+
+        let summary = store
+            .history_for_file(std::path::Path::new("src/lib.rs"), 10)
+            .unwrap();
+        assert_eq!(summary.recent_commits.len(), 2);
+        assert_eq!(summary.file_touches.len(), 2);
+        assert_eq!(summary.symbol_touches.len(), 1);
+        assert_eq!(summary.cochange_neighbors.len(), 2);
+        assert_eq!(summary.reviewer_evidence.len(), 1);
+        assert!(!summary.truncated);
+        assert!(summary.uncertainty.is_empty());
+
+        let truncated = store
+            .history_for_file(std::path::Path::new("src/lib.rs"), 1)
+            .unwrap();
+        assert!(truncated.truncated);
+        assert!(truncated
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("truncated")));
+    }
+
+    #[test]
+    fn invalid_snapshot_does_not_replace_existing_history() {
+        let store = make_store();
+        let snapshot = history_snapshot();
+        store.put_history_snapshot(&snapshot).unwrap();
+
+        let mut invalid = snapshot;
+        invalid.file_touches[0].commit_id = GitCommitId::new("missing");
+        let error = store
+            .put_history_snapshot(&invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("references missing commit `missing`"));
+
+        let recent = store.recent_commits(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id.0, "newer");
+
+        store
+            .put_history_snapshot(&HistorySnapshot::empty())
+            .unwrap();
+        assert!(store.recent_commits(10).unwrap().is_empty());
     }
 
     #[test]
@@ -907,6 +1764,54 @@ mod tests {
         assert_eq!(git[0].target, git_fact.target);
         let all = store.analysis_facts(None, 10).unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn replace_index_preserves_typed_and_legacy_history() {
+        let store = make_store();
+        store.put_history_snapshot(&history_snapshot()).unwrap();
+
+        let file = make_file("f1", "src/lib.rs");
+        let manifest = make_manifest();
+        let git_fact = AnalysisFact {
+            id: "legacy-git-1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "tests/lib_test.rs".into(),
+            target_kind: GraphNodeType::Test,
+            edge_type: GraphEdgeType::ChangedBy,
+            range: None,
+            confidence: Confidence::High,
+            source: "git-history:newer".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            message: "legacy co-change compatibility fact".into(),
+        };
+
+        for _ in 0..2 {
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: std::slice::from_ref(&file),
+                    symbols: &[],
+                    occurrences: &[],
+                    chunks: &[],
+                    imports: &[],
+                    tests: &[],
+                    analysis_facts: std::slice::from_ref(&git_fact),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(store.recent_commits(10).unwrap().len(), 2);
+        let summary = store
+            .history_for_file(std::path::Path::new("src/lib.rs"), 10)
+            .unwrap();
+        assert_eq!(summary.file_touches.len(), 2);
+        let legacy = store
+            .analysis_facts(Some(EvidenceSourceType::GitHistory), 10)
+            .unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].id, git_fact.id);
     }
 
     #[test]
