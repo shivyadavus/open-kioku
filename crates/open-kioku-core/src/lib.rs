@@ -901,6 +901,41 @@ pub struct IndexQuality {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EvidenceGraphSchema {
+    pub version: String,
+    pub node_types: Vec<NodeTypeSpec>,
+    pub edge_types: Vec<EdgeTypeSpec>,
+    pub property_specs: Vec<PropertySpec>,
+    pub feature_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeTypeSpec {
+    pub name: String,
+    pub stable: bool,
+    pub description: String,
+    pub required_fields: Vec<String>,
+    pub optional_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeTypeSpec {
+    pub name: String,
+    pub stable: bool,
+    pub description: String,
+    pub source_types: Vec<String>,
+    pub target_types: Vec<String>,
+    pub required_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PropertySpec {
+    pub name: String,
+    pub type_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphNodeType {
     File,

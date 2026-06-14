@@ -386,6 +386,7 @@ async fn dispatch(
                 json!({"denied": true, "reason": "apply_patch requires explicit stored patch approval flow"}),
             )
         }
+        "get_evidence_schema" => Ok(json!(open_kioku_graph::schema::current_schema())),
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
             Ok(json!(disabled_response(method)))
         }
@@ -588,6 +589,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),
+        ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
     ];
 
     let write_tools: &[(&str, &str, Value)] = &[(
