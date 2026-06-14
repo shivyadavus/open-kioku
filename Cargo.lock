@@ -1379,6 +1379,7 @@ dependencies = [
  "open-kioku-context-compress",
  "open-kioku-core",
  "open-kioku-format",
+ "open-kioku-graph",
  "open-kioku-impact",
  "open-kioku-memory",
  "open-kioku-patch",

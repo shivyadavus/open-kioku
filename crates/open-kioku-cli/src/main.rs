@@ -202,6 +202,18 @@ enum Command {
         #[command(subcommand)]
         command: ScipCommand,
     },
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCommand {
+    Schema {
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1106,6 +1118,71 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if exit_code && !report.ok {
                     anyhow::bail!("Open Kioku setup audit has failing checks");
+                }
+            }
+        },
+        Command::Graph { command } => match command {
+            GraphCommand::Schema { format } => {
+                let schema = open_kioku_graph::schema::current_schema();
+                if format.to_lowercase() == "markdown" {
+                    let mut lines = vec![
+                        format!("# Open Kioku Evidence Graph Schema v{}", schema.version),
+                        "".to_string(),
+                    ];
+
+                    if !schema.feature_flags.is_empty() {
+                        lines.push("## Supported Features".to_string());
+                        for feature in &schema.feature_flags {
+                            lines.push(format!("- `{}`", feature));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    lines.push("## Node Types".to_string());
+                    for node in &schema.node_types {
+                        let status = if node.stable {
+                            "Stable"
+                        } else {
+                            "Experimental"
+                        };
+                        lines.push(format!("### {} ({})", node.name, status));
+                        lines.push(node.description.clone());
+                        if !node.required_fields.is_empty() {
+                            lines.push(
+                                "- **Required**: ".to_string() + &node.required_fields.join(", "),
+                            );
+                        }
+                        if !node.optional_fields.is_empty() {
+                            lines.push(
+                                "- **Optional**: ".to_string() + &node.optional_fields.join(", "),
+                            );
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    lines.push("## Edge Types".to_string());
+                    for edge in &schema.edge_types {
+                        let status = if edge.stable {
+                            "Stable"
+                        } else {
+                            "Experimental"
+                        };
+                        lines.push(format!("### {} ({})", edge.name, status));
+                        lines.push(edge.description.clone());
+                        lines.push(format!("- **Sources**: {}", edge.source_types.join(", ")));
+                        lines.push(format!("- **Targets**: {}", edge.target_types.join(", ")));
+                        if !edge.required_evidence.is_empty() {
+                            lines.push(format!(
+                                "- **Evidence**: {}",
+                                edge.required_evidence.join(", ")
+                            ));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    println!("{}", lines.join("\n"));
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&schema)?);
                 }
             }
         },
