@@ -932,6 +932,16 @@
         },
         "maturity": "experimental",
         "name": "find_recent_failures"
+      },
+      {
+        "description": "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "get_evidence_schema"
       }
     ]
   }
