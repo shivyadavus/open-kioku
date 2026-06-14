@@ -7,6 +7,8 @@ use open_kioku_errors::Result;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub mod schema;
+
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
     pub nodes: HashMap<String, GraphNode>,
