@@ -916,6 +916,12 @@ pub struct NodeTypeSpec {
     pub description: String,
     pub required_fields: Vec<String>,
     pub optional_fields: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -926,6 +932,12 @@ pub struct EdgeTypeSpec {
     pub source_types: Vec<String>,
     pub target_types: Vec<String>,
     pub required_evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

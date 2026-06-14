@@ -1117,7 +1117,7 @@ async fn main() -> anyhow::Result<()> {
                     print_setup_audit_report(&report);
                 }
                 if exit_code && !report.ok {
-                    std::process::exit(1);
+                    anyhow::bail!("Open Kioku setup audit has failing checks");
                 }
             }
         },

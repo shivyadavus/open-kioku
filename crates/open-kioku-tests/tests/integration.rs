@@ -163,3 +163,27 @@ fn test_mcp_tools_list_snapshot() {
 
     std::fs::remove_dir_all(&temp).unwrap();
 }
+
+#[test]
+fn test_cli_graph_schema_markdown() {
+    let mut cmd = Command::cargo_bin("ok").unwrap();
+    cmd.args(["graph", "schema", "--format", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "# Open Kioku Evidence Graph Schema v1.0.0",
+        ))
+        .stdout(predicate::str::contains("## Node Types"))
+        .stdout(predicate::str::contains("### file (Stable)"));
+}
+
+#[test]
+fn test_cli_graph_schema_json() {
+    let mut cmd = Command::cargo_bin("ok").unwrap();
+    cmd.args(["graph", "schema", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"version\": \"1.0.0\""))
+        .stdout(predicate::str::contains("\"node_types\": ["))
+        .stdout(predicate::str::contains("\"name\": \"file\""));
+}

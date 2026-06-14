@@ -814,4 +814,35 @@ mod tests {
         let tools_rw = result_rw["tools"].as_array().unwrap();
         assert!(tools_rw.iter().any(|t| t["name"] == "apply_patch"));
     }
+
+    #[tokio::test]
+    async fn test_get_evidence_schema_shape() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+
+        let params = json!({});
+        let result = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "get_evidence_schema",
+            params,
+        )
+        .await
+        .unwrap();
+
+        // Check top-level properties
+        assert!(result.get("version").is_some());
+        assert!(result.get("node_types").is_some());
+        assert!(result.get("edge_types").is_some());
+        assert!(result.get("property_specs").is_some());
+        assert!(result.get("feature_flags").is_some());
+
+        // Check arrays
+        let node_types = result["node_types"].as_array().unwrap();
+        assert!(!node_types.is_empty(), "node_types should not be empty");
+        
+        let edge_types = result["edge_types"].as_array().unwrap();
+        assert!(!edge_types.is_empty(), "edge_types should not be empty");
+    }
 }
