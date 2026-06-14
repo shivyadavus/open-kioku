@@ -337,6 +337,30 @@ pub struct Evidence {
     pub confidence: Confidence,
     pub message: String,
     pub indexed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
+}
+
+impl Default for Evidence {
+    fn default() -> Self {
+        Self {
+            id: EvidenceId::new(""),
+            source: String::new(),
+            source_type: EvidenceSourceType::Lexical,
+            file_range: None,
+            symbol_id: None,
+            confidence: Confidence::Low,
+            message: String::new(),
+            indexed_at: Utc::now(),
+            confidence_score: None,
+            confidence_reason: None,
+            freshness: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1009,6 +1033,39 @@ pub struct GraphNode {
     pub label: String,
     pub file_id: Option<FileId>,
     pub symbol_id: Option<SymbolId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pass: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambiguity: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality_notes: Vec<String>,
+}
+
+impl Default for GraphNode {
+    fn default() -> Self {
+        Self {
+            id: NodeId::new(""),
+            node_type: GraphNodeType::File,
+            label: String::new(),
+            file_id: None,
+            symbol_id: None,
+            properties: BTreeMap::new(),
+            schema_version: None,
+            source_pass: None,
+            index_mode: None,
+            extractor_version: None,
+            ambiguity: vec![],
+            quality_notes: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1018,6 +1075,39 @@ pub struct GraphEdge {
     pub to: NodeId,
     pub edge_type: GraphEdgeType,
     pub evidence: Evidence,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_pass: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambiguity: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality_notes: Vec<String>,
+}
+
+impl Default for GraphEdge {
+    fn default() -> Self {
+        Self {
+            id: EdgeId::new(""),
+            from: NodeId::new(""),
+            to: NodeId::new(""),
+            edge_type: GraphEdgeType::References,
+            evidence: Evidence::default(),
+            properties: BTreeMap::new(),
+            schema_version: None,
+            source_pass: None,
+            index_mode: None,
+            extractor_version: None,
+            ambiguity: vec![],
+            quality_notes: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
