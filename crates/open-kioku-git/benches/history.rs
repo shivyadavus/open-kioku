@@ -9,6 +9,7 @@ fn benchmark_history_ingest(c: &mut Criterion) {
     git(repo.path(), &["config", "user.email", "bench@example.com"]);
     git(repo.path(), &["config", "user.name", "History Bench"]);
     git(repo.path(), &["config", "commit.gpgsign", "false"]);
+    git(repo.path(), &["config", "gc.auto", "0"]);
     for index in 0..50 {
         let path = repo.path().join(format!("src/file_{index}.rs"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
