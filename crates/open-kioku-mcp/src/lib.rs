@@ -841,7 +841,7 @@ mod tests {
         // Check arrays
         let node_types = result["node_types"].as_array().unwrap();
         assert!(!node_types.is_empty(), "node_types should not be empty");
-        
+
         let edge_types = result["edge_types"].as_array().unwrap();
         assert!(!edge_types.is_empty(), "edge_types should not be empty");
     }
