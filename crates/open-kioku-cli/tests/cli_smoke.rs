@@ -287,6 +287,12 @@ fn index_mode_is_reported_by_index_and_status_json() {
     let indexed: serde_json::Value = serde_json::from_str(&indexed).unwrap();
     assert_eq!(indexed["index_mode"], "fast");
     assert!(indexed["phase_reports"].as_array().unwrap().len() >= 2);
+    assert_eq!(indexed["quality"]["skip_counts"]["fast_mode"], 1);
+    assert!(indexed["quality"]["skipped_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path["reason"] == "fast_mode" && path["source"] == "fast_mode"));
     assert!(indexed["quality"]["quality_notes"]
         .as_array()
         .unwrap()
@@ -300,6 +306,12 @@ fn index_mode_is_reported_by_index_and_status_json() {
     });
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["index_mode"], "fast");
+    assert_eq!(status["quality"]["skip_counts"]["fast_mode"], 1);
+    assert!(status["quality"]["skipped_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path["reason"] == "fast_mode" && path["source"] == "fast_mode"));
 
     let (_, stderr) = run_failure({
         let mut command = ok();

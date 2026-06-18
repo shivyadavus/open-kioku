@@ -1051,9 +1051,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             } else if let Some(manifest) = manifest {
                 println!(
-                    "Healthy index: {} files, {} symbols, mode {}, indexed at {}",
+                    "Healthy index: {} files, {} symbols, {} skipped, mode {}, indexed at {}",
                     manifest.file_count,
                     manifest.symbol_count,
+                    manifest.quality.skipped_paths.len(),
                     manifest.index_mode,
                     manifest.indexed_at
                 );
@@ -2014,6 +2015,10 @@ fn render_status_markdown(
         out.push_str(&format!("| Files | {} |\n", manifest.file_count));
         out.push_str(&format!("| Symbols | {} |\n", manifest.symbol_count));
         out.push_str(&format!("| Chunks | {} |\n", manifest.chunk_count));
+        out.push_str(&format!(
+            "| Skipped paths | {} |\n",
+            manifest.quality.skipped_paths.len()
+        ));
         out.push_str(&format!("| Tests | {} |\n", manifest.quality.test_count));
         out.push_str(&format!(
             "| Imports | {} |\n",

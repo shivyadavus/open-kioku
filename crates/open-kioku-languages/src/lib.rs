@@ -55,7 +55,13 @@ pub fn likely_test_path(path: &Path) -> bool {
 
 pub fn likely_vendor_path(path: &Path) -> bool {
     let value = path.to_string_lossy();
-    value.contains("node_modules/")
+    value.starts_with("node_modules/")
+        || value.starts_with("target/")
+        || value.starts_with("vendor/")
+        || value.starts_with(".venv/")
+        || value.starts_with("dist/")
+        || value.starts_with("build/")
+        || value.contains("node_modules/")
         || value.contains("/target/")
         || value.contains("/vendor/")
         || value.contains("/.venv/")
