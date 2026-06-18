@@ -1,12 +1,14 @@
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, FileProvenance,
     GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge,
-    GraphNode, HistoryRecordId, HistorySnapshot, HistorySummary, Import, IndexManifest,
-    ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
-    HISTORY_SCHEMA_VERSION,
+    GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary,
+    Import, IndexManifest, ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
+    TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
-use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
+use open_kioku_storage::{
+    GraphCounts, GraphSchemaCounts, GraphStore, HistoryStore, IndexData, MetadataStore,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -244,13 +246,6 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_id);
             CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_id);
-            CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type);
-            CREATE INDEX IF NOT EXISTS idx_graph_nodes_file ON graph_nodes(file_id);
-            CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type);
             "#,
         )
         .map_err(storage_err)?;
@@ -1256,6 +1251,16 @@ fn history_confidence_rank(confidence: Confidence) -> u8 {
         Confidence::Exact => 3,
     }
 }
+const DEFAULT_GRAPH_QUERY_LIMIT: usize = 100;
+const MAX_GRAPH_QUERY_LIMIT: usize = 1_000;
+
+fn clamp_limit(limit: usize) -> usize {
+    if limit == 0 {
+        DEFAULT_GRAPH_QUERY_LIMIT
+    } else {
+        limit.min(MAX_GRAPH_QUERY_LIMIT)
+    }
+}
 
 impl GraphStore for SqliteStore {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
@@ -1427,6 +1432,120 @@ impl GraphStore for SqliteStore {
             }
         }
         Ok(Vec::new())
+    }
+    fn nodes_by_type(
+        &self,
+        node_type: GraphNodeType,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = clamp_limit(limit) as i64;
+        let offset = offset as i64;
+        let type_str = format!("{:?}", node_type);
+        let mut stmt = conn
+            .prepare("SELECT json FROM graph_nodes WHERE node_type = ?1 LIMIT ?2 OFFSET ?3")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![type_str, limit, offset], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn edges_by_type(
+        &self,
+        edge_type: GraphEdgeType,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<GraphEdge>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = clamp_limit(limit) as i64;
+        let offset = offset as i64;
+        let type_str = format!("{:?}", edge_type);
+        let mut stmt = conn
+            .prepare("SELECT json FROM graph_edges WHERE edge_type = ?1 LIMIT ?2 OFFSET ?3")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![type_str, limit, offset], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn graph_counts(&self) -> Result<GraphCounts> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let nodes: usize = conn
+            .query_row("SELECT COUNT(*) FROM graph_nodes", [], |row| row.get(0))
+            .map_err(storage_err)?;
+        let edges: usize = conn
+            .query_row("SELECT COUNT(*) FROM graph_edges", [], |row| row.get(0))
+            .map_err(storage_err)?;
+        Ok(GraphCounts { nodes, edges })
+    }
+
+    fn graph_schema_counts(&self) -> Result<GraphSchemaCounts> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+
+        let mut node_types = std::collections::BTreeMap::new();
+        let mut stmt = conn
+            .prepare("SELECT node_type, COUNT(*) FROM graph_nodes GROUP BY node_type")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let ntype: String = row.get(0).map_err(storage_err)?;
+            let count: usize = row.get(1).map_err(storage_err)?;
+            if !ntype.is_empty() {
+                node_types.insert(ntype, count);
+            }
+        }
+
+        let mut edge_types = std::collections::BTreeMap::new();
+        let mut stmt = conn
+            .prepare("SELECT edge_type, COUNT(*) FROM graph_edges GROUP BY edge_type")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let etype: String = row.get(0).map_err(storage_err)?;
+            let count: usize = row.get(1).map_err(storage_err)?;
+            if !etype.is_empty() {
+                edge_types.insert(etype, count);
+            }
+        }
+
+        Ok(GraphSchemaCounts {
+            node_types,
+            edge_types,
+        })
+    }
+
+    fn graph_edges_between(&self, from: &str, to: &str, limit: usize) -> Result<Vec<GraphEdge>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = clamp_limit(limit) as i64;
+        let mut stmt = conn
+            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1 AND to_id = ?2 LIMIT ?3")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![from, to, limit], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
     }
 }
 
@@ -2559,5 +2678,196 @@ mod tests {
 
         let path = store.shortest_path("x", "y", 5).unwrap();
         assert!(path.is_empty());
+    }
+
+    #[test]
+    fn test_old_graph_tables_migrate_and_replace_graph_backfills_columns() {
+        let store = make_store();
+        {
+            let conn = store.connection.lock().unwrap();
+            conn.execute("DROP TABLE graph_nodes", []).unwrap();
+            conn.execute("DROP TABLE graph_edges", []).unwrap();
+            conn.execute(
+                "CREATE TABLE graph_nodes(id TEXT PRIMARY KEY, label TEXT, json TEXT)",
+                [],
+            )
+            .unwrap();
+            conn.execute("CREATE TABLE graph_edges(id TEXT PRIMARY KEY, from_id TEXT, to_id TEXT, edge_type TEXT, json TEXT)", []).unwrap();
+        }
+        store.initialize().unwrap();
+
+        let node = GraphNode {
+            id: NodeId::new("test_node"),
+            node_type: GraphNodeType::File,
+            label: "test".into(),
+            ..Default::default()
+        };
+        store.replace_graph(&[node], &[]).unwrap();
+
+        let count: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM graph_nodes WHERE node_type = 'File'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_nodes_by_type_uses_indexed_column() {
+        let store = make_store();
+        let node1 = GraphNode {
+            id: NodeId::new("n1"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("n2"),
+            node_type: GraphNodeType::Function,
+            ..Default::default()
+        };
+        store.replace_graph(&[node1, node2], &[]).unwrap();
+
+        let nodes = store.nodes_by_type(GraphNodeType::File, 10, 0).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id.0, "n1");
+    }
+
+    #[test]
+    fn test_edges_by_type_uses_indexed_column() {
+        let store = make_store();
+        let node1 = GraphNode {
+            id: NodeId::new("n1"),
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("n2"),
+            ..Default::default()
+        };
+        let edge1 = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        let edge2 = GraphEdge {
+            id: EdgeId::new("e2"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            edge_type: GraphEdgeType::Defines,
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[node1, node2], &[edge1, edge2])
+            .unwrap();
+
+        let edges = store.edges_by_type(GraphEdgeType::Calls, 10, 0).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].id.0, "e1");
+    }
+
+    #[test]
+    fn test_graph_edges_between_respects_limit() {
+        let store = make_store();
+        let node1 = GraphNode {
+            id: NodeId::new("n1"),
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("n2"),
+            ..Default::default()
+        };
+        let edge1 = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            ..Default::default()
+        };
+        let edge2 = GraphEdge {
+            id: EdgeId::new("e2"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[node1, node2], &[edge1, edge2])
+            .unwrap();
+
+        let edges = store.graph_edges_between("n1", "n2", 1).unwrap();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_query_limit_is_capped() {
+        assert_eq!(super::clamp_limit(0), 100);
+        assert_eq!(super::clamp_limit(5), 5);
+        assert_eq!(super::clamp_limit(5000), 1000);
+    }
+
+    #[test]
+    fn test_graph_schema_counts_returns_sorted_type_counts() {
+        let store = make_store();
+        let node1 = GraphNode {
+            id: NodeId::new("n1"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("n2"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let node3 = GraphNode {
+            id: NodeId::new("n3"),
+            node_type: GraphNodeType::Function,
+            ..Default::default()
+        };
+        let edge1 = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[node1, node2, node3], &[edge1])
+            .unwrap();
+
+        let counts = store.graph_schema_counts().unwrap();
+        assert_eq!(counts.node_types.get("File"), Some(&2));
+        assert_eq!(counts.node_types.get("Function"), Some(&1));
+        assert_eq!(counts.edge_types.get("Calls"), Some(&1));
+    }
+
+    #[test]
+    fn test_graph_counts_returns_total_nodes_and_edges() {
+        let store = make_store();
+        let node1 = GraphNode {
+            id: NodeId::new("n1"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("n2"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let edge1 = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        store.replace_graph(&[node1, node2], &[edge1]).unwrap();
+
+        let overall = store.graph_counts().unwrap();
+        assert_eq!(overall.nodes, 2);
+        assert_eq!(overall.edges, 1);
     }
 }
