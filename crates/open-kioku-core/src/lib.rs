@@ -954,6 +954,51 @@ pub struct IndexPhaseReport {
     pub warnings: Vec<String>,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    Ignored,
+    Denied,
+    Hidden,
+    UnsupportedLanguage,
+    Binary,
+    TooLarge,
+    Generated,
+    Vendor,
+    FastMode,
+    SecretPolicy,
+    SymlinkPolicy,
+    Error,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipSource {
+    SecurityPolicy,
+    HiddenPolicy,
+    ConfigExclude,
+    GitIgnore,
+    OkIgnore,
+    Detector,
+    FastMode,
+    SizeLimit,
+    SymlinkPolicy,
+    LanguageSupport,
+    Filesystem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkippedPath {
+    pub path: PathBuf,
+    pub reason: SkipReason,
+    pub source: SkipSource,
+    pub safe_to_show: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct IndexQuality {
     #[serde(default)]
@@ -986,6 +1031,10 @@ pub struct IndexQuality {
     pub architecture_facts: usize,
     #[serde(default)]
     pub semantic_provider_notes: Vec<String>,
+    #[serde(default)]
+    pub skip_counts: BTreeMap<SkipReason, usize>,
+    #[serde(default)]
+    pub skipped_paths: Vec<SkippedPath>,
     pub quality_notes: Vec<String>,
 }
 
