@@ -406,15 +406,43 @@ async fn dispatch(
                 Ok(ast) => ast,
                 Err(e) => {
                     let (kind, message) = match e {
-                        open_kioku_graph::query::GraphQueryError::ParseError(m) => ("parse_error", m),
-                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => ("query_rejected", m),
-                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => ("unknown_node_type", m),
-                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => ("unknown_edge_type", m),
-                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => ("unsupported_filter", m.clone()),
-                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => ("depth_limit_exceeded", format!("requested {} exceeds limit", requested)),
-                        open_kioku_graph::query::GraphQueryError::Timeout => ("timeout", "Query execution timed out".to_string()),
-                        open_kioku_graph::query::GraphQueryError::Storage(e) => ("storage_error", e.to_string()),
-                        open_kioku_graph::query::GraphQueryError::Serde(e) => ("serde_error", e.to_string()),
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => {
+                            ("parse_error", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => {
+                            ("query_rejected", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => {
+                            ("unknown_node_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => {
+                            ("unknown_edge_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => {
+                            ("unsupported_filter", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => {
+                            (
+                                "depth_limit_exceeded",
+                                format!("requested {} exceeds limit", requested),
+                            )
+                        }
+                        open_kioku_graph::query::GraphQueryError::LimitExceeded(requested) => (
+                            "limit_exceeded",
+                            format!("requested {} exceeds limit", requested),
+                        ),
+                        open_kioku_graph::query::GraphQueryError::UnboundVariable(m) => {
+                            ("unbound_variable", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Timeout => {
+                            ("timeout", "Query execution timed out".to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => {
+                            ("storage_error", e.to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => {
+                            ("serde_error", e.to_string())
+                        }
                     };
                     return Ok(serde_json::json!({
                         "error": {
@@ -438,15 +466,43 @@ async fn dispatch(
                 Ok(result) => Ok(serde_json::to_value(result)?),
                 Err(e) => {
                     let (kind, message) = match e {
-                        open_kioku_graph::query::GraphQueryError::ParseError(m) => ("parse_error", m),
-                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => ("query_rejected", m),
-                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => ("unknown_node_type", m),
-                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => ("unknown_edge_type", m),
-                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => ("unsupported_filter", m.clone()),
-                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => ("depth_limit_exceeded", format!("requested {} exceeds limit", requested)),
-                        open_kioku_graph::query::GraphQueryError::Timeout => ("timeout", "Query execution timed out".to_string()),
-                        open_kioku_graph::query::GraphQueryError::Storage(e) => ("storage_error", e.to_string()),
-                        open_kioku_graph::query::GraphQueryError::Serde(e) => ("serde_error", e.to_string()),
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => {
+                            ("parse_error", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => {
+                            ("query_rejected", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => {
+                            ("unknown_node_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => {
+                            ("unknown_edge_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => {
+                            ("unsupported_filter", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => {
+                            (
+                                "depth_limit_exceeded",
+                                format!("requested {} exceeds limit", requested),
+                            )
+                        }
+                        open_kioku_graph::query::GraphQueryError::LimitExceeded(requested) => (
+                            "limit_exceeded",
+                            format!("requested {} exceeds limit", requested),
+                        ),
+                        open_kioku_graph::query::GraphQueryError::UnboundVariable(m) => {
+                            ("unbound_variable", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Timeout => {
+                            ("timeout", "Query execution timed out".to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => {
+                            ("storage_error", e.to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => {
+                            ("serde_error", e.to_string())
+                        }
                     };
                     Ok(serde_json::json!({
                         "error": {

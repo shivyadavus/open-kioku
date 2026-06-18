@@ -1134,7 +1134,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Graph { command } => match command {
-            GraphCommand::Query { dsl, limit, max_depth, timeout_ms, format } => {
+            GraphCommand::Query {
+                dsl,
+                limit,
+                max_depth,
+                timeout_ms,
+                format,
+            } => {
                 let store = open_store(&repo)?;
                 let ast = open_kioku_graph::query::parse_graph_query(&dsl)?;
                 let mut options = open_kioku_graph::query::GraphQueryOptions::default();
