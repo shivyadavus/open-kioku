@@ -1,5 +1,5 @@
 use open_kioku_core::{
-    EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
+    identity, EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -171,10 +171,8 @@ impl GraphBuffer {
 
     pub fn insert_edge(&mut self, mut edge: GraphEdge) -> EdgeId {
         let key = (edge.from.clone(), edge.to.clone(), edge.edge_type.clone());
-        let expected_edge_id = EdgeId::new(format!(
-            "edge:{}:{}:{:?}",
-            edge.from.0, edge.to.0, edge.edge_type
-        ));
+        let expected_edge_id =
+            identity::edge_id(edge.edge_type.clone(), &edge.from, &edge.to, None);
         edge.id = expected_edge_id.clone();
 
         if let Some(&index) = self.edges_by_key.get(&key) {
@@ -333,8 +331,16 @@ mod tests {
         assert_eq!(edges2.len(), 1);
         assert_eq!(edges2[0].evidence.id.0, "evid_A");
 
-        // Edge ID itself should be deterministic based on the key
-        assert_eq!(edges[0].id.0, "edge:n1:n2:Calls");
+        // Edge ID itself should be deterministic based on the canonical identity helper.
+        assert_eq!(
+            edges[0].id,
+            identity::edge_id(
+                GraphEdgeType::Calls,
+                &NodeId::new("n1"),
+                &NodeId::new("n2"),
+                None
+            )
+        );
         assert_eq!(edges[0].id.0, edges2[0].id.0);
     }
 

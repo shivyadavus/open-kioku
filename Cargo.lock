@@ -1251,9 +1251,11 @@ name = "open-kioku-core"
 version = "2.0.1"
 dependencies = [
  "chrono",
+ "open-kioku-errors",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
