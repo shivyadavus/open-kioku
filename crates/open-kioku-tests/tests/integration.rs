@@ -174,7 +174,7 @@ fn test_cli_graph_schema_markdown() {
             "# Open Kioku Evidence Graph Schema v1.0.0",
         ))
         .stdout(predicate::str::contains("## Node Types"))
-        .stdout(predicate::str::contains("### file (Stable)"));
+        .stdout(predicate::str::contains("### File (Stable)"));
 }
 
 #[test]
@@ -185,5 +185,5 @@ fn test_cli_graph_schema_json() {
         .success()
         .stdout(predicate::str::contains("\"version\": \"1.0.0\""))
         .stdout(predicate::str::contains("\"node_types\": ["))
-        .stdout(predicate::str::contains("\"name\": \"file\""));
+        .stdout(predicate::str::contains("\"name\": \"File\""));
 }

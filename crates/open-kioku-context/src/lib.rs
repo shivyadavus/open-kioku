@@ -256,6 +256,7 @@ impl<'a> ContextPackBuilder<'a> {
                     confidence: Confidence::Medium,
                     message: msg.clone(),
                     indexed_at: Utc::now(),
+                    ..Default::default()
                 })
             })
             .chain(impact.evidence.clone())
@@ -735,6 +736,7 @@ fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
         confidence: signal.confidence,
         message: signal.message.clone(),
         indexed_at: Utc::now(),
+        ..Default::default()
     }
 }
 
@@ -841,6 +843,7 @@ fn git_history_evidence_for_results(
             confidence: fact.confidence,
             message: format!("{}: {}", fact.message, fact.target),
             indexed_at: Utc::now(),
+            ..Default::default()
         });
         if evidence.len() >= 20 {
             break;
@@ -1259,6 +1262,7 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
             confidence: Confidence::Low,
             message: "context pack search did not find indexed evidence".into(),
             indexed_at: Utc::now(),
+            ..Default::default()
         }],
         score_breakdown: vec![ScoreComponent::single(
             "no_context_found",
@@ -1290,6 +1294,7 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
                 "context pack used persisted search results without full-table impact expansion"
                     .into(),
             indexed_at: Utc::now(),
+            ..Default::default()
         }],
         score_breakdown: vec![ScoreComponent::single(
             "bounded_context_risk",

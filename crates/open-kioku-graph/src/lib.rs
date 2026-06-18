@@ -53,6 +53,7 @@ impl InMemoryGraph {
                 label: file.path.display().to_string(),
                 file_id: Some(file.id.clone()),
                 symbol_id: None,
+                ..Default::default()
             };
             graph.nodes.insert(node.id.0.clone(), node);
         }
@@ -63,6 +64,7 @@ impl InMemoryGraph {
                 label: symbol.qualified_name.clone(),
                 file_id: Some(symbol.file_id.clone()),
                 symbol_id: Some(symbol.id.clone()),
+                ..Default::default()
             };
             let Some(file) = files_by_id.get(symbol.file_id.0.as_str()) else {
                 continue;
@@ -88,7 +90,9 @@ impl InMemoryGraph {
                     confidence: symbol.confidence,
                     message: format!("{} defines {}", file.path.display(), symbol.name),
                     indexed_at: Utc::now(),
+                    ..Default::default()
                 },
+                ..Default::default()
             };
             graph.nodes.insert(symbol_node.id.0.clone(), symbol_node);
             graph.edges.push(edge);
@@ -132,7 +136,9 @@ impl InMemoryGraph {
                     confidence: occurrence.confidence,
                     message: format!("{} references {}", file.path.display(), symbol.name),
                     indexed_at: Utc::now(),
+                    ..Default::default()
                 },
+                ..Default::default()
             });
         }
         let mut edge_ids = graph
@@ -150,6 +156,7 @@ impl InMemoryGraph {
                 label: import.imported.clone(),
                 file_id: None,
                 symbol_id: None,
+                ..Default::default()
             };
             graph
                 .nodes
@@ -177,7 +184,9 @@ impl InMemoryGraph {
                         confidence: import.confidence,
                         message: format!("{} imports {}", file.path.display(), import.imported),
                         indexed_at: Utc::now(),
+                        ..Default::default()
                     },
+                    ..Default::default()
                 });
             }
         }
@@ -201,6 +210,7 @@ impl InMemoryGraph {
                 label: fact.target.clone(),
                 file_id: None,
                 symbol_id: None,
+                ..Default::default()
             };
             graph
                 .nodes
@@ -228,7 +238,9 @@ impl InMemoryGraph {
                         confidence: fact.confidence,
                         message: fact.message.clone(),
                         indexed_at: Utc::now(),
+                        ..Default::default()
                     },
+                    ..Default::default()
                 });
             }
         }
@@ -371,6 +383,7 @@ mod tests {
                 label: "A".into(),
                 file_id: None,
                 symbol_id: None,
+                ..Default::default()
             },
         );
         graph.nodes.insert(
@@ -381,6 +394,7 @@ mod tests {
                 label: "B".into(),
                 file_id: None,
                 symbol_id: None,
+                ..Default::default()
             },
         );
         graph.nodes.insert(
@@ -391,6 +405,7 @@ mod tests {
                 label: "C".into(),
                 file_id: None,
                 symbol_id: None,
+                ..Default::default()
             },
         );
 
@@ -408,7 +423,9 @@ mod tests {
                 confidence: Confidence::High,
                 message: "".into(),
                 indexed_at: Utc::now(),
+                ..Default::default()
             },
+            ..Default::default()
         });
         graph.edges.push(GraphEdge {
             id: EdgeId::new("e2"),
@@ -424,7 +441,9 @@ mod tests {
                 confidence: Confidence::High,
                 message: "".into(),
                 indexed_at: Utc::now(),
+                ..Default::default()
             },
+            ..Default::default()
         });
 
         let path = graph.shortest_path("A", "C", 5);
