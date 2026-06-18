@@ -1624,6 +1624,8 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
         "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0",
     )?;
 
+    backfill_graph_query_columns(conn)?;
+
     // Add indexes (these are idempotent via IF NOT EXISTS)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
@@ -1667,6 +1669,105 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     if version < SQLITE_GRAPH_SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SQLITE_GRAPH_SCHEMA_VERSION)
             .map_err(storage_err)?;
+    }
+
+    Ok(())
+}
+
+fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
+    let node_rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, json FROM graph_nodes
+                 WHERE COALESCE(node_type, '') = ''
+                    OR COALESCE(file_id, '') = ''
+                    OR COALESCE(symbol_id, '') = ''",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_err)?;
+        let mut rows_out = Vec::new();
+        for row in rows {
+            rows_out.push(row.map_err(storage_err)?);
+        }
+        rows_out
+    };
+    for (id, json) in node_rows {
+        let Ok(node) = serde_json::from_str::<GraphNode>(&json) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE graph_nodes
+             SET node_type = ?1,
+                 file_id = ?2,
+                 symbol_id = ?3,
+                 evidence_available = ?4
+             WHERE id = ?5",
+            params![
+                format!("{:?}", node.node_type),
+                node.file_id.as_ref().map(|file_id| file_id.0.as_str()),
+                node.symbol_id
+                    .as_ref()
+                    .map(|symbol_id| symbol_id.0.as_str()),
+                node.file_id.is_some() || node.symbol_id.is_some(),
+                id,
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+
+    let edge_rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, json FROM graph_edges
+                 WHERE COALESCE(edge_type, '') = ''
+                    OR COALESCE(confidence, '') = ''
+                    OR COALESCE(source_type, '') = ''
+                    OR COALESCE(source_file, '') = ''",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_err)?;
+        let mut rows_out = Vec::new();
+        for row in rows {
+            rows_out.push(row.map_err(storage_err)?);
+        }
+        rows_out
+    };
+    for (id, json) in edge_rows {
+        let Ok(edge) = serde_json::from_str::<GraphEdge>(&json) else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE graph_edges
+             SET from_id = ?1,
+                 to_id = ?2,
+                 edge_type = ?3,
+                 confidence = ?4,
+                 source_type = ?5,
+                 source_file = ?6,
+                 evidence_available = ?7,
+                 freshness = ?8
+             WHERE id = ?9",
+            params![
+                edge.from.0.as_str(),
+                edge.to.0.as_str(),
+                format!("{:?}", edge.edge_type),
+                format!("{:?}", edge.evidence.confidence),
+                format!("{:?}", edge.evidence.source_type),
+                edge.evidence.source.as_str(),
+                true,
+                edge.evidence.indexed_at.timestamp(),
+                id,
+            ],
+        )
+        .map_err(storage_err)?;
     }
 
     Ok(())
@@ -1961,7 +2062,7 @@ mod tests {
         ReviewerEvidence, ReviewerRole, Symbol, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::collections::BTreeMap;
 
     fn make_store() -> SqliteStore {
@@ -2808,6 +2909,31 @@ mod tests {
     #[test]
     fn test_old_graph_tables_migrate_and_replace_graph_backfills_columns() {
         let store = make_store();
+        let legacy_file = GraphNode {
+            id: NodeId::new("legacy_file"),
+            node_type: GraphNodeType::File,
+            label: "legacy.rs".into(),
+            file_id: Some(FileId::new("f1")),
+            ..Default::default()
+        };
+        let legacy_symbol = GraphNode {
+            id: NodeId::new("legacy_symbol"),
+            node_type: GraphNodeType::Function,
+            label: "legacy_fn".into(),
+            symbol_id: Some(SymbolId::new("s1")),
+            ..Default::default()
+        };
+        let mut legacy_evidence = evidence();
+        legacy_evidence.source_type = EvidenceSourceType::Scip;
+        legacy_evidence.source = "index.scip".into();
+        let legacy_edge = GraphEdge {
+            id: EdgeId::new("legacy_edge"),
+            from: legacy_file.id.clone(),
+            to: legacy_symbol.id.clone(),
+            edge_type: GraphEdgeType::Defines,
+            evidence: legacy_evidence,
+            ..Default::default()
+        };
         {
             let conn = store.connection.lock().unwrap();
             conn.execute("DROP TABLE graph_nodes", []).unwrap();
@@ -2818,9 +2944,54 @@ mod tests {
             )
             .unwrap();
             conn.execute("CREATE TABLE graph_edges(id TEXT PRIMARY KEY, from_id TEXT, to_id TEXT, edge_type TEXT, json TEXT)", []).unwrap();
+            conn.execute(
+                "INSERT INTO graph_nodes(id, label, json) VALUES(?1, ?2, ?3)",
+                params![
+                    legacy_file.id.0.as_str(),
+                    legacy_file.label.as_str(),
+                    serde_json::to_string(&legacy_file).unwrap(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO graph_nodes(id, label, json) VALUES(?1, ?2, ?3)",
+                params![
+                    legacy_symbol.id.0.as_str(),
+                    legacy_symbol.label.as_str(),
+                    serde_json::to_string(&legacy_symbol).unwrap(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO graph_edges(id, from_id, to_id, edge_type, json)
+                 VALUES(?1, ?2, ?3, '', ?4)",
+                params![
+                    legacy_edge.id.0.as_str(),
+                    legacy_edge.from.0.as_str(),
+                    legacy_edge.to.0.as_str(),
+                    serde_json::to_string(&legacy_edge).unwrap(),
+                ],
+            )
+            .unwrap();
         }
         store.initialize().unwrap();
         store.initialize().unwrap();
+
+        let migrated_nodes = store.nodes_by_type(GraphNodeType::File, 10, 0).unwrap();
+        assert_eq!(migrated_nodes.len(), 1);
+        assert_eq!(migrated_nodes[0].id.0, "legacy_file");
+
+        let migrated_edges = store.edges_by_type(GraphEdgeType::Defines, 10, 0).unwrap();
+        assert_eq!(migrated_edges.len(), 1);
+        assert_eq!(migrated_edges[0].id.0, "legacy_edge");
+        let migrated_between = store
+            .graph_edges_between("legacy_file", "legacy_symbol", 10)
+            .unwrap();
+        assert_eq!(migrated_between.len(), 1);
+
+        let migrated_counts = store.graph_schema_counts().unwrap();
+        assert_eq!(migrated_counts.node_types.get("File"), Some(&1));
+        assert_eq!(migrated_counts.edge_types.get("Defines"), Some(&1));
 
         let node = GraphNode {
             id: NodeId::new("test_node"),
