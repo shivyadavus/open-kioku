@@ -5,8 +5,8 @@ use open_kioku_config::OkConfig;
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
     GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot,
-    Import, IndexManifest, IndexQuality, LineRange, Repository, RepositoryId, Symbol,
-    SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
+    Import, IndexManifest, IndexMode, IndexPhaseReport, IndexQuality, LineRange, Repository,
+    RepositoryId, Symbol, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 pub mod resolver;
 pub mod symbol_registry;
@@ -39,14 +40,20 @@ pub struct IndexSnapshot {
     pub occurrences: Vec<SymbolOccurrence>,
     pub analysis_facts: Vec<AnalysisFact>,
     pub scip: Option<ScipIndexReport>,
+    pub phase_reports: Vec<IndexPhaseReport>,
 }
 
 #[derive(Debug, Clone)]
 pub struct IndexProgress {
     pub phase: &'static str,
+    pub elapsed_ms: u64,
     pub scanned_files: usize,
     pub indexed_files: usize,
     pub total_files: Option<usize>,
+    pub nodes_added: usize,
+    pub edges_added: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
 }
 
 pub struct Indexer {
@@ -87,6 +94,29 @@ impl Indexer {
             .map(|(snapshot, _history)| snapshot)
     }
 
+    pub fn index_repo_with_mode(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+        mode: IndexMode,
+    ) -> Result<IndexSnapshot> {
+        self.index_repo_with_mode_and_progress(root, config, mode, |_| {})
+    }
+
+    pub fn index_repo_with_mode_and_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+        mode: IndexMode,
+        on_progress: F,
+    ) -> Result<IndexSnapshot>
+    where
+        F: Fn(IndexProgress) + Sync,
+    {
+        self.index_repo_with_history_mode_and_progress(root, config, mode, on_progress)
+            .map(|(snapshot, _history)| snapshot)
+    }
+
     pub fn index_repo_with_history_and_progress<F>(
         &self,
         root: impl AsRef<Path>,
@@ -96,8 +126,81 @@ impl Indexer {
     where
         F: Fn(IndexProgress) + Sync,
     {
+        self.index_repo_with_history_mode_and_progress(root, config, IndexMode::Full, on_progress)
+    }
+
+    pub fn index_repo_with_history_mode_and_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        config: &OkConfig,
+        mode: IndexMode,
+        on_progress: F,
+    ) -> Result<(IndexSnapshot, HistorySnapshot)>
+    where
+        F: Fn(IndexProgress) + Sync,
+    {
+        let started = Instant::now();
+        let mut phase_reports = Vec::new();
         let root = root.as_ref().canonicalize()?;
         let repo_id = RepositoryId::new(stable_id(root.to_string_lossy().as_ref()));
+        if mode == IndexMode::CrossProject {
+            let repository = Repository {
+                id: repo_id,
+                name: config.repo.name.clone(),
+                root: root.clone(),
+                branch: open_kioku_git::branch(&root),
+                commit: open_kioku_git::commit(&root),
+                indexed_at: Some(Utc::now()),
+            };
+            emit_progress(
+                &on_progress,
+                &mut phase_reports,
+                started,
+                ProgressEvent::new("cross_project")
+                    .warning("cross-project mode records repository status without parsing source"),
+            );
+            let quality = index_quality(IndexQualityInput {
+                root: &root,
+                config,
+                scip_report: None,
+                test_count: 0,
+                import_count: 0,
+                analysis: AnalysisCounts::default(),
+                quality_notes: &[
+                    "cross-project mode: source parsing skipped; link already-indexed projects only"
+                        .into(),
+                ],
+                mode,
+                phase_reports: &phase_reports,
+            });
+            let manifest = IndexManifest {
+                repository,
+                file_count: 0,
+                symbol_count: 0,
+                chunk_count: 0,
+                indexed_at: Utc::now(),
+                schema_version: 1,
+                index_mode: mode,
+                phase_reports: phase_reports.clone(),
+                quality,
+            };
+            return Ok((
+                IndexSnapshot {
+                    manifest,
+                    files: Vec::new(),
+                    symbols: Vec::new(),
+                    chunks: Vec::new(),
+                    tests: Vec::new(),
+                    imports: Vec::new(),
+                    import_resolutions: Vec::new(),
+                    occurrences: Vec::new(),
+                    analysis_facts: Vec::new(),
+                    scip: None,
+                    phase_reports,
+                },
+                HistorySnapshot::empty(),
+            ));
+        }
         let build_hint: Option<String> =
             if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
                 Some("gradle".to_string())
@@ -111,13 +214,21 @@ impl Indexer {
             } else {
                 None
             };
-        let files = self.scan_files(&root, config, &repo_id, &on_progress)?;
-        on_progress(IndexProgress {
-            phase: "parse",
-            scanned_files: files.len(),
-            indexed_files: 0,
-            total_files: Some(files.len()),
-        });
+        let scan = {
+            let mut progress = ProgressRecorder::new(&on_progress, started, &mut phase_reports);
+            self.scan_files(&root, config, &repo_id, mode, &mut progress)?
+        };
+        let files = scan.files;
+        emit_progress(
+            &on_progress,
+            &mut phase_reports,
+            started,
+            ProgressEvent::new("parse")
+                .scanned(files.len())
+                .total(Some(files.len()))
+                .skipped(scan.skipped)
+                .warnings(scan.warnings.clone()),
+        );
         let parsed_count = AtomicUsize::new(0);
         let parsed = files
             .par_iter()
@@ -129,23 +240,19 @@ impl Indexer {
                     .parse_with_hint(file, &content, build_hint.as_deref());
                 let indexed_files = parsed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if should_emit_progress(indexed_files, files.len()) {
-                    on_progress(IndexProgress {
-                        phase: "parse",
-                        scanned_files: files.len(),
-                        indexed_files,
-                        total_files: Some(files.len()),
-                    });
+                    emit_progress(
+                        &on_progress,
+                        &mut Vec::new(),
+                        started,
+                        ProgressEvent::new("parse")
+                            .scanned(files.len())
+                            .indexed(indexed_files)
+                            .total(Some(files.len())),
+                    );
                 }
                 Ok(parsed)
             })
             .collect::<Result<Vec<_>>>()?;
-        on_progress(IndexProgress {
-            phase: "extract",
-            scanned_files: files.len(),
-            indexed_files: files.len(),
-            total_files: Some(files.len()),
-        });
-
         let mut symbols = parsed
             .iter()
             .flat_map(|file| file.symbols.clone())
@@ -167,6 +274,16 @@ impl Indexer {
             .iter()
             .flat_map(|file| file.analysis_facts.clone())
             .collect::<Vec<_>>();
+        emit_progress(
+            &on_progress,
+            &mut phase_reports,
+            started,
+            ProgressEvent::new("extract")
+                .scanned(files.len())
+                .indexed(files.len())
+                .total(Some(files.len()))
+                .nodes_added(files.len() + symbols.len() + chunks.len() + tests.len()),
+        );
         let resolver_report = resolver::resolve_imports(&root, &files, &symbols, &imports)?;
         let resolver_fact_count = resolver_report.analysis_facts.len();
         analysis_facts.extend(resolver_report.analysis_facts.clone());
@@ -179,21 +296,19 @@ impl Indexer {
         let registry_fact_count = registry_report.analysis_facts.len();
         analysis_facts.extend(registry_report.analysis_facts);
         let static_analysis_facts = analysis_facts.len();
-        on_progress(IndexProgress {
-            phase: "analysis",
-            scanned_files: files.len(),
-            indexed_files: files.len(),
-            total_files: Some(files.len()),
-        });
+        emit_progress(
+            &on_progress,
+            &mut phase_reports,
+            started,
+            ProgressEvent::new("analysis")
+                .scanned(files.len())
+                .indexed(files.len())
+                .total(Some(files.len()))
+                .edges_added(static_analysis_facts),
+        );
         let runtime_facts = collect_runtime_analysis_facts(&root, &files)?;
         let runtime_analysis_facts = runtime_facts.len();
         analysis_facts.extend(runtime_facts);
-        on_progress(IndexProgress {
-            phase: "history",
-            scanned_files: files.len(),
-            indexed_files: files.len(),
-            total_files: Some(files.len()),
-        });
         let git_history = if config.history.enabled {
             collect_git_history(
                 &root,
@@ -205,25 +320,42 @@ impl Indexer {
         } else {
             GitHistoryIngest::empty()
         };
+        emit_progress(
+            &on_progress,
+            &mut phase_reports,
+            started,
+            ProgressEvent::new("history")
+                .scanned(files.len())
+                .indexed(files.len())
+                .total(Some(files.len()))
+                .edges_added(git_history.snapshot.cochange_edges.len()),
+        );
         let git_history_fact_count = git_history.analysis_facts.len();
         analysis_facts.extend(git_history.analysis_facts);
-        on_progress(IndexProgress {
-            phase: "occurrences",
-            scanned_files: files.len(),
-            indexed_files: files.len(),
-            total_files: Some(files.len()),
-        });
         let mut occurrences = derive_occurrences(&chunks, &symbols);
+        emit_progress(
+            &on_progress,
+            &mut phase_reports,
+            started,
+            ProgressEvent::new("occurrences")
+                .scanned(files.len())
+                .indexed(files.len())
+                .total(Some(files.len()))
+                .edges_added(occurrences.len()),
+        );
 
         let mut arch_fact_count = 0;
         if let Ok(Some(policy)) = open_kioku_config::load_architecture_policy(&root) {
             if let Ok(resolver) = open_kioku_architecture::PolicyResolver::new(&policy) {
-                on_progress(IndexProgress {
-                    phase: "architecture",
-                    scanned_files: files.len(),
-                    indexed_files: files.len(),
-                    total_files: Some(files.len()),
-                });
+                emit_progress(
+                    &on_progress,
+                    &mut phase_reports,
+                    started,
+                    ProgressEvent::new("architecture")
+                        .scanned(files.len())
+                        .indexed(files.len())
+                        .total(Some(files.len())),
+                );
                 let arch_facts = collect_architecture_facts(&resolver, &files, &symbols);
                 arch_fact_count = arch_facts.len();
                 analysis_facts.extend(arch_facts);
@@ -232,17 +364,24 @@ impl Indexer {
 
         let mut scip_report = None;
         if config.scip.enabled {
-            on_progress(IndexProgress {
-                phase: "scip",
-                scanned_files: files.len(),
-                indexed_files: files.len(),
-                total_files: Some(files.len()),
-            });
             let (imported, report) =
                 open_kioku_scip::prepare_and_import_scip(&root, &config.scip, &repo_id)?;
+            let imported_symbol_count = imported.symbols.len();
+            let imported_occurrence_count = imported.occurrences.len();
             symbols.extend(imported.symbols);
             dedupe_symbols(&mut symbols);
             occurrences.extend(imported.occurrences);
+            emit_progress(
+                &on_progress,
+                &mut phase_reports,
+                started,
+                ProgressEvent::new("scip")
+                    .scanned(files.len())
+                    .indexed(files.len())
+                    .total(Some(files.len()))
+                    .nodes_added(imported_symbol_count)
+                    .edges_added(imported_occurrence_count),
+            );
             scip_report = Some(report);
         }
         let repository = Repository {
@@ -255,13 +394,15 @@ impl Indexer {
         };
         let mut resolver_quality_notes = resolver_report.quality_notes.clone();
         resolver_quality_notes.extend(registry_report.quality_notes);
-        let quality = index_quality(
-            &root,
+        let mut mode_notes = mode_quality_notes(mode);
+        mode_notes.extend(resolver_quality_notes);
+        let quality = index_quality(IndexQualityInput {
+            root: &root,
             config,
-            scip_report.as_ref(),
-            tests.len(),
-            imports.len(),
-            AnalysisCounts {
+            scip_report: scip_report.as_ref(),
+            test_count: tests.len(),
+            import_count: imports.len(),
+            analysis: AnalysisCounts {
                 static_facts: static_analysis_facts,
                 resolver_facts: resolver_fact_count,
                 registry_facts: registry_fact_count,
@@ -269,8 +410,10 @@ impl Indexer {
                 git_history_facts: git_history_fact_count,
                 architecture_facts: arch_fact_count,
             },
-            &resolver_quality_notes,
-        );
+            quality_notes: &mode_notes,
+            mode,
+            phase_reports: &phase_reports,
+        });
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -278,6 +421,8 @@ impl Indexer {
             chunk_count: chunks.len(),
             indexed_at: Utc::now(),
             schema_version: 1,
+            index_mode: mode,
+            phase_reports: phase_reports.clone(),
             quality,
         };
         Ok((
@@ -292,6 +437,7 @@ impl Indexer {
                 occurrences,
                 analysis_facts,
                 scip: scip_report,
+                phase_reports,
             },
             git_history.snapshot,
         ))
@@ -302,8 +448,9 @@ impl Indexer {
         root: &Path,
         config: &OkConfig,
         repository_id: &RepositoryId,
-        on_progress: &dyn Fn(IndexProgress),
-    ) -> Result<Vec<File>> {
+        mode: IndexMode,
+        progress: &mut ProgressRecorder<'_>,
+    ) -> Result<ScanResult> {
         let max_size = config.max_file_size_bytes()?;
         let excludes = compile_globs(&config.index.exclude)?;
         let denied = compile_globs(&config.paths.deny)?;
@@ -311,13 +458,10 @@ impl Indexer {
         builder.hidden(!config.security.allow_hidden_files);
         builder.git_ignore(true).git_exclude(true).parents(true);
         let mut files = Vec::new();
+        let mut skipped = 0usize;
+        let mut warnings = Vec::new();
         let mut scanned_files = 0;
-        on_progress(IndexProgress {
-            phase: "scan",
-            scanned_files,
-            indexed_files: files.len(),
-            total_files: None,
-        });
+        progress.emit(ProgressEvent::new("scan"));
         for entry in builder.build() {
             let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
             if !entry
@@ -331,31 +475,45 @@ impl Indexer {
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
             if excludes.is_match(&rel) || denied.is_match(&rel) {
+                skipped += 1;
                 if should_emit_progress(scanned_files, 0) {
-                    on_progress(IndexProgress {
-                        phase: "scan",
-                        scanned_files,
-                        indexed_files: files.len(),
-                        total_files: None,
-                    });
+                    progress.emit_transient(
+                        ProgressEvent::new("scan")
+                            .scanned(scanned_files)
+                            .indexed(files.len())
+                            .skipped(skipped),
+                    );
                 }
+                continue;
+            }
+            if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
+                skipped += 1;
                 continue;
             }
             let metadata = entry
                 .metadata()
                 .map_err(|err| OkError::Index(err.to_string()))?;
             if metadata.len() > max_size {
+                skipped += 1;
                 continue;
             }
             let language = detect_language(&rel);
             if !is_supported_code(&language) {
+                skipped += 1;
                 continue;
             }
             let bytes = fs::read(path)?;
             if bytes.contains(&0) {
+                skipped += 1;
                 continue;
             }
             let content = String::from_utf8_lossy(&bytes);
+            let is_generated = likely_generated(&content);
+            let is_vendor = likely_vendor_path(&rel);
+            if mode == IndexMode::Fast && (is_generated || is_vendor) {
+                skipped += 1;
+                continue;
+            }
             let content_hash = hash_bytes(&bytes);
             files.push(File {
                 id: FileId::new(stable_id(&rel.to_string_lossy())),
@@ -364,29 +522,182 @@ impl Indexer {
                 language,
                 size_bytes: metadata.len(),
                 content_hash,
-                is_generated: likely_generated(&content),
-                is_vendor: likely_vendor_path(&rel),
+                is_generated,
+                is_vendor,
             });
             if should_emit_progress(scanned_files, 0) {
-                on_progress(IndexProgress {
-                    phase: "scan",
-                    scanned_files,
-                    indexed_files: files.len(),
-                    total_files: None,
-                });
+                progress.emit_transient(
+                    ProgressEvent::new("scan")
+                        .scanned(scanned_files)
+                        .indexed(files.len())
+                        .skipped(skipped),
+                );
             }
         }
-        on_progress(IndexProgress {
-            phase: "scan",
-            scanned_files,
-            indexed_files: files.len(),
-            total_files: Some(files.len()),
-        });
-        Ok(files)
+        if mode == IndexMode::Fast && skipped > 0 {
+            warnings.push(format!(
+                "fast mode skipped {skipped} unsupported, excluded, generated, docs/examples/testdata, or oversized path(s)"
+            ));
+        }
+        progress.emit(
+            ProgressEvent::new("scan")
+                .scanned(scanned_files)
+                .indexed(files.len())
+                .total(Some(files.len()))
+                .skipped(skipped)
+                .warnings(warnings.clone()),
+        );
+        Ok(ScanResult {
+            files,
+            skipped,
+            warnings,
+        })
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+struct ScanResult {
+    files: Vec<File>,
+    skipped: usize,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProgressEvent {
+    phase: &'static str,
+    scanned_files: usize,
+    indexed_files: usize,
+    total_files: Option<usize>,
+    nodes_added: usize,
+    edges_added: usize,
+    skipped: usize,
+    warnings: Vec<String>,
+}
+
+impl ProgressEvent {
+    fn new(phase: &'static str) -> Self {
+        Self {
+            phase,
+            scanned_files: 0,
+            indexed_files: 0,
+            total_files: None,
+            nodes_added: 0,
+            edges_added: 0,
+            skipped: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn scanned(mut self, value: usize) -> Self {
+        self.scanned_files = value;
+        self
+    }
+
+    fn indexed(mut self, value: usize) -> Self {
+        self.indexed_files = value;
+        self
+    }
+
+    fn total(mut self, value: Option<usize>) -> Self {
+        self.total_files = value;
+        self
+    }
+
+    fn skipped(mut self, value: usize) -> Self {
+        self.skipped = value;
+        self
+    }
+
+    fn nodes_added(mut self, value: usize) -> Self {
+        self.nodes_added = value;
+        self
+    }
+
+    fn edges_added(mut self, value: usize) -> Self {
+        self.edges_added = value;
+        self
+    }
+
+    fn warnings(mut self, value: Vec<String>) -> Self {
+        self.warnings = value;
+        self
+    }
+
+    fn warning(mut self, value: impl Into<String>) -> Self {
+        self.warnings.push(value.into());
+        self
+    }
+}
+
+impl IndexProgress {
+    fn from_event(started: Instant, event: ProgressEvent) -> Self {
+        Self {
+            phase: event.phase,
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            scanned_files: event.scanned_files,
+            indexed_files: event.indexed_files,
+            total_files: event.total_files,
+            nodes_added: event.nodes_added,
+            edges_added: event.edges_added,
+            skipped: event.skipped,
+            warnings: event.warnings,
+        }
+    }
+
+    fn phase_report(&self) -> IndexPhaseReport {
+        IndexPhaseReport {
+            phase: self.phase.to_string(),
+            elapsed_ms: self.elapsed_ms,
+            scanned_files: self.scanned_files,
+            indexed_files: self.indexed_files,
+            nodes_added: self.nodes_added,
+            edges_added: self.edges_added,
+            skipped: self.skipped,
+            warnings: self.warnings.clone(),
+        }
+    }
+}
+
+fn emit_progress(
+    on_progress: &dyn Fn(IndexProgress),
+    phase_reports: &mut Vec<IndexPhaseReport>,
+    started: Instant,
+    event: ProgressEvent,
+) {
+    let progress = IndexProgress::from_event(started, event);
+    phase_reports.push(progress.phase_report());
+    on_progress(progress);
+}
+
+struct ProgressRecorder<'a> {
+    on_progress: &'a dyn Fn(IndexProgress),
+    started: Instant,
+    phase_reports: &'a mut Vec<IndexPhaseReport>,
+}
+
+impl<'a> ProgressRecorder<'a> {
+    fn new(
+        on_progress: &'a dyn Fn(IndexProgress),
+        started: Instant,
+        phase_reports: &'a mut Vec<IndexPhaseReport>,
+    ) -> Self {
+        Self {
+            on_progress,
+            started,
+            phase_reports,
+        }
+    }
+
+    fn emit(&mut self, event: ProgressEvent) {
+        emit_progress(self.on_progress, self.phase_reports, self.started, event);
+    }
+
+    fn emit_transient(&self, event: ProgressEvent) {
+        (self.on_progress)(IndexProgress::from_event(self.started, event));
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct AnalysisCounts {
     static_facts: usize,
     resolver_facts: usize,
@@ -396,17 +707,24 @@ struct AnalysisCounts {
     architecture_facts: usize,
 }
 
-fn index_quality(
-    root: &Path,
-    config: &OkConfig,
-    scip_report: Option<&ScipIndexReport>,
+struct IndexQualityInput<'a> {
+    root: &'a Path,
+    config: &'a OkConfig,
+    scip_report: Option<&'a ScipIndexReport>,
     test_count: usize,
     import_count: usize,
     analysis: AnalysisCounts,
-    resolver_quality_notes: &[String],
-) -> IndexQuality {
+    quality_notes: &'a [String],
+    mode: IndexMode,
+    phase_reports: &'a [IndexPhaseReport],
+}
+
+fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
     let mut quality_notes = Vec::new();
-    quality_notes.extend(resolver_quality_notes.iter().cloned());
+    quality_notes.extend(input.quality_notes.iter().cloned());
+    let root = input.root;
+    let config = input.config;
+    let analysis = input.analysis;
     let build_systems = detect_build_systems(root);
     let codeql_databases = detect_codeql_databases(root);
     let coverage_reports = count_analysis_artifacts(root, &["jacoco.xml", "coverage.xml"]);
@@ -466,7 +784,7 @@ fn index_quality(
         ));
     }
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
-    if let Some(report) = scip_report {
+    if let Some(report) = input.scip_report {
         if report.imported_paths.is_empty() {
             quality_notes.push("SCIP was enabled but no SCIP index was imported".into());
         }
@@ -489,14 +807,16 @@ fn index_quality(
             }
         }
         IndexQuality {
+            index_mode: input.mode,
+            phase_reports: input.phase_reports.to_vec(),
             scip_enabled: config.scip.enabled,
             scip_mode,
             scip_indexes_imported: report.imported_paths.len(),
             scip_symbols: report.symbols,
             scip_occurrences: report.occurrences,
             scip_exact_references: report.exact_references,
-            test_count,
-            import_count,
+            test_count: input.test_count,
+            import_count: input.import_count,
             build_systems,
             codeql_databases,
             coverage_reports,
@@ -514,14 +834,16 @@ fn index_quality(
                 .push("SCIP disabled; symbol references use tree-sitter/import heuristics".into());
         }
         IndexQuality {
+            index_mode: input.mode,
+            phase_reports: input.phase_reports.to_vec(),
             scip_enabled: config.scip.enabled,
             scip_mode,
             scip_indexes_imported: 0,
             scip_symbols: 0,
             scip_occurrences: 0,
             scip_exact_references: 0,
-            test_count,
-            import_count,
+            test_count: input.test_count,
+            import_count: input.import_count,
             build_systems,
             codeql_databases,
             coverage_reports,
@@ -1309,6 +1631,47 @@ fn should_emit_progress(done: usize, total: usize) -> bool {
     done == total || done % 500 == 0
 }
 
+fn mode_quality_notes(mode: IndexMode) -> Vec<String> {
+    match mode {
+        IndexMode::Full => Vec::new(),
+        IndexMode::Balanced => vec![
+            "balanced mode: trust-critical passes enabled; expensive optional passes may be skipped when configured"
+                .into(),
+        ],
+        IndexMode::Fast => vec![
+            "fast mode: docs, examples, generated files, vendor paths, testdata, unsupported files, and oversized files may be skipped"
+                .into(),
+        ],
+        IndexMode::CrossProject => vec![
+            "cross-project mode: source parsing skipped; link already-indexed projects only".into(),
+        ],
+    }
+}
+
+fn fast_mode_skip_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        matches!(
+            value.as_str(),
+            "docs"
+                | "doc"
+                | "examples"
+                | "example"
+                | "testdata"
+                | "fixtures"
+                | "fixture"
+                | "samples"
+                | "sample"
+                | "generated"
+                | "vendor"
+                | "third_party"
+        ) || value.contains(".generated.")
+            || value.ends_with(".generated.rs")
+            || value.ends_with(".generated.ts")
+            || value.ends_with(".generated.js")
+    })
+}
+
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -1470,8 +1833,8 @@ mod tests {
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
         CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitChangeKind, GitCommitId,
-        GitCommitRecord, GitFileTouch, HistoryRecordId, Language, LineRange, Owner, RepositoryId,
-        Symbol, SymbolId, SymbolKind,
+        GitCommitRecord, GitFileTouch, HistoryRecordId, IndexMode, Language, LineRange, Owner,
+        RepositoryId, Symbol, SymbolId, SymbolKind,
     };
     use std::process::Command;
 
@@ -1611,6 +1974,118 @@ class Util {
             .semantic_provider_notes
             .iter()
             .any(|note| note.contains("import resolver facts detected")));
+    }
+
+    #[test]
+    fn index_modes_are_stored_with_phase_reports_and_caveats() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("examples")).unwrap();
+        std::fs::create_dir_all(root.join("testdata")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+        std::fs::write(root.join("docs/guide.rs"), "pub fn docs_only() {}\n").unwrap();
+        std::fs::write(root.join("examples/demo.rs"), "pub fn demo() {}\n").unwrap();
+        std::fs::write(root.join("testdata/case.rs"), "pub fn fixture() {}\n").unwrap();
+        std::fs::write(
+            root.join("src/schema.generated.rs"),
+            "// @generated\npub fn generated() {}\n",
+        )
+        .unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+
+        let full = Indexer::default().index_repo(root, &config).unwrap();
+        assert_eq!(full.manifest.index_mode, IndexMode::Full);
+        assert_eq!(full.manifest.quality.index_mode, IndexMode::Full);
+        assert!(!full.manifest.phase_reports.is_empty());
+        assert!(full
+            .manifest
+            .phase_reports
+            .iter()
+            .any(|report| report.phase == "scan"));
+
+        let fast = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert_eq!(fast.manifest.index_mode, IndexMode::Fast);
+        assert_eq!(fast.manifest.quality.index_mode, IndexMode::Fast);
+        assert_eq!(fast.manifest.file_count, 1);
+        assert!(fast
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .any(|note| note.contains("fast mode")));
+        assert!(fast
+            .manifest
+            .phase_reports
+            .iter()
+            .any(|report| report.phase == "scan" && report.skipped >= 4));
+    }
+
+    #[test]
+    fn balanced_mode_keeps_trust_critical_passes_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn issue_token() -> &'static str { \"token\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tests/auth_test.rs"),
+            "#[test]\nfn login_returns_valid_token() { assert_eq!(\"token\", \"token\"); }\n",
+        )
+        .unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Balanced)
+            .unwrap();
+        assert_eq!(snapshot.manifest.index_mode, IndexMode::Balanced);
+        assert!(snapshot.manifest.quality.test_count > 0);
+        assert!(snapshot
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .any(|note| note.contains("balanced mode")));
+    }
+
+    #[test]
+    fn cross_project_mode_records_status_without_parsing_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn should_not_parse() {}\n").unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::CrossProject)
+            .unwrap();
+        assert_eq!(snapshot.manifest.index_mode, IndexMode::CrossProject);
+        assert_eq!(snapshot.manifest.file_count, 0);
+        assert_eq!(snapshot.manifest.symbol_count, 0);
+        assert_eq!(snapshot.manifest.chunk_count, 0);
+        assert!(snapshot.files.is_empty());
+        assert!(snapshot
+            .manifest
+            .quality
+            .quality_notes
+            .iter()
+            .any(|note| note.contains("source parsing skipped")));
     }
 
     #[test]

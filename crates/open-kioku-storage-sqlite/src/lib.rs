@@ -2125,6 +2125,8 @@ mod tests {
             chunk_count: 0,
             indexed_at: Utc::now(),
             schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
             quality: IndexQuality::default(),
         }
     }
