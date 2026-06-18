@@ -1447,7 +1447,9 @@ impl GraphStore for SqliteStore {
         let offset = offset as i64;
         let type_str = format!("{:?}", node_type);
         let mut stmt = conn
-            .prepare("SELECT json FROM graph_nodes WHERE node_type = ?1 LIMIT ?2 OFFSET ?3")
+            .prepare(
+                "SELECT json FROM graph_nodes WHERE node_type = ?1 ORDER BY id LIMIT ?2 OFFSET ?3",
+            )
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![type_str, limit, offset], |row| {
@@ -1471,7 +1473,9 @@ impl GraphStore for SqliteStore {
         let offset = offset as i64;
         let type_str = format!("{:?}", edge_type);
         let mut stmt = conn
-            .prepare("SELECT json FROM graph_edges WHERE edge_type = ?1 LIMIT ?2 OFFSET ?3")
+            .prepare(
+                "SELECT json FROM graph_edges WHERE edge_type = ?1 ORDER BY id LIMIT ?2 OFFSET ?3",
+            )
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![type_str, limit, offset], |row| {
@@ -1540,7 +1544,7 @@ impl GraphStore for SqliteStore {
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let limit = clamp_limit(limit) as i64;
         let mut stmt = conn
-            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1 AND to_id = ?2 LIMIT ?3")
+            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1 AND to_id = ?2 ORDER BY id LIMIT ?3")
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![from, to, limit], |row| row.get::<_, String>(0))
@@ -2727,14 +2731,22 @@ mod tests {
         };
         let node2 = GraphNode {
             id: NodeId::new("n2"),
+            node_type: GraphNodeType::File,
+            ..Default::default()
+        };
+        let node3 = GraphNode {
+            id: NodeId::new("n3"),
             node_type: GraphNodeType::Function,
             ..Default::default()
         };
-        store.replace_graph(&[node1, node2], &[]).unwrap();
+        store
+            .replace_graph(&[node2.clone(), node3.clone(), node1.clone()], &[])
+            .unwrap();
 
         let nodes = store.nodes_by_type(GraphNodeType::File, 10, 0).unwrap();
-        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].id.0, "n1");
+        assert_eq!(nodes[1].id.0, "n2");
     }
 
     #[test]
@@ -2759,16 +2771,27 @@ mod tests {
             id: EdgeId::new("e2"),
             from: NodeId::new("n1"),
             to: NodeId::new("n2"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        let edge3 = GraphEdge {
+            id: EdgeId::new("e3"),
+            from: NodeId::new("n1"),
+            to: NodeId::new("n2"),
             edge_type: GraphEdgeType::Defines,
             ..Default::default()
         };
         store
-            .replace_graph(&[node1, node2], &[edge1, edge2])
+            .replace_graph(
+                &[node1, node2],
+                &[edge2.clone(), edge3.clone(), edge1.clone()],
+            )
             .unwrap();
 
         let edges = store.edges_by_type(GraphEdgeType::Calls, 10, 0).unwrap();
-        assert_eq!(edges.len(), 1);
+        assert_eq!(edges.len(), 2);
         assert_eq!(edges[0].id.0, "e1");
+        assert_eq!(edges[1].id.0, "e2");
     }
 
     #[test]
@@ -2795,11 +2818,12 @@ mod tests {
             ..Default::default()
         };
         store
-            .replace_graph(&[node1, node2], &[edge1, edge2])
+            .replace_graph(&[node1, node2], &[edge2.clone(), edge1.clone()])
             .unwrap();
 
         let edges = store.graph_edges_between("n1", "n2", 1).unwrap();
         assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].id.0, "e1");
     }
 
     #[test]
