@@ -7,8 +7,8 @@ use open_kioku_config::{
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
-    Confidence, ContextHandleId, EvidenceSourceType, FileProvenance, IndexManifest, PlanReport,
-    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
+    Confidence, ContextHandleId, EvidenceSourceType, FileProvenance, IndexManifest, IndexMode,
+    PlanReport, ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -64,6 +64,8 @@ enum Command {
         repo: PathBuf,
         #[arg(long = "with-scip", value_parser = ["off", "consume", "auto", "required"])]
         with_scip: Option<String>,
+        #[arg(long, default_value = "full")]
+        mode: String,
     },
     /// Keep the local index current while repository files change.
     Watch {
@@ -976,17 +978,20 @@ async fn main() -> anyhow::Result<()> {
         Command::Index {
             repo: command_repo,
             with_scip,
+            mode,
         } => {
             let repo = resolve_repo(&repo, command_repo);
-            let snapshot = index_repo_with_scip_mode(&repo, with_scip.as_deref())?;
+            let mode = parse_index_mode(&mode)?;
+            let snapshot = index_repo_with_scip_mode(&repo, with_scip.as_deref(), mode)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&snapshot.manifest)?);
             } else {
                 println!(
-                    "Indexed {} files, {} symbols, {} chunks",
+                    "Indexed {} files, {} symbols, {} chunks in {} mode",
                     snapshot.manifest.file_count,
                     snapshot.manifest.symbol_count,
-                    snapshot.manifest.chunk_count
+                    snapshot.manifest.chunk_count,
+                    snapshot.manifest.index_mode
                 );
                 if let Some(scip) = &snapshot.scip {
                     println!(
@@ -1046,8 +1051,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             } else if let Some(manifest) = manifest {
                 println!(
-                    "Healthy index: {} files, {} symbols, indexed at {}",
-                    manifest.file_count, manifest.symbol_count, manifest.indexed_at
+                    "Healthy index: {} files, {} symbols, mode {}, indexed at {}",
+                    manifest.file_count,
+                    manifest.symbol_count,
+                    manifest.index_mode,
+                    manifest.indexed_at
                 );
             } else {
                 println!("No index found. Run `ok index .`.");
@@ -2002,6 +2010,7 @@ fn render_status_markdown(
     out.push_str("\n## Index\n\n");
     if let Some(manifest) = manifest {
         out.push_str("| Metric | Value |\n| --- | ---: |\n");
+        out.push_str(&format!("| Mode | `{}` |\n", manifest.index_mode));
         out.push_str(&format!("| Files | {} |\n", manifest.file_count));
         out.push_str(&format!("| Symbols | {} |\n", manifest.symbol_count));
         out.push_str(&format!("| Chunks | {} |\n", manifest.chunk_count));
@@ -4968,31 +4977,34 @@ fn build_context_pack(
 }
 
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
-    index_repo_with_config(repo, OkConfig::load_from_repo(repo)?)
+    index_repo_with_config(repo, OkConfig::load_from_repo(repo)?, IndexMode::Full)
 }
 
 fn index_repo_with_scip_mode(
     repo: &Path,
     with_scip: Option<&str>,
+    mode: IndexMode,
 ) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let mut config = OkConfig::load_from_repo(repo)?;
     if let Some(mode) = with_scip {
         config.scip.enabled = mode != "off";
         config.scip.mode = parse_scip_mode(mode)?;
     }
-    index_repo_with_config(repo, config)
+    index_repo_with_config(repo, config, mode)
 }
 
 fn index_repo_with_config(
     repo: &Path,
     config: OkConfig,
+    mode: IndexMode,
 ) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
     let _lock = IndexWriteLock::acquire(repo, &reporter)?;
     let index_reporter = Arc::clone(&reporter);
-    let (snapshot, history) = Indexer::default().index_repo_with_history_and_progress(
+    let (snapshot, history) = Indexer::default().index_repo_with_history_mode_and_progress(
         repo,
         &config,
+        mode,
         move |progress| {
             report_index_progress(&index_reporter, progress);
         },
@@ -5079,6 +5091,18 @@ fn parse_scip_mode(value: &str) -> anyhow::Result<ScipMode> {
         "auto" => Ok(ScipMode::Auto),
         "required" => Ok(ScipMode::Required),
         other => anyhow::bail!("unsupported SCIP mode: {other}"),
+    }
+}
+
+fn parse_index_mode(value: &str) -> anyhow::Result<IndexMode> {
+    match value {
+        "full" => Ok(IndexMode::Full),
+        "balanced" => Ok(IndexMode::Balanced),
+        "fast" => Ok(IndexMode::Fast),
+        "cross-project" | "cross_project" => Ok(IndexMode::CrossProject),
+        other => anyhow::bail!(
+            "unsupported index mode: {other}; expected full, balanced, fast, or cross-project"
+        ),
     }
 }
 

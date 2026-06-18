@@ -345,6 +345,8 @@ mod tests {
             chunk_count: 1,
             indexed_at,
             schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
             quality: IndexQuality {
                 scip_exact_references: 2,
                 runtime_analysis_facts: 3,

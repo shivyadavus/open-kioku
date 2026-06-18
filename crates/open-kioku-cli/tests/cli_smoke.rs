@@ -260,6 +260,60 @@ fn init_index_search_and_doctor_work_together() {
 }
 
 #[test]
+fn index_mode_is_reported_by_index_and_status_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+    fs::write(repo.join("docs/guide.rs"), "pub fn docs_only() {}\n").unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+
+    let indexed = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("index")
+            .arg(repo)
+            .arg("--mode")
+            .arg("fast");
+        command
+    });
+    let indexed: serde_json::Value = serde_json::from_str(&indexed).unwrap();
+    assert_eq!(indexed["index_mode"], "fast");
+    assert!(indexed["phase_reports"].as_array().unwrap().len() >= 2);
+    assert!(indexed["quality"]["quality_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap_or_default().contains("fast mode")));
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--json").arg("status").arg(repo);
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["index_mode"], "fast");
+
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("index")
+            .arg(repo)
+            .arg("--mode")
+            .arg("unsupported");
+        command
+    });
+    assert!(stderr.contains("unsupported index mode"));
+}
+
+#[test]
 fn mcp_install_prints_client_config() {
     let temp = tempfile::tempdir().unwrap();
     let output = run({

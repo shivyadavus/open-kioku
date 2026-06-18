@@ -653,6 +653,8 @@ mod tests {
             chunk_count: 2,
             indexed_at: Utc::now(),
             schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
             quality: IndexQuality::default(),
         };
 
@@ -821,6 +823,8 @@ mod tests {
             chunk_count: chunks.len(),
             indexed_at: Utc::now(),
             schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
             quality: IndexQuality::default(),
         };
 
