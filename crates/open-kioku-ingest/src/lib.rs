@@ -23,6 +23,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod resolver;
+pub mod symbol_registry;
 
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
@@ -169,6 +170,14 @@ impl Indexer {
         let resolver_report = resolver::resolve_imports(&root, &files, &symbols, &imports)?;
         let resolver_fact_count = resolver_report.analysis_facts.len();
         analysis_facts.extend(resolver_report.analysis_facts.clone());
+        let registry_report = symbol_registry::resolve_symbol_edges(
+            &chunks,
+            &symbols,
+            &resolver_report.resolutions,
+            config.scip.enabled,
+        );
+        let registry_fact_count = registry_report.analysis_facts.len();
+        analysis_facts.extend(registry_report.analysis_facts);
         let static_analysis_facts = analysis_facts.len();
         on_progress(IndexProgress {
             phase: "analysis",
@@ -244,6 +253,8 @@ impl Indexer {
             commit: open_kioku_git::commit(&root),
             indexed_at: Some(Utc::now()),
         };
+        let mut resolver_quality_notes = resolver_report.quality_notes.clone();
+        resolver_quality_notes.extend(registry_report.quality_notes);
         let quality = index_quality(
             &root,
             config,
@@ -253,11 +264,12 @@ impl Indexer {
             AnalysisCounts {
                 static_facts: static_analysis_facts,
                 resolver_facts: resolver_fact_count,
+                registry_facts: registry_fact_count,
                 runtime_facts: runtime_analysis_facts,
                 git_history_facts: git_history_fact_count,
                 architecture_facts: arch_fact_count,
             },
-            &resolver_report.quality_notes,
+            &resolver_quality_notes,
         );
         let manifest = IndexManifest {
             repository,
@@ -378,6 +390,7 @@ impl Indexer {
 struct AnalysisCounts {
     static_facts: usize,
     resolver_facts: usize,
+    registry_facts: usize,
     runtime_facts: usize,
     git_history_facts: usize,
     architecture_facts: usize,
@@ -426,6 +439,12 @@ fn index_quality(
         semantic_provider_notes.push(format!(
             "import resolver facts detected: {}",
             analysis.resolver_facts
+        ));
+    }
+    if analysis.registry_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "symbol registry facts detected: {}",
+            analysis.registry_facts
         ));
     }
     if analysis.runtime_facts > 0 {
@@ -1510,7 +1529,17 @@ class ExampleTests extends BaseTests {
   @GetMapping("/example")
   void works() {
     System.getenv("EXAMPLE_REGION");
+    helper();
   }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/test/java/org/example/Util.java"),
+            r#"package org.example;
+class Util {
+  void helper() {}
 }
 "#,
         )
@@ -1552,6 +1581,12 @@ class ExampleTests extends BaseTests {
             .analysis_facts
             .iter()
             .any(|fact| fact.source.starts_with("open-kioku-import-resolver/")));
+        assert!(snapshot
+            .manifest
+            .quality
+            .semantic_provider_notes
+            .iter()
+            .any(|note| note.contains("symbol registry facts detected")));
         assert!(snapshot
             .analysis_facts
             .iter()
