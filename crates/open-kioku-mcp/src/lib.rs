@@ -549,10 +549,17 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
         .or_else(|| params.get("pattern"))
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("code");
     let index_dir = default_index_dir(repo);
     if TantivySearchIndex::exists(&index_dir) {
         let index = TantivySearchIndex::open_or_create(index_dir)?;
+        if mode == "graph" {
+            return Ok(json!(index.search_graph(query, limit(params))?));
+        }
         return Ok(json!(index.search(query, limit(params))?));
+    }
+    if mode == "graph" {
+        anyhow::bail!("graph search index is missing; run `ok index .` first");
     }
     let files = store.list_files(usize::MAX, 0)?;
     let chunks = store.all_chunks()?;
@@ -679,8 +686,8 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("detect_architecture", "Detect high-level architectural components and directories in the repository based on file layouts.", json!({"type":"object","properties":{}})),
         ("architecture_boundaries", "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Report any import or boundary violations that deviate from the defined codebase architecture rules.", json!({"type":"object","properties":{}})),
-        ("search_code", "Perform a lexical BM25 search across all indexed code chunks. Returns snippet matches, line numbers, and relevance scores. Best for general code search.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, or identifiers."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
-        ("search_files", "Search indexed file names and contents for specific keywords or file path patterns.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths and file contents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
+        ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
+        ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
         ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
         ("semantic_status", "Report the current status, readiness, and staleness of the local semantic vector index.", json!({"type":"object","properties":{}})),
         ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
