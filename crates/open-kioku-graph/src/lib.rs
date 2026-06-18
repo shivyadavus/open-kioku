@@ -207,11 +207,8 @@ impl InMemoryGraph {
             buffer.upsert_node(target_node.clone());
 
             let edge_id = EdgeId::new(stable_id(&format!(
-                "analysis:{}:{}:{}:{:?}",
-                source_node.0,
-                fact.target,
-                format!("{:?}", fact.edge_type),
-                fact.source_type
+                "analysis:{}:{}:{:?}:{:?}",
+                source_node.0, fact.target, fact.edge_type, fact.source_type
             )));
 
             buffer.insert_edge(GraphEdge {
