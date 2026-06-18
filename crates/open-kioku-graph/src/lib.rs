@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 
 pub mod buffer;
+pub mod query;
 pub mod schema;
 
 pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};

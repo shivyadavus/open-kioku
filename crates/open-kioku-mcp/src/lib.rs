@@ -392,6 +392,127 @@ async fn dispatch(
             ));
             Ok(json!(schema))
         }
+        "query_evidence_graph" => {
+            let query_str = params
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize);
+
+            let ast = match open_kioku_graph::query::parse_graph_query(query_str) {
+                Ok(ast) => ast,
+                Err(e) => {
+                    let (kind, message) = match e {
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => {
+                            ("parse_error", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => {
+                            ("query_rejected", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => {
+                            ("unknown_node_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => {
+                            ("unknown_edge_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => {
+                            ("unsupported_filter", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => {
+                            (
+                                "depth_limit_exceeded",
+                                format!("requested {} exceeds limit", requested),
+                            )
+                        }
+                        open_kioku_graph::query::GraphQueryError::LimitExceeded(requested) => (
+                            "limit_exceeded",
+                            format!("requested {} exceeds limit", requested),
+                        ),
+                        open_kioku_graph::query::GraphQueryError::UnboundVariable(m) => {
+                            ("unbound_variable", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Timeout => {
+                            ("timeout", "Query execution timed out".to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => {
+                            ("storage_error", e.to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => {
+                            ("serde_error", e.to_string())
+                        }
+                    };
+                    return Ok(serde_json::json!({
+                        "error": {
+                            "kind": kind,
+                            "message": message,
+                        }
+                    }));
+                }
+            };
+
+            let mut options = open_kioku_graph::query::GraphQueryOptions::default();
+            if let Some(l) = limit {
+                options.limit = l;
+            }
+
+            match open_kioku_graph::query::execute_graph_query(
+                store as &dyn open_kioku_storage::GraphStore,
+                &ast,
+                options,
+            ) {
+                Ok(result) => Ok(serde_json::to_value(result)?),
+                Err(e) => {
+                    let (kind, message) = match e {
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => {
+                            ("parse_error", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => {
+                            ("query_rejected", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => {
+                            ("unknown_node_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => {
+                            ("unknown_edge_type", m)
+                        }
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => {
+                            ("unsupported_filter", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => {
+                            (
+                                "depth_limit_exceeded",
+                                format!("requested {} exceeds limit", requested),
+                            )
+                        }
+                        open_kioku_graph::query::GraphQueryError::LimitExceeded(requested) => (
+                            "limit_exceeded",
+                            format!("requested {} exceeds limit", requested),
+                        ),
+                        open_kioku_graph::query::GraphQueryError::UnboundVariable(m) => {
+                            ("unbound_variable", m.clone())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Timeout => {
+                            ("timeout", "Query execution timed out".to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => {
+                            ("storage_error", e.to_string())
+                        }
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => {
+                            ("serde_error", e.to_string())
+                        }
+                    };
+                    Ok(serde_json::json!({
+                        "error": {
+                            "kind": kind,
+                            "message": message,
+                        }
+                    }))
+                }
+            }
+        }
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
             Ok(json!(disabled_response(method)))
         }
@@ -595,6 +716,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),
         ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
+        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50."}}})),
     ];
 
     let write_tools: &[(&str, &str, Value)] = &[(

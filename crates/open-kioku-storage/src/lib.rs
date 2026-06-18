@@ -101,6 +101,11 @@ pub struct TypeStats {
 
 pub trait GraphStore: Send + Sync {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()>;
+    fn node_by_id(&self, _id: &str) -> Result<Option<GraphNode>> {
+        Err(OkError::Unsupported(
+            "node_by_id is not implemented by this graph store".into(),
+        ))
+    }
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)>;
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
 
