@@ -1,7 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, GraphEdgeType, GraphNodeType,
-    Import, Language, LineRange, ScoreComponent, Symbol, SymbolId, SymbolKind, TestTarget,
+    identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, GraphEdgeType,
+    GraphNodeType, Import, Language, LineRange, ScoreComponent, Symbol, SymbolId, SymbolKind,
+    TestTarget,
 };
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -215,7 +216,7 @@ fn extract_with_patterns(
             if let Some(captures) = regex.captures(line) {
                 if let Some(name) = captures.get(*capture) {
                     let line_number = (idx + 1) as u32;
-                    let qualified_name = qualified_name(file, name.as_str());
+                    let qualified_name = qualified_name(file, content, name.as_str());
                     symbols.push(Symbol {
                         id: SymbolId::new(stable_id(&format!(
                             "{}:{}:{}",
@@ -723,13 +724,15 @@ pub fn extract_tests(
         .collect()
 }
 
-fn qualified_name(file: &File, name: &str) -> String {
-    let stem = file
-        .path
-        .with_extension("")
-        .to_string_lossy()
-        .replace(['/', '\\'], "::");
-    format!("{stem}::{name}")
+fn qualified_name(file: &File, content: &str, name: &str) -> String {
+    identity::qualified_name(&file.path, &file.language, Some(content), name).unwrap_or_else(|_| {
+        let stem = file
+            .path
+            .with_extension("")
+            .to_string_lossy()
+            .replace(['/', '\\'], "::");
+        format!("{stem}::{name}")
+    })
 }
 
 fn stable_id(value: &str) -> String {
@@ -764,6 +767,7 @@ pub fn evidence_timestamp() -> chrono::DateTime<Utc> {
 mod tests {
     use super::{
         extract_analysis_facts, extract_chunks, extract_imports, extract_symbols, extract_tests,
+        qualified_name,
     };
     use open_kioku_core::{
         Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, Language,
@@ -853,6 +857,39 @@ mod tests {
         let symbols = extract_symbols(&file, src);
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"ApiClient") || !symbols.is_empty());
+    }
+
+    #[test]
+    fn qualified_names_follow_language_entrypoint_rules() {
+        let mut file = ts_file();
+        file.path = "src/index.ts".into();
+        assert_eq!(qualified_name(&file, "", "handler"), "src::handler");
+
+        file.path = "pkg/__init__.py".into();
+        file.language = Language::Python;
+        assert_eq!(qualified_name(&file, "", "Factory"), "pkg::Factory");
+
+        file.path = "src/api/mod.rs".into();
+        file.language = Language::Rust;
+        assert_eq!(qualified_name(&file, "", "run"), "src::api::run");
+
+        file.path = "src/main/java/com/acme/OrderController.java".into();
+        file.language = Language::Java;
+        assert_eq!(
+            qualified_name(
+                &file,
+                "package com.acme;\nclass OrderController {}",
+                "getOrder"
+            ),
+            "com::acme::OrderController::getOrder"
+        );
+
+        file.path = "internal/orders/handler.go".into();
+        file.language = Language::Go;
+        assert_eq!(
+            qualified_name(&file, "package orders\nfunc Load() {}", "Load"),
+            "orders::Load"
+        );
     }
 
     // ─── extract_imports ──────────────────────────────────────────────────────
