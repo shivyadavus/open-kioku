@@ -1314,6 +1314,8 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-storage",
+ "regex",
+ "serde",
  "serde_json",
  "sha2",
 ]
