@@ -582,6 +582,27 @@ pub struct Import {
     pub confidence: Confidence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionStatus {
+    Resolved,
+    Ambiguous { candidates: usize },
+    ExternalPackage,
+    Builtin,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportResolution {
+    pub import: Import,
+    pub status: ResolutionStatus,
+    pub target_file: Option<FileId>,
+    pub target_symbol: Option<SymbolId>,
+    pub confidence: Confidence,
+    pub strategy: String,
+    pub caveats: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AnalysisFact {
     pub id: String,
