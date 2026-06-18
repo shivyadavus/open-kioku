@@ -1,7 +1,8 @@
 use open_kioku_core::{
     AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge,
-    GitCommitRecord, GraphEdge, GraphNode, HistorySnapshot, HistorySummary, ImpactReport, Import,
-    IndexManifest, SearchResult, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistorySnapshot,
+    HistorySummary, ImpactReport, Import, IndexManifest, SearchResult, Symbol, SymbolId,
+    SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use std::path::Path;
@@ -79,6 +80,18 @@ pub struct IndexData<'a> {
     pub analysis_facts: &'a [AnalysisFact],
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphCounts {
+    pub nodes: usize,
+    pub edges: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphSchemaCounts {
+    pub node_types: std::collections::BTreeMap<String, usize>,
+    pub edge_types: std::collections::BTreeMap<String, usize>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TypeStats {
     pub count: usize,
@@ -97,6 +110,46 @@ pub trait GraphStore: Send + Sync {
 
     fn edge_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {
         Ok(std::collections::HashMap::new())
+    }
+
+    fn nodes_by_type(
+        &self,
+        _node_type: GraphNodeType,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<GraphNode>> {
+        Err(OkError::Unsupported(
+            "nodes_by_type is not implemented by this graph store".into(),
+        ))
+    }
+
+    fn edges_by_type(
+        &self,
+        _edge_type: GraphEdgeType,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<GraphEdge>> {
+        Err(OkError::Unsupported(
+            "edges_by_type is not implemented by this graph store".into(),
+        ))
+    }
+
+    fn graph_counts(&self) -> Result<GraphCounts> {
+        Err(OkError::Unsupported(
+            "graph_counts is not implemented by this graph store".into(),
+        ))
+    }
+
+    fn graph_schema_counts(&self) -> Result<GraphSchemaCounts> {
+        Err(OkError::Unsupported(
+            "graph_schema_counts is not implemented by this graph store".into(),
+        ))
+    }
+
+    fn graph_edges_between(&self, _from: &str, _to: &str, _limit: usize) -> Result<Vec<GraphEdge>> {
+        Err(OkError::Unsupported(
+            "graph_edges_between is not implemented by this graph store".into(),
+        ))
     }
 }
 
