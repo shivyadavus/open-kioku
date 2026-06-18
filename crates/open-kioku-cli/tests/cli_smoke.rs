@@ -369,6 +369,24 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(search.contains("src/auth.rs"));
 
+    let graph_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--kind")
+            .arg("graph")
+            .arg("issue token")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    assert!(graph_search.contains("graph node identifier match"));
+    assert!(graph_search.contains("graph_node_identifier"));
+    assert!(graph_search.contains("issue_token"));
+
     let explained_search = run({
         let mut command = ok();
         command
