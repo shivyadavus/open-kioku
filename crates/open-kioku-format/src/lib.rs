@@ -614,6 +614,7 @@ mod tests {
                 confidence: Confidence::Medium,
                 message: "rendered".into(),
                 indexed_at: Utc::now(),
+                ..Default::default()
             }],
             evidence_by_section: std::collections::BTreeMap::new(),
             negative_evidence: Vec::new(),

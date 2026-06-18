@@ -748,6 +748,18 @@ mod tests {
         ) -> Result<Vec<GraphEdge>> {
             Ok(Vec::new())
         }
+
+        fn node_type_stats(
+            &self,
+        ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+            Ok(std::collections::HashMap::new())
+        }
+
+        fn edge_type_stats(
+            &self,
+        ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+            Ok(std::collections::HashMap::new())
+        }
     }
 
     #[test]

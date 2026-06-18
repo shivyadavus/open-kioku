@@ -1,73 +1,106 @@
 use open_kioku_core::{EdgeTypeSpec, EvidenceGraphSchema, NodeTypeSpec, PropertySpec};
 
-pub fn current_schema() -> EvidenceGraphSchema {
+pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> EvidenceGraphSchema {
     let node_variants = vec![
-        "file",
-        "directory",
-        "module",
-        "package",
-        "class",
-        "trait",
-        "interface",
-        "function",
-        "method",
-        "field",
-        "endpoint",
-        "database_table",
-        "collection",
-        "queue",
-        "topic",
-        "config_key",
-        "test",
-        "build_target",
-        "runtime_error",
-        "ticket",
-        "pull_request",
-        "architecture_component",
+        "File",
+        "Directory",
+        "Module",
+        "Package",
+        "Class",
+        "Trait",
+        "Interface",
+        "Function",
+        "Method",
+        "Field",
+        "Endpoint",
+        "DatabaseTable",
+        "Collection",
+        "Queue",
+        "Topic",
+        "ConfigKey",
+        "Test",
+        "BuildTarget",
+        "RuntimeError",
+        "Ticket",
+        "PullRequest",
+        "ArchitectureComponent",
     ];
 
     let edge_variants = vec![
-        "CONTAINS",
-        "DEFINES",
-        "REFERENCES",
-        "CALLS",
-        "IMPLEMENTS",
-        "EXTENDS",
-        "IMPORTS",
-        "DEPENDS_ON",
-        "EXPOSES_ENDPOINT",
-        "CALLS_ENDPOINT",
-        "READS_CONFIG",
-        "WRITES_CONFIG",
-        "READS_TABLE",
-        "WRITES_TABLE",
-        "PUBLISHES_EVENT",
-        "CONSUMES_EVENT",
-        "TESTS",
-        "OWNED_BY",
-        "CHANGED_BY",
-        "FAILED_IN",
-        "BELONGS_TO",
-        "MENTIONED_IN",
-        "RELATED_TO_TICKET",
+        "Contains",
+        "Defines",
+        "References",
+        "Calls",
+        "Implements",
+        "Extends",
+        "Imports",
+        "DependsOn",
+        "ExposesEndpoint",
+        "CallsEndpoint",
+        "ReadsConfig",
+        "WritesConfig",
+        "ReadsTable",
+        "WritesTable",
+        "PublishesEvent",
+        "ConsumesEvent",
+        "Tests",
+        "OwnedBy",
+        "ChangedBy",
+        "FailedIn",
+        "BelongsTo",
+        "MentionedIn",
+        "RelatedToTicket",
     ];
+
+    let node_stats = store.and_then(|s| s.node_type_stats().ok());
+    let edge_stats = store.and_then(|s| s.edge_type_stats().ok());
 
     let mut node_types = Vec::new();
     for name in node_variants {
+        let mut count = None;
+        let mut evidence_available = None;
+        let mut freshness = None;
+
+        if let Some(stats) = &node_stats {
+            if let Some(s) = stats.get(name) {
+                count = Some(s.count);
+                evidence_available = Some(s.evidence_available);
+                freshness = s.freshness.map(|v| v.to_string());
+            } else {
+                count = Some(0);
+                evidence_available = Some(false);
+            }
+        }
+
         node_types.push(NodeTypeSpec {
             name: name.to_string(),
             stable: true,
             description: format!("Node of type {}", name),
             required_fields: vec![],
             optional_fields: vec![],
-            count: None,
-            evidence_available: None,
-            freshness: None,
+            count,
+            evidence_available,
+            freshness,
         });
     }
 
     let mut edge_types = Vec::new();
     for name in edge_variants {
+        let mut count = None;
+        let mut evidence_available = None;
+        let mut freshness = None;
+
+        if let Some(stats) = &edge_stats {
+            if let Some(s) = stats.get(name) {
+                count = Some(s.count);
+                evidence_available = Some(s.evidence_available);
+                freshness = s.freshness.map(|v| v.to_string());
+            } else {
+                count = Some(0);
+                evidence_available = Some(false);
+            }
+        }
+
         edge_types.push(EdgeTypeSpec {
             name: name.to_string(),
             stable: true,
@@ -75,9 +108,9 @@ pub fn current_schema() -> EvidenceGraphSchema {
             source_types: vec![],
             target_types: vec![],
             required_evidence: vec![],
-            count: None,
-            evidence_available: None,
-            freshness: None,
+            count,
+            evidence_available,
+            freshness,
         });
     }
 
@@ -111,8 +144,8 @@ mod tests {
 
     #[test]
     fn test_schema_json_deterministic() {
-        let schema1 = current_schema();
-        let schema2 = current_schema();
+        let schema1 = current_schema(None);
+        let schema2 = current_schema(None);
 
         let json1 = serde_json::to_string(&schema1).unwrap();
         let json2 = serde_json::to_string(&schema2).unwrap();

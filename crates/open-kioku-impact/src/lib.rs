@@ -184,6 +184,7 @@ impl<'a> ImpactEngine<'a> {
                 "impact report derived from indexed symbols and lexical references".into()
             },
             indexed_at: Utc::now(),
+            ..Default::default()
         };
         let runtime_evidence = runtime_facts
             .iter()
@@ -382,6 +383,7 @@ fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         confidence: fact.confidence,
         message: format!("{}: {}", fact.message, fact.target),
         indexed_at: Utc::now(),
+        ..Default::default()
     }
 }
 
@@ -398,6 +400,7 @@ fn git_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         confidence: fact.confidence,
         message: format!("{}: {}", fact.message, fact.target),
         indexed_at: Utc::now(),
+        ..Default::default()
     }
 }
 

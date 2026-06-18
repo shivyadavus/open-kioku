@@ -2230,6 +2230,10 @@ mod tests {
                 "context pack used persisted search results without full-table impact expansion"
                     .into(),
             indexed_at: Utc::now(),
+
+            confidence_score: None,
+            confidence_reason: None,
+            freshness: None,
         };
         let primary = SearchResult {
             path: PathBuf::from("src/auth.rs"),
@@ -2320,6 +2324,10 @@ mod tests {
                 "context pack used persisted search results without full-table impact expansion"
                     .into(),
             indexed_at: Utc::now(),
+
+            confidence_score: None,
+            confidence_reason: None,
+            freshness: None,
         };
         let primary = SearchResult {
             path: PathBuf::from("src/EnterpriseRateValidator.java"),

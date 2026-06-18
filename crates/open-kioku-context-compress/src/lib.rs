@@ -104,6 +104,7 @@ impl ContextHandleStore {
                 confidence: Confidence::Medium,
                 message: "context pack compressed into reversible local handles".into(),
                 indexed_at: Utc::now(),
+                ..Default::default()
             }],
         })
     }

@@ -386,7 +386,12 @@ async fn dispatch(
                 json!({"denied": true, "reason": "apply_patch requires explicit stored patch approval flow"}),
             )
         }
-        "get_evidence_schema" => Ok(json!(open_kioku_graph::schema::current_schema())),
+        "get_evidence_schema" => {
+            let schema = open_kioku_graph::schema::current_schema(Some(
+                store as &dyn open_kioku_storage::GraphStore,
+            ));
+            Ok(json!(schema))
+        }
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
             Ok(json!(disabled_response(method)))
         }
