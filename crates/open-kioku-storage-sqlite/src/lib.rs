@@ -1269,22 +1269,26 @@ impl GraphStore for SqliteStore {
         tx.execute("DELETE FROM graph_nodes", [])
             .map_err(storage_err)?;
         for node in nodes {
+            let evidence_available = node.file_id.is_some() || node.symbol_id.is_some();
             tx.execute(
-                "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     &node.id.0,
                     &node.label,
                     format!("{:?}", node.node_type),
                     node.file_id.as_ref().map(|f| &f.0),
                     node.symbol_id.as_ref().map(|s| &s.0),
+                    evidence_available,
+                    0_i64,
                     serde_json::to_string(node)?
                 ],
             )
             .map_err(storage_err)?;
         }
         for edge in edges {
+            let freshness = edge.evidence.indexed_at.timestamp();
             tx.execute(
-                "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     &edge.id.0,
                     &edge.from.0,
@@ -1293,6 +1297,8 @@ impl GraphStore for SqliteStore {
                     format!("{:?}", edge.evidence.confidence),
                     format!("{:?}", edge.evidence.source_type),
                     &edge.evidence.source,
+                    true,
+                    freshness,
                     serde_json::to_string(edge)?
                 ],
             )
@@ -1302,38 +1308,50 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
-    fn node_type_counts(&self) -> Result<std::collections::HashMap<String, usize>> {
+    fn node_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT node_type, COUNT(*) FROM graph_nodes GROUP BY node_type")
+            .prepare("SELECT node_type, COUNT(*), MAX(evidence_available), MAX(freshness) FROM graph_nodes GROUP BY node_type")
             .map_err(storage_err)?;
         let mut rows = stmt.query([]).map_err(storage_err)?;
         let mut map = std::collections::HashMap::new();
         while let Some(row) = rows.next().map_err(storage_err)? {
             let t: String = row.get(0).map_err(storage_err)?;
             let c: i64 = row.get(1).map_err(storage_err)?;
-            map.insert(t, c as usize);
+            let ev: bool = row.get(2).unwrap_or(false);
+            let fr: Option<i64> = row.get(3).unwrap_or(None);
+            map.insert(t, open_kioku_storage::TypeStats {
+                count: c as usize,
+                evidence_available: ev,
+                freshness: fr.map(|v| v as u64),
+            });
         }
         Ok(map)
     }
 
-    fn edge_type_counts(&self) -> Result<std::collections::HashMap<String, usize>> {
+    fn edge_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT edge_type, COUNT(*) FROM graph_edges GROUP BY edge_type")
+            .prepare("SELECT edge_type, COUNT(*), MAX(evidence_available), MAX(freshness) FROM graph_edges GROUP BY edge_type")
             .map_err(storage_err)?;
         let mut rows = stmt.query([]).map_err(storage_err)?;
         let mut map = std::collections::HashMap::new();
         while let Some(row) = rows.next().map_err(storage_err)? {
             let t: String = row.get(0).map_err(storage_err)?;
             let c: i64 = row.get(1).map_err(storage_err)?;
-            map.insert(t, c as usize);
+            let ev: bool = row.get(2).unwrap_or(false);
+            let fr: Option<i64> = row.get(3).unwrap_or(None);
+            map.insert(t, open_kioku_storage::TypeStats {
+                count: c as usize,
+                evidence_available: ev,
+                freshness: fr.map(|v| v as u64),
+            });
         }
         Ok(map)
     }
@@ -1402,64 +1420,66 @@ impl GraphStore for SqliteStore {
     }
 }
 
+fn is_duplicate_column(err: &rusqlite::Error) -> bool {
+    if let rusqlite::Error::SqliteFailure(_, Some(msg)) = err {
+        msg.contains("duplicate column name")
+    } else {
+        false
+    }
+}
+
+fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<()> {
+    match conn.execute(stmt, []) {
+        Ok(_) => Ok(()),
+        Err(err) if is_duplicate_column(&err) => Ok(()),
+        Err(err) => Err(storage_err(err)),
+    }
+}
+
 fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     // Add columns to graph_nodes
-    let _ = conn.execute(
-        "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE graph_nodes ADD COLUMN file_id TEXT DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''",
-        [],
-    );
+    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN file_id TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN evidence_available BOOLEAN DEFAULT 0")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN freshness INTEGER DEFAULT 0")?;
 
     // Add columns to graph_edges
-    let _ = conn.execute(
-        "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''",
-        [],
-    );
+    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN evidence_available BOOLEAN DEFAULT 0")?;
+    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0")?;
 
     // Add indexes (these are idempotent via IF NOT EXISTS)
-    let _ = conn.execute(
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_file ON graph_nodes(file_id)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type)",
         [],
-    );
-    let _ = conn.execute(
+    ).map_err(storage_err)?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type)",
         [],
-    );
+    ).map_err(storage_err)?;
 
     Ok(())
 }

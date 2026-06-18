@@ -52,16 +52,28 @@ pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> Evi
         "RelatedToTicket",
     ];
 
-    let node_counts = store
-        .and_then(|s| s.node_type_counts().ok())
-        .unwrap_or_default();
-    let edge_counts = store
-        .and_then(|s| s.edge_type_counts().ok())
-        .unwrap_or_default();
+    let node_stats = store
+        .and_then(|s| s.node_type_stats().ok());
+    let edge_stats = store
+        .and_then(|s| s.edge_type_stats().ok());
 
     let mut node_types = Vec::new();
     for name in node_variants {
-        let count = node_counts.get(name).copied();
+        let mut count = None;
+        let mut evidence_available = None;
+        let mut freshness = None;
+
+        if let Some(stats) = &node_stats {
+            if let Some(s) = stats.get(name) {
+                count = Some(s.count);
+                evidence_available = Some(s.evidence_available);
+                freshness = s.freshness.map(|v| v.to_string());
+            } else {
+                count = Some(0);
+                evidence_available = Some(false);
+            }
+        }
+
         node_types.push(NodeTypeSpec {
             name: name.to_string(),
             stable: true,
@@ -69,14 +81,28 @@ pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> Evi
             required_fields: vec![],
             optional_fields: vec![],
             count,
-            evidence_available: None,
-            freshness: None,
+            evidence_available,
+            freshness,
         });
     }
 
     let mut edge_types = Vec::new();
     for name in edge_variants {
-        let count = edge_counts.get(name).copied();
+        let mut count = None;
+        let mut evidence_available = None;
+        let mut freshness = None;
+
+        if let Some(stats) = &edge_stats {
+            if let Some(s) = stats.get(name) {
+                count = Some(s.count);
+                evidence_available = Some(s.evidence_available);
+                freshness = s.freshness.map(|v| v.to_string());
+            } else {
+                count = Some(0);
+                evidence_available = Some(false);
+            }
+        }
+
         edge_types.push(EdgeTypeSpec {
             name: name.to_string(),
             stable: true,
@@ -85,8 +111,8 @@ pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> Evi
             target_types: vec![],
             required_evidence: vec![],
             count,
-            evidence_available: None,
-            freshness: None,
+            evidence_available,
+            freshness,
         });
     }
 
