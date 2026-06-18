@@ -1123,7 +1123,12 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::Graph { command } => match command {
             GraphCommand::Schema { format } => {
-                let schema = open_kioku_graph::schema::current_schema();
+                let store = open_store(&repo).ok();
+                let schema = open_kioku_graph::schema::current_schema(
+                    store
+                        .as_ref()
+                        .map(|s| s as &dyn open_kioku_storage::GraphStore),
+                );
                 if format.to_lowercase() == "markdown" {
                     let mut lines = vec![
                         format!("# Open Kioku Evidence Graph Schema v{}", schema.version),

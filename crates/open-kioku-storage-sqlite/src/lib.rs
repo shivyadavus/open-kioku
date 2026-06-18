@@ -1302,6 +1302,42 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
+    fn node_type_counts(&self) -> Result<std::collections::HashMap<String, usize>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT node_type, COUNT(*) FROM graph_nodes GROUP BY node_type")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let t: String = row.get(0).map_err(storage_err)?;
+            let c: i64 = row.get(1).map_err(storage_err)?;
+            map.insert(t, c as usize);
+        }
+        Ok(map)
+    }
+
+    fn edge_type_counts(&self) -> Result<std::collections::HashMap<String, usize>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT edge_type, COUNT(*) FROM graph_edges GROUP BY edge_type")
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        let mut map = std::collections::HashMap::new();
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let t: String = row.get(0).map_err(storage_err)?;
+            let c: i64 = row.get(1).map_err(storage_err)?;
+            map.insert(t, c as usize);
+        }
+        Ok(map)
+    }
+
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
         let conn = self
             .connection
