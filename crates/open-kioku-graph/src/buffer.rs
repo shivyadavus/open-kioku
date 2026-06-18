@@ -1,5 +1,7 @@
-use open_kioku_core::{Evidence, GraphEdge, GraphEdgeType, GraphNode, NodeId, EdgeId, EvidenceSourceType};
-use std::collections::{HashMap, BTreeSet};
+use open_kioku_core::{
+    EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
+};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default, Debug, Clone)]
 pub struct GraphBufferMergeReport {
@@ -26,7 +28,10 @@ pub struct WorkerGraphBuffer {
 
 impl WorkerGraphBuffer {
     pub fn new(worker_id: usize) -> Self {
-        Self { worker_id, inner: GraphBuffer::new() }
+        Self {
+            worker_id,
+            inner: GraphBuffer::new(),
+        }
     }
 
     pub fn into_inner(self) -> GraphBuffer {
@@ -166,7 +171,10 @@ impl GraphBuffer {
 
     pub fn insert_edge(&mut self, mut edge: GraphEdge) -> EdgeId {
         let key = (edge.from.clone(), edge.to.clone(), edge.edge_type.clone());
-        let expected_edge_id = EdgeId::new(format!("edge:{}:{}:{:?}", edge.from.0, edge.to.0, edge.edge_type));
+        let expected_edge_id = EdgeId::new(format!(
+            "edge:{}:{}:{:?}",
+            edge.from.0, edge.to.0, edge.edge_type
+        ));
         edge.id = expected_edge_id.clone();
 
         if let Some(&index) = self.edges_by_key.get(&key) {
@@ -174,21 +182,30 @@ impl GraphBuffer {
             let existing_rank = evidence_rank(&existing.evidence);
             let new_rank = evidence_rank(&edge.evidence);
 
-            if new_rank > existing_rank || (new_rank == existing_rank && edge.evidence.id.0 < existing.evidence.id.0) {
+            if new_rank > existing_rank
+                || (new_rank == existing_rank && edge.evidence.id.0 < existing.evidence.id.0)
+            {
                 let merged_msg = merge_messages(&edge.evidence.message, &existing.evidence.message);
                 edge.evidence.message = merged_msg;
                 merge_edge_metadata(&mut edge, existing.clone());
                 self.edges[index] = edge.clone();
             } else {
-                existing.evidence.message = merge_messages(&existing.evidence.message, &edge.evidence.message);
+                existing.evidence.message =
+                    merge_messages(&existing.evidence.message, &edge.evidence.message);
                 merge_edge_metadata(existing, edge);
             }
             self.edges[index].id.clone()
         } else {
             let index = self.edges.len();
             self.edges_by_key.insert(key.clone(), index);
-            self.edges_by_source_type.entry((edge.from.clone(), edge.edge_type.clone())).or_default().push(index);
-            self.edges_by_target_type.entry((edge.to.clone(), edge.edge_type.clone())).or_default().push(index);
+            self.edges_by_source_type
+                .entry((edge.from.clone(), edge.edge_type.clone()))
+                .or_default()
+                .push(index);
+            self.edges_by_target_type
+                .entry((edge.to.clone(), edge.edge_type.clone()))
+                .or_default()
+                .push(index);
             let id = edge.id.clone();
             self.edges.push(edge);
             id
@@ -242,10 +259,10 @@ mod tests {
         };
         let mut node2 = node1.clone();
         node2.label = "funcA_updated".into();
-        
+
         let id1 = buffer.upsert_node(node1);
         let id2 = buffer.upsert_node(node2);
-        
+
         assert_eq!(id1, id2);
         let (nodes, _) = buffer.into_parts();
         assert_eq!(nodes.len(), 1);
@@ -315,7 +332,7 @@ mod tests {
         let (_, edges2) = buffer2.into_parts();
         assert_eq!(edges2.len(), 1);
         assert_eq!(edges2[0].evidence.id.0, "evid_A");
-        
+
         // Edge ID itself should be deterministic based on the key
         assert_eq!(edges[0].id.0, "edge:n1:n2:Calls");
         assert_eq!(edges[0].id.0, edges2[0].id.0);
@@ -324,14 +341,26 @@ mod tests {
     #[test]
     fn test_deterministic_ordering() {
         let mut buffer = GraphBuffer::new();
-        let node1 = GraphNode { id: NodeId::new("B"), label: "B".into(), ..Default::default() };
-        let node2 = GraphNode { id: NodeId::new("A"), label: "A".into(), ..Default::default() };
-        let node3 = GraphNode { id: NodeId::new("C"), label: "C".into(), ..Default::default() };
-        
+        let node1 = GraphNode {
+            id: NodeId::new("B"),
+            label: "B".into(),
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("A"),
+            label: "A".into(),
+            ..Default::default()
+        };
+        let node3 = GraphNode {
+            id: NodeId::new("C"),
+            label: "C".into(),
+            ..Default::default()
+        };
+
         buffer.upsert_node(node1);
         buffer.upsert_node(node2);
         buffer.upsert_node(node3);
-        
+
         let (nodes, _) = buffer.into_parts();
         assert_eq!(nodes[0].id.0, "A");
         assert_eq!(nodes[1].id.0, "B");
@@ -341,12 +370,30 @@ mod tests {
     #[test]
     fn test_worker_merge() {
         let mut buffer1 = GraphBuffer::new();
-        buffer1.upsert_node(GraphNode { id: NodeId::new("1"), ..Default::default() });
-        buffer1.insert_edge(GraphEdge { id: EdgeId::new("e1"), from: NodeId::new("1"), to: NodeId::new("1"), edge_type: GraphEdgeType::Calls, ..Default::default() });
+        buffer1.upsert_node(GraphNode {
+            id: NodeId::new("1"),
+            ..Default::default()
+        });
+        buffer1.insert_edge(GraphEdge {
+            id: EdgeId::new("e1"),
+            from: NodeId::new("1"),
+            to: NodeId::new("1"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        });
 
         let mut buffer2 = GraphBuffer::new();
-        buffer2.upsert_node(GraphNode { id: NodeId::new("1"), ..Default::default() });
-        buffer2.insert_edge(GraphEdge { id: EdgeId::new("e2"), from: NodeId::new("1"), to: NodeId::new("1"), edge_type: GraphEdgeType::Calls, ..Default::default() });
+        buffer2.upsert_node(GraphNode {
+            id: NodeId::new("1"),
+            ..Default::default()
+        });
+        buffer2.insert_edge(GraphEdge {
+            id: EdgeId::new("e2"),
+            from: NodeId::new("1"),
+            to: NodeId::new("1"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        });
 
         let report = buffer1.merge(buffer2);
         assert_eq!(report.nodes_merged, 1);

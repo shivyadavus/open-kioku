@@ -190,9 +190,9 @@ impl InMemoryGraph {
                 .symbol_id
                 .as_ref()
                 .and_then(|symbol_id| {
-                    symbols_by_id.get(symbol_id.0.as_str()).map(|symbol| {
-                        NodeId::new(format!("symbol:{}", symbol.id.0))
-                    })
+                    symbols_by_id
+                        .get(symbol_id.0.as_str())
+                        .map(|symbol| NodeId::new(format!("symbol:{}", symbol.id.0)))
                 })
                 .unwrap_or_else(|| NodeId::new(format!("file:{}", file.path.display())));
 
@@ -236,13 +236,13 @@ impl InMemoryGraph {
                 ..Default::default()
             });
         }
-        
+
         let (nodes_vec, edges) = buffer.into_parts();
         let mut nodes = HashMap::new();
         for node in nodes_vec {
             nodes.insert(node.id.0.clone(), node);
         }
-        
+
         Self { nodes, edges }
     }
 
@@ -330,9 +330,8 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EvidenceSourceType, File, FileId,
-        GraphEdgeType, GraphNodeType, Import, Language, LineRange, RepositoryId, Symbol, SymbolId,
-        SymbolKind, SymbolOccurrence,
+        AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
+        Import, Language, LineRange, RepositoryId, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
     };
     use std::path::PathBuf;
 
@@ -523,10 +522,21 @@ mod tests {
             range: Some(LineRange { start: 2, end: 2 }),
             confidence: Confidence::High,
         };
-        
-        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[], &[], &[], &[import1, import2], &[]);
-        
-        let imports = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::Imports).collect::<Vec<_>>();
+
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[file],
+            &[],
+            &[],
+            &[],
+            &[import1, import2],
+            &[],
+        );
+
+        let imports = graph
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == GraphEdgeType::Imports)
+            .collect::<Vec<_>>();
         assert_eq!(imports.len(), 1);
     }
 
@@ -571,9 +581,20 @@ mod tests {
             provenance: EvidenceSourceType::Lsp,
         };
 
-        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[symbol], &[], &[occ1, occ2], &[], &[]);
-        
-        let refs = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::References).collect::<Vec<_>>();
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[file],
+            &[symbol],
+            &[],
+            &[occ1, occ2],
+            &[],
+            &[],
+        );
+
+        let refs = graph
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == GraphEdgeType::References)
+            .collect::<Vec<_>>();
         assert_eq!(refs.len(), 1);
     }
 
@@ -604,7 +625,11 @@ mod tests {
         };
 
         let graph = InMemoryGraph::from_index_with_analysis(&[file], &[], &[], &[], &[], &[fact]);
-        let edges = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::Calls).collect::<Vec<_>>();
+        let edges = graph
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == GraphEdgeType::Calls)
+            .collect::<Vec<_>>();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].evidence.message, "msg");
     }
@@ -631,10 +656,24 @@ mod tests {
             is_generated: false,
             is_vendor: false,
         };
-        
-        let graph1 = InMemoryGraph::from_index_with_analysis(&[file1.clone(), file2.clone()], &[], &[], &[], &[], &[]);
-        let graph2 = InMemoryGraph::from_index_with_analysis(&[file2.clone(), file1.clone()], &[], &[], &[], &[], &[]);
-        
+
+        let graph1 = InMemoryGraph::from_index_with_analysis(
+            &[file1.clone(), file2.clone()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let graph2 = InMemoryGraph::from_index_with_analysis(
+            &[file2.clone(), file1.clone()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+
         let mut keys1 = graph1.nodes.keys().collect::<Vec<_>>();
         keys1.sort();
         let mut keys2 = graph2.nodes.keys().collect::<Vec<_>>();
@@ -693,20 +732,51 @@ mod tests {
             message: "msg".into(),
         };
 
-        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[symbol], &[], &[occ], &[import], &[fact]);
-        
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[file],
+            &[symbol],
+            &[],
+            &[occ],
+            &[import],
+            &[fact],
+        );
+
         // Assert files
-        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::File));
+        assert!(graph
+            .nodes
+            .values()
+            .any(|n| n.node_type == GraphNodeType::File));
         // Assert symbols
-        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Function));
-        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::Defines));
+        assert!(graph
+            .nodes
+            .values()
+            .any(|n| n.node_type == GraphNodeType::Function));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|e| e.edge_type == GraphEdgeType::Defines));
         // Assert occurrences
-        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::References));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|e| e.edge_type == GraphEdgeType::References));
         // Assert imports
-        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::Imports));
-        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Module));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|e| e.edge_type == GraphEdgeType::Imports));
+        assert!(graph
+            .nodes
+            .values()
+            .any(|n| n.node_type == GraphNodeType::Module));
         // Assert facts
-        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::ExposesEndpoint));
-        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Endpoint));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|e| e.edge_type == GraphEdgeType::ExposesEndpoint));
+        assert!(graph
+            .nodes
+            .values()
+            .any(|n| n.node_type == GraphNodeType::Endpoint));
     }
 }
