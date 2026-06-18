@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const SQLITE_HISTORY_SCHEMA_VERSION: i64 = HISTORY_SCHEMA_VERSION as i64;
+const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
+const SQLITE_GRAPH_SCHEMA_VERSION: i64 = 2;
+const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_GRAPH_SCHEMA_VERSION;
 
 const HISTORY_SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS git_commits (
@@ -128,7 +130,7 @@ impl MetadataStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        ensure_supported_history_schema(&conn)?;
+        ensure_supported_sqlite_schema(&conn)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -1659,26 +1661,39 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     )
     .map_err(storage_err)?;
 
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_err)?;
+    if version < SQLITE_GRAPH_SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SQLITE_GRAPH_SCHEMA_VERSION)
+            .map_err(storage_err)?;
+    }
+
     Ok(())
 }
 
 fn migrate_history_schema(conn: &mut Connection) -> Result<()> {
-    ensure_supported_history_schema(conn)?;
+    ensure_supported_sqlite_schema(conn)?;
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_err)?;
     let tx = conn.transaction().map_err(storage_err)?;
     tx.execute_batch(HISTORY_SCHEMA_V1).map_err(storage_err)?;
-    tx.pragma_update(None, "user_version", SQLITE_HISTORY_SCHEMA_VERSION)
-        .map_err(storage_err)?;
+    if version < SQLITE_HISTORY_SCHEMA_VERSION {
+        tx.pragma_update(None, "user_version", SQLITE_HISTORY_SCHEMA_VERSION)
+            .map_err(storage_err)?;
+    }
     tx.commit().map_err(storage_err)?;
     Ok(())
 }
 
-fn ensure_supported_history_schema(conn: &Connection) -> Result<()> {
+fn ensure_supported_sqlite_schema(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(storage_err)?;
-    if version > SQLITE_HISTORY_SCHEMA_VERSION {
+    if version > SQLITE_SUPPORTED_SCHEMA_VERSION {
         return Err(OkError::Storage(format!(
-            "sqlite history schema version {version} is newer than supported version {SQLITE_HISTORY_SCHEMA_VERSION}"
+            "sqlite schema version {version} is newer than supported version {SQLITE_SUPPORTED_SCHEMA_VERSION}"
         )));
     }
     Ok(())
@@ -1936,7 +1951,7 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::SqliteStore;
+    use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION};
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
         AnalysisFact, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
@@ -1947,6 +1962,7 @@ mod tests {
     };
     use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
     use rusqlite::Connection;
+    use std::collections::BTreeMap;
 
     fn make_store() -> SqliteStore {
         SqliteStore::open(":memory:").expect("in-memory store")
@@ -2151,7 +2167,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, SQLITE_GRAPH_SCHEMA_VERSION);
         let history_table_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
@@ -2175,14 +2191,14 @@ mod tests {
     }
 
     #[test]
-    fn newer_history_schema_is_rejected_without_mutation() {
+    fn newer_sqlite_schema_is_rejected_without_mutation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("future.sqlite");
         let future = Connection::open(&path).unwrap();
         future
             .execute_batch(
                 r#"
-                PRAGMA user_version = 2;
+                PRAGMA user_version = 3;
                 CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);
                 "#,
             )
@@ -2193,7 +2209,7 @@ mod tests {
             Ok(_) => panic!("newer schema should be rejected"),
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("newer than supported version 1"));
+        assert!(error.contains("newer than supported version 2"));
 
         let conn = Connection::open(&path).unwrap();
         let current_table_count: i64 = conn
@@ -2621,6 +2637,103 @@ mod tests {
     }
 
     #[test]
+    fn graph_facts_with_properties_and_confidence_metadata_round_trip() {
+        let store = make_store();
+        let file = make_file("f1", "src/lib.rs");
+        let manifest = make_manifest();
+        let files = vec![file];
+        let data = IndexData {
+            manifest: &manifest,
+            files: &files,
+            symbols: &[],
+            occurrences: &[],
+            chunks: &[],
+            imports: &[],
+            tests: &[],
+            analysis_facts: &[],
+        };
+        store.replace_index(data).unwrap();
+
+        let node_a = GraphNode {
+            id: NodeId::new("file:src/lib.rs"),
+            node_type: GraphNodeType::File,
+            label: "src/lib.rs".into(),
+            file_id: Some(FileId::new("f1")),
+            properties: BTreeMap::from([("package".into(), serde_json::json!("open-kioku"))]),
+            schema_version: Some("graph-v1".into()),
+            source_pass: Some("tree_sitter".into()),
+            index_mode: Some("full".into()),
+            extractor_version: Some("test-extractor".into()),
+            ambiguity: vec!["generated file status unknown".into()],
+            quality_notes: vec!["file path verified".into()],
+            ..Default::default()
+        };
+        let node_b = GraphNode {
+            id: NodeId::new("symbol:s1"),
+            node_type: GraphNodeType::Function,
+            label: "worker".into(),
+            file_id: Some(FileId::new("f1")),
+            symbol_id: Some(SymbolId::new("s1")),
+            ..Default::default()
+        };
+        let mut edge_evidence = evidence();
+        edge_evidence.confidence_score = Some(0.98);
+        edge_evidence.confidence_reason = Some("exact symbol occurrence".into());
+        edge_evidence.freshness = Some("fresh".into());
+        let edge = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: node_a.id.clone(),
+            to: node_b.id.clone(),
+            edge_type: GraphEdgeType::Defines,
+            evidence: edge_evidence,
+            properties: BTreeMap::from([("relation".into(), serde_json::json!("definition"))]),
+            schema_version: Some("graph-v1".into()),
+            source_pass: Some("scip".into()),
+            index_mode: Some("full".into()),
+            extractor_version: Some("test-scip".into()),
+            ambiguity: vec!["macro expansion not modeled".into()],
+            quality_notes: vec!["exact definition edge".into()],
+        };
+
+        store
+            .replace_graph(
+                &[node_a.clone(), node_b.clone()],
+                std::slice::from_ref(&edge),
+            )
+            .unwrap();
+
+        let (nodes, edges) = store.neighbors("file:src/lib.rs", 10).unwrap();
+        let stored_node = nodes.iter().find(|node| node.id == node_a.id).unwrap();
+        assert_eq!(stored_node.properties, node_a.properties);
+        assert_eq!(stored_node.schema_version.as_deref(), Some("graph-v1"));
+        assert_eq!(stored_node.source_pass.as_deref(), Some("tree_sitter"));
+        assert_eq!(stored_node.quality_notes, vec!["file path verified"]);
+
+        assert_eq!(edges.len(), 1);
+        let stored_edge = &edges[0];
+        assert_eq!(stored_edge.properties, edge.properties);
+        assert_eq!(stored_edge.schema_version.as_deref(), Some("graph-v1"));
+        assert_eq!(stored_edge.evidence.confidence_score, Some(0.98));
+        assert_eq!(
+            stored_edge.evidence.confidence_reason.as_deref(),
+            Some("exact symbol occurrence")
+        );
+        assert_eq!(stored_edge.evidence.freshness.as_deref(), Some("fresh"));
+
+        let indexed_confidence: String = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT confidence FROM graph_edges WHERE id = 'e1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed_confidence, "Medium");
+    }
+
+    #[test]
     fn shortest_path_finds_direct_route() {
         let store = make_store();
         let file = make_file("f1", "src/lib.rs");
@@ -2707,6 +2820,7 @@ mod tests {
             conn.execute("CREATE TABLE graph_edges(id TEXT PRIMARY KEY, from_id TEXT, to_id TEXT, edge_type TEXT, json TEXT)", []).unwrap();
         }
         store.initialize().unwrap();
+        store.initialize().unwrap();
 
         let node = GraphNode {
             id: NodeId::new("test_node"),
@@ -2727,6 +2841,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+
+        let version: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SQLITE_GRAPH_SCHEMA_VERSION);
+
+        let index_count: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                     'idx_graph_nodes_type',
+                     'idx_graph_nodes_file',
+                     'idx_graph_nodes_symbol',
+                     'idx_graph_edges_type',
+                     'idx_graph_edges_from_type',
+                     'idx_graph_edges_to_type',
+                     'idx_graph_edges_source_type'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 7);
     }
 
     #[test]

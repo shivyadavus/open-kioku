@@ -1438,11 +1438,13 @@ pub struct PatchPlan {
 mod tests {
     use super::{
         reconcile_score_breakdown, score_component_total, Confidence, ConfidenceBreakdown,
-        ConfidenceSignalInput, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
-        GitSymbolTouch, HistoryRecordId, HistorySnapshot, HistorySummary, Owner, ScoreComponent,
-        SymbolId, HISTORY_SCHEMA_VERSION,
+        ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType, FileRange, GitChangeKind,
+        GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType,
+        GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, LineRange,
+        NodeId, Owner, ScoreComponent, SymbolId, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
+    use std::collections::BTreeMap;
 
     #[test]
     fn reconciliation_adds_delta_to_match_surfaced_score() {
@@ -1635,5 +1637,115 @@ mod tests {
         assert!(decoded.line_ranges.is_empty());
         assert_eq!(decoded.confidence, Confidence::Low);
         assert!(decoded.uncertainty.is_empty());
+    }
+
+    #[test]
+    fn legacy_graph_json_deserializes_with_default_metadata() {
+        let decoded_node: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": "node:file",
+            "node_type": "file",
+            "label": "src/lib.rs",
+            "file_id": "file:src/lib.rs",
+            "symbol_id": null
+        }))
+        .unwrap();
+        assert!(decoded_node.properties.is_empty());
+        assert!(decoded_node.schema_version.is_none());
+        assert!(decoded_node.ambiguity.is_empty());
+        assert!(decoded_node.quality_notes.is_empty());
+
+        let decoded_edge: GraphEdge = serde_json::from_value(serde_json::json!({
+            "id": "edge:defines",
+            "from": "node:file",
+            "to": "node:symbol",
+            "edge_type": "DEFINES",
+            "evidence": {
+                "id": "evidence:legacy",
+                "source": "tree-sitter",
+                "source_type": "tree_sitter",
+                "file_range": {
+                    "path": "src/lib.rs",
+                    "line_range": { "start": 1, "end": 3 }
+                },
+                "symbol_id": "symbol:main",
+                "confidence": "high",
+                "message": "legacy graph evidence",
+                "indexed_at": "2026-06-01T12:00:00Z"
+            }
+        }))
+        .unwrap();
+        assert!(decoded_edge.properties.is_empty());
+        assert!(decoded_edge.schema_version.is_none());
+        assert!(decoded_edge.quality_notes.is_empty());
+        assert!(decoded_edge.evidence.confidence_score.is_none());
+        assert!(decoded_edge.evidence.confidence_reason.is_none());
+        assert!(decoded_edge.evidence.freshness.is_none());
+    }
+
+    #[test]
+    fn enriched_graph_json_round_trips_metadata() {
+        let indexed_at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let node = GraphNode {
+            id: NodeId::new("node:file"),
+            node_type: GraphNodeType::File,
+            label: "src/lib.rs".into(),
+            file_id: None,
+            symbol_id: Some(SymbolId::new("symbol:main")),
+            properties: BTreeMap::from([(
+                "qualified_name".into(),
+                serde_json::Value::String("crate::main".into()),
+            )]),
+            schema_version: Some("graph-v1".into()),
+            source_pass: Some("tree_sitter".into()),
+            index_mode: Some("scip".into()),
+            extractor_version: Some("open-kioku-test".into()),
+            ambiguity: vec!["overloaded symbol name".into()],
+            quality_notes: vec!["exact definition".into()],
+        };
+        let edge = GraphEdge {
+            id: EdgeId::new("edge:defines"),
+            from: NodeId::new("node:file"),
+            to: NodeId::new("node:symbol"),
+            edge_type: GraphEdgeType::Defines,
+            evidence: Evidence {
+                id: super::EvidenceId::new("evidence:rich"),
+                source: "scip".into(),
+                source_type: EvidenceSourceType::Scip,
+                file_range: Some(FileRange {
+                    path: "src/lib.rs".into(),
+                    line_range: Some(LineRange { start: 1, end: 1 }),
+                }),
+                symbol_id: Some(SymbolId::new("symbol:main")),
+                confidence: Confidence::Exact,
+                message: "exact reference".into(),
+                indexed_at,
+                confidence_score: Some(0.99),
+                confidence_reason: Some("SCIP exact occurrence".into()),
+                freshness: Some("fresh".into()),
+            },
+            properties: BTreeMap::from([("call_kind".into(), serde_json::json!("direct"))]),
+            schema_version: Some("graph-v1".into()),
+            source_pass: Some("scip".into()),
+            index_mode: Some("full".into()),
+            extractor_version: Some("scip-cli".into()),
+            ambiguity: vec!["dynamic dispatch not expanded".into()],
+            quality_notes: vec!["exact edge".into()],
+        };
+
+        let decoded_node: GraphNode =
+            serde_json::from_str(&serde_json::to_string(&node).unwrap()).unwrap();
+        let decoded_edge: GraphEdge =
+            serde_json::from_str(&serde_json::to_string(&edge).unwrap()).unwrap();
+
+        assert_eq!(decoded_node.properties, node.properties);
+        assert_eq!(decoded_node.schema_version, Some("graph-v1".into()));
+        assert_eq!(decoded_node.quality_notes, vec!["exact definition"]);
+        assert_eq!(decoded_edge.properties, edge.properties);
+        assert_eq!(decoded_edge.evidence.confidence_score, Some(0.99));
+        assert_eq!(
+            decoded_edge.evidence.confidence_reason.as_deref(),
+            Some("SCIP exact occurrence")
+        );
+        assert_eq!(decoded_edge.evidence.freshness.as_deref(), Some("fresh"));
     }
 }
