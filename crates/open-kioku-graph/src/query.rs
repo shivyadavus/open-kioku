@@ -153,6 +153,22 @@ fn validate_ast(ast: &GraphQueryAst) -> QueryResult<()> {
             if let Some(v) = &target.variable {
                 bound_vars.insert(v.clone());
             }
+            if edge_range.min_hops < 1 {
+                return Err(GraphQueryError::QueryRejected(
+                    "min_hops must be >= 1".into(),
+                ));
+            }
+            if edge_range.max_hops < edge_range.min_hops {
+                return Err(GraphQueryError::QueryRejected(
+                    "max_hops must be >= min_hops".into(),
+                ));
+            }
+            if edge_range.max_hops > HARD_MAX_DEPTH {
+                return Err(GraphQueryError::QueryRejected(format!(
+                    "max_hops cannot exceed hard limit of {}",
+                    HARD_MAX_DEPTH
+                )));
+            }
         }
     }
 
@@ -276,56 +292,77 @@ pub fn execute_graph_query(
             edge,
             target,
         } => {
-            let edges = if let Some(t) = &edge.edge_type {
-                store.edges_by_type(t.clone(), limit * 10 + offset, 0)?
+            let edge_type = if let Some(t) = &edge.edge_type {
+                t.clone()
             } else {
                 return Err(GraphQueryError::ParseError(
                     "OneHop path requires an edge type for initial candidate narrowing".into(),
                 ));
             };
 
-            for e in edges {
+            let mut curr_offset = 0;
+            let batch_size = 1000;
+            let mut loop_count = 0;
+            let max_loops = 50;
+
+            'paging: while rows.len() < limit + offset && loop_count < max_loops {
+                loop_count += 1;
                 if start_time.elapsed() > deadline {
                     return Err(GraphQueryError::Timeout);
                 }
 
-                let source_id = &e.from.0;
-                let target_id = &e.to.0;
-
-                let (actual_source_id, actual_target_id) = match edge.direction {
-                    Direction::Forward => (source_id, target_id),
-                    Direction::Reverse => (target_id, source_id),
-                };
-
-                let actual_source = match store.node_by_id(actual_source_id)? {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let actual_target = match store.node_by_id(actual_target_id)? {
-                    Some(n) => n,
-                    None => continue,
-                };
-
-                if !check_node(&actual_source, source) {
-                    continue;
+                let batch = store.edges_by_type(edge_type.clone(), batch_size, curr_offset)?;
+                if batch.is_empty() {
+                    break;
                 }
-                if !check_node(&actual_target, target) {
-                    continue;
-                }
+                curr_offset += batch_size;
 
-                let mut row = HashMap::new();
-                if let Some(v) = &source.variable {
-                    row.insert(v.clone(), serde_json::to_value(&actual_source)?);
-                }
-                if let Some(v) = &target.variable {
-                    row.insert(v.clone(), serde_json::to_value(&actual_target)?);
-                }
-                if let Some(v) = &edge.variable {
-                    row.insert(v.clone(), serde_json::to_value(&e)?);
-                }
+                for e in batch {
+                    if start_time.elapsed() > deadline {
+                        return Err(GraphQueryError::Timeout);
+                    }
+                    if rows.len() >= limit + offset {
+                        break 'paging;
+                    }
 
-                if apply_filters(&row)? {
-                    rows.push(row);
+                    let source_id = &e.from.0;
+                    let target_id = &e.to.0;
+
+                    let (actual_source_id, actual_target_id) = match edge.direction {
+                        Direction::Forward => (source_id, target_id),
+                        Direction::Reverse => (target_id, source_id),
+                    };
+
+                    let actual_source = match store.node_by_id(actual_source_id)? {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let actual_target = match store.node_by_id(actual_target_id)? {
+                        Some(n) => n,
+                        None => continue,
+                    };
+
+                    if !check_node(&actual_source, source) {
+                        continue;
+                    }
+                    if !check_node(&actual_target, target) {
+                        continue;
+                    }
+
+                    let mut row = HashMap::new();
+                    if let Some(v) = &source.variable {
+                        row.insert(v.clone(), serde_json::to_value(&actual_source)?);
+                    }
+                    if let Some(v) = &target.variable {
+                        row.insert(v.clone(), serde_json::to_value(&actual_target)?);
+                    }
+                    if let Some(v) = &edge.variable {
+                        row.insert(v.clone(), serde_json::to_value(&e)?);
+                    }
+
+                    if apply_filters(&row)? {
+                        rows.push(row);
+                    }
                 }
             }
         }
@@ -368,7 +405,7 @@ pub fn execute_graph_query(
                 queue.push_back((start_node.clone(), 0));
 
                 while let Some((curr_node, depth)) = queue.pop_front() {
-                    if !visited.insert(curr_node.id.0.clone()) {
+                    if !visited.insert((curr_node.id.0.clone(), depth)) {
                         continue;
                     }
 
@@ -390,11 +427,6 @@ pub fn execute_graph_query(
                     if depth < edge_range.max_hops {
                         let (_, edges) = store.neighbors(&curr_node.id.0, limit * 10 + offset)?;
                         for edge in edges {
-                            let expected_from = match edge_range.direction {
-                                Direction::Forward => &curr_node.id.0,
-                                Direction::Reverse => &edge.to.0, // handled below by checking edge direction properly
-                            };
-
                             // Follow only forward edges for multi-hop
                             if edge.from.0 != curr_node.id.0 {
                                 continue;
@@ -406,7 +438,7 @@ pub fn execute_graph_query(
                                 }
                             }
 
-                            if !visited.contains(&edge.to.0) {
+                            if !visited.contains(&(edge.to.0.clone(), depth + 1)) {
                                 if let Some(next) = store.node_by_id(&edge.to.0)? {
                                     queue.push_back((next, depth + 1));
                                 }
@@ -1085,9 +1117,9 @@ mod tests {
         let ast = parse_graph_query(q).unwrap();
 
         let PathExpr::OneHop {
-            source,
+            source: _,
             edge,
-            target,
+            target: _,
         } = ast.match_clause.path
         else {
             panic!()
@@ -1320,7 +1352,83 @@ mod tests {
             GraphQueryOptions::default(),
         )
         .unwrap();
-        // Since we explicitly filtered edges by CALLS type and correct direction, it should return 1 row.
         assert_eq!(res.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_multihop_rejects_min_zero() {
+        let res = parse_graph_query("MATCH (a:Function)-[:CALLS *0..2]->(b:Function) RETURN a, b");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("min_hops must be >= 1"));
+    }
+
+    #[test]
+    fn test_multihop_rejects_min_greater_than_max() {
+        let res = parse_graph_query("MATCH (a:Function)-[:CALLS *3..2]->(b:Function) RETURN a, b");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("max_hops must be >= min_hops"));
+    }
+
+    #[test]
+    fn test_multihop_allows_same_node_at_different_depths_when_range_requires_it() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        store.nodes.insert(
+            "f1".into(),
+            open_kioku_core::GraphNode {
+                id: open_kioku_core::NodeId::new("f1"),
+                node_type: GraphNodeType::Function,
+                label: "A".into(),
+                ..Default::default()
+            },
+        );
+        store.nodes.insert(
+            "f2".into(),
+            open_kioku_core::GraphNode {
+                id: open_kioku_core::NodeId::new("f2"),
+                node_type: GraphNodeType::Function,
+                label: "B".into(),
+                ..Default::default()
+            },
+        );
+        // f1 -> f2 (1 hop)
+        store.edges.push(open_kioku_core::GraphEdge {
+            id: open_kioku_core::EdgeId::new("e1"),
+            from: open_kioku_core::NodeId::new("f1"),
+            to: open_kioku_core::NodeId::new("f2"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        });
+        // f2 -> f1 (2 hops total: f1 -> f2 -> f1)
+        store.edges.push(open_kioku_core::GraphEdge {
+            id: open_kioku_core::EdgeId::new("e2"),
+            from: open_kioku_core::NodeId::new("f2"),
+            to: open_kioku_core::NodeId::new("f1"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        });
+
+        // 2..3 should allow reaching f1 again at depth 2
+        let query =
+            parse_graph_query("MATCH (a:Function)-[:CALLS *2..3]->(b:Function) RETURN a, b")
+                .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        // Since we go f1->f2 (depth 1, ignored) -> f1 (depth 2, matched) -> f2 (depth 3, matched)
+        // AND f2->f1 (depth 1, ignored) -> f2 (depth 2, matched) -> f1 (depth 3, matched)
+        // The total number of paths is 4.
+        assert_eq!(res.rows.len(), 4);
     }
 }
