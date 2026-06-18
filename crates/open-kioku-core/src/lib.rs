@@ -931,6 +931,16 @@ pub struct EvidenceGraphSchema {
     pub edge_types: Vec<EdgeTypeSpec>,
     pub property_specs: Vec<PropertySpec>,
     pub feature_flags: Vec<String>,
+    #[serde(default)]
+    pub evidence_source_types: Vec<String>,
+    #[serde(default)]
+    pub query_features: Vec<String>,
+    #[serde(default)]
+    pub optional_evidence: Vec<OptionalEvidenceSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -969,6 +979,17 @@ pub struct PropertySpec {
     pub name: String,
     pub type_name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OptionalEvidenceSpec {
+    pub name: String,
+    pub available: bool,
+    pub status: String,
+    pub evidence_count: usize,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

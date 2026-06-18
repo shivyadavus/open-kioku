@@ -387,9 +387,11 @@ async fn dispatch(
             )
         }
         "get_evidence_schema" => {
-            let schema = open_kioku_graph::schema::current_schema(Some(
-                store as &dyn open_kioku_storage::GraphStore,
-            ));
+            let manifest = store.manifest().ok().flatten();
+            let schema = open_kioku_graph::schema::current_schema_with_manifest(
+                Some(store as &dyn open_kioku_storage::GraphStore),
+                manifest.as_ref(),
+            );
             Ok(json!(schema))
         }
         "query_evidence_graph" => {
@@ -964,6 +966,9 @@ mod tests {
         assert!(result.get("edge_types").is_some());
         assert!(result.get("property_specs").is_some());
         assert!(result.get("feature_flags").is_some());
+        assert!(result.get("evidence_source_types").is_some());
+        assert!(result.get("query_features").is_some());
+        assert!(result.get("optional_evidence").is_some());
 
         // Check arrays
         let node_types = result["node_types"].as_array().unwrap();
@@ -971,5 +976,20 @@ mod tests {
 
         let edge_types = result["edge_types"].as_array().unwrap();
         assert!(!edge_types.is_empty(), "edge_types should not be empty");
+
+        let evidence_source_types = result["evidence_source_types"].as_array().unwrap();
+        assert!(evidence_source_types
+            .iter()
+            .any(|source_type| source_type == "git_history"));
+
+        let query_features = result["query_features"].as_array().unwrap();
+        assert!(query_features
+            .iter()
+            .any(|feature| feature == "bounded_multi_hop_traversal"));
+
+        let optional_evidence = result["optional_evidence"].as_array().unwrap();
+        assert!(optional_evidence
+            .iter()
+            .any(|evidence| evidence["name"] == "scip" && evidence["status"] == "unknown"));
     }
 }

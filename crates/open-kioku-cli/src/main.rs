@@ -1162,10 +1162,15 @@ async fn main() -> anyhow::Result<()> {
             }
             GraphCommand::Schema { format } => {
                 let store = open_store(&repo).ok();
-                let schema = open_kioku_graph::schema::current_schema(
+                let manifest = store
+                    .as_ref()
+                    .and_then(|store| open_kioku_storage::MetadataStore::manifest(store).ok())
+                    .flatten();
+                let schema = open_kioku_graph::schema::current_schema_with_manifest(
                     store
                         .as_ref()
                         .map(|s| s as &dyn open_kioku_storage::GraphStore),
+                    manifest.as_ref(),
                 );
                 if format.to_lowercase() == "markdown" {
                     let mut lines = vec![
@@ -1177,6 +1182,36 @@ async fn main() -> anyhow::Result<()> {
                         lines.push("## Supported Features".to_string());
                         for feature in &schema.feature_flags {
                             lines.push(format!("- `{}`", feature));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    if !schema.query_features.is_empty() {
+                        lines.push("## Query Features".to_string());
+                        for feature in &schema.query_features {
+                            lines.push(format!("- `{}`", feature));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    if !schema.evidence_source_types.is_empty() {
+                        lines.push("## Evidence Source Types".to_string());
+                        for source_type in &schema.evidence_source_types {
+                            lines.push(format!("- `{}`", source_type));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    if !schema.optional_evidence.is_empty() {
+                        lines.push("## Optional Evidence Availability".to_string());
+                        for evidence in &schema.optional_evidence {
+                            lines.push(format!(
+                                "- `{}`: {} (count: {})",
+                                evidence.name, evidence.status, evidence.evidence_count
+                            ));
+                            for caveat in &evidence.caveats {
+                                lines.push(format!("  - caveat: {}", caveat));
+                            }
                         }
                         lines.push("".to_string());
                     }
