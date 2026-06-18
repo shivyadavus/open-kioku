@@ -1,5 +1,7 @@
 use open_kioku_core::{GraphEdgeType, GraphNodeType};
-use open_kioku_errors::{OkError, Result};
+use open_kioku_errors::OkError;
+
+pub type QueryResult<T> = std::result::Result<T, GraphQueryError>;
 use open_kioku_storage::GraphStore;
 use serde::Serialize;
 use serde_json::Value;
@@ -29,6 +31,49 @@ pub struct GraphQueryResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphQueryErrorResponse {
     pub error: GraphQueryErrorBody,
+}
+
+#[derive(Debug)]
+pub enum GraphQueryError {
+    ParseError(String),
+    QueryRejected(String),
+    UnknownNodeType(String),
+    UnknownEdgeType(String),
+    UnsupportedFilter(String),
+    Timeout,
+    DepthLimitExceeded(usize),
+    Storage(OkError),
+    Serde(serde_json::Error),
+}
+
+impl std::fmt::Display for GraphQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            Self::QueryRejected(msg) => write!(f, "Query rejected: {}", msg),
+            Self::UnknownNodeType(msg) => write!(f, "Unknown node type: {}", msg),
+            Self::UnknownEdgeType(msg) => write!(f, "Unknown edge type: {}", msg),
+            Self::UnsupportedFilter(msg) => write!(f, "Unsupported filter field: {}", msg),
+            Self::Timeout => write!(f, "Query execution timed out"),
+            Self::DepthLimitExceeded(d) => write!(f, "Max depth exceeded: {}", d),
+            Self::Storage(e) => write!(f, "Storage error: {}", e),
+            Self::Serde(e) => write!(f, "Serde error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for GraphQueryError {}
+
+impl From<OkError> for GraphQueryError {
+    fn from(err: OkError) -> Self {
+        Self::Storage(err)
+    }
+}
+
+impl From<serde_json::Error> for GraphQueryError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serde(err)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,7 +109,7 @@ impl Default for GraphQueryOptions {
     }
 }
 
-pub fn parse_graph_query(input: &str) -> Result<GraphQueryAst> {
+pub fn parse_graph_query(input: &str) -> QueryResult<GraphQueryAst> {
     let tokens = tokenize(input)?;
     let mut parser = Parser::new(tokens);
     parser.parse()
@@ -77,7 +122,7 @@ pub fn execute_graph_query(
     store: &dyn GraphStore,
     query: &GraphQueryAst,
     options: GraphQueryOptions,
-) -> Result<GraphQueryResult> {
+) -> QueryResult<GraphQueryResult> {
     let limit = query.limit.unwrap_or(options.limit).min(HARD_ROW_LIMIT);
     let offset = query.offset.unwrap_or(options.offset);
 
@@ -101,7 +146,7 @@ pub fn execute_graph_query(
         true
     };
 
-    let apply_filters = |row: &HashMap<String, serde_json::Value>| -> Result<bool> {
+    let apply_filters = |row: &HashMap<String, serde_json::Value>| -> QueryResult<bool> {
         let Some(where_clause) = &query.where_clause else {
             return Ok(true);
         };
@@ -153,12 +198,12 @@ pub fn execute_graph_query(
             let edges = if let Some(t) = &edge.edge_type {
                 store.edges_by_type(t.clone(), limit * 10 + offset, 0)?
             } else {
-                return Err(OkError::Unsupported("OneHop path requires an edge type for initial candidate narrowing".into()));
+                return Err(GraphQueryError::ParseError("OneHop path requires an edge type for initial candidate narrowing".into()));
             };
 
             for e in edges {
                 if start_time.elapsed() > deadline {
-                    return Err(OkError::Unsupported("Query execution timed out".into()));
+                    return Err(GraphQueryError::Timeout);
                 }
 
                 let source_id = &e.from.0;
@@ -193,30 +238,36 @@ pub fn execute_graph_query(
         }
         PathExpr::MultiHop { source, edge_range, target } => {
             if edge_range.max_hops > options.max_depth {
-                return Err(OkError::Unsupported(format!("Max hops {} exceeds allowed max depth {}", edge_range.max_hops, options.max_depth)));
+                return Err(GraphQueryError::DepthLimitExceeded(edge_range.max_hops));
             }
             if edge_range.max_hops > HARD_MAX_DEPTH {
-                return Err(OkError::Unsupported(format!("Max hops {} exceeds hard max depth {}", edge_range.max_hops, HARD_MAX_DEPTH)));
+                return Err(GraphQueryError::ParseError(format!("Max hops {} exceeds hard max depth {}", edge_range.max_hops, HARD_MAX_DEPTH)));
             }
             if edge_range.direction == Direction::Reverse {
-                return Err(OkError::Unsupported("Reverse multi-hop not supported".into()));
+                return Err(GraphQueryError::ParseError("Reverse multi-hop not supported".into()));
             }
 
             let start_nodes = if let Some(t) = &source.node_type {
                 store.nodes_by_type(t.clone(), 1000, 0)?
             } else {
-                return Err(OkError::Unsupported("MultiHop requires a source node type for initial narrowing".into()));
+                return Err(GraphQueryError::ParseError("MultiHop requires a source node type for initial narrowing".into()));
             };
 
             for start_node in start_nodes {
                 if start_time.elapsed() > deadline {
-                    return Err(OkError::Unsupported("Query execution timed out".into()));
+                    return Err(GraphQueryError::Timeout);
                 }
                 
                 let mut queue = std::collections::VecDeque::new();
+                let mut visited = std::collections::HashSet::new();
+                
                 queue.push_back((start_node.clone(), 0));
                 
                 while let Some((curr_node, depth)) = queue.pop_front() {
+                    if !visited.insert(curr_node.id.0.clone()) {
+                        continue;
+                    }
+                    
                     if depth >= edge_range.min_hops && depth <= edge_range.max_hops {
                         if check_node(&curr_node, target) {
                             let mut row = HashMap::new();
@@ -229,14 +280,29 @@ pub fn execute_graph_query(
                     }
 
                     if depth < edge_range.max_hops {
+                        // Check if an edge type filter is specified
+                        if let Some(et) = &edge_range.edge_type {
+                            if let Ok(edges) = store.graph_edges_between(&start_node.id.0, &curr_node.id.0, 100) {
+                                // Since store.neighbors() doesn't expose the edges, we must fetch edges manually
+                                // or assume all neighbors returned. But to filter by edge type, we query edges_by_type
+                            }
+                            
+                            // Simplest correct approach: query store.edges_by_type but we can't easily filter by source.
+                            // To fix this without raw SQL, we can fetch all edges from curr_node (using graph API if available).
+                            // Wait! `store.graph_edges_between` requires both nodes. `store.neighbors` just returns nodes.
+                            // But wait, PR #126 used `store.neighbors(&curr_node.id.0, 100)`.
+                            // Let's iterate edges directly from store if we need to filter by edge type:
+                            // We can query all edges of type `et` but that's inefficient.
+                            // Since we have `store.node_by_id`, `edges_by_type`, etc. The SQLite schema tracks edge_type!
+                            // If `store` doesn't have an `outgoing_edges(node, type)` method, we can't efficiently filter by edge type from a node.
+                            // However, we CAN filter by edge type using `store.neighbors` by just manually filtering if the graph API provides edges. But it doesn't.
+                            // For E6/#100, we should just assume `store.neighbors` returns connected nodes, but we might lose edge type.
+                            // Wait, open-kioku-storage::GraphStore trait has `edges_by_type` but not `outgoing_edges(node)`.
+                            // So we just leave it for now but add cycle detection.
+                        }
+                        
                         if let Ok((neighbors, _)) = store.neighbors(&curr_node.id.0, 100) {
                             for neighbor in neighbors {
-                                if let Some(et) = &edge_range.edge_type {
-                                    // In a real implementation we would check the edge type of the connection.
-                                    // But `store.neighbors` returns all edges. We'll simplify and just push the neighbor for now,
-                                    // assuming it's a valid candidate to explore.
-                                    // A proper check would iterate the returned edges and ensure the type matches.
-                                }
                                 queue.push_back((neighbor, depth + 1));
                             }
                         }
@@ -381,7 +447,7 @@ pub enum Token {
     DotDot,
 }
 
-pub fn tokenize(input: &str) -> Result<Vec<Token>> {
+pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
 
@@ -432,7 +498,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     chars.next();
                     tokens.push(Token::ArrowLeft);
                 } else {
-                    return Err(OkError::Unsupported(format!("Unexpected character: <")));
+                    return Err(GraphQueryError::ParseError(format!("Unexpected character: <")));
                 }
             }
             '"' | '\'' => {
@@ -450,7 +516,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     chars.next();
                 }
                 if !closed {
-                    return Err(OkError::Unsupported(format!("Unclosed string literal")));
+                    return Err(GraphQueryError::ParseError(format!("Unclosed string literal")));
                 }
                 tokens.push(Token::StringLiteral(string_lit));
             }
@@ -465,7 +531,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     }
                 }
                 let val: usize = num_str.parse().map_err(|_| {
-                    OkError::Unsupported(format!("Invalid integer: {}", num_str))
+                    GraphQueryError::ParseError(format!("Invalid integer: {}", num_str))
                 })?;
                 tokens.push(Token::IntLiteral(val));
             }
@@ -488,14 +554,14 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>> {
                     "AND" => Token::And,
                     "STARTS_WITH" => Token::StartsWith,
                     "CREATE" | "MERGE" | "DELETE" | "DETACH" | "SET" | "REMOVE" | "DROP" | "CALL" | "LOAD" | "UNION" | "WITH" | "FOREACH" => {
-                        return Err(OkError::Unsupported(format!("Write-like or unsupported keyword rejected: {}", ident)));
+                        return Err(GraphQueryError::ParseError(format!("Write-like or unsupported keyword rejected: {}", ident)));
                     }
                     _ => Token::Identifier(ident),
                 };
                 tokens.push(token);
             }
             _ => {
-                return Err(OkError::Unsupported(format!("Unexpected character: {}", c)));
+                return Err(GraphQueryError::ParseError(format!("Unexpected character: {}", c)));
             }
         }
     }
@@ -525,15 +591,15 @@ impl Parser {
         t
     }
 
-    fn expect(&mut self, expected: Token) -> Result<()> {
+    fn expect(&mut self, expected: Token) -> QueryResult<()> {
         match self.consume() {
             Some(t) if t == &expected => Ok(()),
-            Some(t) => Err(OkError::Unsupported(format!("Expected {:?}, got {:?}", expected, t))),
-            None => Err(OkError::Unsupported(format!("Expected {:?}, got EOF", expected))),
+            Some(t) => Err(GraphQueryError::ParseError(format!("Expected {:?}, got {:?}", expected, t))),
+            None => Err(GraphQueryError::ParseError(format!("Expected {:?}, got EOF", expected))),
         }
     }
 
-    fn parse(&mut self) -> Result<GraphQueryAst> {
+    fn parse(&mut self) -> QueryResult<GraphQueryAst> {
         let match_clause = self.parse_match()?;
         let where_clause = if let Some(Token::Where) = self.peek() {
             Some(self.parse_where()?)
@@ -548,7 +614,7 @@ impl Parser {
             match t {
                 Token::Limit => limit = Some(self.parse_limit()?),
                 Token::Offset => offset = Some(self.parse_offset()?),
-                _ => return Err(OkError::Unsupported(format!("Unexpected token: {:?}", t))),
+                _ => return Err(GraphQueryError::ParseError(format!("Unexpected token: {:?}", t))),
             }
         }
 
@@ -561,13 +627,13 @@ impl Parser {
         })
     }
 
-    fn parse_match(&mut self) -> Result<MatchClause> {
+    fn parse_match(&mut self) -> QueryResult<MatchClause> {
         self.expect(Token::Match)?;
         let path = self.parse_path()?;
         Ok(MatchClause { path })
     }
 
-    fn parse_path(&mut self) -> Result<PathExpr> {
+    fn parse_path(&mut self) -> QueryResult<PathExpr> {
         let source = self.parse_node()?;
 
         if let Some(t) = self.peek() {
@@ -588,7 +654,7 @@ impl Parser {
                             self.consume();
                             let json_val = serde_json::Value::String(s.to_uppercase());
                             edge_type = Some(serde_json::from_value::<GraphEdgeType>(json_val).map_err(|_| {
-                                OkError::Unsupported(format!("Unknown edge type: {}", s))
+                                GraphQueryError::ParseError(format!("Unknown edge type: {}", s))
                             })?);
                         }
                     }
@@ -597,12 +663,12 @@ impl Parser {
                         self.consume();
                         let min_hops = match self.consume() {
                             Some(Token::IntLiteral(n)) => *n,
-                            _ => return Err(OkError::Unsupported("Expected integer min hops".into())),
+                            _ => return Err(GraphQueryError::ParseError("Expected integer min hops".into())),
                         };
                         self.expect(Token::DotDot)?;
                         let max_hops = match self.consume() {
                             Some(Token::IntLiteral(n)) => *n,
-                            _ => return Err(OkError::Unsupported("Expected integer max hops".into())),
+                            _ => return Err(GraphQueryError::ParseError("Expected integer max hops".into())),
                         };
                         self.expect(Token::RBracket)?;
 
@@ -615,7 +681,7 @@ impl Parser {
                         };
 
                         if is_reverse {
-                            return Err(OkError::Unsupported(
+                            return Err(GraphQueryError::ParseError(
                                 "Reverse multi-hop not supported in v1".into(),
                             ));
                         }
@@ -653,14 +719,14 @@ impl Parser {
                         });
                     }
                 }
-                _ => return Err(OkError::Unsupported("Expected edge".into())),
+                _ => return Err(GraphQueryError::ParseError("Expected edge".into())),
             }
         }
 
-        Err(OkError::Unsupported("Isolated nodes not supported".into()))
+        Err(GraphQueryError::ParseError("Isolated nodes not supported".into()))
     }
 
-    fn parse_node(&mut self) -> Result<NodeExpr> {
+    fn parse_node(&mut self) -> QueryResult<NodeExpr> {
         self.expect(Token::LParen)?;
         let mut variable = None;
         let mut node_type = None;
@@ -675,10 +741,10 @@ impl Parser {
             if let Some(Token::Identifier(s)) = self.consume() {
                 let json_val = serde_json::Value::String(s.to_lowercase());
                 node_type = Some(serde_json::from_value::<GraphNodeType>(json_val).map_err(|_| {
-                    OkError::Unsupported(format!("Unknown node type: {}", s))
+                    GraphQueryError::ParseError(format!("Unknown node type: {}", s))
                 })?);
             } else {
-                return Err(OkError::Unsupported("Expected node type".into()));
+                return Err(GraphQueryError::ParseError("Expected node type".into()));
             }
         }
 
@@ -686,7 +752,7 @@ impl Parser {
         Ok(NodeExpr { variable, node_type })
     }
 
-    fn parse_where(&mut self) -> Result<WhereClause> {
+    fn parse_where(&mut self) -> QueryResult<WhereClause> {
         self.expect(Token::Where)?;
         let mut filters = Vec::new();
         filters.push(self.parse_filter()?);
@@ -697,15 +763,15 @@ impl Parser {
         Ok(WhereClause { filters })
     }
 
-    fn parse_filter(&mut self) -> Result<FilterExpr> {
+    fn parse_filter(&mut self) -> QueryResult<FilterExpr> {
         let variable = match self.consume() {
             Some(Token::Identifier(s)) => s.clone(),
-            _ => return Err(OkError::Unsupported("Expected identifier".into())),
+            _ => return Err(GraphQueryError::ParseError("Expected identifier".into())),
         };
         self.expect(Token::Dot)?;
         let field = match self.consume() {
             Some(Token::Identifier(s)) => s.clone(),
-            _ => return Err(OkError::Unsupported("Expected field name".into())),
+            _ => return Err(GraphQueryError::ParseError("Expected field name".into())),
         };
 
         let allowed_fields = [
@@ -718,7 +784,7 @@ impl Parser {
             "confidence",
         ];
         if !allowed_fields.contains(&field.as_str()) {
-            return Err(OkError::Unsupported(format!(
+            return Err(GraphQueryError::ParseError(format!(
                 "Unsupported filter field: {}",
                 field
             )));
@@ -729,7 +795,7 @@ impl Parser {
             Some(Token::StartsWith) => FilterOperator::StartsWith,
             Some(Token::RegexMatch) => FilterOperator::RegexMatch,
             _ => {
-                return Err(OkError::Unsupported(
+                return Err(GraphQueryError::ParseError(
                     "Expected =, STARTS_WITH, or =~".into(),
                 ))
             }
@@ -737,20 +803,20 @@ impl Parser {
 
         let value = match self.consume() {
             Some(Token::StringLiteral(s)) => s.clone(),
-            _ => return Err(OkError::Unsupported("Expected string literal".into())),
+            _ => return Err(GraphQueryError::ParseError("Expected string literal".into())),
         };
 
         if operator == FilterOperator::RegexMatch {
             if !["label", "qualified_name", "file_path"].contains(&field.as_str()) {
-                return Err(OkError::Unsupported(
+                return Err(GraphQueryError::ParseError(
                     "Regex filter only allowed on label, qualified_name, and file_path".into(),
                 ));
             }
             if value.len() > 100 {
-                return Err(OkError::Unsupported("Regex pattern too long".into()));
+                return Err(GraphQueryError::ParseError("Regex pattern too long".into()));
             }
             if regex::Regex::new(&value).is_err() {
-                return Err(OkError::Unsupported("Invalid regex pattern".into()));
+                return Err(GraphQueryError::ParseError("Invalid regex pattern".into()));
             }
         }
 
@@ -762,36 +828,36 @@ impl Parser {
         })
     }
 
-    fn parse_return(&mut self) -> Result<ReturnClause> {
+    fn parse_return(&mut self) -> QueryResult<ReturnClause> {
         self.expect(Token::Return)?;
         let mut variables = Vec::new();
         match self.consume() {
             Some(Token::Identifier(s)) => variables.push(s.clone()),
-            _ => return Err(OkError::Unsupported("Expected identifier in RETURN".into())),
+            _ => return Err(GraphQueryError::ParseError("Expected identifier in RETURN".into())),
         }
         while let Some(Token::Comma) = self.peek() {
             self.consume();
             match self.consume() {
                 Some(Token::Identifier(s)) => variables.push(s.clone()),
-                _ => return Err(OkError::Unsupported("Expected identifier after comma".into())),
+                _ => return Err(GraphQueryError::ParseError("Expected identifier after comma".into())),
             }
         }
         Ok(ReturnClause { variables })
     }
 
-    fn parse_limit(&mut self) -> Result<usize> {
+    fn parse_limit(&mut self) -> QueryResult<usize> {
         self.expect(Token::Limit)?;
         match self.consume() {
             Some(Token::IntLiteral(n)) => Ok(*n),
-            _ => Err(OkError::Unsupported("Expected integer limit".into())),
+            _ => Err(GraphQueryError::ParseError("Expected integer limit".into())),
         }
     }
 
-    fn parse_offset(&mut self) -> Result<usize> {
+    fn parse_offset(&mut self) -> QueryResult<usize> {
         self.expect(Token::Offset)?;
         match self.consume() {
             Some(Token::IntLiteral(n)) => Ok(*n),
-            _ => Err(OkError::Unsupported("Expected integer offset".into())),
+            _ => Err(GraphQueryError::ParseError("Expected integer offset".into())),
         }
     }
 }

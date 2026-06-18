@@ -219,6 +219,10 @@ enum GraphCommand {
         dsl: String,
         #[arg(long, default_value = "50")]
         limit: usize,
+        #[arg(long, default_value = "3")]
+        max_depth: usize,
+        #[arg(long, default_value = "5000")]
+        timeout_ms: u64,
         #[arg(long, default_value = "json")]
         format: String,
     },
@@ -1130,11 +1134,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Graph { command } => match command {
-            GraphCommand::Query { dsl, limit, format } => {
+            GraphCommand::Query { dsl, limit, max_depth, timeout_ms, format } => {
                 let store = open_store(&repo)?;
                 let ast = open_kioku_graph::query::parse_graph_query(&dsl)?;
                 let mut options = open_kioku_graph::query::GraphQueryOptions::default();
                 options.limit = limit;
+                options.max_depth = max_depth;
+                options.deadline_ms = timeout_ms;
                 let result = open_kioku_graph::query::execute_graph_query(
                     &store as &dyn open_kioku_storage::GraphStore,
                     &ast,

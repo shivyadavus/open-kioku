@@ -942,6 +942,28 @@
         },
         "maturity": "stable",
         "name": "get_evidence_schema"
+      },
+      {
+        "description": "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher).",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "description": "Maximum rows to return. Defaults to 50.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "The graph query string to execute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "query_evidence_graph"
       }
     ]
   }

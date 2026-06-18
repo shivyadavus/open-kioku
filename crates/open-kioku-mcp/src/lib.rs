@@ -393,16 +393,33 @@ async fn dispatch(
             Ok(json!(schema))
         }
         "query_evidence_graph" => {
-            let query_str = params.get("query").and_then(serde_json::Value::as_str).unwrap_or("");
-            let limit = params.get("limit").and_then(serde_json::Value::as_u64).map(|n| n as usize);
+            let query_str = params
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let limit = params
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize);
 
             let ast = match open_kioku_graph::query::parse_graph_query(query_str) {
                 Ok(ast) => ast,
                 Err(e) => {
+                    let (kind, message) = match e {
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => ("parse_error", m),
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => ("query_rejected", m),
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => ("unknown_node_type", m),
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => ("unknown_edge_type", m),
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => ("unsupported_filter", m.clone()),
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => ("depth_limit_exceeded", format!("requested {} exceeds limit", requested)),
+                        open_kioku_graph::query::GraphQueryError::Timeout => ("timeout", "Query execution timed out".to_string()),
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => ("storage_error", e.to_string()),
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => ("serde_error", e.to_string()),
+                    };
                     return Ok(serde_json::json!({
                         "error": {
-                            "kind": "parse_error",
-                            "message": e.user_message(),
+                            "kind": kind,
+                            "message": message,
                         }
                     }));
                 }
@@ -419,12 +436,25 @@ async fn dispatch(
                 options,
             ) {
                 Ok(result) => Ok(serde_json::to_value(result)?),
-                Err(e) => Ok(serde_json::json!({
-                    "error": {
-                        "kind": "execution_error",
-                        "message": e.user_message(),
-                    }
-                })),
+                Err(e) => {
+                    let (kind, message) = match e {
+                        open_kioku_graph::query::GraphQueryError::ParseError(m) => ("parse_error", m),
+                        open_kioku_graph::query::GraphQueryError::QueryRejected(m) => ("query_rejected", m),
+                        open_kioku_graph::query::GraphQueryError::UnknownNodeType(m) => ("unknown_node_type", m),
+                        open_kioku_graph::query::GraphQueryError::UnknownEdgeType(m) => ("unknown_edge_type", m),
+                        open_kioku_graph::query::GraphQueryError::UnsupportedFilter(m) => ("unsupported_filter", m.clone()),
+                        open_kioku_graph::query::GraphQueryError::DepthLimitExceeded(requested) => ("depth_limit_exceeded", format!("requested {} exceeds limit", requested)),
+                        open_kioku_graph::query::GraphQueryError::Timeout => ("timeout", "Query execution timed out".to_string()),
+                        open_kioku_graph::query::GraphQueryError::Storage(e) => ("storage_error", e.to_string()),
+                        open_kioku_graph::query::GraphQueryError::Serde(e) => ("serde_error", e.to_string()),
+                    };
+                    Ok(serde_json::json!({
+                        "error": {
+                            "kind": kind,
+                            "message": message,
+                        }
+                    }))
+                }
             }
         }
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
