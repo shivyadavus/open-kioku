@@ -690,8 +690,6 @@ mod tests {
             Ok(Vec::new())
         }
 
-
-
         fn all_chunks(&self) -> Result<Vec<CodeChunk>> {
             Ok(Vec::new())
         }
@@ -751,11 +749,15 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn node_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+        fn node_type_stats(
+            &self,
+        ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
             Ok(std::collections::HashMap::new())
         }
 
-        fn edge_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+        fn edge_type_stats(
+            &self,
+        ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
             Ok(std::collections::HashMap::new())
         }
     }

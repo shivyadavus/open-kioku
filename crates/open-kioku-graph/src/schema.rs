@@ -52,10 +52,8 @@ pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> Evi
         "RelatedToTicket",
     ];
 
-    let node_stats = store
-        .and_then(|s| s.node_type_stats().ok());
-    let edge_stats = store
-        .and_then(|s| s.edge_type_stats().ok());
+    let node_stats = store.and_then(|s| s.node_type_stats().ok());
+    let edge_stats = store.and_then(|s| s.edge_type_stats().ok());
 
     let mut node_types = Vec::new();
     for name in node_variants {

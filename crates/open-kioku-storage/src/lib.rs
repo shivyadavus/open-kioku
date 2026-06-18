@@ -90,11 +90,11 @@ pub trait GraphStore: Send + Sync {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()>;
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)>;
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>>;
-    
+
     fn node_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {
         Ok(std::collections::HashMap::new())
     }
-    
+
     fn edge_type_stats(&self) -> Result<std::collections::HashMap<String, TypeStats>> {
         Ok(std::collections::HashMap::new())
     }

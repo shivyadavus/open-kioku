@@ -1308,7 +1308,9 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
-    fn node_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+    fn node_type_stats(
+        &self,
+    ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
         let conn = self
             .connection
             .lock()
@@ -1323,16 +1325,21 @@ impl GraphStore for SqliteStore {
             let c: i64 = row.get(1).map_err(storage_err)?;
             let ev: bool = row.get(2).unwrap_or(false);
             let fr: Option<i64> = row.get(3).unwrap_or(None);
-            map.insert(t, open_kioku_storage::TypeStats {
-                count: c as usize,
-                evidence_available: ev,
-                freshness: fr.map(|v| v as u64),
-            });
+            map.insert(
+                t,
+                open_kioku_storage::TypeStats {
+                    count: c as usize,
+                    evidence_available: ev,
+                    freshness: fr.map(|v| v as u64),
+                },
+            );
         }
         Ok(map)
     }
 
-    fn edge_type_stats(&self) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
+    fn edge_type_stats(
+        &self,
+    ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
         let conn = self
             .connection
             .lock()
@@ -1347,11 +1354,14 @@ impl GraphStore for SqliteStore {
             let c: i64 = row.get(1).map_err(storage_err)?;
             let ev: bool = row.get(2).unwrap_or(false);
             let fr: Option<i64> = row.get(3).unwrap_or(None);
-            map.insert(t, open_kioku_storage::TypeStats {
-                count: c as usize,
-                evidence_available: ev,
-                freshness: fr.map(|v| v as u64),
-            });
+            map.insert(
+                t,
+                open_kioku_storage::TypeStats {
+                    count: c as usize,
+                    evidence_available: ev,
+                    freshness: fr.map(|v| v as u64),
+                },
+            );
         }
         Ok(map)
     }
@@ -1438,48 +1448,85 @@ fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<()> {
 
 fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     // Add columns to graph_nodes
-    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN file_id TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN evidence_available BOOLEAN DEFAULT 0")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_nodes ADD COLUMN freshness INTEGER DEFAULT 0")?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_nodes ADD COLUMN file_id TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_nodes ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_nodes ADD COLUMN freshness INTEGER DEFAULT 0",
+    )?;
 
     // Add columns to graph_edges
-    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN evidence_available BOOLEAN DEFAULT 0")?;
-    add_column_if_not_exists(conn, "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0")?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_edges ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
+    )?;
+    add_column_if_not_exists(
+        conn,
+        "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0",
+    )?;
 
     // Add indexes (these are idempotent via IF NOT EXISTS)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_file ON graph_nodes(file_id)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type)",
         [],
-    ).map_err(storage_err)?;
+    )
+    .map_err(storage_err)?;
 
     Ok(())
 }
