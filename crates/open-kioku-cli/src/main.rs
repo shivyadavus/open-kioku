@@ -23,7 +23,9 @@ use open_kioku_ranking::{
     RankingSignal, RankingWeights,
 };
 use open_kioku_search_regex::search_chunks;
-use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index, TantivySearchIndex};
+use open_kioku_search_tantivy::{
+    default_index_dir, rebuild_disk_index_with_graph, TantivySearchIndex,
+};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::{
     GraphStore, HistoryStore, IndexData, MetadataStore, OkStore, SearchIndex,
@@ -101,6 +103,8 @@ enum Command {
         query: String,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long, value_enum, default_value_t = SearchKind::Code)]
+        kind: SearchKind,
         #[arg(long, default_value_t = false)]
         explain_ranking: bool,
         #[arg(long, default_value_t = false)]
@@ -272,6 +276,12 @@ enum MemoryCommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SearchKind {
+    Code,
+    Graph,
 }
 
 #[derive(Subcommand)]
@@ -1286,12 +1296,15 @@ async fn main() -> anyhow::Result<()> {
         Command::Search {
             query,
             limit,
+            kind,
             explain_ranking,
             semantic,
             hybrid,
         } => {
             let store = open_store(&repo)?;
-            let results = if semantic {
+            let results = if matches!(kind, SearchKind::Graph) {
+                graph_search(&repo, &query, limit)?
+            } else if semantic {
                 semantic_search(&repo, &store, &query, limit)?
             } else if hybrid {
                 hybrid_search(&repo, &store, &query, limit)?
@@ -5048,11 +5061,12 @@ fn index_repo_with_config(
             snapshot.chunks.len()
         ),
     );
-    rebuild_disk_index(
+    rebuild_disk_index_with_graph(
         default_index_dir(repo),
         &snapshot.chunks,
         &snapshot.files,
         &snapshot.symbols,
+        &graph.nodes.values().cloned().collect::<Vec<_>>(),
     )?;
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
@@ -5343,6 +5357,18 @@ fn search(
     limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
     search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
+}
+
+fn graph_search(
+    repo: impl AsRef<Path>,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let index_dir = default_index_dir(repo);
+    if !TantivySearchIndex::exists(&index_dir) {
+        anyhow::bail!("graph search index is missing; run `ok index .` first");
+    }
+    Ok(TantivySearchIndex::open_or_create(index_dir)?.search_graph(query, limit)?)
 }
 
 fn semantic_search(

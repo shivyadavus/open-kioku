@@ -122,7 +122,7 @@
         "name": "architecture_violations"
       },
       {
-        "description": "Perform a lexical BM25 search across all indexed code chunks. Returns snippet matches, line numbers, and relevance scores. Best for general code search.",
+        "description": "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -130,8 +130,16 @@
               "description": "Maximum number of search results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
+            "mode": {
+              "description": "Search mode. Defaults to code; graph searches indexed graph-node documents.",
+              "enum": [
+                "code",
+                "graph"
+              ],
+              "type": "string"
+            },
             "query": {
-              "description": "The search query containing terms, code patterns, or identifiers.",
+              "description": "The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys.",
               "type": "string"
             }
           },
@@ -144,7 +152,7 @@
         "name": "search_code"
       },
       {
-        "description": "Search indexed file names and contents for specific keywords or file path patterns.",
+        "description": "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -152,8 +160,16 @@
               "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
+            "mode": {
+              "description": "Search mode. Defaults to code; graph searches indexed graph-node documents.",
+              "enum": [
+                "code",
+                "graph"
+              ],
+              "type": "string"
+            },
             "query": {
-              "description": "The search query to match against file paths and file contents.",
+              "description": "The search query to match against file paths, file contents, or graph-node documents.",
               "type": "string"
             }
           },
