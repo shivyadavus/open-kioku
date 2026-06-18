@@ -913,11 +913,53 @@ pub struct IndexManifest {
     pub indexed_at: DateTime<Utc>,
     pub schema_version: u32,
     #[serde(default)]
+    pub index_mode: IndexMode,
+    #[serde(default)]
+    pub phase_reports: Vec<IndexPhaseReport>,
+    #[serde(default)]
     pub quality: IndexQuality,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexMode {
+    #[default]
+    Full,
+    Balanced,
+    Fast,
+    CrossProject,
+}
+
+impl fmt::Display for IndexMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Full => "full",
+            Self::Balanced => "balanced",
+            Self::Fast => "fast",
+            Self::CrossProject => "cross_project",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct IndexPhaseReport {
+    pub phase: String,
+    pub elapsed_ms: u64,
+    pub scanned_files: usize,
+    pub indexed_files: usize,
+    pub nodes_added: usize,
+    pub edges_added: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct IndexQuality {
+    #[serde(default)]
+    pub index_mode: IndexMode,
+    #[serde(default)]
+    pub phase_reports: Vec<IndexPhaseReport>,
     pub scip_enabled: bool,
     pub scip_mode: String,
     pub scip_indexes_imported: usize,

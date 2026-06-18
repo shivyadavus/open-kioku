@@ -777,6 +777,8 @@ mod tests {
             chunk_count: 1,
             indexed_at: Utc::now(),
             schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
             quality: Default::default(),
         };
         let files = vec![file("file_auth", "src/auth.rs")];
