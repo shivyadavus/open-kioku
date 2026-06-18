@@ -214,6 +214,14 @@ enum GraphCommand {
         #[arg(long, default_value = "json")]
         format: String,
     },
+    Query {
+        #[arg(long)]
+        dsl: String,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1122,6 +1130,22 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Graph { command } => match command {
+            GraphCommand::Query { dsl, limit, format } => {
+                let store = open_store(&repo)?;
+                let ast = open_kioku_graph::query::parse_graph_query(&dsl)?;
+                let mut options = open_kioku_graph::query::GraphQueryOptions::default();
+                options.limit = limit;
+                let result = open_kioku_graph::query::execute_graph_query(
+                    &store as &dyn open_kioku_storage::GraphStore,
+                    &ast,
+                    options,
+                )?;
+                if format.to_lowercase() == "json" {
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                } else {
+                    println!("{:?}", result);
+                }
+            }
             GraphCommand::Schema { format } => {
                 let store = open_store(&repo).ok();
                 let schema = open_kioku_graph::schema::current_schema(

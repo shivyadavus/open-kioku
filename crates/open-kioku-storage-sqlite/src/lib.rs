@@ -1371,6 +1371,14 @@ impl GraphStore for SqliteStore {
         Ok(map)
     }
 
+    fn node_by_id(&self, id: &str) -> Result<Option<GraphNode>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        graph_node_by_id(&conn, id)
+    }
+
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
         let conn = self
             .connection

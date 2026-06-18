@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 
 pub mod buffer;
 pub mod schema;
+pub mod query;
 
 pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};
 #[derive(Default, Clone)]
