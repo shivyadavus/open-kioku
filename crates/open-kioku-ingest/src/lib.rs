@@ -22,6 +22,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+pub mod resolver;
+
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub struct IndexSnapshot {
     pub chunks: Vec<CodeChunk>,
     pub tests: Vec<TestTarget>,
     pub imports: Vec<Import>,
+    pub import_resolutions: Vec<open_kioku_core::ImportResolution>,
     pub occurrences: Vec<SymbolOccurrence>,
     pub analysis_facts: Vec<AnalysisFact>,
     pub scip: Option<ScipIndexReport>,
@@ -163,6 +166,9 @@ impl Indexer {
             .iter()
             .flat_map(|file| file.analysis_facts.clone())
             .collect::<Vec<_>>();
+        let resolver_report = resolver::resolve_imports(&root, &files, &symbols, &imports)?;
+        let resolver_fact_count = resolver_report.analysis_facts.len();
+        analysis_facts.extend(resolver_report.analysis_facts.clone());
         let static_analysis_facts = analysis_facts.len();
         on_progress(IndexProgress {
             phase: "analysis",
@@ -246,10 +252,12 @@ impl Indexer {
             imports.len(),
             AnalysisCounts {
                 static_facts: static_analysis_facts,
+                resolver_facts: resolver_fact_count,
                 runtime_facts: runtime_analysis_facts,
                 git_history_facts: git_history_fact_count,
                 architecture_facts: arch_fact_count,
             },
+            &resolver_report.quality_notes,
         );
         let manifest = IndexManifest {
             repository,
@@ -268,6 +276,7 @@ impl Indexer {
                 chunks,
                 tests,
                 imports,
+                import_resolutions: resolver_report.resolutions,
                 occurrences,
                 analysis_facts,
                 scip: scip_report,
@@ -368,6 +377,7 @@ impl Indexer {
 #[derive(Debug, Clone, Copy)]
 struct AnalysisCounts {
     static_facts: usize,
+    resolver_facts: usize,
     runtime_facts: usize,
     git_history_facts: usize,
     architecture_facts: usize,
@@ -380,8 +390,10 @@ fn index_quality(
     test_count: usize,
     import_count: usize,
     analysis: AnalysisCounts,
+    resolver_quality_notes: &[String],
 ) -> IndexQuality {
     let mut quality_notes = Vec::new();
+    quality_notes.extend(resolver_quality_notes.iter().cloned());
     let build_systems = detect_build_systems(root);
     let codeql_databases = detect_codeql_databases(root);
     let coverage_reports = count_analysis_artifacts(root, &["jacoco.xml", "coverage.xml"]);
@@ -408,6 +420,12 @@ fn index_quality(
         semantic_provider_notes.push(format!(
             "language static analysis facts detected: {}",
             analysis.static_facts
+        ));
+    }
+    if analysis.resolver_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "import resolver facts detected: {}",
+            analysis.resolver_facts
         ));
     }
     if analysis.runtime_facts > 0 {
@@ -1529,6 +1547,11 @@ class ExampleTests extends BaseTests {
         assert_eq!(snapshot.manifest.quality.junit_reports, 1);
         assert!(snapshot.manifest.quality.static_analysis_facts >= 3);
         assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 3);
+        assert!(!snapshot.import_resolutions.is_empty());
+        assert!(snapshot
+            .analysis_facts
+            .iter()
+            .any(|fact| fact.source.starts_with("open-kioku-import-resolver/")));
         assert!(snapshot
             .analysis_facts
             .iter()
@@ -1547,6 +1570,12 @@ class ExampleTests extends BaseTests {
             .semantic_provider_notes
             .iter()
             .any(|note| note.contains("build systems detected")));
+        assert!(snapshot
+            .manifest
+            .quality
+            .semantic_provider_notes
+            .iter()
+            .any(|note| note.contains("import resolver facts detected")));
     }
 
     #[test]
