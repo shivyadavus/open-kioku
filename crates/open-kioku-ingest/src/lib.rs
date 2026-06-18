@@ -1,12 +1,14 @@
 use chrono::Utc;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
     GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot,
     Import, IndexManifest, IndexMode, IndexPhaseReport, IndexQuality, LineRange, Repository,
-    RepositoryId, Symbol, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
+    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolOccurrence, TestTarget,
+    HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -17,9 +19,9 @@ use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -41,6 +43,7 @@ pub struct IndexSnapshot {
     pub analysis_facts: Vec<AnalysisFact>,
     pub scip: Option<ScipIndexReport>,
     pub phase_reports: Vec<IndexPhaseReport>,
+    pub skipped_paths: Vec<SkippedPath>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +175,7 @@ impl Indexer {
                 ],
                 mode,
                 phase_reports: &phase_reports,
+                skipped_paths: &[],
             });
             let manifest = IndexManifest {
                 repository,
@@ -197,6 +201,7 @@ impl Indexer {
                     analysis_facts: Vec::new(),
                     scip: None,
                     phase_reports,
+                    skipped_paths: Vec::new(),
                 },
                 HistorySnapshot::empty(),
             ));
@@ -413,6 +418,7 @@ impl Indexer {
             quality_notes: &mode_notes,
             mode,
             phase_reports: &phase_reports,
+            skipped_paths: &scan.skipped_paths,
         });
         let manifest = IndexManifest {
             repository,
@@ -438,6 +444,7 @@ impl Indexer {
                 analysis_facts,
                 scip: scip_report,
                 phase_reports,
+                skipped_paths: scan.skipped_paths,
             },
             git_history.snapshot,
         ))
@@ -454,19 +461,36 @@ impl Indexer {
         let max_size = config.max_file_size_bytes()?;
         let excludes = compile_globs(&config.index.exclude)?;
         let denied = compile_globs(&config.paths.deny)?;
+        let git_ignores = build_ignore_matcher(root, ".gitignore")?;
+        let ok_ignores = build_ignore_matcher(root, ".okignore")?;
         let mut builder = WalkBuilder::new(root);
-        builder.hidden(!config.security.allow_hidden_files);
-        builder.git_ignore(true).git_exclude(true).parents(true);
+        builder.hidden(false);
+        builder.git_ignore(false).git_exclude(false).parents(false);
+        builder.ignore(false);
+        builder.follow_links(false);
+        builder.filter_entry(|entry| !is_heavy_discovery_dir(entry.path()));
         let mut files = Vec::new();
-        let mut skipped = 0usize;
+        let mut skipped_paths = Vec::new();
         let mut warnings = Vec::new();
         let mut scanned_files = 0;
         progress.emit(ProgressEvent::new("scan"));
         for entry in builder.build() {
-            let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    skipped_paths.push(SkippedPath {
+                        path: PathBuf::from("[walk-error]"),
+                        reason: SkipReason::Error,
+                        source: SkipSource::Filesystem,
+                        safe_to_show: false,
+                    });
+                    warnings.push(format!("discovery walk error: {err}"));
+                    continue;
+                }
+            };
             if !entry
                 .file_type()
-                .map(|kind| kind.is_file())
+                .map(|kind| kind.is_file() || kind.is_symlink())
                 .unwrap_or(false)
             {
                 continue;
@@ -474,44 +498,164 @@ impl Indexer {
             scanned_files += 1;
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-            if excludes.is_match(&rel) || denied.is_match(&rel) {
-                skipped += 1;
+            let secret_policy = is_secret_like_path(&rel);
+            if secret_policy || denied.is_match(&rel) {
+                let safe_to_show = !secret_policy || !config.security.redact_secrets;
+                let reason = if secret_policy {
+                    SkipReason::SecretPolicy
+                } else {
+                    SkipReason::Denied
+                };
+                push_skip(
+                    root,
+                    path,
+                    reason,
+                    SkipSource::SecurityPolicy,
+                    safe_to_show,
+                    &mut skipped_paths,
+                );
                 if should_emit_progress(scanned_files, 0) {
                     progress.emit_transient(
                         ProgressEvent::new("scan")
                             .scanned(scanned_files)
                             .indexed(files.len())
-                            .skipped(skipped),
+                            .skipped(skipped_paths.len()),
                     );
                 }
                 continue;
             }
+            if !config.security.allow_hidden_files && is_hidden_path(&rel) {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Hidden,
+                    SkipSource::HiddenPolicy,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if excludes.is_match(&rel) {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Ignored,
+                    SkipSource::ConfigExclude,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if git_ignores
+                .matched_path_or_any_parents(path, false)
+                .is_ignore()
+            {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Ignored,
+                    SkipSource::GitIgnore,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if ok_ignores
+                .matched_path_or_any_parents(path, false)
+                .is_ignore()
+            {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Ignored,
+                    SkipSource::OkIgnore,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::SymlinkPolicy,
+                    SkipSource::SymlinkPolicy,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if likely_vendor_path(&rel) {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Vendor,
+                    SkipSource::Detector,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
             if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
-                skipped += 1;
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::FastMode,
+                    SkipSource::FastMode,
+                    true,
+                    &mut skipped_paths,
+                );
                 continue;
             }
             let metadata = entry
                 .metadata()
                 .map_err(|err| OkError::Index(err.to_string()))?;
             if metadata.len() > max_size {
-                skipped += 1;
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::TooLarge,
+                    SkipSource::SizeLimit,
+                    true,
+                    &mut skipped_paths,
+                );
                 continue;
             }
             let language = detect_language(&rel);
             if !is_supported_code(&language) {
-                skipped += 1;
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::UnsupportedLanguage,
+                    SkipSource::LanguageSupport,
+                    true,
+                    &mut skipped_paths,
+                );
                 continue;
             }
             let bytes = fs::read(path)?;
             if bytes.contains(&0) {
-                skipped += 1;
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Binary,
+                    SkipSource::Detector,
+                    true,
+                    &mut skipped_paths,
+                );
                 continue;
             }
             let content = String::from_utf8_lossy(&bytes);
             let is_generated = likely_generated(&content);
-            let is_vendor = likely_vendor_path(&rel);
-            if mode == IndexMode::Fast && (is_generated || is_vendor) {
-                skipped += 1;
+            if is_generated {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::Generated,
+                    SkipSource::Detector,
+                    true,
+                    &mut skipped_paths,
+                );
                 continue;
             }
             let content_hash = hash_bytes(&bytes);
@@ -523,20 +667,24 @@ impl Indexer {
                 size_bytes: metadata.len(),
                 content_hash,
                 is_generated,
-                is_vendor,
+                is_vendor: false,
             });
             if should_emit_progress(scanned_files, 0) {
                 progress.emit_transient(
                     ProgressEvent::new("scan")
                         .scanned(scanned_files)
                         .indexed(files.len())
-                        .skipped(skipped),
+                        .skipped(skipped_paths.len()),
                 );
             }
         }
-        if mode == IndexMode::Fast && skipped > 0 {
+        let fast_skipped = skipped_paths
+            .iter()
+            .filter(|path| path.reason == SkipReason::FastMode)
+            .count();
+        if fast_skipped > 0 {
             warnings.push(format!(
-                "fast mode skipped {skipped} unsupported, excluded, generated, docs/examples/testdata, or oversized path(s)"
+                "fast mode skipped {fast_skipped} docs/examples/testdata/sample path(s)"
             ));
         }
         progress.emit(
@@ -544,13 +692,15 @@ impl Indexer {
                 .scanned(scanned_files)
                 .indexed(files.len())
                 .total(Some(files.len()))
-                .skipped(skipped)
+                .skipped(skipped_paths.len())
                 .warnings(warnings.clone()),
         );
+        let skipped = skipped_paths.len();
         Ok(ScanResult {
             files,
             skipped,
             warnings,
+            skipped_paths,
         })
     }
 }
@@ -560,6 +710,7 @@ struct ScanResult {
     files: Vec<File>,
     skipped: usize,
     warnings: Vec<String>,
+    skipped_paths: Vec<SkippedPath>,
 }
 
 #[derive(Debug, Clone)]
@@ -717,11 +868,18 @@ struct IndexQualityInput<'a> {
     quality_notes: &'a [String],
     mode: IndexMode,
     phase_reports: &'a [IndexPhaseReport],
+    skipped_paths: &'a [SkippedPath],
 }
 
 fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
     let mut quality_notes = Vec::new();
     quality_notes.extend(input.quality_notes.iter().cloned());
+    if !input.skipped_paths.is_empty() {
+        quality_notes.push(format!(
+            "discovery skipped {} path(s); inspect skip_counts/skipped_paths before treating evidence as complete",
+            input.skipped_paths.len()
+        ));
+    }
     let root = input.root;
     let config = input.config;
     let analysis = input.analysis;
@@ -809,6 +967,8 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         IndexQuality {
             index_mode: input.mode,
             phase_reports: input.phase_reports.to_vec(),
+            skip_counts: skip_counts(input.skipped_paths),
+            skipped_paths: input.skipped_paths.to_vec(),
             scip_enabled: config.scip.enabled,
             scip_mode,
             scip_indexes_imported: report.imported_paths.len(),
@@ -836,6 +996,8 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         IndexQuality {
             index_mode: input.mode,
             phase_reports: input.phase_reports.to_vec(),
+            skip_counts: skip_counts(input.skipped_paths),
+            skipped_paths: input.skipped_paths.to_vec(),
             scip_enabled: config.scip.enabled,
             scip_mode,
             scip_indexes_imported: 0,
@@ -1672,6 +1834,102 @@ fn fast_mode_skip_path(path: &Path) -> bool {
     })
 }
 
+fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root);
+    let direct = root.join(file_name);
+    if direct.exists() {
+        builder.add(&direct);
+    }
+    if file_name == ".gitignore" {
+        let git_exclude = root.join(".git/info/exclude");
+        if git_exclude.exists() {
+            builder.add(git_exclude);
+        }
+    }
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .parents(false)
+        .ignore(false)
+        .follow_links(false)
+        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .build()
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if entry.file_name() == file_name {
+            builder.add(entry.path());
+        }
+    }
+    builder
+        .build()
+        .map_err(|err| OkError::Config(err.to_string()))
+}
+
+fn is_heavy_discovery_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git" | ".ok" | "target" | "node_modules" | "dist" | "build" | ".venv"
+    )
+}
+
+fn push_skip(
+    root: &Path,
+    path: &Path,
+    reason: SkipReason,
+    source: SkipSource,
+    safe_to_show: bool,
+    skipped_paths: &mut Vec<SkippedPath>,
+) {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    skipped_paths.push(SkippedPath {
+        path: if safe_to_show {
+            rel.to_path_buf()
+        } else {
+            PathBuf::from("[redacted]")
+        },
+        reason,
+        source,
+        safe_to_show,
+    });
+}
+
+fn skip_counts(skipped_paths: &[SkippedPath]) -> BTreeMap<SkipReason, usize> {
+    let mut counts = BTreeMap::new();
+    for skipped in skipped_paths {
+        *counts.entry(skipped.reason).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn is_hidden_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+}
+
+fn is_secret_like_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        value == ".env"
+            || value.starts_with(".env.")
+            || matches!(value.as_str(), ".aws" | ".ssh" | "secrets" | "secret")
+            || value.contains("secret")
+            || value.contains("credential")
+            || value.ends_with("_key")
+            || value.ends_with(".pem")
+            || value.ends_with(".key")
+    })
+}
+
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -1834,7 +2092,7 @@ mod tests {
     use open_kioku_core::{
         CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitChangeKind, GitCommitId,
         GitCommitRecord, GitFileTouch, HistoryRecordId, IndexMode, Language, LineRange, Owner,
-        RepositoryId, Symbol, SymbolId, SymbolKind,
+        RepositoryId, SkipReason, SkipSource, Symbol, SymbolId, SymbolKind,
     };
     use std::process::Command;
 
@@ -2086,6 +2344,90 @@ class Util {
             .quality_notes
             .iter()
             .any(|note| note.contains("source parsing skipped")));
+    }
+
+    #[test]
+    fn discovery_reports_typed_skipped_paths_without_reading_secret_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("blocked")).unwrap();
+        std::fs::create_dir_all(root.join("vendor")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join(".gitignore"), "git_ignored.rs\n").unwrap();
+        std::fs::write(root.join(".okignore"), "ok_ignored.rs\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+        std::fs::write(root.join("blocked/deny.rs"), "pub fn blocked() {}\n").unwrap();
+        std::fs::write(root.join(".hidden.rs"), "pub fn hidden() {}\n").unwrap();
+        std::fs::write(root.join("git_ignored.rs"), "pub fn git_ignored() {}\n").unwrap();
+        std::fs::write(root.join("ok_ignored.rs"), "pub fn ok_ignored() {}\n").unwrap();
+        std::fs::write(root.join("large.rs"), "pub fn too_large() {}\n".repeat(8)).unwrap();
+        std::fs::write(root.join("binary.rs"), b"pub fn binary() {}\0").unwrap();
+        std::fs::write(
+            root.join("generated.rs"),
+            "// @generated\npub fn generated() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("vendor/lib.rs"), "pub fn vendored() {}\n").unwrap();
+        std::fs::write(root.join("docs/guide.rs"), "pub fn docs() {}\n").unwrap();
+        std::fs::write(root.join(".env"), "OPEN_KIOKU_SECRET=do-not-read\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("src/lib.rs"), root.join("linked.rs")).unwrap();
+
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        config.index.max_file_size = "64b".into();
+        config.paths.deny = vec!["blocked/**".into()];
+
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        let quality = &snapshot.manifest.quality;
+        assert_eq!(snapshot.manifest.file_count, 1);
+        assert_skip(quality, SkipReason::Denied, SkipSource::SecurityPolicy);
+        assert_skip(quality, SkipReason::Hidden, SkipSource::HiddenPolicy);
+        assert_skip(quality, SkipReason::Ignored, SkipSource::GitIgnore);
+        assert_skip(quality, SkipReason::Ignored, SkipSource::OkIgnore);
+        assert_skip(quality, SkipReason::TooLarge, SkipSource::SizeLimit);
+        assert_skip(quality, SkipReason::Binary, SkipSource::Detector);
+        assert_skip(quality, SkipReason::Generated, SkipSource::Detector);
+        assert_skip(quality, SkipReason::Vendor, SkipSource::Detector);
+        assert_skip(quality, SkipReason::FastMode, SkipSource::FastMode);
+        #[cfg(unix)]
+        assert_skip(
+            quality,
+            SkipReason::SymlinkPolicy,
+            SkipSource::SymlinkPolicy,
+        );
+
+        let secret = quality
+            .skipped_paths
+            .iter()
+            .find(|path| path.reason == SkipReason::SecretPolicy)
+            .expect("secret-like path should be skipped by secret policy");
+        assert!(!secret.safe_to_show);
+        assert_eq!(secret.path.display().to_string(), "[redacted]");
+        assert!(quality
+            .quality_notes
+            .iter()
+            .any(|note| note.contains("discovery skipped")));
+    }
+
+    fn assert_skip(
+        quality: &open_kioku_core::IndexQuality,
+        reason: SkipReason,
+        source: SkipSource,
+    ) {
+        assert!(
+            quality
+                .skipped_paths
+                .iter()
+                .any(|path| path.reason == reason && path.source == source),
+            "missing skip reason={reason:?} source={source:?}: {:?}",
+            quality.skipped_paths
+        );
+        assert!(quality.skip_counts.get(&reason).copied().unwrap_or(0) > 0);
     }
 
     #[test]

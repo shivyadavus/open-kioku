@@ -2,8 +2,8 @@ use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
     ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
-    MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, RuntimeSignal, ScoreComponent,
-    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    IndexManifest, MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, RuntimeSignal,
+    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -95,12 +95,15 @@ impl<'a> PlanEngine<'a> {
             test.reconcile_score_breakdown();
         }
         let unmatched_anchors = unmatched_named_anchors(task, &primary_context);
-        let risk = merge_risk(
+        let mut risk = merge_risk(
             &context.risk_report,
             &impact.risk_report,
             primary_context.is_empty(),
             &unmatched_anchors,
         );
+        if let Some(manifest) = self.store.manifest()? {
+            apply_discovery_skip_caveat(&mut risk, &manifest);
+        }
         let relevant_symbols = context
             .primary_symbols
             .iter()
@@ -1257,6 +1260,28 @@ fn summary(
     )
 }
 
+fn apply_discovery_skip_caveat(risk: &mut RiskReport, manifest: &IndexManifest) {
+    let skipped = manifest.quality.skipped_paths.len();
+    if skipped == 0 {
+        return;
+    }
+    let mut reasons = manifest
+        .quality
+        .skip_counts
+        .iter()
+        .map(|(reason, count)| format!("{reason:?}={count}"))
+        .collect::<Vec<_>>();
+    reasons.sort();
+    risk.reasons.push(format!(
+        "Index discovery skipped {skipped} path(s) ({}); evidence may be incomplete for skipped areas.",
+        reasons.join(", ")
+    ));
+    risk.score = (risk.score + 0.05).min(1.0);
+    if risk.level == "low" {
+        risk.level = "medium".into();
+    }
+}
+
 fn render_text(report: &PlanReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("Plan: {}\n", report.task));
@@ -1848,8 +1873,8 @@ mod tests {
     use open_kioku_core::{
         AnalysisFact, CodeChunk, Confidence, ConfidenceBreakdown, Evidence, EvidenceId,
         EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest, Language,
-        LineRange, Repository, RepositoryId, Symbol, SymbolId, SymbolKind, TestTarget,
-        ValidationPlan,
+        LineRange, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId,
+        SymbolKind, TestTarget, ValidationPlan,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -1859,6 +1884,16 @@ mod tests {
     }
 
     fn test_store_with_analysis_facts(analysis_facts: Vec<AnalysisFact>) -> SqliteStore {
+        test_store_with_analysis_facts_and_quality(
+            analysis_facts,
+            open_kioku_core::IndexQuality::default(),
+        )
+    }
+
+    fn test_store_with_analysis_facts_and_quality(
+        analysis_facts: Vec<AnalysisFact>,
+        quality: open_kioku_core::IndexQuality,
+    ) -> SqliteStore {
         let store = SqliteStore::open(":memory:").unwrap();
         let repo_id = RepositoryId::new("repo");
         let file_auth = File {
@@ -1961,7 +1996,7 @@ mod tests {
             schema_version: 1,
             index_mode: Default::default(),
             phase_reports: Vec::new(),
-            quality: open_kioku_core::IndexQuality::default(),
+            quality,
         };
         store
             .replace_index(IndexData {
@@ -2117,6 +2152,28 @@ mod tests {
             .recommended_change_boundary
             .expansion_requirements
             .is_empty());
+    }
+
+    #[test]
+    fn plan_surfaces_discovery_skip_caveat() {
+        let quality = open_kioku_core::IndexQuality {
+            skipped_paths: vec![SkippedPath {
+                path: PathBuf::from("docs/guide.rs"),
+                reason: SkipReason::FastMode,
+                source: SkipSource::FastMode,
+                safe_to_show: true,
+            }],
+            skip_counts: BTreeMap::from([(SkipReason::FastMode, 1)]),
+            ..Default::default()
+        };
+        let store = test_store_with_analysis_facts_and_quality(Vec::new(), quality);
+
+        let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+        assert!(report
+            .risk
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Index discovery skipped 1 path")));
     }
 
     #[test]
