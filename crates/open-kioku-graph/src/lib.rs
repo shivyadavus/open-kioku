@@ -5,10 +5,12 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
+pub mod buffer;
 pub mod schema;
 
+pub use buffer::{GraphBuffer, GraphBufferMergeReport, WorkerGraphBuffer};
 #[derive(Default, Clone)]
 pub struct InMemoryGraph {
     pub nodes: HashMap<String, GraphNode>,
@@ -37,7 +39,7 @@ impl InMemoryGraph {
         imports: &[Import],
         analysis_facts: &[AnalysisFact],
     ) -> Self {
-        let mut graph = Self::default();
+        let mut buffer = GraphBuffer::new();
         let files_by_id = files
             .iter()
             .map(|file| (file.id.0.as_str(), file))
@@ -55,7 +57,7 @@ impl InMemoryGraph {
                 symbol_id: None,
                 ..Default::default()
             };
-            graph.nodes.insert(node.id.0.clone(), node);
+            buffer.upsert_node(node);
         }
         for symbol in symbols {
             let symbol_node = GraphNode {
@@ -94,8 +96,8 @@ impl InMemoryGraph {
                 },
                 ..Default::default()
             };
-            graph.nodes.insert(symbol_node.id.0.clone(), symbol_node);
-            graph.edges.push(edge);
+            buffer.upsert_node(symbol_node);
+            buffer.insert_edge(edge);
         }
         for occurrence in occurrences
             .iter()
@@ -107,7 +109,7 @@ impl InMemoryGraph {
             let Some(symbol) = symbols_by_id.get(occurrence.symbol_id.0.as_str()) else {
                 continue;
             };
-            graph.edges.push(GraphEdge {
+            buffer.insert_edge(GraphEdge {
                 id: EdgeId::new(stable_id(&format!(
                     "occurrence:{}:{}:{}",
                     file.id.0,
@@ -141,11 +143,6 @@ impl InMemoryGraph {
                 ..Default::default()
             });
         }
-        let mut edge_ids = graph
-            .edges
-            .iter()
-            .map(|edge| edge.id.0.clone())
-            .collect::<HashSet<_>>();
         for import in imports {
             let Some(file) = files_by_id.get(import.file_id.0.as_str()) else {
                 continue;
@@ -158,37 +155,32 @@ impl InMemoryGraph {
                 symbol_id: None,
                 ..Default::default()
             };
-            graph
-                .nodes
-                .entry(target_node.id.0.clone())
-                .or_insert(target_node.clone());
+            buffer.upsert_node(target_node.clone());
             let edge_id = EdgeId::new(stable_id(&format!(
                 "import:{}:{}",
                 file.id.0, import.imported
             )));
-            if edge_ids.insert(edge_id.0.clone()) {
-                graph.edges.push(GraphEdge {
-                    id: edge_id.clone(),
-                    from: NodeId::new(format!("file:{}", file.path.display())),
-                    to: target_node.id,
-                    edge_type: GraphEdgeType::Imports,
-                    evidence: Evidence {
-                        id: EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0))),
-                        source: "open-kioku-static/imports".into(),
-                        source_type: EvidenceSourceType::StaticAnalysis,
-                        file_range: Some(FileRange {
-                            path: file.path.clone(),
-                            line_range: import.range.clone(),
-                        }),
-                        symbol_id: None,
-                        confidence: import.confidence,
-                        message: format!("{} imports {}", file.path.display(), import.imported),
-                        indexed_at: Utc::now(),
-                        ..Default::default()
-                    },
+            buffer.insert_edge(GraphEdge {
+                id: edge_id.clone(),
+                from: NodeId::new(format!("file:{}", file.path.display())),
+                to: target_node.id,
+                edge_type: GraphEdgeType::Imports,
+                evidence: Evidence {
+                    id: EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0))),
+                    source: "open-kioku-static/imports".into(),
+                    source_type: EvidenceSourceType::StaticAnalysis,
+                    file_range: Some(FileRange {
+                        path: file.path.clone(),
+                        line_range: import.range.clone(),
+                    }),
+                    symbol_id: None,
+                    confidence: import.confidence,
+                    message: format!("{} imports {}", file.path.display(), import.imported),
+                    indexed_at: Utc::now(),
                     ..Default::default()
-                });
-            }
+                },
+                ..Default::default()
+            });
         }
         for fact in analysis_facts {
             let Some(file) = files_by_id.get(fact.file_id.0.as_str()) else {
@@ -198,12 +190,12 @@ impl InMemoryGraph {
                 .symbol_id
                 .as_ref()
                 .and_then(|symbol_id| {
-                    graph
-                        .nodes
-                        .get(&format!("symbol:{}", symbol_id.0))
-                        .map(|node| node.id.clone())
+                    symbols_by_id.get(symbol_id.0.as_str()).map(|symbol| {
+                        NodeId::new(format!("symbol:{}", symbol.id.0))
+                    })
                 })
                 .unwrap_or_else(|| NodeId::new(format!("file:{}", file.path.display())));
+
             let target_node = GraphNode {
                 id: analysis_node_id(fact.target_kind.clone(), &fact.target),
                 node_type: fact.target_kind.clone(),
@@ -212,39 +204,46 @@ impl InMemoryGraph {
                 symbol_id: None,
                 ..Default::default()
             };
-            graph
-                .nodes
-                .entry(target_node.id.0.clone())
-                .or_insert(target_node.clone());
+            buffer.upsert_node(target_node.clone());
+
             let edge_id = EdgeId::new(stable_id(&format!(
-                "analysis:{}:{}:{}",
-                source_node.0, target_node.id.0, fact.id
+                "analysis:{}:{}:{}:{:?}",
+                source_node.0,
+                fact.target,
+                format!("{:?}", fact.edge_type),
+                fact.source_type
             )));
-            if edge_ids.insert(edge_id.0.clone()) {
-                graph.edges.push(GraphEdge {
-                    id: edge_id.clone(),
-                    from: source_node,
-                    to: target_node.id,
-                    edge_type: fact.edge_type.clone(),
-                    evidence: Evidence {
-                        id: EvidenceId::new(stable_id(&format!("analysis-evidence:{}", fact.id))),
-                        source: fact.source.clone(),
-                        source_type: fact.source_type.clone(),
-                        file_range: Some(FileRange {
-                            path: file.path.clone(),
-                            line_range: fact.range.clone(),
-                        }),
-                        symbol_id: fact.symbol_id.clone(),
-                        confidence: fact.confidence,
-                        message: fact.message.clone(),
-                        indexed_at: Utc::now(),
-                        ..Default::default()
-                    },
+
+            buffer.insert_edge(GraphEdge {
+                id: edge_id.clone(),
+                from: source_node,
+                to: target_node.id,
+                edge_type: fact.edge_type.clone(),
+                evidence: Evidence {
+                    id: EvidenceId::new(stable_id(&format!("analysis-evidence:{}", edge_id.0))),
+                    source: fact.source.clone(),
+                    source_type: fact.source_type.clone(),
+                    file_range: fact.range.as_ref().map(|range| FileRange {
+                        path: file.path.clone(),
+                        line_range: Some(range.clone()),
+                    }),
+                    symbol_id: fact.symbol_id.clone(),
+                    confidence: fact.confidence,
+                    message: fact.message.clone(),
+                    indexed_at: Utc::now(),
                     ..Default::default()
-                });
-            }
+                },
+                ..Default::default()
+            });
         }
-        graph
+        
+        let (nodes_vec, edges) = buffer.into_parts();
+        let mut nodes = HashMap::new();
+        for node in nodes_vec {
+            nodes.insert(node.id.0.clone(), node);
+        }
+        
+        Self { nodes, edges }
     }
 
     pub fn neighbors(&self, node: &str, limit: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
@@ -331,9 +330,11 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EvidenceSourceType, FileId, Import, Language, LineRange,
-        RepositoryId, SymbolId, SymbolKind,
+        AnalysisFact, Confidence, EvidenceSourceType, File, FileId,
+        GraphEdgeType, GraphNodeType, Import, Language, LineRange, RepositoryId, Symbol, SymbolId,
+        SymbolKind, SymbolOccurrence,
     };
+    use std::path::PathBuf;
 
     fn make_file(id: &str) -> File {
         File {
@@ -496,5 +497,216 @@ mod tests {
                     .get(&edge.to.0)
                     .is_some_and(|node| node.label == "GET /orders")
         }));
+    }
+
+    #[test]
+    fn test_duplicate_import_edges_are_collapsed() {
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let import1 = Import {
+            file_id: file.id.clone(),
+            imported: "std::collections::HashMap".into(),
+            range: Some(LineRange { start: 1, end: 1 }),
+            confidence: Confidence::Exact,
+        };
+        let import2 = Import {
+            file_id: file.id.clone(),
+            imported: "std::collections::HashMap".into(),
+            range: Some(LineRange { start: 2, end: 2 }),
+            confidence: Confidence::High,
+        };
+        
+        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[], &[], &[], &[import1, import2], &[]);
+        
+        let imports = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::Imports).collect::<Vec<_>>();
+        assert_eq!(imports.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_reference_edges_are_collapsed() {
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = Symbol {
+            id: SymbolId::new("s1"),
+            file_id: file.id.clone(),
+            language: Language::Rust,
+            name: "foo".into(),
+            qualified_name: "foo".into(),
+            kind: SymbolKind::Function,
+            range: Some(LineRange { start: 1, end: 5 }),
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        let occ1 = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange { start: 10, end: 10 }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        // Duplicate reference to same symbol from same file
+        let occ2 = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange { start: 12, end: 12 }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[symbol], &[], &[occ1, occ2], &[], &[]);
+        
+        let refs = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::References).collect::<Vec<_>>();
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn test_analysis_fact_edges_survive_buffering() {
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let fact = AnalysisFact {
+            id: "fact1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "foo".into(),
+            target_kind: GraphNodeType::Function,
+            edge_type: GraphEdgeType::Calls,
+            range: None,
+            confidence: Confidence::High,
+            source: "analyzer".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "msg".into(),
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[], &[], &[], &[], &[fact]);
+        let edges = graph.edges.iter().filter(|e| e.edge_type == GraphEdgeType::Calls).collect::<Vec<_>>();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].evidence.message, "msg");
+    }
+
+    #[test]
+    fn test_buffer_output_is_stable_across_repeated_runs() {
+        let file1 = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("a.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let file2 = File {
+            id: FileId::new("f2"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("b.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        
+        let graph1 = InMemoryGraph::from_index_with_analysis(&[file1.clone(), file2.clone()], &[], &[], &[], &[], &[]);
+        let graph2 = InMemoryGraph::from_index_with_analysis(&[file2.clone(), file1.clone()], &[], &[], &[], &[], &[]);
+        
+        let mut keys1 = graph1.nodes.keys().collect::<Vec<_>>();
+        keys1.sort();
+        let mut keys2 = graph2.nodes.keys().collect::<Vec<_>>();
+        keys2.sort();
+        assert_eq!(keys1, keys2);
+    }
+
+    #[test]
+    fn test_from_index_with_analysis_preserves_files_symbols_occurrences_imports_analysis_facts() {
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/main.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = Symbol {
+            id: SymbolId::new("s1"),
+            file_id: file.id.clone(),
+            language: Language::Rust,
+            name: "foo".into(),
+            qualified_name: "foo".into(),
+            kind: SymbolKind::Function,
+            range: Some(LineRange { start: 1, end: 5 }),
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        let occ = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange { start: 10, end: 10 }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        let import = Import {
+            file_id: file.id.clone(),
+            imported: "std::collections::HashMap".into(),
+            range: Some(LineRange { start: 1, end: 1 }),
+            confidence: Confidence::Exact,
+        };
+        let fact = AnalysisFact {
+            id: "fact1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "GET /api".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: None,
+            confidence: Confidence::High,
+            source: "analyzer".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "msg".into(),
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(&[file], &[symbol], &[], &[occ], &[import], &[fact]);
+        
+        // Assert files
+        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::File));
+        // Assert symbols
+        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Function));
+        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::Defines));
+        // Assert occurrences
+        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::References));
+        // Assert imports
+        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::Imports));
+        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Module));
+        // Assert facts
+        assert!(graph.edges.iter().any(|e| e.edge_type == GraphEdgeType::ExposesEndpoint));
+        assert!(graph.nodes.values().any(|n| n.node_type == GraphNodeType::Endpoint));
     }
 }
