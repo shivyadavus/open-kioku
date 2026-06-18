@@ -1,11 +1,11 @@
 use chrono::Utc;
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
+    identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
     GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, NodeId, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 pub mod buffer;
 pub mod query;
@@ -50,8 +50,9 @@ impl InMemoryGraph {
             .map(|symbol| (symbol.id.0.as_str(), symbol))
             .collect::<HashMap<_, _>>();
         for file in files {
+            let file_node_id = identity::file_node_id(&file.path);
             let node = GraphNode {
-                id: NodeId::new(format!("file:{}", file.path.display())),
+                id: file_node_id,
                 node_type: GraphNodeType::File,
                 label: file.path.display().to_string(),
                 file_id: Some(file.id.clone()),
@@ -61,8 +62,9 @@ impl InMemoryGraph {
             buffer.upsert_node(node);
         }
         for symbol in symbols {
+            let symbol_node_id = identity::symbol_node_id(symbol);
             let symbol_node = GraphNode {
-                id: NodeId::new(format!("symbol:{}", symbol.id.0)),
+                id: symbol_node_id.clone(),
                 node_type: symbol_node_type(symbol),
                 label: symbol.qualified_name.clone(),
                 file_id: Some(symbol.file_id.clone()),
@@ -72,9 +74,10 @@ impl InMemoryGraph {
             let Some(file) = files_by_id.get(symbol.file_id.0.as_str()) else {
                 continue;
             };
+            let file_node_id = identity::file_node_id(&file.path);
             let edge = GraphEdge {
-                id: EdgeId::new(stable_id(&format!("defines:{}:{}", file.id.0, symbol.id.0))),
-                from: NodeId::new(format!("file:{}", file.path.display())),
+                id: identity::edge_id(GraphEdgeType::Defines, &file_node_id, &symbol_node_id, None),
+                from: file_node_id,
                 to: symbol_node.id.clone(),
                 edge_type: GraphEdgeType::Defines,
                 evidence: Evidence {
@@ -110,19 +113,12 @@ impl InMemoryGraph {
             let Some(symbol) = symbols_by_id.get(occurrence.symbol_id.0.as_str()) else {
                 continue;
             };
+            let from = identity::file_node_id(&file.path);
+            let to = identity::symbol_node_id(symbol);
             buffer.insert_edge(GraphEdge {
-                id: EdgeId::new(stable_id(&format!(
-                    "occurrence:{}:{}:{}",
-                    file.id.0,
-                    symbol.id.0,
-                    occurrence
-                        .range
-                        .as_ref()
-                        .map(|range| range.start)
-                        .unwrap_or_default()
-                ))),
-                from: NodeId::new(format!("file:{}", file.path.display())),
-                to: NodeId::new(format!("symbol:{}", symbol.id.0)),
+                id: identity::edge_id(GraphEdgeType::References, &from, &to, None),
+                from,
+                to,
                 edge_type: GraphEdgeType::References,
                 evidence: Evidence {
                     id: EvidenceId::new(stable_id(&format!(
@@ -157,13 +153,11 @@ impl InMemoryGraph {
                 ..Default::default()
             };
             buffer.upsert_node(target_node.clone());
-            let edge_id = EdgeId::new(stable_id(&format!(
-                "import:{}:{}",
-                file.id.0, import.imported
-            )));
+            let from = identity::file_node_id(&file.path);
+            let edge_id = identity::edge_id(GraphEdgeType::Imports, &from, &target_node.id, None);
             buffer.insert_edge(GraphEdge {
                 id: edge_id.clone(),
-                from: NodeId::new(format!("file:{}", file.path.display())),
+                from,
                 to: target_node.id,
                 edge_type: GraphEdgeType::Imports,
                 evidence: Evidence {
@@ -193,9 +187,9 @@ impl InMemoryGraph {
                 .and_then(|symbol_id| {
                     symbols_by_id
                         .get(symbol_id.0.as_str())
-                        .map(|symbol| NodeId::new(format!("symbol:{}", symbol.id.0)))
+                        .map(|symbol| identity::symbol_node_id(symbol))
                 })
-                .unwrap_or_else(|| NodeId::new(format!("file:{}", file.path.display())));
+                .unwrap_or_else(|| identity::file_node_id(&file.path));
 
             let target_node = GraphNode {
                 id: analysis_node_id(fact.target_kind.clone(), &fact.target),
@@ -207,10 +201,12 @@ impl InMemoryGraph {
             };
             buffer.upsert_node(target_node.clone());
 
-            let edge_id = EdgeId::new(stable_id(&format!(
-                "analysis:{}:{}:{:?}:{:?}",
-                source_node.0, fact.target, fact.edge_type, fact.source_type
-            )));
+            let edge_id = identity::edge_id(
+                fact.edge_type.clone(),
+                &source_node,
+                &target_node.id,
+                Some(&fact.id),
+            );
 
             buffer.insert_edge(GraphEdge {
                 id: edge_id.clone(),
@@ -298,16 +294,33 @@ fn symbol_node_type(symbol: &Symbol) -> GraphNodeType {
 }
 
 fn analysis_node_id(node_type: GraphNodeType, label: &str) -> NodeId {
-    NodeId::new(format!(
-        "analysis:{node_type:?}:{}",
-        stable_id(&label.to_ascii_lowercase())
-    ))
+    match node_type {
+        GraphNodeType::File => identity::try_file_node_id(Path::new(label))
+            .unwrap_or_else(|_| identity::legacy_analysis_node_id(node_type, label)),
+        GraphNodeType::Endpoint => {
+            let (method, path) = split_route_label(label);
+            identity::route_node_id("http", method, path)
+        }
+        GraphNodeType::ConfigKey => identity::config_node_id(label),
+        GraphNodeType::Test => {
+            NodeId::new(format!("test:{}", label.replace([':', '/', '\\'], "_")))
+        }
+        GraphNodeType::RuntimeError => identity::runtime_node_id(label),
+        GraphNodeType::ArchitectureComponent => identity::architecture_node_id(label),
+        _ => identity::legacy_analysis_node_id(node_type, label),
+    }
 }
 
 fn stable_id(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    identity::stable_hash(value)
+}
+
+fn split_route_label(label: &str) -> (Option<&str>, &str) {
+    let trimmed = label.trim();
+    trimmed
+        .split_once(' ')
+        .map(|(method, path)| (Some(method), path))
+        .unwrap_or((None, trimmed))
 }
 
 impl open_kioku_storage::GraphStore for InMemoryGraph {
@@ -328,8 +341,9 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
-        Import, Language, LineRange, RepositoryId, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
+        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdgeType,
+        GraphNodeType, Import, Language, LineRange, RepositoryId, Symbol, SymbolId, SymbolKind,
+        SymbolOccurrence,
     };
     use std::path::PathBuf;
 
@@ -368,6 +382,9 @@ mod tests {
         let graph = InMemoryGraph::from_index_with_occurrences(&[file_a], &[sym_a], &[], &[]);
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.edges.len(), 1); // file defines symbol
+        assert!(graph.nodes.contains_key("file:a.rs"));
+        assert!(graph.nodes.contains_key("symbol:s1"));
+        assert!(graph.edges[0].id.0.starts_with("edge:"));
     }
 
     #[test]
@@ -489,10 +506,9 @@ mod tests {
             .any(|edge| edge.edge_type == GraphEdgeType::Imports));
         assert!(graph.edges.iter().any(|edge| {
             edge.edge_type == GraphEdgeType::ExposesEndpoint
-                && graph
-                    .nodes
-                    .get(&edge.to.0)
-                    .is_some_and(|node| node.label == "GET /orders")
+                && graph.nodes.get(&edge.to.0).is_some_and(|node| {
+                    node.label == "GET /orders" && node.id.0 == "route:http:GET:%2Forders"
+                })
         }));
     }
 

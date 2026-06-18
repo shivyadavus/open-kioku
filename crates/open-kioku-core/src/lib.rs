@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod identity;
+
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(
