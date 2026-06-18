@@ -15,6 +15,8 @@ pub const DEFAULT_MAX_DEPTH: usize = 3;
 pub const HARD_ROW_LIMIT: usize = 500;
 /// The default row limit.
 pub const DEFAULT_ROW_LIMIT: usize = 50;
+const EDGE_SCAN_BATCH_SIZE: usize = 1_000;
+const NODE_SCAN_BATCH_SIZE: usize = 1_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphQueryResult {
@@ -218,6 +220,7 @@ pub fn execute_graph_query(
 ) -> QueryResult<GraphQueryResult> {
     let limit = query.limit.unwrap_or(options.limit).min(HARD_ROW_LIMIT);
     let offset = query.offset.unwrap_or(options.offset);
+    let target_rows = offset.saturating_add(limit).saturating_add(1);
 
     let start_time = Instant::now();
     let deadline = Duration::from_millis(options.deadline_ms);
@@ -301,27 +304,24 @@ pub fn execute_graph_query(
             };
 
             let mut curr_offset = 0;
-            let batch_size = 1000;
-            let mut loop_count = 0;
-            let max_loops = 50;
 
-            'paging: while rows.len() < limit + offset && loop_count < max_loops {
-                loop_count += 1;
+            'paging: while rows.len() < target_rows {
                 if start_time.elapsed() > deadline {
                     return Err(GraphQueryError::Timeout);
                 }
 
-                let batch = store.edges_by_type(edge_type.clone(), batch_size, curr_offset)?;
+                let batch =
+                    store.edges_by_type(edge_type.clone(), EDGE_SCAN_BATCH_SIZE, curr_offset)?;
                 if batch.is_empty() {
                     break;
                 }
-                curr_offset += batch_size;
+                curr_offset = curr_offset.saturating_add(EDGE_SCAN_BATCH_SIZE);
 
                 for e in batch {
                     if start_time.elapsed() > deadline {
                         return Err(GraphQueryError::Timeout);
                     }
-                    if rows.len() >= limit + offset {
+                    if rows.len() >= target_rows {
                         break 'paging;
                     }
 
@@ -386,31 +386,52 @@ pub fn execute_graph_query(
                 ));
             }
 
-            let start_nodes = if let Some(t) = &source.node_type {
-                store.nodes_by_type(t.clone(), 1000, 0)?
+            let source_type = if let Some(t) = &source.node_type {
+                t.clone()
             } else {
                 return Err(GraphQueryError::ParseError(
                     "MultiHop requires a source node type for initial narrowing".into(),
                 ));
             };
 
-            for start_node in start_nodes {
+            let mut start_offset = 0;
+            'starts: loop {
                 if start_time.elapsed() > deadline {
                     return Err(GraphQueryError::Timeout);
                 }
 
-                let mut queue = std::collections::VecDeque::new();
-                let mut visited = std::collections::HashSet::new();
+                let start_nodes =
+                    store.nodes_by_type(source_type.clone(), NODE_SCAN_BATCH_SIZE, start_offset)?;
+                if start_nodes.is_empty() {
+                    break;
+                }
+                start_offset = start_offset.saturating_add(NODE_SCAN_BATCH_SIZE);
 
-                queue.push_back((start_node.clone(), 0));
-
-                while let Some((curr_node, depth)) = queue.pop_front() {
-                    if !visited.insert((curr_node.id.0.clone(), depth)) {
-                        continue;
+                for start_node in start_nodes {
+                    if rows.len() >= target_rows {
+                        break 'starts;
+                    }
+                    if start_time.elapsed() > deadline {
+                        return Err(GraphQueryError::Timeout);
                     }
 
-                    if depth >= edge_range.min_hops && depth <= edge_range.max_hops {
-                        if check_node(&curr_node, target) {
+                    let mut queue = std::collections::VecDeque::new();
+                    let mut visited = std::collections::HashSet::new();
+
+                    queue.push_back((start_node.clone(), 0));
+
+                    while let Some((curr_node, depth)) = queue.pop_front() {
+                        if rows.len() >= target_rows {
+                            break;
+                        }
+                        if !visited.insert((curr_node.id.0.clone(), depth)) {
+                            continue;
+                        }
+
+                        if depth >= edge_range.min_hops
+                            && depth <= edge_range.max_hops
+                            && check_node(&curr_node, target)
+                        {
                             let mut row = HashMap::new();
                             if let Some(v) = &source.variable {
                                 row.insert(v.clone(), serde_json::to_value(&start_node)?);
@@ -419,28 +440,29 @@ pub fn execute_graph_query(
                                 row.insert(v.clone(), serde_json::to_value(&curr_node)?);
                             }
                             if apply_filters(&row)? {
-                                rows.push(row.clone());
+                                rows.push(row);
                             }
                         }
-                    }
 
-                    if depth < edge_range.max_hops {
-                        let (_, edges) = store.neighbors(&curr_node.id.0, limit * 10 + offset)?;
-                        for edge in edges {
-                            // Follow only forward edges for multi-hop
-                            if edge.from.0 != curr_node.id.0 {
-                                continue;
-                            }
-
-                            if let Some(expected_type) = &edge_range.edge_type {
-                                if &edge.edge_type != expected_type {
+                        if depth < edge_range.max_hops {
+                            let (_, edges) =
+                                store.neighbors(&curr_node.id.0, EDGE_SCAN_BATCH_SIZE)?;
+                            for edge in edges {
+                                // Follow only forward edges for multi-hop
+                                if edge.from.0 != curr_node.id.0 {
                                     continue;
                                 }
-                            }
 
-                            if !visited.contains(&(edge.to.0.clone(), depth + 1)) {
-                                if let Some(next) = store.node_by_id(&edge.to.0)? {
-                                    queue.push_back((next, depth + 1));
+                                if let Some(expected_type) = &edge_range.edge_type {
+                                    if &edge.edge_type != expected_type {
+                                        continue;
+                                    }
+                                }
+
+                                if !visited.contains(&(edge.to.0.clone(), depth + 1)) {
+                                    if let Some(next) = store.node_by_id(&edge.to.0)? {
+                                        queue.push_back((next, depth + 1));
+                                    }
                                 }
                             }
                         }
@@ -450,7 +472,7 @@ pub fn execute_graph_query(
         }
     }
 
-    let has_more = rows.len() > offset + limit;
+    let has_more = rows.len() > offset.saturating_add(limit);
     let paginated_rows = rows
         .into_iter()
         .skip(offset)
@@ -661,9 +683,9 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                     chars.next();
                     tokens.push(Token::ArrowLeft);
                 } else {
-                    return Err(GraphQueryError::ParseError(format!(
-                        "Unexpected character: <"
-                    )));
+                    return Err(GraphQueryError::ParseError(
+                        "Unexpected character: <".into(),
+                    ));
                 }
             }
             '"' | '\'' => {
@@ -681,9 +703,9 @@ pub fn tokenize(input: &str) -> QueryResult<Vec<Token>> {
                     chars.next();
                 }
                 if !closed {
-                    return Err(GraphQueryError::ParseError(format!(
-                        "Unclosed string literal"
-                    )));
+                    return Err(GraphQueryError::ParseError(
+                        "Unclosed string literal".into(),
+                    ));
                 }
                 tokens.push(Token::StringLiteral(string_lit));
             }
@@ -1276,15 +1298,57 @@ mod tests {
         fn nodes_by_type(
             &self,
             node_type: GraphNodeType,
-            _limit: usize,
-            _offset: usize,
+            limit: usize,
+            offset: usize,
         ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphNode>> {
             Ok(self
                 .nodes
                 .values()
                 .filter(|n| n.node_type == node_type)
+                .skip(offset)
+                .take(limit)
                 .cloned()
                 .collect())
+        }
+
+        fn edges_by_type(
+            &self,
+            edge_type: GraphEdgeType,
+            limit: usize,
+            offset: usize,
+        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphEdge>> {
+            Ok(self
+                .edges
+                .iter()
+                .filter(|edge| edge.edge_type == edge_type)
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn test_node(id: &str, label: &str, node_type: GraphNodeType) -> open_kioku_core::GraphNode {
+        open_kioku_core::GraphNode {
+            id: open_kioku_core::NodeId::new(id),
+            node_type,
+            label: label.into(),
+            ..Default::default()
+        }
+    }
+
+    fn test_edge(
+        id: &str,
+        from: &str,
+        to: &str,
+        edge_type: GraphEdgeType,
+    ) -> open_kioku_core::GraphEdge {
+        open_kioku_core::GraphEdge {
+            id: open_kioku_core::EdgeId::new(id),
+            from: open_kioku_core::NodeId::new(from),
+            to: open_kioku_core::NodeId::new(to),
+            edge_type,
+            ..Default::default()
         }
     }
 
@@ -1294,54 +1358,18 @@ mod tests {
             nodes: std::collections::HashMap::new(),
             edges: Vec::new(),
         };
-        store.nodes.insert(
-            "f1".into(),
-            open_kioku_core::GraphNode {
-                id: open_kioku_core::NodeId::new("f1"),
-                node_type: GraphNodeType::Function,
-                label: "A".into(),
-                properties: std::collections::BTreeMap::new(),
-                ..Default::default()
-            },
-        );
-        store.nodes.insert(
-            "f2".into(),
-            open_kioku_core::GraphNode {
-                id: open_kioku_core::NodeId::new("f2"),
-                node_type: GraphNodeType::Function,
-                label: "B".into(),
-                properties: std::collections::BTreeMap::new(),
-                ..Default::default()
-            },
-        );
-        store.edges.push(open_kioku_core::GraphEdge {
-            id: open_kioku_core::EdgeId::new("e1"),
-            from: open_kioku_core::NodeId::new("f1"),
-            to: open_kioku_core::NodeId::new("f2"),
-            edge_type: GraphEdgeType::Calls,
-            evidence: open_kioku_core::Evidence::default(),
-            properties: std::collections::BTreeMap::new(),
-            schema_version: None,
-            source_pass: None,
-            index_mode: None,
-            extractor_version: None,
-            ambiguity: vec![],
-            quality_notes: vec![],
-        });
-        store.edges.push(open_kioku_core::GraphEdge {
-            id: open_kioku_core::EdgeId::new("e2"),
-            from: open_kioku_core::NodeId::new("f1"),
-            to: open_kioku_core::NodeId::new("f2"),
-            edge_type: GraphEdgeType::Imports,
-            evidence: open_kioku_core::Evidence::default(),
-            properties: std::collections::BTreeMap::new(),
-            schema_version: None,
-            source_pass: None,
-            index_mode: None,
-            extractor_version: None,
-            ambiguity: vec![],
-            quality_notes: vec![],
-        });
+        store
+            .nodes
+            .insert("f1".into(), test_node("f1", "A", GraphNodeType::Function));
+        store
+            .nodes
+            .insert("f2".into(), test_node("f2", "B", GraphNodeType::Function));
+        store
+            .edges
+            .push(test_edge("e1", "f1", "f2", GraphEdgeType::Calls));
+        store
+            .edges
+            .push(test_edge("e2", "f1", "f2", GraphEdgeType::Imports));
 
         let query =
             parse_graph_query("MATCH (a:Function)-[:CALLS *1..2]->(b:Function) RETURN a, b")
@@ -1381,40 +1409,20 @@ mod tests {
             nodes: std::collections::HashMap::new(),
             edges: Vec::new(),
         };
-        store.nodes.insert(
-            "f1".into(),
-            open_kioku_core::GraphNode {
-                id: open_kioku_core::NodeId::new("f1"),
-                node_type: GraphNodeType::Function,
-                label: "A".into(),
-                ..Default::default()
-            },
-        );
-        store.nodes.insert(
-            "f2".into(),
-            open_kioku_core::GraphNode {
-                id: open_kioku_core::NodeId::new("f2"),
-                node_type: GraphNodeType::Function,
-                label: "B".into(),
-                ..Default::default()
-            },
-        );
+        store
+            .nodes
+            .insert("f1".into(), test_node("f1", "A", GraphNodeType::Function));
+        store
+            .nodes
+            .insert("f2".into(), test_node("f2", "B", GraphNodeType::Function));
         // f1 -> f2 (1 hop)
-        store.edges.push(open_kioku_core::GraphEdge {
-            id: open_kioku_core::EdgeId::new("e1"),
-            from: open_kioku_core::NodeId::new("f1"),
-            to: open_kioku_core::NodeId::new("f2"),
-            edge_type: GraphEdgeType::Calls,
-            ..Default::default()
-        });
+        store
+            .edges
+            .push(test_edge("e1", "f1", "f2", GraphEdgeType::Calls));
         // f2 -> f1 (2 hops total: f1 -> f2 -> f1)
-        store.edges.push(open_kioku_core::GraphEdge {
-            id: open_kioku_core::EdgeId::new("e2"),
-            from: open_kioku_core::NodeId::new("f2"),
-            to: open_kioku_core::NodeId::new("f1"),
-            edge_type: GraphEdgeType::Calls,
-            ..Default::default()
-        });
+        store
+            .edges
+            .push(test_edge("e2", "f2", "f1", GraphEdgeType::Calls));
 
         // 2..3 should allow reaching f1 again at depth 2
         let query =
@@ -1430,5 +1438,77 @@ mod tests {
         // AND f2->f1 (depth 1, ignored) -> f2 (depth 2, matched) -> f1 (depth 3, matched)
         // The total number of paths is 4.
         assert_eq!(res.rows.len(), 4);
+    }
+
+    #[test]
+    fn test_one_hop_reports_has_more_by_fetching_one_extra_match() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        store.nodes.insert(
+            "root".into(),
+            test_node("root", "root", GraphNodeType::File),
+        );
+        for idx in 0..3 {
+            let id = format!("fn{idx}");
+            store
+                .nodes
+                .insert(id.clone(), test_node(&id, &id, GraphNodeType::Function));
+            store.edges.push(test_edge(
+                &format!("edge{idx}"),
+                "root",
+                &id,
+                GraphEdgeType::Defines,
+            ));
+        }
+
+        let query =
+            parse_graph_query("MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 2")
+                .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 2);
+        assert!(res.has_more);
+    }
+
+    #[test]
+    fn test_multihop_reports_has_more_by_fetching_one_extra_match() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        store.nodes.insert(
+            "root".into(),
+            test_node("root", "root", GraphNodeType::File),
+        );
+        for idx in 0..3 {
+            let id = format!("fn{idx}");
+            store
+                .nodes
+                .insert(id.clone(), test_node(&id, &id, GraphNodeType::Function));
+            store.edges.push(test_edge(
+                &format!("edge{idx}"),
+                "root",
+                &id,
+                GraphEdgeType::Defines,
+            ));
+        }
+
+        let query =
+            parse_graph_query("MATCH (f:File)-[:DEFINES *1..1]->(s:Function) RETURN f, s LIMIT 2")
+                .unwrap();
+        let res = execute_graph_query(
+            &store as &dyn open_kioku_storage::GraphStore,
+            &query,
+            GraphQueryOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(res.rows.len(), 2);
+        assert!(res.has_more);
     }
 }

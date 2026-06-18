@@ -1143,17 +1143,19 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let store = open_store(&repo)?;
                 let ast = open_kioku_graph::query::parse_graph_query(&dsl)?;
-                let mut options = open_kioku_graph::query::GraphQueryOptions::default();
-                options.limit = limit;
-                options.max_depth = max_depth;
-                options.deadline_ms = timeout_ms;
+                let options = open_kioku_graph::query::GraphQueryOptions {
+                    limit,
+                    max_depth,
+                    deadline_ms: timeout_ms,
+                    ..Default::default()
+                };
                 let result = open_kioku_graph::query::execute_graph_query(
                     &store as &dyn open_kioku_storage::GraphStore,
                     &ast,
                     options,
                 )?;
                 if format.to_lowercase() == "json" {
-                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
                     println!("{:?}", result);
                 }
