@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Local-first code intelligence for AI agents — instant code search, symbol resolution, impact analysis, dependency graphs, and context packs across any codebase. Works offline. No data leaves your machine.",
-    "version": "2.0.1"
+    "version": "2.1.0"
   },
   "plugins": [
     {
@@ -16,7 +16,7 @@
         "repo": "shivyadavus/open-kioku"
       },
       "description": "Local-first code intelligence for AI agents — instant BM25 + regex code search, symbol resolution, call-graph traversal, impact analysis, architecture detection, and token-efficient context packs. Runs entirely on your machine via a native binary. Index once, query instantly. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
-      "version": "2.0.1",
+      "version": "2.1.0",
       "author": {
         "name": "Shiv Yadav",
         "email": "shivyadavus@users.noreply.github.com"

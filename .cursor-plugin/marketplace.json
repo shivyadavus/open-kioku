@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search — all on your machine. No cloud. No embeddings API. No data leaves your machine.",
-    "version": "2.0.1"
+    "version": "2.1.0"
   },
   "plugins": [
     {

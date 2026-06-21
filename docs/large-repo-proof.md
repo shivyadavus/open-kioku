@@ -1,6 +1,6 @@
 # Public Repository Proof
 
-This audit records local Open Kioku 2.0.1 runs against fixed revisions of
+This audit records local Open Kioku 2.1.0 runs against fixed revisions of
 public repositories under permissive open-source licenses. It checks whether
 commands merely execute and whether their results match the indexed source.
 
@@ -12,7 +12,7 @@ standalone reproduction recipe.
 ## Environment
 
 - Date: 2026-06-12
-- Open Kioku version: 2.0.1
+- Open Kioku version: 2.1.0
 - Open Kioku source revision: `a3703cf`
 - Binary: `target/release/ok`
 - Platform: macOS
