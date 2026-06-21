@@ -151,6 +151,8 @@ enum Command {
         format: PlanFormat,
         #[arg(long, default_value_t = 12)]
         limit: usize,
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
         #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
         verify_evidence: EvidenceVerifyMode,
     },
@@ -171,6 +173,8 @@ enum Command {
         diff: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         git: bool,
+        #[arg(long = "since-plan", value_name = "REV")]
+        since_plan: Option<String>,
         #[arg(long = "changed", value_name = "PATH")]
         changed: Vec<PathBuf>,
         #[arg(long = "evidence-ref", value_name = "REF")]
@@ -461,6 +465,8 @@ struct ImpactArgs {
     file: Option<PathBuf>,
     #[arg(long)]
     symbol: Option<String>,
+    #[arg(long, value_name = "REV")]
+    since: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1458,6 +1464,37 @@ async fn main() -> anyhow::Result<()> {
             let engine = ImpactEngine::new(&store)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
 
+            if let Some(since) = args.since.as_deref() {
+                let changed = changed_ranges_since(&repo, since)?;
+                let mut reports = Vec::new();
+                for file in changed.iter().filter_map(|change| change.new_path.as_ref()) {
+                    reports.push(engine.for_file(file)?);
+                }
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "since": since,
+                            "changed_files": changed,
+                            "impact_reports": reports,
+                        }))?
+                    );
+                } else {
+                    println!("Changed files since {since}:");
+                    for change in &changed {
+                        println!("  {}", render_changed_range(change));
+                    }
+                    for report in &reports {
+                        println!("\nImpact target: {}", report.target);
+                        println!(
+                            "Risk: {} ({:.2})",
+                            report.risk_report.level, report.risk_report.score
+                        );
+                    }
+                }
+                return Ok(());
+            }
+
             let report = if let Some(path) = args.file {
                 let normalized = normalize_to_repo_relative(&repo, &path);
                 engine.for_file(&normalized)?
@@ -1563,9 +1600,15 @@ async fn main() -> anyhow::Result<()> {
             task,
             format,
             limit,
+            since,
             verify_evidence,
         } => {
             let store = open_store(&repo)?;
+            let task = if let Some(since) = since.as_deref() {
+                task_with_changed_ranges(&repo, &task, since)?
+            } else {
+                task
+            };
             let context = build_context_pack(&repo, &store, &task, limit)?;
             let index_dir = default_index_dir(&repo);
             let search_index = if TantivySearchIndex::exists(&index_dir) {
@@ -1604,13 +1647,24 @@ async fn main() -> anyhow::Result<()> {
             plan,
             diff,
             git,
+            since_plan,
             changed,
             evidence_refs,
             run_commands,
         } => {
             let store = open_store(&repo)?;
             let report = load_saved_plan(&plan)?;
-            let unified_diff = verify_diff_input(&repo, diff.as_deref(), git)?;
+            let mut changed = changed;
+            let unified_diff = if let Some(since) = since_plan.as_deref() {
+                for change in changed_ranges_since(&repo, since)? {
+                    if let Some(path) = change.new_path.or(change.old_path) {
+                        changed.push(path);
+                    }
+                }
+                verify_diff_since(&repo, diff.as_deref(), since)?
+            } else {
+                verify_diff_input(&repo, diff.as_deref(), git)?
+            };
             let index_dir = default_index_dir(&repo);
             let search_index = if TantivySearchIndex::exists(&index_dir) {
                 Some(TantivySearchIndex::open_or_create(&index_dir)?)
@@ -4333,6 +4387,96 @@ fn verify_diff_input(
         Ok(None)
     } else {
         Ok(Some(diffs.join("\n")))
+    }
+}
+
+fn verify_diff_since(
+    repo: &Path,
+    diff_path: Option<&Path>,
+    since: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut diffs = Vec::new();
+    if let Some(path) = diff_path {
+        diffs.push(fs::read_to_string(path)?);
+    }
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--unified=0", "--no-ext-diff", "--relative"])
+        .arg(since)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    diffs.push(String::from_utf8(output.stdout)?);
+    if diffs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(diffs.join("\n")))
+    }
+}
+
+fn changed_ranges_since(repo: &Path, since: &str) -> anyhow::Result<Vec<open_kioku_git::DiffFile>> {
+    let changes = open_kioku_git::diff_unified_zero_since(repo, since)?;
+    Ok(changes
+        .into_iter()
+        .filter(|change| change.old_path.is_some() || change.new_path.is_some())
+        .collect())
+}
+
+fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Result<String> {
+    let changed = changed_ranges_since(repo, since)?;
+    if changed.is_empty() {
+        return Ok(format!(
+            "{task}\n\nGit diff since `{since}` has no changed files."
+        ));
+    }
+    let mut enriched =
+        format!("{task}\n\nChanged files and line ranges from `git diff {since} --unified=0`:\n");
+    for change in &changed {
+        enriched.push_str("- ");
+        enriched.push_str(&render_changed_range(change));
+        enriched.push('\n');
+    }
+    Ok(enriched)
+}
+
+fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
+    let path = change
+        .new_path
+        .as_ref()
+        .or(change.old_path.as_ref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<unknown>".into());
+    let ranges = change
+        .hunks
+        .iter()
+        .filter_map(|hunk| hunk.new_range.as_ref().or(hunk.old_range.as_ref()))
+        .map(|range| {
+            if range.start == range.end {
+                range.start.to_string()
+            } else {
+                format!("{}-{}", range.start, range.end)
+            }
+        })
+        .collect::<Vec<_>>();
+    let score = change
+        .rename_score
+        .map(|score| format!(" rename_score={score}"))
+        .unwrap_or_default();
+    if ranges.is_empty() {
+        format!("{:?} {}{}", change.status, path, score)
+    } else {
+        format!(
+            "{:?} {} lines {}{}",
+            change.status,
+            path,
+            ranges.join(","),
+            score
+        )
     }
 }
 

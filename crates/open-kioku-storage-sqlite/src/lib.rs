@@ -8,8 +8,9 @@ use open_kioku_core::{
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{
     GraphCounts, GraphSchemaCounts, GraphStore, HistoryStore, IndexData, MetadataStore,
+    PartialIndexUpdate,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -307,99 +308,187 @@ impl MetadataStore for SqliteStore {
             params![serde_json::to_string(data.manifest)?],
         )
         .map_err(storage_err)?;
-        for file in data.files {
+        insert_index_rows(
+            &tx,
+            IndexRows {
+                files: data.files,
+                symbols: data.symbols,
+                chunks: data.chunks,
+                tests: data.tests,
+                imports: data.imports,
+                occurrences: data.occurrences,
+                analysis_facts: data.analysis_facts,
+            },
+        )?;
+        tx.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    fn replace_files_index(&self, update: PartialIndexUpdate<'_>) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        let affected_file_ids = update
+            .changed_files
+            .iter()
+            .map(|file| file.id.clone())
+            .chain(update.deleted_file_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut affected_file_paths = update
+            .changed_files
+            .iter()
+            .map(|file| file.path.to_string_lossy().to_string())
+            .collect::<BTreeSet<_>>();
+        for file_id in &affected_file_ids {
+            let path: Option<String> = tx
+                .query_row(
+                    "SELECT path FROM files WHERE id = ?1",
+                    params![&file_id.0],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_err)?;
+            if let Some(path) = path {
+                affected_file_paths.insert(path);
+            }
+        }
+
+        let mut affected_symbol_ids = update
+            .symbols
+            .iter()
+            .map(|symbol| symbol.id.clone())
+            .collect::<BTreeSet<_>>();
+        for file_id in &affected_file_ids {
+            let mut stmt = tx
+                .prepare("SELECT id FROM symbols WHERE file_id = ?1")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            for row in rows {
+                affected_symbol_ids.insert(SymbolId::new(row.map_err(storage_err)?));
+            }
+        }
+
+        let mut affected_node_ids = update
+            .graph_nodes
+            .iter()
+            .map(|node| node.id.0.clone())
+            .collect::<BTreeSet<_>>();
+        for file_id in &affected_file_ids {
+            let mut stmt = tx
+                .prepare("SELECT id FROM graph_nodes WHERE file_id = ?1")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            for row in rows {
+                affected_node_ids.insert(row.map_err(storage_err)?);
+            }
+        }
+        for symbol_id in &affected_symbol_ids {
+            let mut stmt = tx
+                .prepare("SELECT id FROM graph_nodes WHERE symbol_id = ?1")
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![&symbol_id.0], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            for row in rows {
+                affected_node_ids.insert(row.map_err(storage_err)?);
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO manifests(id, json) VALUES(1, ?1)
+             ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+            params![serde_json::to_string(update.manifest)?],
+        )
+        .map_err(storage_err)?;
+
+        for node_id in &affected_node_ids {
             tx.execute(
-                "INSERT INTO files(id, path, json) VALUES(?1, ?2, ?3)",
-                params![
-                    &file.id.0,
-                    file.path.to_string_lossy().as_ref(),
-                    serde_json::to_string(file)?
-                ],
+                "DELETE FROM graph_edges WHERE from_id = ?1 OR to_id = ?1",
+                params![node_id],
             )
             .map_err(storage_err)?;
         }
-        for symbol in data.symbols {
+        for path in &affected_file_paths {
             tx.execute(
-                "INSERT INTO symbols(id, name, qualified_name, file_id, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![
-                    &symbol.id.0,
-                    &symbol.name,
-                    &symbol.qualified_name,
-                    &symbol.file_id.0,
-                    serde_json::to_string(symbol)?
-                ],
+                "DELETE FROM graph_edges WHERE source_file = ?1",
+                params![path],
             )
             .map_err(storage_err)?;
         }
-        for chunk in data.chunks {
+        for node_id in &affected_node_ids {
+            tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
+                .map_err(storage_err)?;
+        }
+        for file_id in &affected_file_ids {
             tx.execute(
-                "INSERT INTO chunks(id, file_id, start_line, end_line, text, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    &chunk.id,
-                    &chunk.file_id.0,
-                    chunk.range.start,
-                    chunk.range.end,
-                    &chunk.text,
-                    serde_json::to_string(chunk)?
-                ],
+                "DELETE FROM graph_nodes WHERE file_id = ?1",
+                params![&file_id.0],
             )
             .map_err(storage_err)?;
         }
-        for test in data.tests {
+        for symbol_id in &affected_symbol_ids {
             tx.execute(
-                "INSERT INTO tests(id, file_id, json) VALUES(?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET json = excluded.json",
-                params![&test.id, &test.file_id.0, serde_json::to_string(test)?],
+                "DELETE FROM graph_nodes WHERE symbol_id = ?1",
+                params![&symbol_id.0],
             )
             .map_err(storage_err)?;
         }
-        for import in data.imports {
+
+        for symbol_id in &affected_symbol_ids {
             tx.execute(
-                "INSERT INTO imports(id, file_id, imported, json) VALUES(?1, ?2, ?3, ?4)",
-                params![
-                    occurrence_id(
-                        &import.file_id.0,
-                        &import.imported,
-                        import.range.as_ref().map(|range| range.start),
-                        true
-                    ),
-                    &import.file_id.0,
-                    &import.imported,
-                    serde_json::to_string(import)?
-                ],
+                "DELETE FROM occurrences WHERE symbol_id = ?1",
+                params![&symbol_id.0],
             )
             .map_err(storage_err)?;
         }
-        for occurrence in data.occurrences {
+        for file_id in &affected_file_ids {
             tx.execute(
-                "INSERT INTO occurrences(id, symbol_id, file_id, is_definition, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![
-                    occurrence_id(
-                        &occurrence.file_id.0,
-                        &occurrence.symbol_id.0,
-                        occurrence.range.as_ref().map(|range| range.start),
-                        occurrence.is_definition,
-                    ),
-                    &occurrence.symbol_id.0,
-                    &occurrence.file_id.0,
-                    if occurrence.is_definition { 1 } else { 0 },
-                    serde_json::to_string(occurrence)?
-                ],
+                "DELETE FROM occurrences WHERE file_id = ?1",
+                params![&file_id.0],
             )
             .map_err(storage_err)?;
-        }
-        for fact in data.analysis_facts {
             tx.execute(
-                "INSERT INTO analysis_facts(id, file_id, source_type, target, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-                params![
-                    &fact.id,
-                    &fact.file_id.0,
-                    source_type_name(&fact.source_type),
-                    &fact.target,
-                    serde_json::to_string(fact)?
-                ],
+                "DELETE FROM analysis_facts WHERE file_id = ?1",
+                params![&file_id.0],
             )
             .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM imports WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
+            tx.execute("DELETE FROM tests WHERE file_id = ?1", params![&file_id.0])
+                .map_err(storage_err)?;
+            tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![&file_id.0])
+                .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM symbols WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
+            tx.execute("DELETE FROM files WHERE id = ?1", params![&file_id.0])
+                .map_err(storage_err)?;
         }
+
+        insert_index_rows(
+            &tx,
+            IndexRows {
+                files: update.changed_files,
+                symbols: update.symbols,
+                chunks: update.chunks,
+                tests: update.tests,
+                imports: update.imports,
+                occurrences: update.occurrences,
+                analysis_facts: update.analysis_facts,
+            },
+        )?;
+        insert_graph_rows(&tx, update.graph_nodes, update.graph_edges)?;
         tx.commit().map_err(storage_err)?;
         Ok(())
     }
@@ -1256,6 +1345,153 @@ fn history_confidence_rank(confidence: Confidence) -> u8 {
 const DEFAULT_GRAPH_QUERY_LIMIT: usize = 100;
 const MAX_GRAPH_QUERY_LIMIT: usize = 1_000;
 
+struct IndexRows<'a> {
+    files: &'a [File],
+    symbols: &'a [Symbol],
+    chunks: &'a [CodeChunk],
+    tests: &'a [TestTarget],
+    imports: &'a [Import],
+    occurrences: &'a [SymbolOccurrence],
+    analysis_facts: &'a [AnalysisFact],
+}
+
+fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
+    for file in rows.files {
+        tx.execute(
+            "INSERT INTO files(id, path, json) VALUES(?1, ?2, ?3)",
+            params![
+                &file.id.0,
+                file.path.to_string_lossy().as_ref(),
+                serde_json::to_string(file)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for symbol in rows.symbols {
+        tx.execute(
+            "INSERT INTO symbols(id, name, qualified_name, file_id, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                &symbol.id.0,
+                &symbol.name,
+                &symbol.qualified_name,
+                &symbol.file_id.0,
+                serde_json::to_string(symbol)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for chunk in rows.chunks {
+        tx.execute(
+            "INSERT INTO chunks(id, file_id, start_line, end_line, text, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &chunk.id,
+                &chunk.file_id.0,
+                chunk.range.start,
+                chunk.range.end,
+                &chunk.text,
+                serde_json::to_string(chunk)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for test in rows.tests {
+        tx.execute(
+            "INSERT INTO tests(id, file_id, json) VALUES(?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+            params![&test.id, &test.file_id.0, serde_json::to_string(test)?],
+        )
+        .map_err(storage_err)?;
+    }
+    for import in rows.imports {
+        tx.execute(
+            "INSERT INTO imports(id, file_id, imported, json) VALUES(?1, ?2, ?3, ?4)",
+            params![
+                occurrence_id(
+                    &import.file_id.0,
+                    &import.imported,
+                    import.range.as_ref().map(|range| range.start),
+                    true
+                ),
+                &import.file_id.0,
+                &import.imported,
+                serde_json::to_string(import)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for occurrence in rows.occurrences {
+        tx.execute(
+            "INSERT INTO occurrences(id, symbol_id, file_id, is_definition, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                occurrence_id(
+                    &occurrence.file_id.0,
+                    &occurrence.symbol_id.0,
+                    occurrence.range.as_ref().map(|range| range.start),
+                    occurrence.is_definition,
+                ),
+                &occurrence.symbol_id.0,
+                &occurrence.file_id.0,
+                if occurrence.is_definition { 1 } else { 0 },
+                serde_json::to_string(occurrence)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for fact in rows.analysis_facts {
+        tx.execute(
+            "INSERT INTO analysis_facts(id, file_id, source_type, target, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                &fact.id,
+                &fact.file_id.0,
+                source_type_name(&fact.source_type),
+                &fact.target,
+                serde_json::to_string(fact)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    Ok(())
+}
+
+fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
+    for node in nodes {
+        let evidence_available = node.file_id.is_some() || node.symbol_id.is_some();
+        tx.execute(
+            "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &node.id.0,
+                &node.label,
+                format!("{:?}", node.node_type),
+                node.file_id.as_ref().map(|f| &f.0),
+                node.symbol_id.as_ref().map(|s| &s.0),
+                evidence_available,
+                0_i64,
+                serde_json::to_string(node)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for edge in edges {
+        let freshness = edge.evidence.indexed_at.timestamp();
+        tx.execute(
+            "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &edge.id.0,
+                &edge.from.0,
+                &edge.to.0,
+                format!("{:?}", edge.edge_type),
+                format!("{:?}", edge.evidence.confidence),
+                format!("{:?}", edge.evidence.source_type),
+                &edge.evidence.source,
+                true,
+                freshness,
+                serde_json::to_string(edge)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    Ok(())
+}
+
 fn clamp_limit(limit: usize) -> usize {
     if limit == 0 {
         DEFAULT_GRAPH_QUERY_LIMIT
@@ -1275,42 +1511,7 @@ impl GraphStore for SqliteStore {
             .map_err(storage_err)?;
         tx.execute("DELETE FROM graph_nodes", [])
             .map_err(storage_err)?;
-        for node in nodes {
-            let evidence_available = node.file_id.is_some() || node.symbol_id.is_some();
-            tx.execute(
-                "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    &node.id.0,
-                    &node.label,
-                    format!("{:?}", node.node_type),
-                    node.file_id.as_ref().map(|f| &f.0),
-                    node.symbol_id.as_ref().map(|s| &s.0),
-                    evidence_available,
-                    0_i64,
-                    serde_json::to_string(node)?
-                ],
-            )
-            .map_err(storage_err)?;
-        }
-        for edge in edges {
-            let freshness = edge.evidence.indexed_at.timestamp();
-            tx.execute(
-                "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    &edge.id.0,
-                    &edge.from.0,
-                    &edge.to.0,
-                    format!("{:?}", edge.edge_type),
-                    format!("{:?}", edge.evidence.confidence),
-                    format!("{:?}", edge.evidence.source_type),
-                    &edge.evidence.source,
-                    true,
-                    freshness,
-                    serde_json::to_string(edge)?
-                ],
-            )
-            .map_err(storage_err)?;
-        }
+        insert_graph_rows(&tx, nodes, edges)?;
         tx.commit().map_err(storage_err)?;
         Ok(())
     }
@@ -2055,13 +2256,16 @@ mod tests {
     use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION};
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
-        AnalysisFact, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType, File, FileId,
-        GitChangeKind, GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
-        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
-        IndexManifest, IndexQuality, Language, LineRange, NodeId, Owner, Repository, RepositoryId,
-        ReviewerEvidence, ReviewerRole, Symbol, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
+        AnalysisFact, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType,
+        File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch,
+        GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId,
+        HistorySnapshot, IndexManifest, IndexQuality, Language, LineRange, NodeId, Owner,
+        Repository, RepositoryId, ReviewerEvidence, ReviewerRole, Symbol, SymbolId, SymbolKind,
+        SymbolOccurrence, HISTORY_SCHEMA_VERSION,
     };
-    use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
+    use open_kioku_storage::{
+        GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
+    };
     use rusqlite::{params, Connection};
     use std::collections::BTreeMap;
 
@@ -2529,6 +2733,204 @@ mod tests {
             .unwrap();
         assert!(by_path.is_some());
         assert_eq!(by_path.unwrap().id, file1.id);
+    }
+
+    #[test]
+    fn partial_replace_updates_changed_files_and_cleans_deleted_graph_edges() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let file1 = make_file("f1", "src/main.rs");
+        let file2 = make_file("f2", "src/lib.rs");
+        let sym1 = make_symbol("s1", "main_fn", "f1");
+        let sym2 = make_symbol("s2", "lib_fn", "f2");
+        let old_chunk = CodeChunk {
+            id: "c1".into(),
+            file_id: file1.id.clone(),
+            range: LineRange { start: 1, end: 1 },
+            language: Language::Rust,
+            text: "fn main_fn() {}".into(),
+            symbol_id: Some(sym1.id.clone()),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[file1.clone(), file2.clone()],
+                symbols: &[sym1.clone(), sym2.clone()],
+                chunks: std::slice::from_ref(&old_chunk),
+                tests: &[],
+                imports: &[],
+                occurrences: &[SymbolOccurrence {
+                    symbol_id: sym1.id.clone(),
+                    file_id: file1.id.clone(),
+                    range: Some(LineRange::single(1)),
+                    is_definition: true,
+                    confidence: Confidence::Exact,
+                    provenance: EvidenceSourceType::StaticAnalysis,
+                }],
+                analysis_facts: &[],
+            })
+            .unwrap();
+        let node1 = GraphNode {
+            id: NodeId::new("symbol:s1"),
+            node_type: GraphNodeType::Function,
+            label: "main_fn".into(),
+            file_id: Some(file1.id.clone()),
+            symbol_id: Some(sym1.id.clone()),
+            ..Default::default()
+        };
+        let node2 = GraphNode {
+            id: NodeId::new("symbol:s2"),
+            node_type: GraphNodeType::Function,
+            label: "lib_fn".into(),
+            file_id: Some(file2.id.clone()),
+            symbol_id: Some(sym2.id.clone()),
+            ..Default::default()
+        };
+        let edge = GraphEdge {
+            id: EdgeId::new("edge:s1-s2"),
+            from: node1.id.clone(),
+            to: node2.id.clone(),
+            edge_type: GraphEdgeType::References,
+            evidence: evidence(),
+            ..Default::default()
+        };
+        let node3 = GraphNode {
+            id: NodeId::new("external:a"),
+            node_type: GraphNodeType::Module,
+            label: "external a".into(),
+            ..Default::default()
+        };
+        let node4 = GraphNode {
+            id: NodeId::new("external:b"),
+            node_type: GraphNodeType::Module,
+            label: "external b".into(),
+            ..Default::default()
+        };
+        let mut source_evidence = evidence();
+        source_evidence.source = "src/main.rs".into();
+        let source_edge = GraphEdge {
+            id: EdgeId::new("edge:source-file"),
+            from: node3.id.clone(),
+            to: node4.id.clone(),
+            edge_type: GraphEdgeType::RelatedToTicket,
+            evidence: source_evidence,
+            ..Default::default()
+        };
+        store
+            .replace_graph(
+                &[node1, node2.clone(), node3.clone(), node4.clone()],
+                &[edge.clone(), source_edge],
+            )
+            .unwrap();
+
+        let mut updated_file2 = file2.clone();
+        updated_file2.content_hash = "new-hash".into();
+        let updated_sym2 = make_symbol("s2b", "lib_fn_new", "f2");
+        let updated_chunk = CodeChunk {
+            id: "c2".into(),
+            file_id: updated_file2.id.clone(),
+            range: LineRange { start: 2, end: 2 },
+            language: Language::Rust,
+            text: "fn lib_fn_new() {}".into(),
+            symbol_id: Some(updated_sym2.id.clone()),
+        };
+        let updated_node2 = GraphNode {
+            id: NodeId::new("symbol:s2b"),
+            node_type: GraphNodeType::Function,
+            label: "lib_fn_new".into(),
+            file_id: Some(updated_file2.id.clone()),
+            symbol_id: Some(updated_sym2.id.clone()),
+            ..Default::default()
+        };
+        store
+            .replace_files_index(PartialIndexUpdate {
+                manifest: &manifest,
+                changed_files: std::slice::from_ref(&updated_file2),
+                deleted_file_ids: std::slice::from_ref(&file1.id),
+                symbols: std::slice::from_ref(&updated_sym2),
+                chunks: std::slice::from_ref(&updated_chunk),
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                graph_nodes: std::slice::from_ref(&updated_node2),
+                graph_edges: &[],
+            })
+            .unwrap();
+
+        assert!(store
+            .get_file_by_path(std::path::Path::new("src/main.rs"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .get_file_by_path(std::path::Path::new("src/lib.rs"))
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            "new-hash"
+        );
+        assert!(store.symbol_by_id(&sym1.id).unwrap().is_none());
+        assert!(store.symbol_by_id(&updated_sym2.id).unwrap().is_some());
+        assert!(store.chunks_for_file(&file1.id).unwrap().is_empty());
+        assert_eq!(store.chunks_for_file(&file2.id).unwrap()[0].id, "c2");
+        let edge_count: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM graph_edges", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(edge_count, 0);
+        assert!(store.node_by_id("symbol:s1").unwrap().is_none());
+        assert!(store.node_by_id("symbol:s2b").unwrap().is_some());
+    }
+
+    #[test]
+    fn partial_replace_rolls_back_on_insert_failure() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let file = make_file("f1", "src/lib.rs");
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: std::slice::from_ref(&file),
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+            })
+            .unwrap();
+
+        let duplicate_a = make_file("f2", "src/dup.rs");
+        let mut duplicate_b = make_file("f3", "src/dup.rs");
+        duplicate_b.content_hash = "other".into();
+        let error = store
+            .replace_files_index(PartialIndexUpdate {
+                manifest: &manifest,
+                changed_files: &[duplicate_a, duplicate_b],
+                deleted_file_ids: std::slice::from_ref(&file.id),
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                graph_nodes: &[],
+                graph_edges: &[],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("UNIQUE") || error.contains("constraint"));
+        assert!(store
+            .get_file_by_path(std::path::Path::new("src/lib.rs"))
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_file_by_path(std::path::Path::new("src/dup.rs"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

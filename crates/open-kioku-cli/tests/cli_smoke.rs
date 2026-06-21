@@ -260,6 +260,84 @@ fn init_index_search_and_doctor_work_together() {
 }
 
 #[test]
+fn impact_and_plan_accept_since_changed_ranges() {
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn token() -> &'static str {\n    \"old\"\n}\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    git(repo, &["init", "--quiet"]);
+    git(repo, &["config", "user.email", "cli@example.com"]);
+    git(repo, &["config", "user.name", "CLI Test"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "--quiet", "-m", "initial"]);
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn token() -> &'static str {\n    \"new\"\n}\n",
+    )
+    .unwrap();
+
+    let impact = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("impact")
+            .arg("--since")
+            .arg("HEAD");
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact).unwrap();
+    assert_eq!(impact["since"], "HEAD");
+    assert_eq!(impact["changed_files"][0]["new_path"], "src/lib.rs");
+    assert_eq!(
+        impact["changed_files"][0]["hunks"][0]["new_range"]["start"],
+        2
+    );
+
+    let plan = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("plan")
+            .arg("update token")
+            .arg("--since")
+            .arg("HEAD")
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(plan.contains("git diff HEAD --unified=0"));
+    assert!(plan.contains("src/lib.rs"));
+}
+
+#[test]
 fn index_mode_is_reported_by_index_and_status_json() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();

@@ -3,6 +3,7 @@ use open_kioku_core::{
     GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, HistoryRecordId, LineRange, Owner,
 };
 use open_kioku_errors::{OkError, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,30 @@ pub struct FilePatch {
     pub path: PathBuf,
     pub previous_path: Option<PathBuf>,
     pub line_ranges: Vec<LineRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    pub old_path: Option<PathBuf>,
+    pub new_path: Option<PathBuf>,
+    pub status: GitChangeKind,
+    pub rename_score: Option<u8>,
+    pub hunks: Vec<DiffHunk>,
+}
+
+impl DiffFile {
+    pub fn changed_line_ranges(&self) -> Vec<LineRange> {
+        self.hunks
+            .iter()
+            .filter_map(|hunk| hunk.new_range.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffHunk {
+    pub old_range: Option<LineRange>,
+    pub new_range: Option<LineRange>,
 }
 
 pub fn discover_root(start: impl AsRef<Path>) -> Result<PathBuf> {
@@ -188,6 +213,77 @@ pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<
         )));
     }
     parse_commit_patches(&output.stdout)
+}
+
+pub fn diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
+    run_diff_name_status(root, &[])
+}
+
+pub fn diff_name_status_since(root: impl AsRef<Path>, since: &str) -> Result<Vec<DiffFile>> {
+    run_diff_name_status(root, &[since])
+}
+
+pub fn cached_diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
+    run_diff_name_status(root, &["--cached"])
+}
+
+pub fn head_diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
+    run_diff_name_status(root, &["HEAD"])
+}
+
+pub fn diff_unified_zero(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
+    run_diff_unified_zero(root, &[])
+}
+
+pub fn diff_unified_zero_since(root: impl AsRef<Path>, since: &str) -> Result<Vec<DiffFile>> {
+    run_diff_unified_zero(root, &[since])
+}
+
+fn run_diff_unified_zero(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<Vec<DiffFile>> {
+    let root = root.as_ref();
+    if !root.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.quotePath=true"])
+        .arg("diff")
+        .args(extra_args)
+        .args(["--unified=0", "--no-ext-diff", "--no-textconv"])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git diff failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git diff failed: {}",
+            stderr.trim()
+        )));
+    }
+    parse_unified_zero_diff(&git_text(&output.stdout, "diff output")?)
+}
+
+fn run_diff_name_status(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<Vec<DiffFile>> {
+    let root = root.as_ref();
+    if !root.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("diff")
+        .args(extra_args)
+        .args(["--name-status", "--find-renames"])
+        .output()
+        .map_err(|err| OkError::Repository(format!("git diff --name-status failed: {err}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OkError::Repository(format!(
+            "git diff --name-status failed: {}",
+            stderr.trim()
+        )));
+    }
+    parse_diff_name_status(&git_text(&output.stdout, "diff name-status output")?)
 }
 
 pub fn cochange_records_from_history(
@@ -396,6 +492,161 @@ fn parse_file_patches(patch: &str) -> Result<Vec<FilePatch>> {
     Ok(patches)
 }
 
+fn parse_diff_name_status(raw: &str) -> Result<Vec<DiffFile>> {
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() < 2 {
+                fields = line.split_whitespace().collect();
+            }
+            let status = fields.first().copied().unwrap_or_default();
+            if fields.len() < 2 {
+                return Err(OkError::Repository(format!(
+                    "git diff name-status entry is missing a path: `{line}`"
+                )));
+            }
+            let kind = change_kind(status.as_bytes());
+            let rename_score = status
+                .strip_prefix('R')
+                .or_else(|| status.strip_prefix('C'))
+                .and_then(|score| score.parse::<u8>().ok());
+            match kind {
+                GitChangeKind::Renamed | GitChangeKind::Copied => {
+                    if fields.len() < 3 {
+                        return Err(OkError::Repository(format!(
+                            "git diff name-status rename is missing paths: `{line}`"
+                        )));
+                    }
+                    Ok(DiffFile {
+                        old_path: Some(parse_patch_path(fields[1], None)?),
+                        new_path: Some(parse_patch_path(fields[2], None)?),
+                        status: kind,
+                        rename_score,
+                        hunks: Vec::new(),
+                    })
+                }
+                GitChangeKind::Deleted => Ok(DiffFile {
+                    old_path: Some(parse_patch_path(fields[1], None)?),
+                    new_path: None,
+                    status: kind,
+                    rename_score,
+                    hunks: Vec::new(),
+                }),
+                _ => Ok(DiffFile {
+                    old_path: None,
+                    new_path: Some(parse_patch_path(fields[1], None)?),
+                    status: kind,
+                    rename_score,
+                    hunks: Vec::new(),
+                }),
+            }
+        })
+        .collect()
+}
+
+fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
+    #[derive(Default)]
+    struct PendingDiff {
+        old_path: Option<PathBuf>,
+        new_path: Option<PathBuf>,
+        status: Option<GitChangeKind>,
+        rename_score: Option<u8>,
+        hunks: Vec<DiffHunk>,
+    }
+
+    fn finish(files: &mut Vec<DiffFile>, pending: &mut PendingDiff) {
+        if pending.old_path.is_none() && pending.new_path.is_none() {
+            pending.hunks.clear();
+            pending.status = None;
+            pending.rename_score = None;
+            return;
+        }
+        let status = pending.status.unwrap_or_else(|| {
+            if pending.old_path.is_none() {
+                GitChangeKind::Added
+            } else if pending.new_path.is_none() {
+                GitChangeKind::Deleted
+            } else if pending.old_path != pending.new_path {
+                GitChangeKind::Renamed
+            } else {
+                GitChangeKind::Modified
+            }
+        });
+        files.push(DiffFile {
+            old_path: pending.old_path.take(),
+            new_path: pending.new_path.take(),
+            status,
+            rename_score: pending.rename_score.take(),
+            hunks: std::mem::take(&mut pending.hunks),
+        });
+    }
+
+    let mut files = Vec::new();
+    let mut pending = PendingDiff::default();
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            finish(&mut files, &mut pending);
+        } else if line.starts_with("new file mode ") {
+            pending.status = Some(GitChangeKind::Added);
+        } else if line.starts_with("deleted file mode ") {
+            pending.status = Some(GitChangeKind::Deleted);
+        } else if let Some(score) = line.strip_prefix("similarity index ") {
+            pending.rename_score = score.trim_end_matches('%').parse::<u8>().ok();
+        } else if let Some(value) = line.strip_prefix("rename from ") {
+            pending.old_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Renamed);
+        } else if let Some(value) = line.strip_prefix("rename to ") {
+            pending.new_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Renamed);
+        } else if let Some(value) = line.strip_prefix("--- ") {
+            if value != "/dev/null" {
+                pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
+            }
+        } else if let Some(value) = line.strip_prefix("+++ ") {
+            if value != "/dev/null" {
+                pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
+            }
+        } else if line.starts_with("@@ ") {
+            pending.hunks.push(parse_diff_hunk(line)?);
+        }
+    }
+    finish(&mut files, &mut pending);
+    Ok(files)
+}
+
+fn parse_diff_hunk(header: &str) -> Result<DiffHunk> {
+    let old = header
+        .split_whitespace()
+        .find(|part| part.starts_with('-'))
+        .ok_or_else(|| OkError::Repository(format!("git diff hunk is malformed: `{header}`")))?;
+    let new = header
+        .split_whitespace()
+        .find(|part| part.starts_with('+'))
+        .ok_or_else(|| OkError::Repository(format!("git diff hunk is malformed: `{header}`")))?;
+    Ok(DiffHunk {
+        old_range: parse_hunk_range(old.trim_start_matches('-'))?,
+        new_range: parse_hunk_range(new.trim_start_matches('+'))?,
+    })
+}
+
+fn parse_hunk_range(value: &str) -> Result<Option<LineRange>> {
+    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+    let start = start.parse::<u32>().map_err(|err| {
+        OkError::Repository(format!("git diff hunk start `{start}` is invalid: {err}"))
+    })?;
+    let count = count.parse::<u32>().map_err(|err| {
+        OkError::Repository(format!("git diff hunk count `{count}` is invalid: {err}"))
+    })?;
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(LineRange {
+        start,
+        end: start.saturating_add(count - 1),
+    }))
+}
+
 fn parse_new_hunk_range(header: &str) -> Result<Option<LineRange>> {
     let marker = header
         .split_whitespace()
@@ -601,7 +852,8 @@ fn is_test_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cochange_records, commit_history, commit_patches, parse_commit_patches, parse_file_patches,
+        cochange_records, commit_history, commit_patches, parse_commit_patches,
+        parse_diff_name_status, parse_file_patches, parse_unified_zero_diff,
     };
     use open_kioku_core::GitChangeKind;
     use std::fs;
@@ -761,6 +1013,90 @@ mod tests {
                 open_kioku_core::LineRange { start: 7, end: 7 }
             ]
         );
+    }
+
+    #[test]
+    fn diff_name_status_parser_captures_added_modified_deleted_and_renamed() {
+        let files = parse_diff_name_status(
+            "A\tsrc/new.rs\n\
+             M\tsrc/lib.rs\n\
+             D\tsrc/old.rs\n\
+             R087\tsrc/before.rs\tsrc/after.rs\n",
+        )
+        .unwrap();
+
+        assert_eq!(files.len(), 4);
+        assert_eq!(files[0].status, GitChangeKind::Added);
+        assert_eq!(files[0].new_path.as_deref(), Some(Path::new("src/new.rs")));
+        assert_eq!(files[1].status, GitChangeKind::Modified);
+        assert_eq!(files[2].status, GitChangeKind::Deleted);
+        assert_eq!(files[2].old_path.as_deref(), Some(Path::new("src/old.rs")));
+        assert_eq!(files[3].status, GitChangeKind::Renamed);
+        assert_eq!(files[3].rename_score, Some(87));
+        assert_eq!(
+            files[3].old_path.as_deref(),
+            Some(Path::new("src/before.rs"))
+        );
+        assert_eq!(
+            files[3].new_path.as_deref(),
+            Some(Path::new("src/after.rs"))
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_parser_captures_old_new_hunks_and_changed_ranges() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/src/old.rs b/src/new.rs\n\
+             similarity index 92%\n\
+             rename from src/old.rs\n\
+             rename to src/new.rs\n\
+             --- a/src/old.rs\n\
+             +++ b/src/new.rs\n\
+             @@ -2 +2 @@\n\
+             -old();\n\
+             +new();\n\
+             @@ -8,0 +9,2 @@\n\
+             +added();\n\
+             +again();\n\
+             diff --git a/src/deleted.rs b/src/deleted.rs\n\
+             deleted file mode 100644\n\
+             --- a/src/deleted.rs\n\
+             +++ /dev/null\n\
+             @@ -1,3 +0,0 @@\n",
+        )
+        .unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].status, GitChangeKind::Renamed);
+        assert_eq!(files[0].rename_score, Some(92));
+        assert_eq!(files[0].old_path.as_deref(), Some(Path::new("src/old.rs")));
+        assert_eq!(files[0].new_path.as_deref(), Some(Path::new("src/new.rs")));
+        assert_eq!(
+            files[0].hunks,
+            vec![
+                super::DiffHunk {
+                    old_range: Some(open_kioku_core::LineRange { start: 2, end: 2 }),
+                    new_range: Some(open_kioku_core::LineRange { start: 2, end: 2 }),
+                },
+                super::DiffHunk {
+                    old_range: None,
+                    new_range: Some(open_kioku_core::LineRange { start: 9, end: 10 }),
+                }
+            ]
+        );
+        assert_eq!(
+            files[0].changed_line_ranges(),
+            vec![
+                open_kioku_core::LineRange { start: 2, end: 2 },
+                open_kioku_core::LineRange { start: 9, end: 10 }
+            ]
+        );
+        assert_eq!(files[1].status, GitChangeKind::Deleted);
+        assert_eq!(
+            files[1].hunks[0].old_range,
+            Some(open_kioku_core::LineRange { start: 1, end: 3 })
+        );
+        assert_eq!(files[1].hunks[0].new_range, None);
     }
 
     #[test]

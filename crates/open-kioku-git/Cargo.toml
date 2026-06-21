@@ -14,6 +14,7 @@ categories.workspace = true
 chrono.workspace = true
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
+serde.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
