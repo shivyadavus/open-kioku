@@ -8,8 +8,9 @@ use open_kioku_config::{
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
-    Confidence, ContextHandleId, EvidenceSourceType, FileProvenance, IndexManifest, IndexMode,
-    PlanReport, ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
+    Confidence, ContextHandleId, EdgeId, Evidence, EvidenceId, EvidenceSourceType, FileProvenance,
+    GraphEdge, GraphEdgeType, GraphNode, IndexManifest, IndexMode, NodeId, PlanReport,
+    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -37,7 +38,7 @@ use open_kioku_tests::TestSelector;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
@@ -71,6 +72,8 @@ enum Command {
         with_scip: Option<String>,
         #[arg(long, default_value = "full")]
         mode: String,
+        #[arg(long, value_name = "WORKSPACE")]
+        workspace: Option<PathBuf>,
         #[arg(long = "from-snapshot", value_parser = ["auto"])]
         from_snapshot: Option<String>,
     },
@@ -338,6 +341,92 @@ struct SnapshotDoctorReport {
     errors: Vec<String>,
 }
 
+const WORKSPACE_LINK_CAP: usize = 1000;
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceToml {
+    workspace: WorkspaceConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceConfig {
+    projects: Vec<WorkspaceProjectConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WorkspaceProjectConfig {
+    name: String,
+    repo: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceProjectReport {
+    name: String,
+    repo: PathBuf,
+    index_path: PathBuf,
+    graph_nodes: usize,
+    graph_edges: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceLinkReport {
+    ok: bool,
+    workspace: PathBuf,
+    config_path: PathBuf,
+    graph_path: PathBuf,
+    project_count: usize,
+    projects: Vec<WorkspaceProjectReport>,
+    links: Vec<WorkspaceLinkSummary>,
+    link_count: usize,
+    cap: usize,
+    cap_hit: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceLinkSummary {
+    source_project: String,
+    target_project: String,
+    source_node: String,
+    target_node: String,
+    target: String,
+    edge_type: GraphEdgeType,
+    matching_strategy: String,
+    confidence: Confidence,
+    ambiguity: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FleetArchitectureReport {
+    ok: bool,
+    workspace: PathBuf,
+    graph_path: PathBuf,
+    project_count: usize,
+    link_count: usize,
+    links: Vec<WorkspaceLinkSummary>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceProjectGraph {
+    name: String,
+    repo: PathBuf,
+    index_path: PathBuf,
+    graph_node_count: usize,
+    graph_edge_count: usize,
+    exposes: Vec<ProjectBoundaryEdge>,
+    calls: Vec<ProjectBoundaryEdge>,
+    publishes: Vec<ProjectBoundaryEdge>,
+    consumes: Vec<ProjectBoundaryEdge>,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectBoundaryEdge {
+    edge: GraphEdge,
+    source: GraphNode,
+    target: GraphNode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ConfidenceArg {
     Low,
@@ -574,6 +663,10 @@ enum ArchitectureCommand {
     Detect,
     Boundaries,
     Violations,
+    Fleet {
+        #[arg(long, value_name = "WORKSPACE")]
+        workspace: PathBuf,
+    },
     /// Experimental repository-owned architecture policy commands.
     Policy {
         #[command(subcommand)]
@@ -1085,10 +1178,23 @@ async fn main() -> anyhow::Result<()> {
             repo: command_repo,
             with_scip,
             mode,
+            workspace,
             from_snapshot,
         } => {
             let repo = resolve_repo(&repo, command_repo);
             let mode = parse_index_mode(&mode)?;
+            if mode == IndexMode::CrossProject {
+                let workspace = workspace.ok_or_else(|| {
+                    anyhow::anyhow!("--workspace is required for cross-project indexing")
+                })?;
+                let report = build_cross_project_workspace(&workspace)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_workspace_link_report(&report);
+                }
+                return Ok(());
+            }
             if from_snapshot.as_deref() == Some("auto") {
                 match snapshot_import(&repo) {
                     Ok(report) => {
@@ -1968,6 +2074,14 @@ async fn main() -> anyhow::Result<()> {
                 let store = open_store(&repo)?;
                 let summary = ArchitectureDetector::new(&store, None).detect()?;
                 output(cli.json, &summary.violations, || {})?;
+            }
+            ArchitectureCommand::Fleet { workspace } => {
+                let report = load_fleet_architecture_report(&workspace)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_fleet_architecture_report(&report);
+                }
             }
         },
         Command::History { command } => {
@@ -5951,6 +6065,618 @@ fn snapshot_metadata_path(repo: &Path) -> PathBuf {
 
 fn index_sqlite_path(repo: &Path) -> PathBuf {
     repo.join(".ok/index.sqlite")
+}
+
+fn workspace_graph_path(workspace: &Path) -> PathBuf {
+    workspace.join(".ok/workspace.sqlite")
+}
+
+fn build_cross_project_workspace(workspace: &Path) -> anyhow::Result<WorkspaceLinkReport> {
+    let (workspace_root, config_path, config) = load_workspace_config(workspace)?;
+    let mut warnings = Vec::new();
+    let mut projects = Vec::new();
+    for project in &config.projects {
+        projects.push(load_workspace_project(&workspace_root, project)?);
+    }
+
+    let mut workspace_nodes = HashMap::<String, GraphNode>::new();
+    let mut workspace_edges = Vec::<GraphEdge>::new();
+    let mut links = Vec::<WorkspaceLinkSummary>::new();
+    let mut cap_hit = false;
+
+    for source in &projects {
+        for target in &projects {
+            if source.name == target.name {
+                continue;
+            }
+            link_boundary_edges(
+                source,
+                target,
+                &source.calls,
+                &target.exposes,
+                GraphEdgeType::CallsEndpoint,
+                "endpoint_path_protocol",
+                &mut workspace_nodes,
+                &mut workspace_edges,
+                &mut links,
+                &mut warnings,
+                &mut cap_hit,
+            );
+            link_boundary_edges(
+                source,
+                target,
+                &source.publishes,
+                &target.consumes,
+                GraphEdgeType::PublishesEvent,
+                "topic_name",
+                &mut workspace_nodes,
+                &mut workspace_edges,
+                &mut links,
+                &mut warnings,
+                &mut cap_hit,
+            );
+        }
+    }
+
+    let graph_path = workspace_graph_path(&workspace_root);
+    let store = SqliteStore::open(&graph_path)?;
+    let mut nodes = workspace_nodes.into_values().collect::<Vec<_>>();
+    nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    workspace_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    store.replace_graph(&nodes, &workspace_edges)?;
+
+    let project_reports = projects
+        .into_iter()
+        .map(|project| WorkspaceProjectReport {
+            name: project.name,
+            repo: project.repo,
+            index_path: project.index_path,
+            graph_nodes: project.graph_node_count,
+            graph_edges: project.graph_edge_count,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(WorkspaceLinkReport {
+        ok: !cap_hit,
+        workspace: workspace_root,
+        config_path,
+        graph_path,
+        project_count: project_reports.len(),
+        projects: project_reports,
+        link_count: links.len(),
+        links,
+        cap: WORKSPACE_LINK_CAP,
+        cap_hit,
+        warnings,
+    })
+}
+
+fn load_fleet_architecture_report(workspace: &Path) -> anyhow::Result<FleetArchitectureReport> {
+    let (workspace_root, _config_path, config) = load_workspace_config(workspace)?;
+    let graph_path = workspace_graph_path(&workspace_root);
+    if !graph_path.exists() {
+        anyhow::bail!(
+            "workspace graph is missing at {}; run `ok index --mode cross-project --workspace {}`",
+            graph_path.display(),
+            workspace_root.display()
+        );
+    }
+    let conn = Connection::open_with_flags(
+        &graph_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening workspace graph {}", graph_path.display()))?;
+    conn.execute_batch("PRAGMA query_only = ON;")?;
+    let links = load_workspace_link_summaries(&conn)?;
+    Ok(FleetArchitectureReport {
+        ok: true,
+        workspace: workspace_root,
+        graph_path,
+        project_count: config.projects.len(),
+        link_count: links.len(),
+        links,
+        warnings: Vec::new(),
+    })
+}
+
+fn load_workspace_config(workspace: &Path) -> anyhow::Result<(PathBuf, PathBuf, WorkspaceConfig)> {
+    let workspace = absolutize(workspace)?;
+    let (workspace_root, config_path) = if workspace.is_file() {
+        let root = workspace
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        (root, workspace)
+    } else {
+        let candidates = [
+            workspace.join("ok-workspace.toml"),
+            workspace.join("workspace.toml"),
+            workspace.join("ok.toml"),
+        ];
+        let config_path = candidates
+            .into_iter()
+            .find(|path| path.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workspace config not found in {}; expected ok-workspace.toml, workspace.toml, or ok.toml",
+                    workspace.display()
+                )
+            })?;
+        (workspace, config_path)
+    };
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("reading workspace config {}", config_path.display()))?;
+    let parsed: WorkspaceToml = toml::from_str(&raw)
+        .with_context(|| format!("parsing workspace config {}", config_path.display()))?;
+    if parsed.workspace.projects.is_empty() {
+        anyhow::bail!("workspace config {} has no projects", config_path.display());
+    }
+    let mut names = std::collections::HashSet::new();
+    for project in &parsed.workspace.projects {
+        if project.name.trim().is_empty() {
+            anyhow::bail!("workspace project names must not be empty");
+        }
+        if !names.insert(project.name.clone()) {
+            anyhow::bail!("duplicate workspace project name `{}`", project.name);
+        }
+    }
+    Ok((workspace_root, config_path, parsed.workspace))
+}
+
+fn load_workspace_project(
+    workspace_root: &Path,
+    project: &WorkspaceProjectConfig,
+) -> anyhow::Result<WorkspaceProjectGraph> {
+    let repo = if project.repo.is_absolute() {
+        project.repo.clone()
+    } else {
+        workspace_root.join(&project.repo)
+    };
+    let repo = absolutize(&repo)?;
+    let index_path = index_sqlite_path(&repo);
+    if !index_path.exists() {
+        anyhow::bail!(
+            "missing project index for `{}` at {}; run `ok index` in that project first",
+            project.name,
+            index_path.display()
+        );
+    }
+    let conn = Connection::open_with_flags(
+        &index_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening project index {}", index_path.display()))?;
+    conn.execute_batch("PRAGMA query_only = ON;")?;
+
+    let nodes = load_graph_nodes_by_id(&conn)?;
+    let graph_node_count = nodes.len();
+    let graph_edge_count = graph_row_count(&conn, "graph_edges")?;
+    let exposes = load_boundary_edges(&conn, &nodes, GraphEdgeType::ExposesEndpoint)?;
+    let calls = load_boundary_edges(&conn, &nodes, GraphEdgeType::CallsEndpoint)?;
+    let publishes = load_boundary_edges(&conn, &nodes, GraphEdgeType::PublishesEvent)?;
+    let consumes = load_boundary_edges(&conn, &nodes, GraphEdgeType::ConsumesEvent)?;
+
+    Ok(WorkspaceProjectGraph {
+        name: project.name.clone(),
+        repo,
+        index_path,
+        graph_node_count,
+        graph_edge_count,
+        exposes,
+        calls,
+        publishes,
+        consumes,
+    })
+}
+
+fn load_graph_nodes_by_id(conn: &Connection) -> anyhow::Result<HashMap<String, GraphNode>> {
+    let mut stmt = conn.prepare("SELECT json FROM graph_nodes ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    let mut nodes = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let raw: String = row.get(0)?;
+        let node: GraphNode = serde_json::from_str(&raw)?;
+        nodes.insert(node.id.0.clone(), node);
+    }
+    Ok(nodes)
+}
+
+fn load_boundary_edges(
+    conn: &Connection,
+    nodes: &HashMap<String, GraphNode>,
+    edge_type: GraphEdgeType,
+) -> anyhow::Result<Vec<ProjectBoundaryEdge>> {
+    let mut stmt = conn.prepare("SELECT json FROM graph_edges WHERE edge_type = ?1 ORDER BY id")?;
+    let mut rows = stmt.query(params![format!("{:?}", edge_type)])?;
+    let mut edges = Vec::new();
+    while let Some(row) = rows.next()? {
+        let raw: String = row.get(0)?;
+        let edge: GraphEdge = serde_json::from_str(&raw)?;
+        let Some(source) = nodes.get(&edge.from.0).cloned() else {
+            continue;
+        };
+        let Some(target) = nodes.get(&edge.to.0).cloned() else {
+            continue;
+        };
+        edges.push(ProjectBoundaryEdge {
+            edge,
+            source,
+            target,
+        });
+    }
+    Ok(edges)
+}
+
+fn graph_row_count(conn: &Connection, table: &str) -> anyhow::Result<usize> {
+    let sql = match table {
+        "graph_edges" => "SELECT COUNT(*) FROM graph_edges",
+        "graph_nodes" => "SELECT COUNT(*) FROM graph_nodes",
+        _ => anyhow::bail!("unsupported graph count table {table}"),
+    };
+    let count: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_boundary_edges(
+    source_project: &WorkspaceProjectGraph,
+    target_project: &WorkspaceProjectGraph,
+    sources: &[ProjectBoundaryEdge],
+    targets: &[ProjectBoundaryEdge],
+    edge_type: GraphEdgeType,
+    strategy: &str,
+    workspace_nodes: &mut HashMap<String, GraphNode>,
+    workspace_edges: &mut Vec<GraphEdge>,
+    links: &mut Vec<WorkspaceLinkSummary>,
+    warnings: &mut Vec<String>,
+    cap_hit: &mut bool,
+) {
+    for source in sources {
+        if workspace_edges.len() >= WORKSPACE_LINK_CAP {
+            *cap_hit = true;
+            warnings.push(format!(
+                "workspace link cap {} reached; additional cross-project edges were skipped",
+                WORKSPACE_LINK_CAP
+            ));
+            return;
+        }
+        let matches = targets
+            .iter()
+            .filter(|candidate| boundary_targets_match(source, candidate, &edge_type))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            continue;
+        }
+        for candidate in matches
+            .iter()
+            .take(WORKSPACE_LINK_CAP - workspace_edges.len())
+        {
+            let ambiguity = workspace_ambiguity(source, matches.len());
+            let confidence = if ambiguity.is_empty() {
+                Confidence::High
+            } else {
+                Confidence::Medium
+            };
+            let source_node = upsert_workspace_node(
+                workspace_nodes,
+                &source_project.name,
+                &source.source,
+                &source_project.repo,
+            );
+            let target_node = upsert_workspace_node(
+                workspace_nodes,
+                &target_project.name,
+                &candidate.source,
+                &target_project.repo,
+            );
+            let target_label = boundary_target_label(source);
+            let edge_id = workspace_edge_id(
+                &edge_type,
+                &source_project.name,
+                &target_project.name,
+                &source.edge.id,
+                &candidate.edge.id,
+                &source_node,
+                &target_node,
+                &target_label,
+                strategy,
+            );
+            let mut properties = BTreeMap::new();
+            properties.insert(
+                "source_project".into(),
+                serde_json::json!(source_project.name),
+            );
+            properties.insert(
+                "target_project".into(),
+                serde_json::json!(target_project.name),
+            );
+            properties.insert("target".into(), serde_json::json!(target_label.clone()));
+            properties.insert("source_node".into(), serde_json::json!(source.edge.from.0));
+            properties.insert(
+                "target_node".into(),
+                serde_json::json!(candidate.edge.from.0),
+            );
+            properties.insert(
+                "source_endpoint_node".into(),
+                serde_json::json!(source.edge.to.0),
+            );
+            properties.insert(
+                "target_endpoint_node".into(),
+                serde_json::json!(candidate.edge.to.0),
+            );
+            properties.insert("matching_strategy".into(), serde_json::json!(strategy));
+            properties.insert(
+                "confidence".into(),
+                serde_json::json!(format!("{:?}", confidence)),
+            );
+            if let Some(file_id) = &candidate.source.file_id {
+                properties.insert("target_file".into(), serde_json::json!(file_id.0));
+            }
+            if let Some(symbol_id) = &candidate.source.symbol_id {
+                properties.insert("target_symbol".into(), serde_json::json!(symbol_id.0));
+            }
+            workspace_edges.push(GraphEdge {
+                id: edge_id.clone(),
+                from: source_node.clone(),
+                to: target_node.clone(),
+                edge_type: edge_type.clone(),
+                properties,
+                source_pass: Some("workspace_linker".into()),
+                index_mode: Some(IndexMode::CrossProject.to_string()),
+                ambiguity: ambiguity.clone(),
+                evidence: Evidence {
+                    id: EvidenceId::new(open_kioku_core::identity::stable_hash(&format!(
+                        "workspace-link-evidence:{}",
+                        edge_id.0
+                    ))),
+                    source: "open-kioku-workspace".into(),
+                    source_type: EvidenceSourceType::StaticAnalysis,
+                    file_range: source.edge.evidence.file_range.clone(),
+                    symbol_id: source.edge.evidence.symbol_id.clone(),
+                    confidence,
+                    message: format!(
+                        "{} links {} to {} via {}",
+                        source_project.name, target_label, target_project.name, strategy
+                    ),
+                    indexed_at: chrono::Utc::now(),
+                    confidence_score: None,
+                    confidence_reason: Some(if ambiguity.is_empty() {
+                        "single cross-project boundary match".into()
+                    } else {
+                        "ambiguous cross-project boundary match".into()
+                    }),
+                    freshness: None,
+                },
+                ..Default::default()
+            });
+            links.push(WorkspaceLinkSummary {
+                source_project: source_project.name.clone(),
+                target_project: target_project.name.clone(),
+                source_node: source_node.0,
+                target_node: target_node.0,
+                target: target_label,
+                edge_type: edge_type.clone(),
+                matching_strategy: strategy.into(),
+                confidence,
+                ambiguity,
+            });
+        }
+    }
+}
+
+fn boundary_targets_match(
+    source: &ProjectBoundaryEdge,
+    target: &ProjectBoundaryEdge,
+    edge_type: &GraphEdgeType,
+) -> bool {
+    match edge_type {
+        GraphEdgeType::CallsEndpoint => {
+            let source_path = normalized_boundary_value(&source.target);
+            let target_path = normalized_boundary_value(&target.target);
+            if source_path.is_empty() || source_path != target_path {
+                return false;
+            }
+            let source_protocol = string_property(&source.target, "protocol").unwrap_or("http");
+            let target_protocol = string_property(&target.target, "protocol").unwrap_or("http");
+            if source_protocol != target_protocol {
+                return false;
+            }
+            let source_method = string_property(&source.target, "method");
+            let target_method = string_property(&target.target, "method");
+            source_method.is_none() || target_method.is_none() || source_method == target_method
+        }
+        GraphEdgeType::PublishesEvent => {
+            let source_topic = normalized_boundary_value(&source.target);
+            !source_topic.is_empty() && source_topic == normalized_boundary_value(&target.target)
+        }
+        _ => false,
+    }
+}
+
+fn workspace_ambiguity(source: &ProjectBoundaryEdge, match_count: usize) -> Vec<String> {
+    let mut ambiguity = source.edge.ambiguity.clone();
+    if match_count > 1 {
+        ambiguity.push(format!(
+            "{match_count} candidate cross-project targets matched this boundary"
+        ));
+    }
+    ambiguity.sort();
+    ambiguity.dedup();
+    ambiguity
+}
+
+fn upsert_workspace_node(
+    nodes: &mut HashMap<String, GraphNode>,
+    project: &str,
+    node: &GraphNode,
+    repo: &Path,
+) -> NodeId {
+    let workspace_id = workspace_node_id(project, &node.id);
+    nodes.entry(workspace_id.0.clone()).or_insert_with(|| {
+        let mut cloned = node.clone();
+        cloned.id = workspace_id.clone();
+        cloned
+            .properties
+            .insert("project".into(), serde_json::json!(project));
+        cloned
+            .properties
+            .insert("repo".into(), serde_json::json!(repo.display().to_string()));
+        cloned.index_mode = Some(IndexMode::CrossProject.to_string());
+        cloned
+    });
+    workspace_id
+}
+
+fn workspace_node_id(project: &str, node_id: &NodeId) -> NodeId {
+    NodeId::new(format!(
+        "workspace:{}:{}",
+        open_kioku_core::identity::stable_hash(project),
+        node_id.0
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_edge_id(
+    edge_type: &GraphEdgeType,
+    source_project: &str,
+    target_project: &str,
+    source_edge: &EdgeId,
+    target_edge: &EdgeId,
+    source_node: &NodeId,
+    target_node: &NodeId,
+    target: &str,
+    strategy: &str,
+) -> EdgeId {
+    EdgeId::new(format!(
+        "workspace-link:{}",
+        open_kioku_core::identity::stable_hash(&format!(
+            "{edge_type:?}:{source_project}:{target_project}:{}:{}:{}:{}:{target}:{strategy}",
+            source_edge.0, target_edge.0, source_node.0, target_node.0
+        ))
+    ))
+}
+
+fn boundary_target_label(edge: &ProjectBoundaryEdge) -> String {
+    let normalized = normalized_boundary_value(&edge.target);
+    if normalized.is_empty() {
+        edge.target.label.clone()
+    } else {
+        normalized
+    }
+}
+
+fn normalized_boundary_value(node: &GraphNode) -> String {
+    string_property(node, "normalized_path")
+        .unwrap_or(node.label.as_str())
+        .trim()
+        .to_string()
+}
+
+fn string_property<'a>(node: &'a GraphNode, key: &str) -> Option<&'a str> {
+    node.properties.get(key).and_then(|value| value.as_str())
+}
+
+fn load_workspace_link_summaries(conn: &Connection) -> anyhow::Result<Vec<WorkspaceLinkSummary>> {
+    let mut stmt = conn
+        .prepare("SELECT json FROM graph_edges WHERE source_type = 'StaticAnalysis' ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    let mut links = Vec::new();
+    while let Some(row) = rows.next()? {
+        let raw: String = row.get(0)?;
+        let edge: GraphEdge = serde_json::from_str(&raw)?;
+        if edge.source_pass.as_deref() != Some("workspace_linker") {
+            continue;
+        }
+        links.push(WorkspaceLinkSummary {
+            source_project: edge
+                .properties
+                .get("source_project")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            target_project: edge
+                .properties
+                .get("target_project")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            source_node: edge.from.0,
+            target_node: edge.to.0,
+            target: edge
+                .properties
+                .get("target")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            edge_type: edge.edge_type,
+            matching_strategy: edge
+                .properties
+                .get("matching_strategy")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            confidence: edge.evidence.confidence,
+            ambiguity: edge.ambiguity,
+        });
+    }
+    Ok(links)
+}
+
+fn print_workspace_link_report(report: &WorkspaceLinkReport) {
+    println!(
+        "Linked {} cross-project boundary edge(s) across {} project(s)",
+        report.link_count, report.project_count
+    );
+    println!("Workspace graph: {}", report.graph_path.display());
+    for project in &report.projects {
+        println!(
+            "- {}: {} nodes, {} edges ({})",
+            project.name,
+            project.graph_nodes,
+            project.graph_edges,
+            project.repo.display()
+        );
+    }
+    for link in &report.links {
+        println!(
+            "- {} -> {} {} via {} ({:?})",
+            link.source_project,
+            link.target_project,
+            link.target,
+            link.matching_strategy,
+            link.confidence
+        );
+        for ambiguity in &link.ambiguity {
+            println!("  caveat: {ambiguity}");
+        }
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+}
+
+fn print_fleet_architecture_report(report: &FleetArchitectureReport) {
+    println!(
+        "Fleet graph: {} cross-project link(s) across {} project(s)",
+        report.link_count, report.project_count
+    );
+    println!("Workspace graph: {}", report.graph_path.display());
+    for link in &report.links {
+        println!(
+            "- {} -> {} {} via {} ({:?})",
+            link.source_project,
+            link.target_project,
+            link.target,
+            link.matching_strategy,
+            link.confidence
+        );
+        for ambiguity in &link.ambiguity {
+            println!("  caveat: {ambiguity}");
+        }
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
 }
 
 fn unique_temp_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
