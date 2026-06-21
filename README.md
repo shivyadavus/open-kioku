@@ -216,6 +216,24 @@ ok mcp install zed --repo /absolute/path/to/repo
 
 `ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
+Teams and CI can share a known-good local index without sharing personal memory
+or compressed context state:
+
+```sh
+ok --repo /absolute/path/to/repo snapshot export --quality best
+ok --repo /absolute/path/to/repo snapshot doctor
+ok --repo /absolute/path/to/repo snapshot import
+ok --repo /absolute/path/to/repo index --from-snapshot auto
+```
+
+Snapshots write `.ok/artifacts/index.snapshot.zst` plus
+`.ok/artifacts/index.snapshot.json`. The compressed artifact contains the
+SQLite index database only: metadata, chunks already stored in the index, and
+graph facts. It does not bundle `.ok/search/tantivy`, `.ok/memory.sqlite`, or
+`.ok/context.sqlite`; import validates the metadata, SQLite schema, byte sizes,
+and database integrity before promoting the index, then rebuilds Tantivy search
+locally.
+
 Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Windsurf, Trae, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
 
 ### Git-Based Plugin & Marketplace Distribution
@@ -327,6 +345,8 @@ ok --repo /path/to/repo plan "update MCP docs" --format markdown
 ok --repo /path/to/repo plan "update MCP docs" --format toon
 ok status /path/to/repo --markdown --write ok-status.md
 ok setup audit /path/to/repo --markdown --write ok-setup.md
+ok --repo /path/to/repo snapshot export --quality fast
+ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
@@ -346,7 +366,7 @@ These reports include indexed counts, evidence scores, validation commands, and
 path shapes — but intentionally omit source code, so they are safe to share
 from private repos.
 
-Current top-level commands: `init`, `index`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `history`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands: `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `history`, `patch`, `memory`, `mcp`, and `scip`.
 
 History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
@@ -361,6 +381,7 @@ Open Kioku's default path is local:
 - Runtime trace/span/log/incident artifacts are consumed only when local files are provided under `.ok/runtime/` or `.ok/analysis/runtime/`.
 - SQLite stores metadata and dependency graph rows under `.ok/`.
 - Tantivy stores BM25 lexical search data under `.ok/search/tantivy`.
+- Index snapshots are local `.ok/artifacts/index.snapshot.*` files for sharing the SQLite index DB; personal memory and compressed context databases are excluded by default.
 - Repo memory facts are append-only and local under `.ok/memory.sqlite`.
 - Reversible compressed context handles store originals locally under `.ok/context.sqlite`.
 - TOON is an optional prompt-rendering format for compact LLM handoff; JSON remains the internal and MCP structured data format.

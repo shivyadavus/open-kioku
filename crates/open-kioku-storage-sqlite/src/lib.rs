@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
-const SQLITE_GRAPH_SCHEMA_VERSION: i64 = 2;
-const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_GRAPH_SCHEMA_VERSION;
+pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 2;
+const SQLITE_GRAPH_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
+const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 
 const HISTORY_SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS git_commits (
@@ -1666,6 +1667,20 @@ impl GraphStore for SqliteStore {
             .query_map(params![type_str, limit, offset], |row| {
                 row.get::<_, String>(0)
             })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn all_graph_nodes(&self) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT json FROM graph_nodes ORDER BY id")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         collect_json(rows)
     }

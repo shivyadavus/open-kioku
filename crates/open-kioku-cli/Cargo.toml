@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 open-kioku-architecture = { version = "2.0.0", path = "../open-kioku-architecture" }
 open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
@@ -43,9 +44,12 @@ open-kioku-tests = { version = "2.0.0", path = "../open-kioku-tests" }
 open-kioku-watch = { version = "2.0.0", path = "../open-kioku-watch" }
 serde.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 walkdir.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"

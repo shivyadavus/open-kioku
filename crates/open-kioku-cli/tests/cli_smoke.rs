@@ -259,6 +259,259 @@ fn init_index_search_and_doctor_work_together() {
     assert!(!setup_markdown.contains("0 BSP descriptor"));
 }
 
+fn snapshot_fixture_repo() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    temp
+}
+
+#[test]
+fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
+    let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
+    let gitattributes_path = repo.join(".ok/artifacts/.gitattributes");
+    let search_meta = repo.join(".ok/search/tantivy/meta.json");
+
+    let exported = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg("best");
+        command
+    });
+    let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    assert_eq!(exported["ok"], true);
+    assert_eq!(exported["quality"], "best");
+    assert_eq!(exported["metadata"]["artifact_kind"], "index-snapshot");
+    assert_eq!(exported["metadata"]["schema_version"], "1.0.0");
+    assert_eq!(exported["metadata"]["compression_level"], 9);
+    assert!(exported["metadata"]["file_count"].as_u64().unwrap() >= 1);
+    assert!(exported["metadata"]["chunk_count"].as_u64().unwrap() >= 1);
+    assert!(artifact_path.exists());
+    assert!(metadata_path.exists());
+    assert!(gitattributes_path.exists());
+    assert!(fs::read_to_string(&gitattributes_path)
+        .unwrap()
+        .contains("*.snapshot.zst binary -merge"));
+
+    fs::write(repo.join(".ok/memory.sqlite"), b"private memory").unwrap();
+    fs::write(repo.join(".ok/context.sqlite"), b"private context").unwrap();
+    fs::remove_file(repo.join(".ok/index.sqlite")).unwrap();
+    fs::remove_dir_all(repo.join(".ok/search")).unwrap();
+    fs::remove_file(repo.join(".ok/memory.sqlite")).unwrap();
+    fs::remove_file(repo.join(".ok/context.sqlite")).unwrap();
+    fs::write(repo.join(".ok/index.sqlite-wal"), b"stale wal").unwrap();
+    fs::write(repo.join(".ok/index.sqlite-shm"), b"stale shm").unwrap();
+
+    let imported = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
+    assert_eq!(imported["ok"], true);
+    assert_eq!(imported["imported"], true);
+    assert_eq!(imported["rebuilt_search"], true);
+    assert!(repo.join(".ok/index.sqlite").exists());
+    assert!(search_meta.exists());
+    assert!(!repo.join(".ok/index.sqlite-wal").exists());
+    assert!(!repo.join(".ok/index.sqlite-shm").exists());
+    assert!(!repo.join(".ok/memory.sqlite").exists());
+    assert!(!repo.join(".ok/context.sqlite").exists());
+
+    let search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("Worker");
+        command
+    });
+    assert!(search.contains("src/lib.rs"));
+
+    let graph_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("Worker")
+            .arg("--kind")
+            .arg("graph");
+        command
+    });
+    assert!(graph_search.contains("Worker"));
+
+    let doctor = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("doctor");
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    assert_eq!(doctor["ok"], true);
+
+    fs::remove_file(repo.join(".ok/index.sqlite")).unwrap();
+    fs::remove_dir_all(repo.join(".ok/search")).unwrap();
+    let bootstrapped = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("index")
+            .arg("--from-snapshot")
+            .arg("auto");
+        command
+    });
+    let bootstrapped: serde_json::Value = serde_json::from_str(&bootstrapped).unwrap();
+    assert_eq!(bootstrapped["imported"], true);
+    assert!(repo.join(".ok/index.sqlite").exists());
+    assert!(search_meta.exists());
+}
+
+#[test]
+fn snapshot_import_rejects_invalid_artifacts_without_replacing_existing_index() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
+    let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
+
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg("fast");
+        command
+    });
+    let original_index = fs::read(repo.join(".ok/index.sqlite")).unwrap();
+    let original_metadata = fs::read_to_string(&metadata_path).unwrap();
+    let original_artifact = fs::read(&artifact_path).unwrap();
+
+    fs::remove_file(&metadata_path).unwrap();
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    assert!(stderr.contains("snapshot metadata is missing"));
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+    fs::write(&metadata_path, &original_metadata).unwrap();
+
+    fs::write(&artifact_path, b"not a zstd snapshot").unwrap();
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    assert!(stderr.contains("snapshot compressed size mismatch"));
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+    fs::write(&artifact_path, &original_artifact).unwrap();
+
+    let mut metadata: serde_json::Value = serde_json::from_str(&original_metadata).unwrap();
+    metadata["schema_version"] = serde_json::Value::String("9.9.9".into());
+    fs::write(
+        &metadata_path,
+        serde_json::to_string_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    assert!(stderr.contains("unsupported snapshot schema version"));
+    assert_eq!(
+        fs::read(repo.join(".ok/index.sqlite")).unwrap(),
+        original_index
+    );
+
+    let mut metadata: serde_json::Value = serde_json::from_str(&original_metadata).unwrap();
+    metadata["open_kioku_version"] = serde_json::Value::String("0.0.0".into());
+    fs::write(
+        &metadata_path,
+        serde_json::to_string_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
+    let imported = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    let imported: serde_json::Value = serde_json::from_str(&imported).unwrap();
+    assert_eq!(imported["ok"], true);
+    assert!(imported["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .unwrap()
+            .contains("snapshot was exported by Open Kioku 0.0.0")));
+}
+
 #[test]
 fn impact_and_plan_accept_since_changed_ranges() {
     fn git(repo: &std::path::Path, args: &[&str]) {
