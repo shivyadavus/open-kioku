@@ -50,6 +50,11 @@ impl<'a> ImpactEngine<'a> {
         } else {
             Vec::new()
         };
+        let complexity_facts = if let Some(file) = &file {
+            complexity_facts_for_file(self.store, &file.id)?
+        } else {
+            Vec::new()
+        };
 
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
@@ -162,6 +167,12 @@ impl<'a> ImpactEngine<'a> {
                 service_facts.len()
             ));
         }
+        if !complexity_facts.is_empty() {
+            reasons.push(format!(
+                "{} complexity/hot-path risk signal(s) touch this file",
+                complexity_facts.len()
+            ));
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
@@ -171,8 +182,11 @@ impl<'a> ImpactEngine<'a> {
         let runtime_score = (runtime_facts.len() as f32 / 12.0).min(0.25);
         let git_score = (git_facts.len() as f32 / 12.0).min(0.20);
         let service_score = (service_facts.len() as f32 / 12.0).min(0.25);
+        let complexity_score = complexity_risk_score(&complexity_facts);
         let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
-        let score = (direct_reference_score + runtime_score + git_score + service_score).min(1.0);
+        let score =
+            (direct_reference_score + runtime_score + git_score + service_score + complexity_score)
+                .min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
@@ -216,6 +230,10 @@ impl<'a> ImpactEngine<'a> {
             .iter()
             .map(|fact| service_fact_evidence(fact, path))
             .collect::<Vec<_>>();
+        let complexity_evidence = complexity_facts
+            .iter()
+            .map(|fact| complexity_fact_evidence(fact, path))
+            .collect::<Vec<_>>();
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -236,6 +254,7 @@ impl<'a> ImpactEngine<'a> {
                 .chain(runtime_evidence)
                 .chain(git_evidence)
                 .chain(service_evidence)
+                .chain(complexity_evidence)
                 .collect(),
             score_breakdown: vec![ScoreComponent::single(
                 "direct_reference_density",
@@ -266,6 +285,14 @@ impl<'a> ImpactEngine<'a> {
                 service_score,
                 service_facts.iter().map(|fact| fact.id.clone()).collect(),
                 "impact risk adjusted by static route, channel, config, and resource facts",
+            ));
+        }
+        if complexity_score > 0.0 {
+            report.score_breakdown.push(ScoreComponent::adjustment(
+                "complexity_hot_path",
+                complexity_score,
+                complexity_facts.iter().map(|fact| fact.id.clone()).collect(),
+                "impact risk adjusted by complexity, nested-loop, recursion, and hot-path static signals",
             ));
         }
         report.reconcile_score_breakdown();
@@ -307,6 +334,38 @@ fn service_boundary_facts_for_file(
         .filter(|fact| &fact.file_id == file_id && is_service_boundary_fact(fact))
         .take(24)
         .collect())
+}
+
+fn complexity_facts_for_file(
+    store: &dyn MetadataStore,
+    file_id: &FileId,
+) -> Result<Vec<AnalysisFact>> {
+    Ok(store
+        .analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?
+        .into_iter()
+        .filter(|fact| &fact.file_id == file_id && is_complexity_fact(fact))
+        .take(24)
+        .collect())
+}
+
+fn is_complexity_fact(fact: &AnalysisFact) -> bool {
+    fact.source == "open-kioku-relationships:complexity"
+}
+
+fn complexity_risk_score(facts: &[AnalysisFact]) -> f32 {
+    facts
+        .iter()
+        .map(|fact| {
+            if fact.message.contains("complexity_risk=high") {
+                0.18
+            } else if fact.message.contains("complexity_risk=medium") {
+                0.08
+            } else {
+                0.02
+            }
+        })
+        .sum::<f32>()
+        .min(0.25)
 }
 
 fn is_service_boundary_fact(fact: &AnalysisFact) -> bool {
@@ -524,6 +583,23 @@ fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         symbol_id: fact.symbol_id.clone(),
         confidence: fact.confidence,
         message: format!("{}: {}", fact.message, fact.target),
+        indexed_at: Utc::now(),
+        ..Default::default()
+    }
+}
+
+fn complexity_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(fact.id.clone()),
+        source: fact.source.clone(),
+        source_type: EvidenceSourceType::StaticAnalysis,
+        file_range: Some(FileRange {
+            path: path.to_path_buf(),
+            line_range: fact.range.clone(),
+        }),
+        symbol_id: fact.symbol_id.clone(),
+        confidence: fact.confidence,
+        message: fact.message.clone(),
         indexed_at: Utc::now(),
         ..Default::default()
     }
@@ -1118,5 +1194,88 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("static service-boundary")));
+    }
+
+    #[test]
+    fn complexity_facts_raise_risk_without_exact_reference_evidence() {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let file = File {
+            id: FileId::new("hot"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/hot_path.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hot".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunks = vec![CodeChunk {
+            id: "hot-chunk".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 1, end: 12 },
+            language: Language::Rust,
+            text: "fn hot_path() { for item in items { while ready { process(item); } } }".into(),
+            symbol_id: Some(SymbolId::new("hot-symbol")),
+        }];
+        let facts = vec![AnalysisFact {
+            id: "complexity-hot".into(),
+            file_id: file.id.clone(),
+            symbol_id: Some(SymbolId::new("hot-symbol")),
+            target: "complexity:crate::hot_path".into(),
+            target_kind: GraphNodeType::Resource,
+            edge_type: GraphEdgeType::BelongsTo,
+            range: Some(LineRange { start: 1, end: 12 }),
+            confidence: Confidence::Medium,
+            source: "open-kioku-relationships:complexity".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "complexity_risk=high; cyclomatic=12; cognitive=18; loop_count=2; max_loop_depth=2; transitive_loop_depth=2; caveat=risk signal, not proof of complexity".into(),
+        }];
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 1,
+            symbol_count: 0,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[file],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &chunks,
+                imports: &[],
+                tests: &[],
+                analysis_facts: &facts,
+            })
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/hot_path.rs"))
+            .unwrap();
+
+        assert!(report.risk_report.score >= 0.18);
+        assert!(report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("complexity/hot-path")));
+        assert!(report
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "complexity_hot_path"));
     }
 }
