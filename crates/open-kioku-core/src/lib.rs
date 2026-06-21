@@ -904,6 +904,71 @@ pub struct UnmappedPolicyTarget {
     pub symbol_id: Option<SymbolId>,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcedEdgeType {
+    Imports,
+    References,
+    Calls,
+}
+
+impl EnforcedEdgeType {
+    pub fn graph_edge_type(self) -> GraphEdgeType {
+        match self {
+            Self::Imports => GraphEdgeType::Imports,
+            Self::References => GraphEdgeType::References,
+            Self::Calls => GraphEdgeType::Calls,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyMatchEvidence {
+    pub edge_id: String,
+    pub edge_type: EnforcedEdgeType,
+    pub source_node: String,
+    pub target_node: String,
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub confidence: Confidence,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyViolation {
+    pub rule_id: String,
+    pub severity: String,
+    pub source_component: String,
+    pub target_component: String,
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub edge_type: EnforcedEdgeType,
+    pub evidence: PolicyMatchEvidence,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnknownPolicyEdge {
+    pub reason: String,
+    pub evidence: PolicyMatchEvidence,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyCheckReport {
+    pub configured: bool,
+    pub evaluated_edge_count: usize,
+    pub allowed_edges: usize,
+    pub violation_count: usize,
+    pub unknown_edge_count: usize,
+    pub unknown_sample_count: usize,
+    pub unknown_edges_truncated: bool,
+    pub violations: Vec<PolicyViolation>,
+    pub unknown_edges: Vec<UnknownPolicyEdge>,
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IndexManifest {
     pub repository: Repository,
