@@ -25,6 +25,7 @@ open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 open-kioku-format = { version = "2.0.0", path = "../open-kioku-format" }
 open-kioku-graph = { version = "2.0.0", path = "../open-kioku-graph" }
+open-kioku-git = { version = "2.0.0", path = "../open-kioku-git" }
 open-kioku-impact = { version = "2.0.0", path = "../open-kioku-impact" }
 open-kioku-ingest = { version = "2.0.0", path = "../open-kioku-ingest" }
 open-kioku-mcp = { version = "2.0.0", path = "../open-kioku-mcp" }

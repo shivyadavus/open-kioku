@@ -603,7 +603,7 @@
         "name": "retrieve_context"
       },
       {
-        "description": "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, and recommended test targets.",
+        "description": "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -619,6 +619,10 @@
             "limit": {
               "description": "Maximum planning results to generate. Defaults to 20.",
               "type": "integer"
+            },
+            "since": {
+              "description": "Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context.",
+              "type": "string"
             },
             "task": {
               "description": "A natural language description of the task or change to plan.",
@@ -894,6 +898,10 @@
             "run_commands": {
               "description": "Set true to execute the validation commands defined in the plan.",
               "type": "boolean"
+            },
+            "since_plan": {
+              "description": "Optional git revision/range used with git diff --unified=0 to derive changed files and diff input.",
+              "type": "string"
             }
           },
           "type": "object"
