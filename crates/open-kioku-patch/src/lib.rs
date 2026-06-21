@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const HIGH_RUNTIME_ERROR_RATE: f32 = 0.20;
+
 pub struct PatchPlanner<'a> {
     config: &'a OkConfig,
     store: &'a dyn OkStore,
@@ -489,15 +491,49 @@ fn runtime_warnings(
 }
 
 fn runtime_finding(path: &Path, fact: &AnalysisFact) -> VerificationFinding {
+    let requires_validation = runtime_fact_requires_validation(fact);
     VerificationFinding {
         path: Some(path.to_path_buf()),
-        kind: "nearby_runtime_signal".into(),
-        reason: format!(
-            "changed file has local runtime trace/log/incident evidence `{}`: {}",
-            fact.target, fact.message
-        ),
+        kind: if requires_validation {
+            "runtime_validation_required"
+        } else {
+            "nearby_runtime_signal"
+        }
+        .into(),
+        reason: if requires_validation {
+            format!(
+                "changed file has high-risk local runtime aggregate evidence `{}`; run targeted validation before accepting the change: {}",
+                fact.target, fact.message
+            )
+        } else {
+            format!(
+                "changed file has local runtime trace/log/incident evidence `{}`: {}",
+                fact.target, fact.message
+            )
+        },
         evidence_refs: vec![fact.id.clone()],
     }
+}
+
+fn runtime_fact_requires_validation(fact: &AnalysisFact) -> bool {
+    if fact.source != "open-kioku-runtime:aggregate" {
+        return false;
+    }
+    let Some(error_rate) = runtime_message_metric(&fact.message, "error_rate") else {
+        return false;
+    };
+    let error_count = runtime_message_metric(&fact.message, "error_count").unwrap_or(0.0);
+    error_count >= 1.0 && error_rate >= HIGH_RUNTIME_ERROR_RATE
+}
+
+fn runtime_message_metric(message: &str, name: &str) -> Option<f32> {
+    let mut parts = message.split(|ch: char| ch.is_whitespace() || ch == ',');
+    while let Some(part) = parts.next() {
+        if part == name {
+            return parts.next()?.parse::<f32>().ok();
+        }
+    }
+    None
 }
 
 fn impact_finding(result: &SearchResult) -> VerificationFinding {
@@ -646,6 +682,11 @@ mod tests {
             };
             Self { file, fact }
         }
+
+        fn with_fact(mut self, fact: AnalysisFact) -> Self {
+            self.fact = fact;
+            self
+        }
     }
 
     impl MetadataStore for RuntimeStore {
@@ -771,5 +812,30 @@ mod tests {
         assert_eq!(warnings[0].kind, "nearby_runtime_signal");
         assert!(warnings[0].reason.contains("panic in checkout flow"));
         assert_eq!(warnings[0].evidence_refs, vec!["runtime-incident"]);
+    }
+
+    #[test]
+    fn runtime_aggregates_require_validation_when_error_rate_is_high() {
+        let base = RuntimeStore::new();
+        let aggregate = AnalysisFact {
+            id: "runtime-aggregate".into(),
+            file_id: base.file.id.clone(),
+            symbol_id: None,
+            target: "POST /checkout".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: None,
+            confidence: Confidence::High,
+            source: "open-kioku-runtime:aggregate".into(),
+            source_type: EvidenceSourceType::Runtime,
+            message: "runtime aggregate observed: count 10, error_count 3, error_rate 0.30, p95_ms 900.0, freshness recent".into(),
+        };
+        let store = RuntimeStore::new().with_fact(aggregate);
+        let warnings = runtime_warnings(&store, &[PathBuf::from("src/handler.rs")]).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].kind, "runtime_validation_required");
+        assert!(warnings[0].reason.contains("run targeted validation"));
+        assert_eq!(warnings[0].evidence_refs, vec!["runtime-aggregate"]);
     }
 }
