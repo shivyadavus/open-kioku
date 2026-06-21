@@ -4,7 +4,8 @@ use open_kioku_core::{
     GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, NodeId, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
-use std::collections::{HashMap, VecDeque};
+use serde_json::json;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 
 pub mod buffer;
@@ -197,6 +198,9 @@ impl InMemoryGraph {
                 label: fact.target.clone(),
                 file_id: None,
                 symbol_id: None,
+                properties: analysis_node_properties(fact),
+                source_pass: Some(fact.source.clone()),
+                ambiguity: analysis_fact_ambiguity(fact),
                 ..Default::default()
             };
             buffer.upsert_node(target_node.clone());
@@ -213,6 +217,9 @@ impl InMemoryGraph {
                 from: source_node,
                 to: target_node.id,
                 edge_type: fact.edge_type.clone(),
+                properties: analysis_edge_properties(fact),
+                source_pass: Some(fact.source.clone()),
+                ambiguity: analysis_fact_ambiguity(fact),
                 evidence: Evidence {
                     id: EvidenceId::new(stable_id(&format!("analysis-evidence:{}", edge_id.0))),
                     source: fact.source.clone(),
@@ -299,13 +306,15 @@ fn analysis_node_id(node_type: GraphNodeType, label: &str) -> NodeId {
             .unwrap_or_else(|_| identity::legacy_analysis_node_id(node_type, label)),
         GraphNodeType::Endpoint => {
             let (method, path) = split_route_label(label);
-            identity::route_node_id("http", method, path)
+            let protocol = endpoint_descriptor(label).protocol;
+            identity::route_node_id(&protocol, method.as_deref(), &path)
         }
         GraphNodeType::ConfigKey => identity::config_node_id(label),
         GraphNodeType::Test => {
             NodeId::new(format!("test:{}", label.replace([':', '/', '\\'], "_")))
         }
         GraphNodeType::RuntimeError => identity::runtime_node_id(label),
+        GraphNodeType::Resource => identity::resource_node_id(label),
         GraphNodeType::ArchitectureComponent => identity::architecture_node_id(label),
         _ => identity::legacy_analysis_node_id(node_type, label),
     }
@@ -315,12 +324,111 @@ fn stable_id(value: &str) -> String {
     identity::stable_hash(value)
 }
 
-fn split_route_label(label: &str) -> (Option<&str>, &str) {
+fn split_route_label(label: &str) -> (Option<String>, String) {
+    let endpoint = endpoint_descriptor(label);
+    (endpoint.method, endpoint.normalized_path)
+}
+
+#[derive(Debug, Clone)]
+struct EndpointDescriptor {
+    protocol: String,
+    method: Option<String>,
+    raw_path: String,
+    normalized_path: String,
+}
+
+fn endpoint_descriptor(label: &str) -> EndpointDescriptor {
     let trimmed = label.trim();
-    trimmed
+    let (head, tail) = trimmed
         .split_once(' ')
-        .map(|(method, path)| (Some(method), path))
-        .unwrap_or((None, trimmed))
+        .map(|(head, tail)| (head.trim(), tail.trim()))
+        .unwrap_or(("", trimmed));
+    let upper = head.to_ascii_uppercase();
+    let http_methods = [
+        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "HTTP",
+    ];
+    let protocol_markers = ["TCP", "UDP", "GRAPHQL", "GRPC", "TRPC"];
+    let (protocol, method, raw_path) = if http_methods.contains(&upper.as_str()) {
+        (
+            "http".to_string(),
+            (upper != "HTTP").then_some(upper),
+            tail.to_string(),
+        )
+    } else if protocol_markers.contains(&upper.as_str()) {
+        (upper.to_ascii_lowercase(), None, tail.to_string())
+    } else {
+        ("http".to_string(), None, trimmed.to_string())
+    };
+    let normalized_path = normalize_endpoint_path(&raw_path);
+    EndpointDescriptor {
+        protocol,
+        method,
+        raw_path,
+        normalized_path,
+    }
+}
+
+fn normalize_endpoint_path(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('"').trim_matches('\'');
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    let path = if let Some(index) = without_query.find("://") {
+        let rest = &without_query[index + 3..];
+        rest.find('/').map(|path| &rest[path..]).unwrap_or("/")
+    } else {
+        without_query
+    };
+    if path.is_empty() {
+        "/".into()
+    } else if path.starts_with('/') || path.starts_with(':') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+fn analysis_node_properties(fact: &AnalysisFact) -> BTreeMap<String, serde_json::Value> {
+    let mut properties = BTreeMap::new();
+    match fact.target_kind {
+        GraphNodeType::Endpoint => {
+            let endpoint = endpoint_descriptor(&fact.target);
+            properties.insert("protocol".into(), json!(endpoint.protocol));
+            if let Some(method) = endpoint.method {
+                properties.insert("method".into(), json!(method));
+            }
+            properties.insert("raw_path".into(), json!(endpoint.raw_path));
+            properties.insert("normalized_path".into(), json!(endpoint.normalized_path));
+        }
+        GraphNodeType::Queue
+        | GraphNodeType::Topic
+        | GraphNodeType::ConfigKey
+        | GraphNodeType::Resource => {
+            properties.insert("normalized_path".into(), json!(fact.target.trim()));
+        }
+        _ => {}
+    }
+    properties
+}
+
+fn analysis_edge_properties(fact: &AnalysisFact) -> BTreeMap<String, serde_json::Value> {
+    let mut properties = analysis_node_properties(fact);
+    properties.insert("source_framework".into(), json!(fact.source));
+    properties.insert("source_pass".into(), json!(fact.source));
+    properties.insert("confidence".into(), json!(format!("{:?}", fact.confidence)));
+    properties.insert(
+        "target_kind".into(),
+        json!(format!("{:?}", fact.target_kind)),
+    );
+    properties
+}
+
+fn analysis_fact_ambiguity(fact: &AnalysisFact) -> Vec<String> {
+    if fact.target_kind == GraphNodeType::Endpoint {
+        let endpoint = endpoint_descriptor(&fact.target);
+        if endpoint.method.is_none() && endpoint.protocol == "http" {
+            return vec!["HTTP method was not statically resolved".into()];
+        }
+    }
+    Vec::new()
 }
 
 impl open_kioku_storage::GraphStore for InMemoryGraph {
@@ -510,6 +618,32 @@ mod tests {
                     node.label == "GET /orders" && node.id.0 == "route:http:GET:%2Forders"
                 })
         }));
+        let endpoint_edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::ExposesEndpoint)
+            .expect("endpoint edge should exist");
+        assert_eq!(
+            endpoint_edge
+                .properties
+                .get("protocol")
+                .and_then(serde_json::Value::as_str),
+            Some("http")
+        );
+        assert_eq!(
+            endpoint_edge
+                .properties
+                .get("method")
+                .and_then(serde_json::Value::as_str),
+            Some("GET")
+        );
+        assert_eq!(
+            endpoint_edge
+                .properties
+                .get("normalized_path")
+                .and_then(serde_json::Value::as_str),
+            Some("/orders")
+        );
     }
 
     #[test]

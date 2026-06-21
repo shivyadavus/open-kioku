@@ -284,6 +284,9 @@ pub fn extract_analysis_facts(file: &File, content: &str, symbols: &[Symbol]) ->
         }
         Language::Python => extract_python_analysis_facts(file, content, symbols),
         Language::Rust => extract_rust_analysis_facts(file, content, symbols),
+        Language::Yaml | Language::Json | Language::Toml | Language::Text => {
+            extract_infra_analysis_facts(file, content)
+        }
         _ => Vec::new(),
     }
 }
@@ -312,6 +315,13 @@ fn extract_java_analysis_facts(
         .expect("valid Spring value regex");
     let table_re =
         Regex::new(r#"@Table\(\s*name\s*=\s*["']([^"']+)["']"#).expect("valid table regex");
+    let http_client_re =
+        Regex::new(r#"\b(?:getForObject|postForObject|put|delete|exchange)\(\s*["']([^"']+)["']"#)
+            .expect("valid Java HTTP client regex");
+    let kafka_listener_re = Regex::new(r#"@KafkaListener\([^)]*topics\s*=\s*["']([^"']+)["']"#)
+        .expect("valid Kafka listener regex");
+    let kafka_send_re = Regex::new(r#"\bkafkaTemplate\.send\(\s*["']([^"']+)["']"#)
+        .expect("valid Kafka send regex");
 
     for (idx, line) in content.lines().enumerate() {
         let line_number = (idx + 1) as u32;
@@ -413,6 +423,48 @@ fn extract_java_analysis_facts(
                 ));
             }
         }
+        for captures in http_client_re.captures_iter(line) {
+            let Some(route) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("HTTP {}", route.as_str()),
+                line_number,
+                ("open-kioku-static/java", "Java HTTP client call"),
+            ));
+        }
+        for captures in kafka_listener_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_after(symbols, line_number, 3),
+                GraphEdgeType::ConsumesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                ("open-kioku-static/java", "Java Kafka topic listener"),
+            ));
+        }
+        for captures in kafka_send_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::PublishesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                ("open-kioku-static/java", "Java Kafka topic publish"),
+            ));
+        }
     }
     dedupe_analysis_facts(&mut facts);
     facts
@@ -427,6 +479,18 @@ fn extract_javascript_analysis_facts(
     let route_re =
         Regex::new(r#"\b(?:app|router)\.(get|post|put|delete|patch|all)\(\s*["']([^"']+)["']"#)
             .expect("valid JavaScript route regex");
+    let client_re =
+        Regex::new(r#"\b(?:axios|client|http)\.(get|post|put|delete|patch)\(\s*["']([^"']+)["']"#)
+            .expect("valid JavaScript HTTP client regex");
+    let fetch_re = Regex::new(r#"\bfetch\(\s*["']([^"']+)["']"#).expect("valid fetch regex");
+    let publish_re = Regex::new(
+        r#"\b(?:producer|publisher|pubsub|channel)\.(?:send|publish|emit)\(\s*(?:\{[^}]*topic\s*:\s*)?["']([^"']+)["']"#,
+    )
+    .expect("valid JavaScript publish regex");
+    let subscribe_re = Regex::new(
+        r#"\b(?:consumer|subscriber|pubsub|channel)\.(?:subscribe|on)\(\s*(?:\{[^}]*topic\s*:\s*)?["']([^"']+)["']"#,
+    )
+    .expect("valid JavaScript subscribe regex");
     for (idx, line) in content.lines().enumerate() {
         let line_number = (idx + 1) as u32;
         for captures in route_re.captures_iter(line) {
@@ -445,7 +509,70 @@ fn extract_javascript_analysis_facts(
                 ("open-kioku-static/javascript", "JavaScript HTTP route"),
             ));
         }
+        for captures in client_re.captures_iter(line) {
+            let method = captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_uppercase())
+                .unwrap_or_else(|| "HTTP".into());
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                (
+                    "open-kioku-static/javascript",
+                    "JavaScript HTTP client call",
+                ),
+            ));
+        }
+        for captures in fetch_re.captures_iter(line) {
+            let route = captures.get(1).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("HTTP {route}"),
+                line_number,
+                ("open-kioku-static/javascript", "JavaScript fetch call"),
+            ));
+        }
+        for captures in publish_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::PublishesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                ("open-kioku-static/javascript", "JavaScript topic publish"),
+            ));
+        }
+        for captures in subscribe_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::ConsumesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                (
+                    "open-kioku-static/javascript",
+                    "JavaScript topic subscription",
+                ),
+            ));
+        }
     }
+    dedupe_analysis_facts(&mut facts);
     facts
 }
 
@@ -459,6 +586,14 @@ fn extract_python_analysis_facts(
         r#"@(?:app|router|blueprint)\.(get|post|put|delete|patch|route)\(\s*["']([^"']+)["']"#,
     )
     .expect("valid Python route regex");
+    let client_re =
+        Regex::new(r#"\b(?:requests|httpx)\.(get|post|put|delete|patch)\(\s*["']([^"']+)["']"#)
+            .expect("valid Python HTTP client regex");
+    let publish_re = Regex::new(r#"\b(?:producer|publisher|client)\.send\(\s*["']([^"']+)["']"#)
+        .expect("valid Python publish regex");
+    let subscribe_re =
+        Regex::new(r#"\b(?:consumer|subscriber)\.subscribe\(\s*(?:\[)?\s*["']([^"']+)["']"#)
+            .expect("valid Python subscribe regex");
     for (idx, line) in content.lines().enumerate() {
         let line_number = (idx + 1) as u32;
         for captures in route_re.captures_iter(line) {
@@ -478,7 +613,52 @@ fn extract_python_analysis_facts(
                 ("open-kioku-static/python", "Python HTTP route decorator"),
             ));
         }
+        for captures in client_re.captures_iter(line) {
+            let method = captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_uppercase())
+                .unwrap_or_else(|| "HTTP".into());
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/python", "Python HTTP client call"),
+            ));
+        }
+        for captures in publish_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::PublishesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                ("open-kioku-static/python", "Python topic publish"),
+            ));
+        }
+        for captures in subscribe_re.captures_iter(line) {
+            let Some(topic) = captures.get(1) else {
+                continue;
+            };
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::ConsumesEvent,
+                GraphNodeType::Topic,
+                topic.as_str().to_string(),
+                line_number,
+                ("open-kioku-static/python", "Python topic subscription"),
+            ));
+        }
     }
+    dedupe_analysis_facts(&mut facts);
     facts
 }
 
@@ -490,6 +670,8 @@ fn extract_rust_analysis_facts(
     let mut facts = Vec::new();
     let route_re = Regex::new(r#"#\[(get|post|put|delete|patch)\(\s*["']([^"']+)["']\s*\)\]"#)
         .expect("valid Rust route regex");
+    let client_re = Regex::new(r#"\breqwest::(get|post|put|delete|patch)\(\s*["']([^"']+)["']"#)
+        .expect("valid Rust HTTP client regex");
     for (idx, line) in content.lines().enumerate() {
         let line_number = (idx + 1) as u32;
         for captures in route_re.captures_iter(line) {
@@ -508,8 +690,287 @@ fn extract_rust_analysis_facts(
                 ("open-kioku-static/rust", "Rust HTTP route attribute"),
             ));
         }
+        for captures in client_re.captures_iter(line) {
+            let method = captures
+                .get(1)
+                .map(|value| value.as_str().to_ascii_uppercase())
+                .unwrap_or_else(|| "HTTP".into());
+            let route = captures.get(2).map(|value| value.as_str()).unwrap_or("/");
+            facts.push(analysis_fact(
+                file,
+                symbol_at_or_before(symbols, line_number),
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("{method} {route}"),
+                line_number,
+                ("open-kioku-static/rust", "Rust HTTP client call"),
+            ));
+        }
     }
+    dedupe_analysis_facts(&mut facts);
     facts
+}
+
+fn extract_infra_analysis_facts(file: &File, content: &str) -> Vec<AnalysisFact> {
+    let path = file.path.to_string_lossy().to_ascii_lowercase();
+    let mut facts = Vec::new();
+    if path.ends_with("dockerfile") || path.contains("dockerfile.") {
+        extract_dockerfile_facts(file, content, &mut facts);
+    }
+    if path.ends_with("docker-compose.yml")
+        || path.ends_with("docker-compose.yaml")
+        || path.ends_with("compose.yml")
+        || path.ends_with("compose.yaml")
+    {
+        extract_compose_facts(file, content, &mut facts);
+    }
+    if matches!(file.language, Language::Yaml) {
+        extract_kubernetes_facts(file, content, &mut facts);
+    }
+    if path.ends_with(".tf") || path.ends_with(".tfvars") || path.ends_with(".hcl") {
+        extract_terraform_facts(file, content, &mut facts);
+    }
+    extract_url_binding_facts(file, content, &mut facts);
+    dedupe_analysis_facts(&mut facts);
+    facts
+}
+
+fn extract_dockerfile_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFact>) {
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("EXPOSE ") {
+            for port in rest.split_whitespace() {
+                let port = port.split('/').next().unwrap_or(port);
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::ExposesEndpoint,
+                    GraphNodeType::Endpoint,
+                    format!("TCP :{port}"),
+                    line_number,
+                    ("open-kioku-static/dockerfile", "Dockerfile exposed port"),
+                ));
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("ENV ") {
+            if let Some((key, _)) = rest.split_once('=') {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::WritesConfig,
+                    GraphNodeType::ConfigKey,
+                    key.trim().to_string(),
+                    line_number,
+                    (
+                        "open-kioku-static/dockerfile",
+                        "Dockerfile environment binding",
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn extract_compose_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFact>) {
+    let service_re =
+        Regex::new(r#"^\s{2}([A-Za-z0-9_.-]+):\s*$"#).expect("valid compose service regex");
+    let port_re = Regex::new(r#"^\s*-\s*["']?(?:\d+:)?(\d+)(?:/tcp|/udp)?["']?\s*$"#)
+        .expect("valid compose port regex");
+    let env_re = Regex::new(r#"^\s*([A-Z_][A-Z0-9_]+):"#).expect("valid compose env regex");
+    let dep_re = Regex::new(r#"^\s*-\s*([A-Za-z0-9_.-]+)\s*$"#).expect("valid compose dep regex");
+    let mut in_services = false;
+    let mut in_environment = false;
+    let mut in_depends = false;
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        if line.trim() == "services:" {
+            in_services = true;
+            continue;
+        }
+        if !in_services {
+            continue;
+        }
+        if let Some(captures) = service_re.captures(line) {
+            let service = captures.get(1).unwrap().as_str();
+            facts.push(analysis_fact(
+                file,
+                None,
+                GraphEdgeType::Defines,
+                GraphNodeType::Resource,
+                format!("compose:service:{service}"),
+                line_number,
+                ("open-kioku-static/compose", "Docker Compose service"),
+            ));
+            in_environment = false;
+            in_depends = false;
+            continue;
+        }
+        let trimmed = line.trim();
+        in_environment =
+            trimmed == "environment:" || (in_environment && line.starts_with("      "));
+        in_depends = trimmed == "depends_on:" || (in_depends && line.starts_with("      "));
+        if let Some(captures) = port_re.captures(line) {
+            let port = captures.get(1).unwrap().as_str();
+            facts.push(analysis_fact(
+                file,
+                None,
+                GraphEdgeType::ExposesEndpoint,
+                GraphNodeType::Endpoint,
+                format!("TCP :{port}"),
+                line_number,
+                ("open-kioku-static/compose", "Docker Compose published port"),
+            ));
+        }
+        if in_environment {
+            if let Some(captures) = env_re.captures(line) {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::WritesConfig,
+                    GraphNodeType::ConfigKey,
+                    captures.get(1).unwrap().as_str().to_string(),
+                    line_number,
+                    (
+                        "open-kioku-static/compose",
+                        "Docker Compose environment binding",
+                    ),
+                ));
+            }
+        }
+        if in_depends {
+            if let Some(captures) = dep_re.captures(line) {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::DependsOn,
+                    GraphNodeType::Resource,
+                    format!("compose:service:{}", captures.get(1).unwrap().as_str()),
+                    line_number,
+                    (
+                        "open-kioku-static/compose",
+                        "Docker Compose service dependency",
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn extract_kubernetes_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFact>) {
+    let mut kind: Option<String> = None;
+    let mut name: Option<String> = None;
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("kind:") {
+            kind = Some(value.trim().to_string());
+        } else if name.is_none() && trimmed.starts_with("name:") {
+            name = Some(trimmed.trim_start_matches("name:").trim().to_string());
+        } else if let Some(value) = trimmed
+            .strip_prefix("port:")
+            .or_else(|| trimmed.strip_prefix("- port:"))
+        {
+            let port = value.trim();
+            if port.chars().all(|ch| ch.is_ascii_digit()) {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::ExposesEndpoint,
+                    GraphNodeType::Endpoint,
+                    format!("TCP :{port}"),
+                    line_number,
+                    ("open-kioku-static/kubernetes", "Kubernetes service port"),
+                ));
+            }
+        }
+        if let (Some(resource_kind), Some(resource_name)) = (&kind, &name) {
+            facts.push(analysis_fact(
+                file,
+                None,
+                GraphEdgeType::Defines,
+                GraphNodeType::Resource,
+                format!("kubernetes:{resource_kind}:{resource_name}"),
+                line_number,
+                ("open-kioku-static/kubernetes", "Kubernetes resource"),
+            ));
+            kind = None;
+            name = None;
+        }
+    }
+}
+
+fn extract_terraform_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFact>) {
+    let resource_re =
+        Regex::new(r#"resource\s+"([^"]+)"\s+"([^"]+)""#).expect("valid Terraform resource regex");
+    let variable_re =
+        Regex::new(r#"variable\s+"([^"]+)""#).expect("valid Terraform variable regex");
+    for (idx, line) in content.lines().enumerate() {
+        let line_number = (idx + 1) as u32;
+        if let Some(captures) = resource_re.captures(line) {
+            let kind = captures.get(1).unwrap().as_str();
+            let name = captures.get(2).unwrap().as_str();
+            let (target_kind, edge_type, target) = if kind.contains("sqs") || kind.contains("queue")
+            {
+                (
+                    GraphNodeType::Queue,
+                    GraphEdgeType::Defines,
+                    name.to_string(),
+                )
+            } else if kind.contains("sns") || kind.contains("topic") {
+                (
+                    GraphNodeType::Topic,
+                    GraphEdgeType::Defines,
+                    name.to_string(),
+                )
+            } else {
+                (
+                    GraphNodeType::Resource,
+                    GraphEdgeType::Defines,
+                    format!("terraform:{kind}:{name}"),
+                )
+            };
+            facts.push(analysis_fact(
+                file,
+                None,
+                edge_type,
+                target_kind,
+                target,
+                line_number,
+                ("open-kioku-static/terraform", "Terraform resource"),
+            ));
+        }
+        if let Some(captures) = variable_re.captures(line) {
+            facts.push(analysis_fact(
+                file,
+                None,
+                GraphEdgeType::ReadsConfig,
+                GraphNodeType::ConfigKey,
+                captures.get(1).unwrap().as_str().to_string(),
+                line_number,
+                ("open-kioku-static/terraform", "Terraform variable"),
+            ));
+        }
+    }
+}
+
+fn extract_url_binding_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFact>) {
+    let url_re =
+        Regex::new(r#"["']?(?:url|endpoint|base_url)["']?\s*[:=]\s*["'](https?://[^"']+)["']"#)
+            .expect("valid URL binding regex");
+    for (idx, line) in content.lines().enumerate() {
+        for captures in url_re.captures_iter(line) {
+            facts.push(analysis_fact(
+                file,
+                None,
+                GraphEdgeType::CallsEndpoint,
+                GraphNodeType::Endpoint,
+                format!("HTTP {}", captures.get(1).unwrap().as_str()),
+                (idx + 1) as u32,
+                ("open-kioku-static/config", "configuration URL binding"),
+            ));
+        }
+    }
 }
 
 fn analysis_fact(
@@ -968,6 +1429,112 @@ class OrderController extends BaseController implements OrderApi, Audited {
         let py_facts = extract_analysis_facts(&py, py_src, &extract_symbols(&py, py_src));
         assert!(py_facts.iter().any(|fact| {
             fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "GET /health"
+        }));
+    }
+
+    #[test]
+    fn extracts_service_boundary_facts_for_clients_channels_and_infra() {
+        let ts = ts_file();
+        let ts_src = r#"
+router.post("/v1/orders", handler);
+await fetch("https://billing.example.com/v1/orders");
+producer.send({ topic: "orders.created" });
+consumer.subscribe({ topic: "orders.created" });
+"#;
+        let ts_facts = extract_analysis_facts(&ts, ts_src, &extract_symbols(&ts, ts_src));
+        assert!(ts_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::CallsEndpoint
+                && fact.target == "HTTP https://billing.example.com/v1/orders"
+        }));
+        assert!(ts_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::PublishesEvent
+                && fact.target_kind == GraphNodeType::Topic
+                && fact.target == "orders.created"
+        }));
+        assert!(ts_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ConsumesEvent
+                && fact.target_kind == GraphNodeType::Topic
+                && fact.target == "orders.created"
+        }));
+
+        let docker = File {
+            language: Language::Text,
+            path: "Dockerfile".into(),
+            ..rust_file()
+        };
+        let docker_facts =
+            extract_analysis_facts(&docker, "ENV SERVICE_PORT=8080\nEXPOSE 8080\n", &[]);
+        assert!(docker_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "TCP :8080"
+        }));
+        assert!(docker_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::WritesConfig && fact.target == "SERVICE_PORT"
+        }));
+
+        let compose = File {
+            language: Language::Yaml,
+            path: "docker-compose.yml".into(),
+            ..rust_file()
+        };
+        let compose_src = r#"
+services:
+  api:
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://db/app
+    depends_on:
+      - db
+  db:
+    image: postgres
+"#;
+        let compose_facts = extract_analysis_facts(&compose, compose_src, &[]);
+        assert!(compose_facts.iter().any(|fact| {
+            fact.target_kind == GraphNodeType::Resource && fact.target == "compose:service:api"
+        }));
+        assert!(compose_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::DependsOn && fact.target == "compose:service:db"
+        }));
+        assert!(compose_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::WritesConfig && fact.target == "DATABASE_URL"
+        }));
+
+        let k8s = File {
+            language: Language::Yaml,
+            path: "k8s/service.yaml".into(),
+            ..rust_file()
+        };
+        let k8s_src =
+            "kind: Service\nmetadata:\n  name: orders-api\nspec:\n  ports:\n    - port: 80\n";
+        let k8s_facts = extract_analysis_facts(&k8s, k8s_src, &[]);
+        assert!(k8s_facts.iter().any(|fact| {
+            fact.target_kind == GraphNodeType::Resource
+                && fact.target == "kubernetes:Service:orders-api"
+        }));
+        assert!(k8s_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::ExposesEndpoint && fact.target == "TCP :80"
+        }));
+
+        let terraform = File {
+            language: Language::Text,
+            path: "infra/main.tf".into(),
+            ..rust_file()
+        };
+        let terraform_src = r#"
+resource "aws_sns_topic" "orders_created" {}
+variable "DATABASE_URL" {}
+endpoint = "https://orders.example.com/v1/orders"
+"#;
+        let terraform_facts = extract_analysis_facts(&terraform, terraform_src, &[]);
+        assert!(terraform_facts.iter().any(|fact| {
+            fact.target_kind == GraphNodeType::Topic && fact.target == "orders_created"
+        }));
+        assert!(terraform_facts.iter().any(|fact| {
+            fact.target_kind == GraphNodeType::ConfigKey && fact.target == "DATABASE_URL"
+        }));
+        assert!(terraform_facts.iter().any(|fact| {
+            fact.edge_type == GraphEdgeType::CallsEndpoint
+                && fact.target == "HTTP https://orders.example.com/v1/orders"
         }));
     }
 
