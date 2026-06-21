@@ -153,6 +153,13 @@ impl RankingFeatures {
                 }
             })
             .unwrap_or(0.0);
+        let semantic_only = semantic_similarity > 0.0
+            && exact_reference <= 0.0
+            && graph_proximity <= 0.0
+            && runtime_corroboration <= 0.0
+            && git_cochange <= 0.0
+            && validation_proximity <= 0.0;
+        let text_relevance = if semantic_only { 0.0 } else { result.score };
         let path_quality_penalty = path_quality_penalty(&path, result.score);
         let symbol_name_hit = result
             .symbol
@@ -162,7 +169,7 @@ impl RankingFeatures {
             .unwrap_or_default();
 
         Self {
-            text_relevance: result.score,
+            text_relevance,
             exact_reference: exact_reference + symbol_name_hit,
             graph_proximity,
             boundary_fit,
@@ -696,5 +703,34 @@ mod tests {
             .expect("source files retain the default boundary signal");
 
         assert_eq!(boundary_fit.raw_value, 0.03);
+    }
+
+    #[test]
+    fn semantic_only_result_does_not_outrank_exact_reference() {
+        let mut exact = make_result("src/exact.rs", 0.45);
+        exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.evidence = vec!["exact reference from scip".into()];
+
+        let mut semantic = make_result("src/semantic.rs", 0.99);
+        semantic.match_reason = "semantic vector match".into();
+        semantic.evidence = vec!["semantic vector relationship".into()];
+        semantic.score_breakdown = vec![ScoreComponent::single(
+            "semantic_similarity",
+            0.99,
+            vec!["semantic".into()],
+            "semantic-only fixture",
+        )];
+
+        let results = rerank(vec![semantic, exact]);
+
+        assert_eq!(results[0].path, Path::new("src/exact.rs"));
+        assert!(results[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "exact_reference"));
+        assert!(results[1]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "semantic_similarity"));
     }
 }

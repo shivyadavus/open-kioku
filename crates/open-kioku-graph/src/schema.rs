@@ -63,6 +63,8 @@ pub fn current_schema_with_manifest(
         "BelongsTo",
         "MentionedIn",
         "RelatedToTicket",
+        "SimilarTo",
+        "SemanticallyRelated",
     ];
 
     let node_stats = store.and_then(|s| s.node_type_stats().ok());
@@ -335,7 +337,7 @@ mod tests {
 
         // Verify node types has the correct counts
         assert_eq!(schema1.node_types.len(), 23);
-        assert_eq!(schema1.edge_types.len(), 25);
+        assert_eq!(schema1.edge_types.len(), 27);
 
         // Ensure count properties are absent in JSON (since they are None and skip_serializing_if is used)
         assert!(!json1.contains("\"count\":"));
