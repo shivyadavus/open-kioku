@@ -1911,28 +1911,32 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
         }
         rows_out
     };
-    for (id, json) in node_rows {
-        let Ok(node) = serde_json::from_str::<GraphNode>(&json) else {
-            continue;
-        };
-        conn.execute(
-            "UPDATE graph_nodes
-             SET node_type = ?1,
-                 file_id = ?2,
-                 symbol_id = ?3,
-                 evidence_available = ?4
-             WHERE id = ?5",
-            params![
-                format!("{:?}", node.node_type),
-                node.file_id.as_ref().map(|file_id| file_id.0.as_str()),
-                node.symbol_id
-                    .as_ref()
-                    .map(|symbol_id| symbol_id.0.as_str()),
-                node.file_id.is_some() || node.symbol_id.is_some(),
-                id,
-            ],
-        )
-        .map_err(storage_err)?;
+    if !node_rows.is_empty() {
+        let tx = conn.transaction().map_err(storage_err)?;
+        for (id, json) in node_rows {
+            let Ok(node) = serde_json::from_str::<GraphNode>(&json) else {
+                continue;
+            };
+            tx.execute(
+                "UPDATE graph_nodes
+                 SET node_type = ?1,
+                     file_id = ?2,
+                     symbol_id = ?3,
+                     evidence_available = ?4
+                 WHERE id = ?5",
+                params![
+                    format!("{:?}", node.node_type),
+                    node.file_id.as_ref().map(|file_id| file_id.0.as_str()),
+                    node.symbol_id
+                        .as_ref()
+                        .map(|symbol_id| symbol_id.0.as_str()),
+                    node.file_id.is_some() || node.symbol_id.is_some(),
+                    id,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        tx.commit().map_err(storage_err)?;
     }
 
     let edge_rows = {
@@ -1956,34 +1960,38 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
         }
         rows_out
     };
-    for (id, json) in edge_rows {
-        let Ok(edge) = serde_json::from_str::<GraphEdge>(&json) else {
-            continue;
-        };
-        conn.execute(
-            "UPDATE graph_edges
-             SET from_id = ?1,
-                 to_id = ?2,
-                 edge_type = ?3,
-                 confidence = ?4,
-                 source_type = ?5,
-                 source_file = ?6,
-                 evidence_available = ?7,
-                 freshness = ?8
-             WHERE id = ?9",
-            params![
-                edge.from.0.as_str(),
-                edge.to.0.as_str(),
-                format!("{:?}", edge.edge_type),
-                format!("{:?}", edge.evidence.confidence),
-                format!("{:?}", edge.evidence.source_type),
-                edge.evidence.source.as_str(),
-                true,
-                edge.evidence.indexed_at.timestamp(),
-                id,
-            ],
-        )
-        .map_err(storage_err)?;
+    if !edge_rows.is_empty() {
+        let tx = conn.transaction().map_err(storage_err)?;
+        for (id, json) in edge_rows {
+            let Ok(edge) = serde_json::from_str::<GraphEdge>(&json) else {
+                continue;
+            };
+            tx.execute(
+                "UPDATE graph_edges
+                 SET from_id = ?1,
+                     to_id = ?2,
+                     edge_type = ?3,
+                     confidence = ?4,
+                     source_type = ?5,
+                     source_file = ?6,
+                     evidence_available = ?7,
+                     freshness = ?8
+                 WHERE id = ?9",
+                params![
+                    edge.from.0.as_str(),
+                    edge.to.0.as_str(),
+                    format!("{:?}", edge.edge_type),
+                    format!("{:?}", edge.evidence.confidence),
+                    format!("{:?}", edge.evidence.source_type),
+                    edge.evidence.source.as_str(),
+                    true,
+                    edge.evidence.indexed_at.timestamp(),
+                    id,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        tx.commit().map_err(storage_err)?;
     }
 
     Ok(())
