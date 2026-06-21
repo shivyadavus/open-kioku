@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
-Open Kioku is local code intelligence for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, Codex, and other MCP clients the facts they need before editing: code search, symbols, impact, validation commands, context packs, repo memory, and static/runtime graph evidence.
+Open Kioku is local code intelligence for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, Codex, and other MCP clients the facts they need before editing: code search, symbols, impact analysis, validation commands, context packs, repo memory, architecture policy evaluation, evidence graph queries, and static/runtime graph evidence.
 
 No hosted index. No source upload. No embeddings API required.
 
@@ -33,7 +33,7 @@ reproducible with `scripts/quickstart-demo.sh`; regenerate the GIF with
 Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:
 
 ```text
-search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change
+search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change -> verify_change
 ```
 
 The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
@@ -377,6 +377,13 @@ ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
+ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed src/auth.rs
+ok --repo /path/to/repo architecture detect
+ok --repo /path/to/repo architecture policy check --json
+ok --repo /path/to/repo graph schema
+ok --repo /path/to/repo semantic status
+ok --repo /path/to/repo explain file src/auth.rs
+ok --repo /path/to/repo explain symbol validate_token
 ```
 
 ## Share Your Results
@@ -393,9 +400,9 @@ These reports include indexed counts, evidence scores, validation commands, and
 path shapes — but intentionally omit source code, so they are safe to share
 from private repos.
 
-Current top-level commands: `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `bench`, `workflow-bench`, `prove`, `architecture`, `history`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands (31): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `bench`, `workflow-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool notes: [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool reference (50 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
@@ -419,7 +426,7 @@ The MCP server is designed to be source-tree read-only unless write mode is expl
 
 ## Language Support
 
-Tree-sitter parsing currently covers Rust, Python, TypeScript, TSX, JavaScript, Go, and Java. Files in other languages can still be indexed as files/chunks where supported by the ingest pipeline, but symbol quality depends on available grammar support.
+Tree-sitter parsing and symbol extraction covers Rust, Python, TypeScript (including TSX), JavaScript (including JSX), Go, and Java. YAML and JSON are parsed for structure. Language detection and file-level indexing extend to TOML, SQL, Markdown, and Terraform. Files in other languages can still be indexed as files and chunks, but symbol quality depends on available grammar support.
 
 ## Security Model
 
@@ -437,23 +444,34 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 ## Repository Layout
 
-This is a 44-crate Cargo workspace. Important crates:
+This is a 41-crate Cargo workspace. Important crates:
 
-- `open-kioku-contract`: versioned change-contract schema and validation.
-- `open-kioku-cli`: the `ok` binary.
-- `open-kioku-mcp`: JSON-RPC MCP server over stdio.
-- `open-kioku-ingest`: repository indexing pipeline.
+- `open-kioku-cli`: the `ok` binary (31 subcommands).
+- `open-kioku-mcp`: JSON-RPC MCP server over stdio (50 tools).
+- `open-kioku-core`: shared types, evidence data model, and report schemas.
+- `open-kioku-ingest`: repository indexing pipeline with static analysis and runtime evidence ingestion.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
+- `open-kioku-git`: local git history analysis, co-change evidence, and rename tracking.
+- `open-kioku-graph`: evidence graph storage, buffered writes, query DSL, and versioned schema.
+- `open-kioku-architecture`: architecture detection, boundary analysis, and policy edge evaluation.
 - `open-kioku-storage-sqlite`: SQLite metadata, graph, and typed history storage.
-- `open-kioku-search-tantivy`: disk-backed BM25 search.
+- `open-kioku-search-tantivy`: disk-backed BM25 lexical search.
 - `open-kioku-vector`: local vector index contracts and exact-flat backend.
 - `open-kioku-semantic`: local semantic indexing and hybrid search orchestration.
+- `open-kioku-impact`: file and symbol impact analysis.
+- `open-kioku-plan`: evidence-backed pre-edit planning engine.
+- `open-kioku-tests`: validation target selection and test-to-code mapping.
+- `open-kioku-ranking`: multi-signal ranking with configurable weights.
+- `open-kioku-evidence`: evidence aggregation and schema framework.
 - `open-kioku-context`: task context pack builder.
 - `open-kioku-context-compress`: reversible context handle compression.
 - `open-kioku-format`: prompt-oriented renderers, including TOON.
 - `open-kioku-memory`: append-only repo memory and entity-linked recall.
-- `open-kioku-impact`: file impact analysis.
-- `open-kioku-tests`: validation target selection.
+- `open-kioku-contract`: versioned change-contract schema and validation.
+- `open-kioku-actions`: policy-gated action framework for command execution and patching.
+- `open-kioku-watch`: file-system watcher for incremental re-indexing.
+- `open-kioku-daemon`: background indexing daemon.
+- `open-kioku-sandbox`: sandboxed command execution.
 
 Architecture docs: [`docs/architecture.md`](docs/architecture.md) and
 [`docs/architecture-policy.md`](docs/architecture-policy.md)
