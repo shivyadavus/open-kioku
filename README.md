@@ -39,7 +39,7 @@ search_code -> get_definition -> impact_analysis -> find_tests_for_change -> pla
 The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
 
 Tested across several large public repositories under permissive open-source
-licenses. These metrics are from one representative Open Kioku 2.0.1 run:
+licenses. These metrics are from one representative Open Kioku 2.1.0 run:
 
 ```text
 4,623 files

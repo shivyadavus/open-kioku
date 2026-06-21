@@ -9,6 +9,52 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.1.0] — 2026-06-21
+
+### Added
+- **Architecture Boundaries & Enforcement**:
+  - Implemented architecture policy validation with the new `ok architecture policy check` CLI command and `architecture_policy_check` MCP tool, evaluating dependency rules against graph imports, calls, and references.
+  - Implemented configuration-based policy component resolution (`ok.toml` components).
+- **Evidence Graph v2 (E1-E19 Series)**:
+  - Added complexity analysis and relationship evidence passes (E19).
+  - Strengthened validation evidence selection and test-to-code target selection (E18).
+  - Strengthened runtime evidence aggregation and ingestion (E17).
+  - Promoted service boundary graph facts (E15).
+  - Introduced versioned evidence graph schema manifest and mapped SQLite metadata directly to it.
+- **Cross-Project Workspace Linking**:
+  - Added cross-project workspace linking (E16) to allow multi-repository planning and context packs.
+- **Git History & Provenance Tracking**:
+  - Implemented incremental git commit history parsing and ingestion to extract co-change metrics.
+  - Added file and symbol level historical provenance lookup CLI command and MCP tool.
+- **Change Contracts**:
+  - Introduced versioned change contracts (`ContractBuilder` and schemas) and contract store persistence to ensure pre-edit plans are verified post-edit.
+- **High-Performance Ingestion & Graph Buffer**:
+  - Implemented incremental index updates, parsing only modified files for rapid re-indexing.
+  - Implemented a high-throughput deduplicating `GraphBuffer` for buffered database writes.
+  - Added symbol registry resolution, discovery skip reporting, and import manifest resolution.
+  - Supported index snapshot export/import for transferability.
+- **Client & Integration Ecosystem**:
+  - Added auto-installation and support for **Windsurf** and **Trae** MCP configurations.
+  - Scaffolded the repository-scoped **Codex** marketplace and browser plugin.
+  - Added Glama verification metadata.
+
+### Changed
+- Bumped workspace packages, plugins, manifests, and homebrew formulas to version 2.1.0.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.0.1] — 2026-06-05
 
 ### Added
@@ -172,6 +218,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.0
 [2.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.1
 [2.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.0
 [1.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v1.0.4
