@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use open_kioku_architecture::ArchitectureDetector;
+use open_kioku_architecture::{evaluate_policy, ArchitectureDetector, PolicyResolver};
 use open_kioku_config::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
     PolicySource, RankingConfig, ScipMode,
@@ -681,6 +681,7 @@ enum ArchitecturePolicyCommand {
         path: Option<PathBuf>,
     },
     Print,
+    Check,
 }
 
 #[derive(Subcommand)]
@@ -2293,6 +2294,53 @@ fn handle_architecture_policy_command(
                 print!("{}", policy.to_toml()?);
             } else {
                 println!("{}", output.message);
+            }
+        }
+        ArchitecturePolicyCommand::Check => {
+            let Some(policy) = load_architecture_policy(repo)? else {
+                let report = open_kioku_core::PolicyCheckReport {
+                    configured: false,
+                    uncertainty: vec![
+                        "no architecture policy configured; dependency edges were not evaluated"
+                            .into(),
+                    ],
+                    ..Default::default()
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "No architecture policy configured; dependency edges were not evaluated."
+                    );
+                }
+                return Ok(());
+            };
+            let store = open_store(repo)?;
+            let resolver = PolicyResolver::new(&policy)?;
+            let report = evaluate_policy(&store, &resolver, &policy)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Evaluated {} dependency edge(s): {} allowed, {} violation(s), {} unknown.",
+                    report.evaluated_edge_count,
+                    report.allowed_edges,
+                    report.violation_count,
+                    report.unknown_edge_count
+                );
+                for violation in &report.violations {
+                    println!(
+                        "{} {} -> {} via {:?}: {}",
+                        violation.severity,
+                        violation.source_path.display(),
+                        violation.target_path.display(),
+                        violation.edge_type,
+                        violation.rule_id
+                    );
+                }
+                for note in &report.uncertainty {
+                    println!("uncertainty: {note}");
+                }
             }
         }
     }

@@ -883,6 +883,7 @@ fn change_boundary(
             architecture_components: vec![
                 "architecture_boundaries".into(),
                 "architecture_violations".into(),
+                "architecture_policy_check".into(),
             ],
             ownership_sources: vec!["CODEOWNERS".into(), "git_history".into()],
             cochange_sources: vec!["git_cochange".into(), "historical_prs".into()],
