@@ -122,6 +122,16 @@
         "name": "architecture_violations"
       },
       {
+        "description": "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "architecture_policy_check"
+      },
+      {
         "description": "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.",
         "experimental": false,
         "inputSchema": {

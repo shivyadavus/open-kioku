@@ -2,8 +2,9 @@
 
 Architecture policy is an experimental repository-owned contract for layers,
 bounded contexts, dependency rules, public API boundaries, and explicit
-exemptions. Policy loading and validation are available now; edge evaluation
-and integration into plans, contracts, and verification remain follow-up work.
+exemptions. Policy loading, validation, and dependency edge evaluation are
+available now; public API enforcement and integration into plans, contracts,
+and verification remain follow-up work.
 
 ## Policy Location
 
@@ -76,10 +77,23 @@ Print the resolved policy and its source:
 ok --repo /path/to/repo architecture policy print
 ```
 
+Evaluate indexed dependency edges against the resolved policy:
+
+```bash
+ok --repo /path/to/repo architecture policy check
+```
+
+The check evaluates indexed `imports`, `references`, and `calls` graph edges.
+It reports deterministic counts for allowed edges, forbidden violations, and
+unknown edges. Violations include the matching rule id, source component, target
+component, severity, paths, edge type, and graph-edge evidence. Unknown edges
+are counted exactly, while returned unknown samples are bounded so large
+repositories do not produce unbounded output.
+
 Add global `--json` for stable structured output. Repositories with no policy
 remain valid and explicitly report that heuristic architecture detection is
 still active.
 
-No MCP policy command is added in this issue. Policy edge evaluation, public API
-enforcement, and plan/impact/contract integration are also intentionally out of
-scope.
+The MCP tool `architecture_policy_check` returns the same structured policy
+check report for indexed repositories. Public API enforcement and
+plan/impact/contract integration are intentionally out of scope.

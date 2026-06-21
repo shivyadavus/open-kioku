@@ -1,6 +1,6 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
-use open_kioku_architecture::ArchitectureDetector;
-use open_kioku_config::OkConfig;
+use open_kioku_architecture::{evaluate_policy, ArchitectureDetector, PolicyResolver};
+use open_kioku_config::{load_architecture_policy, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{Confidence, ContextHandleId, PlanReport, SymbolId};
@@ -257,6 +257,20 @@ async fn dispatch(
         }
         "detect_architecture" | "architecture_boundaries" | "architecture_violations" => {
             Ok(json!(ArchitectureDetector::new(store, None).detect()?))
+        }
+        "architecture_policy_check" => {
+            let Some(policy) = load_architecture_policy(repo)? else {
+                return Ok(json!(open_kioku_core::PolicyCheckReport {
+                    configured: false,
+                    uncertainty: vec![
+                        "no architecture policy configured; dependency edges were not evaluated"
+                            .into()
+                    ],
+                    ..Default::default()
+                }));
+            };
+            let resolver = PolicyResolver::new(&policy)?;
+            Ok(json!(evaluate_policy(store, &resolver, &policy)?))
         }
         "get_definition" | "get_symbol_context" | "explain_symbol" => {
             let query = required_str(&params, "query")?;
@@ -701,6 +715,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("detect_architecture", "Detect high-level architectural components and directories in the repository based on file layouts.", json!({"type":"object","properties":{}})),
         ("architecture_boundaries", "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Report any import or boundary violations that deviate from the defined codebase architecture rules.", json!({"type":"object","properties":{}})),
+        ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
         ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
         ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
         ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
