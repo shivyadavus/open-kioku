@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+pub mod relationships;
 pub mod resolver;
 pub mod runtime;
 pub mod symbol_registry;
@@ -301,6 +302,16 @@ impl Indexer {
         );
         let registry_fact_count = registry_report.analysis_facts.len();
         analysis_facts.extend(registry_report.analysis_facts);
+        let relationship_facts = collect_relationship_analysis_facts(
+            &files,
+            &symbols,
+            &chunks,
+            &analysis_facts,
+            mode,
+            &config.semantic,
+        );
+        let relationship_fact_count = relationship_facts.len();
+        analysis_facts.extend(relationship_facts);
         let static_analysis_facts = analysis_facts.len();
         emit_progress(
             &on_progress,
@@ -415,6 +426,7 @@ impl Indexer {
                 static_facts: static_analysis_facts,
                 resolver_facts: resolver_fact_count,
                 registry_facts: registry_fact_count,
+                relationship_facts: relationship_fact_count,
                 runtime_facts: runtime_analysis_facts,
                 validation_facts: validation_analysis_facts,
                 git_history_facts: git_history_fact_count,
@@ -858,6 +870,7 @@ struct AnalysisCounts {
     static_facts: usize,
     resolver_facts: usize,
     registry_facts: usize,
+    relationship_facts: usize,
     runtime_facts: usize,
     validation_facts: usize,
     git_history_facts: usize,
@@ -936,6 +949,12 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         semantic_provider_notes.push(format!(
             "symbol registry facts detected: {}",
             analysis.registry_facts
+        ));
+    }
+    if analysis.relationship_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "complexity/similarity relationship facts detected: {}",
+            analysis.relationship_facts
         ));
     }
     if analysis.runtime_facts > 0 {
@@ -1509,6 +1528,24 @@ fn collect_validation_analysis_facts(
     tests: &[TestTarget],
 ) -> Result<Vec<AnalysisFact>> {
     validation::collect_validation_analysis_facts(root, files, symbols, tests)
+}
+
+fn collect_relationship_analysis_facts(
+    files: &[File],
+    symbols: &[Symbol],
+    chunks: &[CodeChunk],
+    existing_facts: &[AnalysisFact],
+    mode: IndexMode,
+    semantic: &open_kioku_config::SemanticConfig,
+) -> Vec<AnalysisFact> {
+    relationships::collect_relationship_analysis_facts(
+        files,
+        symbols,
+        chunks,
+        existing_facts,
+        mode,
+        semantic,
+    )
 }
 
 fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {

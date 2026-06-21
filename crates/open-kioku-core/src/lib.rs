@@ -1162,6 +1162,8 @@ pub enum GraphEdgeType {
     BelongsTo,
     MentionedIn,
     RelatedToTicket,
+    SimilarTo,
+    SemanticallyRelated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
