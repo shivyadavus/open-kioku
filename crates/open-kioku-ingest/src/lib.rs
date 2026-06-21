@@ -17,7 +17,6 @@ use open_kioku_languages::{
 use open_kioku_parse::{HeuristicParser, Parser};
 use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -26,6 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub mod resolver;
+pub mod runtime;
 pub mod symbol_registry;
 
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
@@ -311,7 +311,7 @@ impl Indexer {
                 .total(Some(files.len()))
                 .edges_added(static_analysis_facts),
         );
-        let runtime_facts = collect_runtime_analysis_facts(&root, &files)?;
+        let runtime_facts = collect_runtime_analysis_facts(&root, &files, &symbols)?;
         let runtime_analysis_facts = runtime_facts.len();
         analysis_facts.extend(runtime_facts);
         let git_history = if config.history.enabled {
@@ -1465,322 +1465,20 @@ fn count_analysis_artifacts(root: &Path, names: &[&str]) -> usize {
     count
 }
 
-fn collect_runtime_analysis_facts(root: &Path, files: &[File]) -> Result<Vec<AnalysisFact>> {
-    let files_by_path = files
-        .iter()
-        .map(|file| (normalize_path(&file.path.to_string_lossy()), file))
-        .collect::<HashMap<_, _>>();
-    let mut facts = Vec::new();
-    for runtime_root in [
-        root.join(".ok/runtime"),
-        root.join(".ok/analysis/runtime"),
-        root.join(".ok/analysis"),
-    ] {
-        if !runtime_root.is_dir() {
-            continue;
-        }
-        for entry in walkdir::WalkDir::new(&runtime_root)
-            .max_depth(3)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let lower_name = file_name.to_ascii_lowercase();
-            if !lower_name.ends_with(".jsonl")
-                || !(lower_name.contains("span")
-                    || lower_name.contains("trace")
-                    || lower_name.contains("runtime")
-                    || lower_name.contains("otel")
-                    || lower_name.contains("log")
-                    || lower_name.contains("incident")
-                    || lower_name.contains("error")
-                    || lower_name.contains("failure"))
-            {
-                continue;
-            }
-            let metadata = entry
-                .metadata()
-                .map_err(|err| OkError::Index(err.to_string()))?;
-            if metadata.len() > 5 * 1024 * 1024 {
-                continue;
-            }
-            let content = fs::read_to_string(path)?;
-            for (idx, line) in content.lines().enumerate() {
-                if facts.len() >= 10_000 {
-                    return Ok(dedupe_analysis_facts(facts));
-                }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                    continue;
-                };
-                let Some(source_file) =
-                    json_string(&value, &["file", "code.filepath", "source.file"])
-                else {
-                    continue;
-                };
-                let normalized = normalize_runtime_file(root, &source_file);
-                let Some(file) = files_by_path.get(&normalized).copied() else {
-                    continue;
-                };
-                let line_number = json_u32(&value, &["line", "code.lineno", "source.line"]);
-                if let Some(fact) = runtime_endpoint_fact(file, &value, line_number, path, idx + 1)
-                {
-                    facts.push(fact);
-                }
-                if let Some(fact) = runtime_table_fact(file, &value, line_number, path, idx + 1) {
-                    facts.push(fact);
-                }
-                if let Some(fact) = runtime_incident_fact(file, &value, line_number, path, idx + 1)
-                {
-                    facts.push(fact);
-                }
-            }
-        }
-    }
-    Ok(dedupe_analysis_facts(facts))
-}
-
-fn runtime_endpoint_fact(
-    file: &File,
-    value: &Value,
-    line_number: Option<u32>,
-    artifact: &Path,
-    artifact_line: usize,
-) -> Option<AnalysisFact> {
-    let route = json_string(
-        value,
-        &[
-            "http.route",
-            "http.target",
-            "url.path",
-            "route",
-            "name",
-            "span.name",
-        ],
-    )?;
-    if !route.contains('/') {
-        return None;
-    }
-    let method = json_string(
-        value,
-        &[
-            "http.request.method",
-            "http.method",
-            "method",
-            "request.method",
-        ],
-    )
-    .unwrap_or_else(|| "HTTP".into())
-    .to_ascii_uppercase();
-    Some(runtime_fact(
-        file,
-        GraphEdgeType::ExposesEndpoint,
-        GraphNodeType::Endpoint,
-        format!("{method} {route}"),
-        line_number,
-        RuntimeFactSource {
-            artifact,
-            artifact_line,
-            message: "runtime endpoint observed in local trace artifact",
-        },
-    ))
-}
-
-fn runtime_table_fact(
-    file: &File,
-    value: &Value,
-    line_number: Option<u32>,
-    artifact: &Path,
-    artifact_line: usize,
-) -> Option<AnalysisFact> {
-    let statement = json_string(value, &["db.statement", "sql", "database.statement"])?;
-    let table = extract_sql_table(&statement)?;
-    Some(runtime_fact(
-        file,
-        GraphEdgeType::ReadsTable,
-        GraphNodeType::DatabaseTable,
-        table,
-        line_number,
-        RuntimeFactSource {
-            artifact,
-            artifact_line,
-            message: "runtime database access observed in local trace artifact",
-        },
-    ))
-}
-
-fn runtime_incident_fact(
-    file: &File,
-    value: &Value,
-    line_number: Option<u32>,
-    artifact: &Path,
-    artifact_line: usize,
-) -> Option<AnalysisFact> {
-    let message = json_string(
-        value,
-        &[
-            "error.message",
-            "exception.message",
-            "log.message",
-            "message",
-            "event.message",
-            "span.status.message",
-            "name",
-            "span.name",
-        ],
-    )?;
-    let signal = compact_runtime_message(&message)?;
-    Some(runtime_fact(
-        file,
-        GraphEdgeType::FailedIn,
-        GraphNodeType::RuntimeError,
-        signal,
-        line_number,
-        RuntimeFactSource {
-            artifact,
-            artifact_line,
-            message: "runtime incident observed in local log or failure artifact",
-        },
-    ))
-}
-
-struct RuntimeFactSource<'a> {
-    artifact: &'a Path,
-    artifact_line: usize,
-    message: &'static str,
-}
-
-fn runtime_fact(
-    file: &File,
-    edge_type: GraphEdgeType,
-    target_kind: GraphNodeType,
-    target: String,
-    line_number: Option<u32>,
-    source: RuntimeFactSource<'_>,
-) -> AnalysisFact {
-    AnalysisFact {
-        id: stable_id(&format!(
-            "runtime:{}:{:?}:{}:{}",
-            file.path.display(),
-            edge_type,
-            target,
-            source.artifact_line
-        )),
-        file_id: file.id.clone(),
-        symbol_id: None,
-        target,
-        target_kind,
-        edge_type,
-        range: line_number.map(LineRange::single),
-        confidence: Confidence::High,
-        source: format!("open-kioku-runtime:{}", source.artifact.display()),
-        source_type: EvidenceSourceType::Runtime,
-        message: source.message.into(),
-    }
-}
-
-fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(value) = nested_json_value(value, key).and_then(Value::as_str) {
-            return Some(value.to_string());
-        }
-        if let Some(value) = value
-            .get("attributes")
-            .and_then(|attributes| nested_json_value(attributes, key))
-            .and_then(Value::as_str)
-        {
-            return Some(value.to_string());
-        }
-        if let Some(value) = value
-            .get("resource")
-            .and_then(|resource| resource.get("attributes"))
-            .and_then(|attributes| nested_json_value(attributes, key))
-            .and_then(Value::as_str)
-        {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn json_u32(value: &Value, keys: &[&str]) -> Option<u32> {
-    for key in keys {
-        if let Some(value) = nested_json_value(value, key)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-        {
-            return Some(value);
-        }
-        if let Some(value) = value
-            .get("attributes")
-            .and_then(|attributes| nested_json_value(attributes, key))
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn nested_json_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    if let Some(exact) = value.get(key) {
-        return Some(exact);
-    }
-    let mut current = value;
-    for segment in key.split('.') {
-        current = current.get(segment)?;
-    }
-    Some(current)
-}
-
-fn normalize_runtime_file(root: &Path, value: &str) -> String {
-    let path = Path::new(value);
-    let rel = if path.is_absolute() {
-        path.strip_prefix(root).unwrap_or(path)
-    } else {
-        path
-    };
-    normalize_path(&rel.to_string_lossy())
+fn normalize_history_path(path: &Path) -> String {
+    normalize_path(&path.to_string_lossy())
 }
 
 fn normalize_path(value: &str) -> String {
     value.trim_start_matches("./").replace('\\', "/")
 }
 
-fn normalize_history_path(path: &Path) -> String {
-    normalize_path(&path.to_string_lossy())
-}
-
-fn extract_sql_table(statement: &str) -> Option<String> {
-    let lower = statement.to_ascii_lowercase();
-    for keyword in [" from ", " join ", " update ", " into "] {
-        if let Some(index) = lower.find(keyword) {
-            let start = index + keyword.len();
-            let table = statement[start..]
-                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.')
-                .find(|part| !part.is_empty())?;
-            return Some(table.to_string());
-        }
-    }
-    None
-}
-
-fn compact_runtime_message(message: &str) -> Option<String> {
-    let value = message.trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(value.chars().take(160).collect())
+fn collect_runtime_analysis_facts(
+    root: &Path,
+    files: &[File],
+    symbols: &[Symbol],
+) -> Result<Vec<AnalysisFact>> {
+    runtime::collect_runtime_analysis_facts(root, files, symbols)
 }
 
 fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {
@@ -2196,7 +1894,7 @@ class Util {
         assert_eq!(snapshot.manifest.quality.coverage_reports, 1);
         assert_eq!(snapshot.manifest.quality.junit_reports, 1);
         assert!(snapshot.manifest.quality.static_analysis_facts >= 3);
-        assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 3);
+        assert_eq!(snapshot.manifest.quality.runtime_analysis_facts, 6);
         assert!(!snapshot.import_resolutions.is_empty());
         assert!(snapshot
             .analysis_facts
@@ -2220,6 +1918,15 @@ class Util {
             .analysis_facts
             .iter()
             .any(|fact| fact.target == "checkout failure after runtime request"));
+        assert!(snapshot.analysis_facts.iter().any(|fact| {
+            fact.target == "GET /example"
+                && fact.message.contains("runtime aggregate observed")
+                && fact.message.contains("error_rate")
+        }));
+        assert!(snapshot.analysis_facts.iter().any(|fact| {
+            fact.target == "checkout failure after runtime request"
+                && fact.message.contains("runtime aggregate observed")
+        }));
         assert!(snapshot
             .manifest
             .quality
