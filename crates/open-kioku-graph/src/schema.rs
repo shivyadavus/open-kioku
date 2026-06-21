@@ -33,6 +33,7 @@ pub fn current_schema_with_manifest(
         "RuntimeError",
         "Ticket",
         "PullRequest",
+        "Resource",
         "ArchitectureComponent",
     ];
 
@@ -130,6 +131,7 @@ pub fn current_schema_with_manifest(
             "identifiers".to_string(),
             "routes".to_string(),
             "config_keys".to_string(),
+            "service_boundaries".to_string(),
             "read_only_graph_query".to_string(),
         ],
         property_specs: vec![
@@ -142,6 +144,26 @@ pub fn current_schema_with_manifest(
                 name: "qualified_name".to_string(),
                 type_name: "string".to_string(),
                 description: "Fully qualified symbol name".to_string(),
+            },
+            PropertySpec {
+                name: "protocol".to_string(),
+                type_name: "string".to_string(),
+                description: "Service-boundary protocol such as http, tcp, graphql, grpc, or trpc"
+                    .to_string(),
+            },
+            PropertySpec {
+                name: "normalized_path".to_string(),
+                type_name: "string".to_string(),
+                description:
+                    "Normalized route, URL path, port, topic, queue, config key, or resource target"
+                        .to_string(),
+            },
+            PropertySpec {
+                name: "source_framework".to_string(),
+                type_name: "string".to_string(),
+                description:
+                    "Static/runtime pass or framework that produced a service-boundary fact"
+                        .to_string(),
             },
         ],
         node_types,
@@ -310,7 +332,7 @@ mod tests {
         );
 
         // Verify node types has the correct counts
-        assert_eq!(schema1.node_types.len(), 22);
+        assert_eq!(schema1.node_types.len(), 23);
         assert_eq!(schema1.edge_types.len(), 23);
 
         // Ensure count properties are absent in JSON (since they are None and skip_serializing_if is used)

@@ -1130,6 +1130,7 @@ pub enum GraphNodeType {
     RuntimeError,
     Ticket,
     PullRequest,
+    Resource,
     ArchitectureComponent,
 }
 

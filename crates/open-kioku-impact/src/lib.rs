@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
     search_result_evidence_ids, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId,
-    EvidenceSourceType, File, FileId, FileRange, ImpactReport, RiskReport, ScoreComponent,
-    SearchResult, Symbol, SymbolOccurrence,
+    EvidenceSourceType, File, FileId, FileRange, GraphEdgeType, GraphNodeType, ImpactReport,
+    RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
@@ -45,6 +45,11 @@ impl<'a> ImpactEngine<'a> {
         } else {
             Vec::new()
         };
+        let service_facts = if let Some(file) = &file {
+            service_boundary_facts_for_file(self.store, &file.id)?
+        } else {
+            Vec::new()
+        };
 
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
@@ -54,6 +59,12 @@ impl<'a> ImpactEngine<'a> {
                 self.search_index,
                 file,
                 &runtime_facts,
+            )?);
+            direct.extend(service_boundary_impacts(
+                self.store,
+                self.search_index,
+                file,
+                &service_facts,
             )?);
             for term in impact_terms(path, file, &target_symbols)
                 .into_iter()
@@ -145,6 +156,12 @@ impl<'a> ImpactEngine<'a> {
                 git_facts.len()
             ));
         }
+        if !service_facts.is_empty() {
+            reasons.push(format!(
+                "{} static service-boundary fact(s) touch this file",
+                service_facts.len()
+            ));
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
@@ -153,8 +170,9 @@ impl<'a> ImpactEngine<'a> {
         }
         let runtime_score = (runtime_facts.len() as f32 / 12.0).min(0.25);
         let git_score = (git_facts.len() as f32 / 12.0).min(0.20);
+        let service_score = (service_facts.len() as f32 / 12.0).min(0.25);
         let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
-        let score = (direct_reference_score + runtime_score + git_score).min(1.0);
+        let score = (direct_reference_score + runtime_score + git_score + service_score).min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
@@ -194,6 +212,10 @@ impl<'a> ImpactEngine<'a> {
             .iter()
             .map(|fact| git_fact_evidence(fact, path))
             .collect::<Vec<_>>();
+        let service_evidence = service_facts
+            .iter()
+            .map(|fact| service_fact_evidence(fact, path))
+            .collect::<Vec<_>>();
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -213,6 +235,7 @@ impl<'a> ImpactEngine<'a> {
             evidence: std::iter::once(evidence)
                 .chain(runtime_evidence)
                 .chain(git_evidence)
+                .chain(service_evidence)
                 .collect(),
             score_breakdown: vec![ScoreComponent::single(
                 "direct_reference_density",
@@ -235,6 +258,14 @@ impl<'a> ImpactEngine<'a> {
                 git_score,
                 git_facts.iter().map(|fact| fact.id.clone()).collect(),
                 "impact risk adjusted by git co-change and historical validation facts",
+            ));
+        }
+        if service_score > 0.0 {
+            report.score_breakdown.push(ScoreComponent::adjustment(
+                "service_boundary",
+                service_score,
+                service_facts.iter().map(|fact| fact.id.clone()).collect(),
+                "impact risk adjusted by static route, channel, config, and resource facts",
             ));
         }
         report.reconcile_score_breakdown();
@@ -264,6 +295,42 @@ fn git_history_facts_for_file(
         .filter(|fact| &fact.file_id == file_id)
         .take(12)
         .collect())
+}
+
+fn service_boundary_facts_for_file(
+    store: &dyn MetadataStore,
+    file_id: &FileId,
+) -> Result<Vec<AnalysisFact>> {
+    Ok(store
+        .analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?
+        .into_iter()
+        .filter(|fact| &fact.file_id == file_id && is_service_boundary_fact(fact))
+        .take(24)
+        .collect())
+}
+
+fn is_service_boundary_fact(fact: &AnalysisFact) -> bool {
+    matches!(
+        fact.edge_type,
+        GraphEdgeType::ExposesEndpoint
+            | GraphEdgeType::CallsEndpoint
+            | GraphEdgeType::ReadsConfig
+            | GraphEdgeType::WritesConfig
+            | GraphEdgeType::ReadsTable
+            | GraphEdgeType::WritesTable
+            | GraphEdgeType::PublishesEvent
+            | GraphEdgeType::ConsumesEvent
+            | GraphEdgeType::DependsOn
+            | GraphEdgeType::Defines
+    ) && matches!(
+        fact.target_kind,
+        GraphNodeType::Endpoint
+            | GraphNodeType::ConfigKey
+            | GraphNodeType::DatabaseTable
+            | GraphNodeType::Queue
+            | GraphNodeType::Topic
+            | GraphNodeType::Resource
+    )
 }
 
 fn git_cochange_impacts(
@@ -312,6 +379,43 @@ fn git_cochange_impacts(
     Ok(dedupe_results(results))
 }
 
+fn service_boundary_impacts(
+    store: &dyn MetadataStore,
+    search_index: Option<&dyn SearchIndex>,
+    target_file: &File,
+    service_facts: &[AnalysisFact],
+) -> Result<Vec<SearchResult>> {
+    let files = store.list_files(usize::MAX, 0)?;
+    let chunks = if search_index.is_none() {
+        store.all_chunks()?
+    } else {
+        Vec::new()
+    };
+    let symbols = if search_index.is_none() {
+        store.list_symbols(None, usize::MAX, 0)?
+    } else {
+        Vec::new()
+    };
+    let mut results = Vec::new();
+    for fact in service_facts.iter().take(12) {
+        for term in service_search_terms(fact).into_iter().take(4) {
+            let matches = if let Some(index) = search_index {
+                index.search(&term, 10)?
+            } else {
+                search_chunks(&chunks, &files, &symbols, &term, 10)?
+            };
+            for mut result in matches {
+                if result.path == target_file.path {
+                    continue;
+                }
+                annotate_service_impact(&mut result, fact);
+                results.push(result);
+            }
+        }
+    }
+    Ok(dedupe_results(results))
+}
+
 fn runtime_impacts(
     store: &dyn MetadataStore,
     search_index: Option<&dyn SearchIndex>,
@@ -349,6 +453,27 @@ fn runtime_impacts(
     Ok(dedupe_results(results))
 }
 
+fn annotate_service_impact(result: &mut SearchResult, fact: &AnalysisFact) {
+    let evidence = format!(
+        "service-boundary evidence from `{}` targeting `{}`",
+        fact.source, fact.target
+    );
+    if !result.evidence.contains(&evidence) {
+        result.evidence.push(evidence);
+    }
+    if !result.evidence_refs.contains(&fact.id) {
+        result.evidence_refs.push(fact.id.clone());
+    }
+    result.score += 0.18;
+    result.confidence = result.confidence.max(fact.confidence.score());
+    result.score_breakdown.push(ScoreComponent::adjustment(
+        "service_boundary",
+        0.18,
+        vec![fact.id.clone()],
+        "impact candidate matched route, channel, config, or resource evidence",
+    ));
+}
+
 fn annotate_runtime_impact(result: &mut SearchResult, fact: &AnalysisFact) {
     let evidence = format!(
         "runtime corroboration from local artifact `{}` targeting `{}`",
@@ -368,6 +493,23 @@ fn annotate_runtime_impact(result: &mut SearchResult, fact: &AnalysisFact) {
         vec![fact.id.clone()],
         "impact candidate matched observed runtime endpoint, SQL table, or incident",
     ));
+}
+
+fn service_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(fact.id.clone()),
+        source: fact.source.clone(),
+        source_type: EvidenceSourceType::StaticAnalysis,
+        file_range: Some(FileRange {
+            path: path.to_path_buf(),
+            line_range: fact.range.clone(),
+        }),
+        symbol_id: fact.symbol_id.clone(),
+        confidence: fact.confidence,
+        message: format!("{}: {}", fact.message, fact.target),
+        indexed_at: Utc::now(),
+        ..Default::default()
+    }
 }
 
 fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
@@ -410,6 +552,22 @@ fn runtime_search_terms(fact: &AnalysisFact) -> Vec<String> {
         fact.target
             .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
             .filter(|part| part.len() >= 4)
+            .map(ToOwned::to_owned),
+    );
+    terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    terms.dedup();
+    terms
+}
+
+fn service_search_terms(fact: &AnalysisFact) -> Vec<String> {
+    let mut terms = vec![fact.target.clone()];
+    if let Some((_, tail)) = fact.target.split_once(' ') {
+        terms.push(tail.to_string());
+    }
+    terms.extend(
+        fact.target
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-'))
+            .filter(|part| part.len() >= 3)
             .map(ToOwned::to_owned),
     );
     terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
@@ -855,5 +1013,110 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("exact indexed symbol reference")));
+    }
+
+    #[test]
+    fn service_boundary_facts_surface_cross_service_impacts() {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let provider = File {
+            id: FileId::new("provider"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/orders_api.ts"),
+            language: Language::TypeScript,
+            size_bytes: 100,
+            content_hash: "provider".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let client = File {
+            id: FileId::new("client"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/orders_client.ts"),
+            language: Language::TypeScript,
+            size_bytes: 100,
+            content_hash: "client".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "provider-chunk".into(),
+                file_id: provider.id.clone(),
+                range: LineRange { start: 1, end: 3 },
+                language: Language::TypeScript,
+                text: "router.get('/v1/orders', handler);".into(),
+                symbol_id: None,
+            },
+            CodeChunk {
+                id: "client-chunk".into(),
+                file_id: client.id.clone(),
+                range: LineRange { start: 1, end: 3 },
+                language: Language::TypeScript,
+                text: "await fetch('/v1/orders');".into(),
+                symbol_id: None,
+            },
+        ];
+        let facts = vec![AnalysisFact {
+            id: "route-provider".into(),
+            file_id: provider.id.clone(),
+            symbol_id: None,
+            target: "GET /v1/orders".into(),
+            target_kind: GraphNodeType::Endpoint,
+            edge_type: GraphEdgeType::ExposesEndpoint,
+            range: Some(LineRange { start: 1, end: 1 }),
+            confidence: Confidence::Medium,
+            source: "open-kioku-static/javascript".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "JavaScript HTTP route".into(),
+        }];
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 0,
+            chunk_count: chunks.len(),
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[provider, client],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &chunks,
+                imports: &[],
+                tests: &[],
+                analysis_facts: &facts,
+            })
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/orders_api.ts"))
+            .unwrap();
+
+        assert!(report.direct_impacts.iter().any(|result| {
+            result.path == Path::new("src/orders_client.ts")
+                && result
+                    .score_breakdown
+                    .iter()
+                    .any(|component| component.signal == "service_boundary")
+        }));
+        assert!(report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("static service-boundary")));
     }
 }

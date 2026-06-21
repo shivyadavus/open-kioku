@@ -2,6 +2,11 @@ use open_kioku_core::Language;
 use std::path::Path;
 
 pub fn detect_language(path: &Path) -> Language {
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        if name == "Dockerfile" || name.starts_with("Dockerfile.") {
+            return Language::Text;
+        }
+    }
     match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -16,6 +21,7 @@ pub fn detect_language(path: &Path) -> Language {
         "yaml" | "yml" => Language::Yaml,
         "json" => Language::Json,
         "toml" => Language::Toml,
+        "tf" | "tfvars" | "hcl" => Language::Text,
         "sql" => Language::Sql,
         "md" | "mdx" => Language::Markdown,
         "txt" => Language::Text,
@@ -37,6 +43,7 @@ pub fn is_supported_code(language: &Language) -> bool {
             | Language::Toml
             | Language::Sql
             | Language::Markdown
+            | Language::Text
     )
 }
 

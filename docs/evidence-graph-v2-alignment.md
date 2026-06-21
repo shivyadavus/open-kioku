@@ -7,6 +7,15 @@ The graph domain currently lives in `open-kioku-core` and includes:
 - Enums: `GraphNodeType`, `GraphEdgeType`.
 - Associated Types: `Evidence`, `Confidence`, `IndexManifest`, `IndexQuality`.
 
+Service-boundary facts are represented with the same graph model:
+- `Endpoint` covers HTTP routes, client URL targets, GraphQL/gRPC/tRPC markers, and exposed TCP/UDP ports.
+- `Queue` and `Topic` cover asynchronous publish/subscribe channels.
+- `ConfigKey` covers environment variables, config keys, and URL bindings discovered from code or infrastructure files.
+- `Resource` covers deployable or infrastructure resources such as Docker Compose services, Kubernetes objects, and Terraform resources.
+- Existing edges (`ExposesEndpoint`, `CallsEndpoint`, `ReadsConfig`, `WritesConfig`, `PublishesEvent`, `ConsumesEvent`, `DependsOn`, `Defines`, `ReadsTable`, `WritesTable`) carry boundary relationships instead of introducing a parallel service model.
+
+Promoted service-boundary properties include `protocol`, `method`, `raw_path`, `normalized_path`, `source_framework`, `source_pass`, `confidence`, `target_kind`, and ambiguity/caveat text when static extraction cannot fully resolve a fact.
+
 ## Current storage model
 The storage layer lives in `open-kioku-storage-sqlite`:
 - `manifests`

@@ -1,0 +1,10 @@
+services:
+  web:
+    ports:
+      - "8080:8080"
+    environment:
+      GREETING_API_URL: https://example.com/v1/greet
+    depends_on:
+      - worker
+  worker:
+    image: example/worker
