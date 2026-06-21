@@ -1154,6 +1154,8 @@ pub enum GraphEdgeType {
     PublishesEvent,
     ConsumesEvent,
     Tests,
+    TestCovers,
+    Validates,
     OwnedBy,
     ChangedBy,
     FailedIn,

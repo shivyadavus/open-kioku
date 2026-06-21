@@ -59,6 +59,26 @@ impl<'a> TestSelector<'a> {
                     file_ids.insert(test_file.id);
                 }
             }
+            for fact in self
+                .store
+                .analysis_facts(Some(EvidenceSourceType::ExternalIntegration), 10_000)?
+                .into_iter()
+                .filter(|fact| {
+                    fact.file_id == changed_file.id
+                        && fact.target_kind == open_kioku_core::GraphNodeType::Test
+                        && matches!(
+                            fact.edge_type,
+                            open_kioku_core::GraphEdgeType::Tests
+                                | open_kioku_core::GraphEdgeType::TestCovers
+                                | open_kioku_core::GraphEdgeType::Validates
+                        )
+                })
+                .take(128)
+            {
+                if let Some(test_file) = self.store.get_file_by_path(Path::new(&fact.target))? {
+                    file_ids.insert(test_file.id);
+                }
+            }
         }
 
         let file_ids_vec = file_ids.into_iter().collect::<Vec<_>>();
@@ -81,6 +101,8 @@ impl<'a> TestSelector<'a> {
         let mut scored = Vec::new();
         let runtime_facts = self.runtime_facts_for_path(path)?;
         let git_facts = self.git_history_facts_for_path(path)?;
+        let validation_facts = self.validation_facts()?;
+        let changed_file_id = self.store.get_file_by_path(path)?.map(|file| file.id);
         for test in tests {
             let test_file = files_by_id.get(&test.file_id);
             let mut candidate = test;
@@ -101,6 +123,12 @@ impl<'a> TestSelector<'a> {
             }
             score += apply_runtime_test_signal(&mut candidate, &runtime_facts, test_path);
             score += apply_git_history_test_signal(&mut candidate, &git_facts, test_path);
+            score += apply_validation_test_signal(
+                &mut candidate,
+                &validation_facts,
+                test_path,
+                changed_file_id.as_ref(),
+            );
             candidate.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -135,6 +163,8 @@ impl<'a> TestSelector<'a> {
         let path_tokens = path_tokens(&changed_path);
         let runtime_facts = self.runtime_facts_for_path(path)?;
         let git_facts = self.git_history_facts_for_path(path)?;
+        let validation_facts = self.validation_facts()?;
+        let changed_file_id = self.store.get_file_by_path(path)?.map(|file| file.id);
         let mut scored = Vec::new();
         for mut test in self.get_tests_for_path(path, &std::collections::HashSet::new())? {
             let test_path = files_by_id
@@ -169,6 +199,13 @@ impl<'a> TestSelector<'a> {
                 &git_facts,
                 &searchable,
                 test_path,
+            );
+            score += apply_validation_test_signal_with_searchable(
+                &mut test,
+                &validation_facts,
+                &searchable,
+                test_path,
+                changed_file_id.as_ref(),
             );
             test.confidence = if score > 0.85 {
                 Confidence::High
@@ -222,6 +259,7 @@ impl<'a> TestSelector<'a> {
         let path_tokens = path_tokens(&changed_path);
         let runtime_facts = self.runtime_facts_for_path(path)?;
         let git_facts = self.git_history_facts_for_path(path)?;
+        let validation_facts = self.validation_facts()?;
         let mut test_files_with_overlap = std::collections::HashSet::new();
         for symbol_id in &changed_symbols {
             if let Ok(occurrences) = self.store.references_for_symbol(symbol_id, 100) {
@@ -294,6 +332,13 @@ impl<'a> TestSelector<'a> {
                 &searchable,
                 test_path,
             );
+            score += apply_validation_test_signal_with_searchable(
+                &mut test,
+                &validation_facts,
+                &searchable,
+                test_path,
+                changed_file.as_ref().map(|file| &file.id),
+            );
             test.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -356,6 +401,11 @@ impl<'a> TestSelector<'a> {
             .filter(|fact| fact.file_id == file.id)
             .take(128)
             .collect())
+    }
+
+    fn validation_facts(&self) -> Result<Vec<AnalysisFact>> {
+        self.store
+            .analysis_facts(Some(EvidenceSourceType::ExternalIntegration), 2_000)
     }
 }
 
@@ -474,6 +524,132 @@ fn apply_git_history_test_signal(
     )
     .to_ascii_lowercase();
     apply_git_history_test_signal_with_searchable(test, git_facts, &searchable, test_path)
+}
+
+fn apply_validation_test_signal(
+    test: &mut TestTarget,
+    validation_facts: &[AnalysisFact],
+    test_path: Option<&Path>,
+    changed_file_id: Option<&FileId>,
+) -> f32 {
+    let searchable = format!(
+        "{} {} {} {}",
+        test.id,
+        test.name,
+        test.command.as_deref().unwrap_or_default(),
+        test.reason
+    )
+    .to_ascii_lowercase();
+    apply_validation_test_signal_with_searchable(
+        test,
+        validation_facts,
+        &searchable,
+        test_path,
+        changed_file_id,
+    )
+}
+
+fn apply_validation_test_signal_with_searchable(
+    test: &mut TestTarget,
+    validation_facts: &[AnalysisFact],
+    searchable: &str,
+    test_path: Option<&Path>,
+    changed_file_id: Option<&FileId>,
+) -> f32 {
+    let test_path = test_path
+        .map(|path| {
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    let mut contribution: f32 = 0.0;
+    let mut evidence_ids = Vec::new();
+
+    for fact in validation_facts.iter().filter(|fact| {
+        changed_file_id.is_some_and(|file_id| &fact.file_id == file_id)
+            && fact.edge_type == open_kioku_core::GraphEdgeType::TestCovers
+            && validation_fact_matches_test(fact, searchable, &test_path)
+    }) {
+        let amount = if fact.symbol_id.is_some() { 0.30 } else { 0.18 };
+        contribution = contribution.max(amount);
+        if !evidence_ids.contains(&fact.id) {
+            evidence_ids.push(fact.id.clone());
+        }
+        let signal = if fact.symbol_id.is_some() {
+            "direct_symbol_coverage"
+        } else {
+            "file_coverage"
+        };
+        test.score_breakdown.push(ScoreComponent::adjustment(
+            signal,
+            amount,
+            vec![fact.id.clone()],
+            "test selected or boosted by coverage mapped to the changed file",
+        ));
+    }
+
+    for fact in validation_facts
+        .iter()
+        .filter(|fact| {
+            fact.file_id == test.file_id
+                && fact.edge_type == open_kioku_core::GraphEdgeType::Validates
+        })
+        .take(4)
+    {
+        let failed =
+            fact.message.contains("status failed") || fact.message.contains("status error");
+        let amount = if failed { 0.22 } else { 0.08 };
+        contribution += amount;
+        if !evidence_ids.contains(&fact.id) {
+            evidence_ids.push(fact.id.clone());
+        }
+        test.score_breakdown.push(ScoreComponent::adjustment(
+            if failed {
+                "previous_failure_signal"
+            } else {
+                "junit_validation_history"
+            },
+            amount,
+            vec![fact.id.clone()],
+            "test selected or boosted by JUnit validation history",
+        ));
+    }
+
+    if test.command.is_some() {
+        contribution += 0.05;
+        test.score_breakdown.push(ScoreComponent::adjustment(
+            "command_availability",
+            0.05,
+            test.evidence_refs.clone(),
+            "test has a runnable validation command",
+        ));
+    }
+
+    for id in &evidence_ids {
+        if !test.evidence_refs.contains(id) {
+            test.evidence_refs.push(id.clone());
+        }
+    }
+    if !evidence_ids.is_empty() {
+        test.reason = format!("{}; coverage/JUnit validation evidence", test.reason);
+    } else if contribution > 0.0 {
+        test.reason = format!("{}; runnable validation command available", test.reason);
+    }
+    contribution
+}
+
+fn validation_fact_matches_test(fact: &AnalysisFact, searchable: &str, test_path: &str) -> bool {
+    let target = fact.target.to_ascii_lowercase();
+    if !test_path.is_empty() && (test_path == target || test_path.ends_with(&target)) {
+        return true;
+    }
+    let stem = Path::new(&target)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    !stem.is_empty() && searchable.contains(&stem)
 }
 
 fn apply_git_history_test_signal_with_searchable(
@@ -648,8 +824,9 @@ mod tests {
     use super::TestSelector;
     use open_kioku_core::Confidence;
     use open_kioku_core::{
-        CodeChunk, EvidenceSourceType, File, FileId, Import, IndexManifest, Language, LineRange,
-        RepositoryId, ScoreComponent, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+        AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
+        Import, IndexManifest, Language, LineRange, RepositoryId, ScoreComponent, Symbol, SymbolId,
+        SymbolOccurrence, TestTarget,
     };
     use open_kioku_errors::Result;
     use open_kioku_storage::{IndexData, MetadataStore};
@@ -663,6 +840,7 @@ mod tests {
         files: Vec<File>,
         tests: Vec<TestTarget>,
         occurrences: Vec<SymbolOccurrence>,
+        analysis_facts: Vec<AnalysisFact>,
     }
 
     impl MetadataStore for FastStore {
@@ -804,6 +982,23 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn analysis_facts(
+            &self,
+            source_type: Option<EvidenceSourceType>,
+            _limit: usize,
+        ) -> Result<Vec<AnalysisFact>> {
+            Ok(self
+                .analysis_facts
+                .iter()
+                .filter(|fact| {
+                    source_type
+                        .as_ref()
+                        .is_none_or(|source_type| &fact.source_type == source_type)
+                })
+                .cloned()
+                .collect())
+        }
+
         fn find_files_by_path_pattern(&self, pattern: &str) -> Result<Vec<File>> {
             let lower_pattern = pattern.to_ascii_lowercase();
             Ok(self
@@ -912,6 +1107,7 @@ mod tests {
                 test("billing_flow", &unrelated_test.id),
                 test("login_flow", &matching_test.id),
             ],
+            analysis_facts: Vec::new(),
             occurrences: vec![
                 occurrence("issue_token", &source_file.id),
                 occurrence("issue_token", &matching_test.id),
@@ -927,6 +1123,150 @@ mod tests {
         assert!(selected[0]
             .reason
             .contains("exact symbol-reference overlap"));
+    }
+
+    #[test]
+    fn coverage_and_junit_evidence_boost_validation_selection() {
+        let source_file = file("source", "src/auth.rs");
+        let matching_test = file("matching-test", "tests/auth_test.rs");
+        let unrelated_test = file("unrelated-test", "tests/billing_flow.rs");
+        let coverage_fact = AnalysisFact {
+            id: "coverage-auth".into(),
+            file_id: source_file.id.clone(),
+            symbol_id: Some(SymbolId::new("issue_token")),
+            target: "tests/auth_test.rs".into(),
+            target_kind: GraphNodeType::Test,
+            edge_type: GraphEdgeType::TestCovers,
+            range: Some(LineRange::single(3)),
+            confidence: Confidence::High,
+            source: "open-kioku-validation:coverage/lcov.info".into(),
+            source_type: EvidenceSourceType::ExternalIntegration,
+            message: "lcov coverage maps 1 covered line(s) to validation target `tests/auth_test.rs` for symbol `issue_token`".into(),
+        };
+        let junit_fact = AnalysisFact {
+            id: "junit-auth".into(),
+            file_id: matching_test.id.clone(),
+            symbol_id: None,
+            target: "auth_rejects_expired".into(),
+            target_kind: GraphNodeType::Test,
+            edge_type: GraphEdgeType::Validates,
+            range: None,
+            confidence: Confidence::High,
+            source: "open-kioku-validation:.ok/analysis/TEST-auth.xml".into(),
+            source_type: EvidenceSourceType::ExternalIntegration,
+            message: "JUnit observed test `auth_rejects_expired` status failed".into(),
+        };
+        let store = EvidenceStore {
+            files: vec![
+                source_file.clone(),
+                matching_test.clone(),
+                unrelated_test.clone(),
+            ],
+            tests: vec![
+                test("billing_flow", &unrelated_test.id),
+                test("auth_rejects_expired", &matching_test.id),
+            ],
+            occurrences: Vec::new(),
+            analysis_facts: vec![coverage_fact, junit_fact],
+        };
+
+        let selected = TestSelector::new(&store)
+            .for_changed_path(Path::new("src/auth.rs"), 2)
+            .unwrap();
+
+        assert_eq!(selected[0].name, "auth_rejects_expired");
+        assert!(selected[0].evidence_refs.contains(&"coverage-auth".into()));
+        assert!(selected[0].evidence_refs.contains(&"junit-auth".into()));
+        assert!(selected[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "direct_symbol_coverage"));
+        assert!(selected[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "previous_failure_signal"));
+        assert!(selected[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "command_availability"));
+    }
+
+    #[test]
+    fn runtime_failure_evidence_boosts_matching_tests() {
+        let source_file = file("source", "src/auth.rs");
+        let matching_test = file("matching-test", "tests/auth_failure_test.rs");
+        let unrelated_test = file("unrelated-test", "tests/billing_flow.rs");
+        let runtime_fact = AnalysisFact {
+            id: "runtime-auth-failure".into(),
+            file_id: source_file.id.clone(),
+            symbol_id: None,
+            target: "auth failure".into(),
+            target_kind: GraphNodeType::RuntimeError,
+            edge_type: GraphEdgeType::FailedIn,
+            range: None,
+            confidence: Confidence::High,
+            source: "open-kioku-runtime:.ok/runtime/errors.jsonl".into(),
+            source_type: EvidenceSourceType::Runtime,
+            message: "runtime incident observed in local log or failure artifact".into(),
+        };
+        let store = EvidenceStore {
+            files: vec![
+                source_file.clone(),
+                matching_test.clone(),
+                unrelated_test.clone(),
+            ],
+            tests: vec![
+                test("billing_flow", &unrelated_test.id),
+                test("auth_failure_flow", &matching_test.id),
+            ],
+            occurrences: Vec::new(),
+            analysis_facts: vec![runtime_fact],
+        };
+
+        let selected = TestSelector::new(&store)
+            .for_changed_path(Path::new("src/auth.rs"), 2)
+            .unwrap();
+
+        assert_eq!(selected[0].name, "auth_failure_flow");
+        assert!(selected[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "runtime_corroboration"));
+    }
+
+    #[test]
+    fn git_cochange_evidence_selects_and_boosts_tests() {
+        let source_file = file("source", "src/auth.rs");
+        let matching_test = file("matching-test", "tests/auth_history_test.rs");
+        let git_fact = AnalysisFact {
+            id: "git-auth-test".into(),
+            file_id: source_file.id.clone(),
+            symbol_id: None,
+            target: "tests/auth_history_test.rs".into(),
+            target_kind: GraphNodeType::Test,
+            edge_type: GraphEdgeType::ChangedBy,
+            range: None,
+            confidence: Confidence::High,
+            source: "open-kioku-git-history".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            message: "git co-change observed in 3 commit(s), recency weight 0.90".into(),
+        };
+        let store = EvidenceStore {
+            files: vec![source_file.clone(), matching_test.clone()],
+            tests: vec![test("auth_history_flow", &matching_test.id)],
+            occurrences: Vec::new(),
+            analysis_facts: vec![git_fact],
+        };
+
+        let selected = TestSelector::new(&store)
+            .for_changed_path(Path::new("src/auth.rs"), 1)
+            .unwrap();
+
+        assert_eq!(selected[0].name, "auth_history_flow");
+        assert!(selected[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "git_cochange"));
     }
 
     #[test]

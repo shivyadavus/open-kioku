@@ -23,6 +23,7 @@ open-kioku-languages = { version = "2.0.0", path = "../open-kioku-languages" }
 open-kioku-parse = { version = "2.0.0", path = "../open-kioku-parse" }
 open-kioku-scip = { version = "2.0.0", path = "../open-kioku-scip" }
 rayon.workspace = true
+roxmltree.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
