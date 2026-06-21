@@ -190,10 +190,15 @@ async fn dispatch(
         }
         "plan_change" => {
             let task = required_str(&params, "task")?;
-            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(task, 8)?;
+            let task = if let Some(since) = params.get("since").and_then(Value::as_str) {
+                task_with_changed_ranges(repo, task, since)?
+            } else {
+                task.to_string()
+            };
+            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
             let report = PlanEngine::new(store as &dyn OkStore)
                 .with_memory_facts(memory_facts)
-                .plan(task, limit(&params))?;
+                .plan(&task, limit(&params))?;
             let format_arg = params
                 .get("format")
                 .and_then(Value::as_str)
@@ -326,7 +331,7 @@ async fn dispatch(
         }
         "verify_change" => {
             let plan = plan_from_params(&params)?;
-            let changed_files = params
+            let mut changed_files = params
                 .get("changed_files")
                 .and_then(Value::as_array)
                 .map(|values| {
@@ -348,10 +353,20 @@ async fn dispatch(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let unified_diff = params
+            let mut unified_diff = params
                 .get("diff")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
+                for change in changed_ranges_since(repo, since)? {
+                    if let Some(path) = change.new_path.or(change.old_path) {
+                        changed_files.push(path);
+                    }
+                }
+                if unified_diff.is_none() {
+                    unified_diff = git_diff_since(repo, since)?;
+                }
+            }
             let run_commands = params
                 .get("run_commands")
                 .and_then(Value::as_bool)
@@ -707,7 +722,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("build_context_pack", "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for."},"limit":{"type":"integer","description":"Maximum number of context results to include. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The output format of the context pack."}}})),
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_compressed_context."}}})),
-        ("plan_change", "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, and recommended test targets.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The format of the plan."}}})),
+        ("plan_change", "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The format of the plan."}}})),
         ("remember_fact", "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters.", json!({"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"The fact text to remember."},"source":{"type":"string","description":"The source or tool that observed the fact. Defaults to 'mcp'."},"confidence":{"type":"string","enum":["low","medium","high","exact"],"description":"The confidence level of the fact."}}})),
         ("search_memory", "Search through the append-only repository memory facts using keyword and entity matches.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against facts."},"limit":{"type":"integer","description":"Maximum number of facts to return. Defaults to 20."}}})),
         ("explain_file", "Retrieve the metadata, syntax parsing status, and all code chunks for a single repository file.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file."}}})),
@@ -720,7 +735,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("propose_patch", "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the changes to propose."}}})),
         ("review_patch", "Review a proposed patch plan for safety, target constraints, and completeness.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier associated with the patch."}}})),
         ("validate_patch", "Validate a patch plan against codebase boundaries and references to detect warnings.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier."}}})),
-        ("verify_change", "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"run_commands":{"type":"boolean","description":"Set true to execute the validation commands defined in the plan."}}})),
+        ("verify_change", "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"run_commands":{"type":"boolean","description":"Set true to execute the validation commands defined in the plan."}}})),
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),
@@ -809,6 +824,69 @@ fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("missing required string argument `{key}`"))
+}
+
+fn changed_ranges_since(repo: &Path, since: &str) -> anyhow::Result<Vec<open_kioku_git::DiffFile>> {
+    Ok(open_kioku_git::diff_unified_zero_since(repo, since)?)
+}
+
+fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Result<String> {
+    let changed = changed_ranges_since(repo, since)?;
+    if changed.is_empty() {
+        return Ok(format!(
+            "{task}\n\nGit diff since `{since}` has no changed files."
+        ));
+    }
+    let mut enriched =
+        format!("{task}\n\nChanged files and line ranges from `git diff {since} --unified=0`:\n");
+    for change in &changed {
+        enriched.push_str("- ");
+        enriched.push_str(&render_changed_range(change));
+        enriched.push('\n');
+    }
+    Ok(enriched)
+}
+
+fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
+    let path = change
+        .new_path
+        .as_ref()
+        .or(change.old_path.as_ref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<unknown>".into());
+    let ranges = change
+        .hunks
+        .iter()
+        .filter_map(|hunk| hunk.new_range.as_ref().or(hunk.old_range.as_ref()))
+        .map(|range| {
+            if range.start == range.end {
+                range.start.to_string()
+            } else {
+                format!("{}-{}", range.start, range.end)
+            }
+        })
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        format!("{:?} {}", change.status, path)
+    } else {
+        format!("{:?} {} lines {}", change.status, path, ranges.join(","))
+    }
+}
+
+fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--unified=0", "--no-ext-diff", "--relative"])
+        .arg(since)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(Some(String::from_utf8(output.stdout)?))
 }
 
 fn plan_from_params(params: &Value) -> anyhow::Result<PlanReport> {

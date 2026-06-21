@@ -1166,6 +1166,7 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-format",
+ "open-kioku-git",
  "open-kioku-graph",
  "open-kioku-impact",
  "open-kioku-ingest",
@@ -1305,6 +1306,7 @@ dependencies = [
  "criterion",
  "open-kioku-core",
  "open-kioku-errors",
+ "serde",
  "tempfile",
 ]
 
@@ -1383,6 +1385,7 @@ dependencies = [
  "open-kioku-context-compress",
  "open-kioku-core",
  "open-kioku-format",
+ "open-kioku-git",
  "open-kioku-graph",
  "open-kioku-impact",
  "open-kioku-memory",
@@ -1566,6 +1569,7 @@ dependencies = [
 name = "open-kioku-storage"
 version = "2.0.1"
 dependencies = [
+ "chrono",
  "open-kioku-core",
  "open-kioku-errors",
 ]

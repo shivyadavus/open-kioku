@@ -20,6 +20,7 @@ open-kioku-context-compress = { version = "2.0.0", path = "../open-kioku-context
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-format = { version = "2.0.0", path = "../open-kioku-format" }
 open-kioku-graph = { version = "2.0.0", path = "../open-kioku-graph" }
+open-kioku-git = { version = "2.0.0", path = "../open-kioku-git" }
 open-kioku-impact = { version = "2.0.0", path = "../open-kioku-impact" }
 open-kioku-memory = { version = "2.0.0", path = "../open-kioku-memory" }
 open-kioku-patch = { version = "2.0.0", path = "../open-kioku-patch" }
