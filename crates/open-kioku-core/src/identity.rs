@@ -4,7 +4,7 @@
 //! IDs inline. File paths are repository-relative, use `/` separators, preserve
 //! case, and reject absolute or escaping paths. User-controlled payloads are
 //! escaped before entering reserved namespaces (`file:`, `symbol:`, `route:`,
-//! `config:`, `test:`, `runtime:`, and `architecture:`).
+//! `config:`, `test:`, `runtime:`, `resource:`, and `architecture:`).
 //!
 //! Qualified names keep language entrypoint conventions stable: Python
 //! `__init__.py`, JavaScript/TypeScript `index.*`, and Rust `mod.rs` resolve to
@@ -24,6 +24,7 @@ const RESERVED_NAMESPACES: &[&str] = &[
     "config:",
     "test:",
     "runtime:",
+    "resource:",
     "architecture:",
 ];
 
@@ -61,6 +62,13 @@ pub fn config_node_id(key_path: &str) -> NodeId {
     NodeId::new(format!(
         "config:{}",
         escape_identity_component(key_path.trim())
+    ))
+}
+
+pub fn resource_node_id(resource: &str) -> NodeId {
+    NodeId::new(format!(
+        "resource:{}",
+        escape_identity_component(resource.trim())
     ))
 }
 

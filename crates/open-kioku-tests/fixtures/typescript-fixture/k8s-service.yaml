@@ -1,0 +1,6 @@
+kind: Service
+metadata:
+  name: greeting-web
+spec:
+  ports:
+    - port: 80
