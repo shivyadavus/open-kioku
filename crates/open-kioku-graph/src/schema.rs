@@ -55,6 +55,8 @@ pub fn current_schema_with_manifest(
         "PublishesEvent",
         "ConsumesEvent",
         "Tests",
+        "TestCovers",
+        "Validates",
         "OwnedBy",
         "ChangedBy",
         "FailedIn",
@@ -333,7 +335,7 @@ mod tests {
 
         // Verify node types has the correct counts
         assert_eq!(schema1.node_types.len(), 23);
-        assert_eq!(schema1.edge_types.len(), 23);
+        assert_eq!(schema1.edge_types.len(), 25);
 
         // Ensure count properties are absent in JSON (since they are None and skip_serializing_if is used)
         assert!(!json1.contains("\"count\":"));
