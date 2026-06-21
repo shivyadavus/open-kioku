@@ -27,6 +27,7 @@ use std::time::Instant;
 pub mod resolver;
 pub mod runtime;
 pub mod symbol_registry;
+pub mod validation;
 
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
@@ -314,6 +315,9 @@ impl Indexer {
         let runtime_facts = collect_runtime_analysis_facts(&root, &files, &symbols)?;
         let runtime_analysis_facts = runtime_facts.len();
         analysis_facts.extend(runtime_facts);
+        let validation_facts = collect_validation_analysis_facts(&root, &files, &symbols, &tests)?;
+        let validation_analysis_facts = validation_facts.len();
+        analysis_facts.extend(validation_facts);
         let git_history = if config.history.enabled {
             collect_git_history(
                 &root,
@@ -412,6 +416,7 @@ impl Indexer {
                 resolver_facts: resolver_fact_count,
                 registry_facts: registry_fact_count,
                 runtime_facts: runtime_analysis_facts,
+                validation_facts: validation_analysis_facts,
                 git_history_facts: git_history_fact_count,
                 architecture_facts: arch_fact_count,
             },
@@ -854,6 +859,7 @@ struct AnalysisCounts {
     resolver_facts: usize,
     registry_facts: usize,
     runtime_facts: usize,
+    validation_facts: usize,
     git_history_facts: usize,
     architecture_facts: usize,
 }
@@ -885,7 +891,16 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
     let analysis = input.analysis;
     let build_systems = detect_build_systems(root);
     let codeql_databases = detect_codeql_databases(root);
-    let coverage_reports = count_analysis_artifacts(root, &["jacoco.xml", "coverage.xml"]);
+    let coverage_reports = count_analysis_artifacts(
+        root,
+        &[
+            "jacoco.xml",
+            "coverage.xml",
+            "cobertura.xml",
+            "lcov.info",
+            ".lcov",
+        ],
+    );
     let junit_reports = count_analysis_artifacts(root, &["test-", "junit"]);
     let mut semantic_provider_notes = Vec::new();
     if !build_systems.is_empty() {
@@ -927,6 +942,12 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         semantic_provider_notes.push(format!(
             "runtime analysis facts detected: {}",
             analysis.runtime_facts
+        ));
+    }
+    if analysis.validation_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "validation evidence facts detected: {}",
+            analysis.validation_facts
         ));
     }
     if analysis.git_history_facts > 0 {
@@ -1479,6 +1500,15 @@ fn collect_runtime_analysis_facts(
     symbols: &[Symbol],
 ) -> Result<Vec<AnalysisFact>> {
     runtime::collect_runtime_analysis_facts(root, files, symbols)
+}
+
+fn collect_validation_analysis_facts(
+    root: &Path,
+    files: &[File],
+    symbols: &[Symbol],
+    tests: &[TestTarget],
+) -> Result<Vec<AnalysisFact>> {
+    validation::collect_validation_analysis_facts(root, files, symbols, tests)
 }
 
 fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {

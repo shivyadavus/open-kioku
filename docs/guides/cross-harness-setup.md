@@ -28,7 +28,7 @@ Default signals are local and free: build systems detected from repository metad
 
 Runtime analysis is optional local evidence. Put JSONL trace/span artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths plus fields such as `http.route`, `http.request.method`, or `db.statement`; `ok index` will turn matching entries into graph facts. Open Kioku does not install or run runtime agents by default.
 
-Advanced providers are opportunistic. BSP descriptors, CodeQL database artifacts, matching LSP commands, coverage reports, and JUnit-style reports are shown only when the corresponding local artifact is detected. Missing advanced providers are not readiness failures.
+Advanced providers are opportunistic. BSP descriptors, CodeQL database artifacts, matching LSP commands, JUnit XML, lcov, Cobertura XML, JaCoCo XML, and coverage.py XML/JSON reports are shown only when the corresponding local artifact is detected. Missing advanced providers are not readiness failures.
 
 Client matrix:
 
