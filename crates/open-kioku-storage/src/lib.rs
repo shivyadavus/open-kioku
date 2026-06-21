@@ -400,6 +400,12 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    fn all_graph_nodes(&self) -> Result<Vec<GraphNode>> {
+        Err(OkError::Unsupported(
+            "all_graph_nodes is not implemented by this graph store".into(),
+        ))
+    }
+
     fn edges_by_type(
         &self,
         _edge_type: GraphEdgeType,

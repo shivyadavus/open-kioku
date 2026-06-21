@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use open_kioku_architecture::ArchitectureDetector;
 use open_kioku_config::{
@@ -30,12 +31,16 @@ use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::{
     GraphStore, HistoryStore, IndexData, MetadataStore, OkStore, SearchIndex,
 };
-use open_kioku_storage_sqlite::SqliteStore;
+use open_kioku_storage_sqlite::{SqliteStore, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION};
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fmt;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -66,6 +71,12 @@ enum Command {
         with_scip: Option<String>,
         #[arg(long, default_value = "full")]
         mode: String,
+        #[arg(long = "from-snapshot", value_parser = ["auto"])]
+        from_snapshot: Option<String>,
+    },
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
     },
     /// Keep the local index current while repository files change.
     Watch {
@@ -236,6 +247,95 @@ enum GraphCommand {
         #[arg(long, default_value = "json")]
         format: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommand {
+    Export {
+        #[arg(long, value_enum, default_value_t = SnapshotQuality::Best)]
+        quality: SnapshotQuality,
+    },
+    Import,
+    Doctor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum SnapshotQuality {
+    Best,
+    Fast,
+}
+
+impl SnapshotQuality {
+    fn compression_level(self) -> i32 {
+        match self {
+            Self::Best => 9,
+            Self::Fast => 1,
+        }
+    }
+}
+
+impl fmt::Display for SnapshotQuality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Best => "best",
+            Self::Fast => "fast",
+        })
+    }
+}
+
+const SNAPSHOT_SCHEMA_VERSION: &str = "1.0.0";
+const SNAPSHOT_ARTIFACT_KIND: &str = "index-snapshot";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotMetadata {
+    schema_version: String,
+    sqlite_user_version: i64,
+    open_kioku_version: String,
+    index_mode: String,
+    repo_commit: String,
+    indexed_at: String,
+    file_count: usize,
+    symbol_count: usize,
+    chunk_count: usize,
+    graph_node_count: usize,
+    graph_edge_count: usize,
+    original_size_bytes: u64,
+    compressed_size_bytes: u64,
+    compression_level: i32,
+    source_root_hash: String,
+    artifact_kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotExportReport {
+    ok: bool,
+    quality: SnapshotQuality,
+    artifact_path: PathBuf,
+    metadata_path: PathBuf,
+    metadata: SnapshotMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotImportReport {
+    ok: bool,
+    imported: bool,
+    rebuilt_search: bool,
+    artifact_path: PathBuf,
+    metadata_path: PathBuf,
+    index_path: PathBuf,
+    metadata: SnapshotMetadata,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotDoctorReport {
+    ok: bool,
+    artifact_path: PathBuf,
+    metadata_path: PathBuf,
+    metadata: Option<SnapshotMetadata>,
+    warnings: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -985,9 +1085,31 @@ async fn main() -> anyhow::Result<()> {
             repo: command_repo,
             with_scip,
             mode,
+            from_snapshot,
         } => {
             let repo = resolve_repo(&repo, command_repo);
             let mode = parse_index_mode(&mode)?;
+            if from_snapshot.as_deref() == Some("auto") {
+                match snapshot_import(&repo) {
+                    Ok(report) => {
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            println!(
+                                "Imported snapshot from {} and rebuilt search index",
+                                report.artifact_path.display()
+                            );
+                            for warning in &report.warnings {
+                                println!("warning: {warning}");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        eprintln!("snapshot import unavailable; falling back to full index: {err}");
+                    }
+                }
+            }
             let snapshot = index_repo_with_scip_mode(&repo, with_scip.as_deref(), mode)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&snapshot.manifest)?);
@@ -1015,6 +1137,48 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Command::Snapshot { command } => match command {
+            SnapshotCommand::Export { quality } => {
+                let report = snapshot_export(&repo, quality)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "Exported {} snapshot to {}",
+                        report.quality,
+                        report.artifact_path.display()
+                    );
+                    println!(
+                        "Metadata: {} ({} -> {} bytes)",
+                        report.metadata_path.display(),
+                        report.metadata.original_size_bytes,
+                        report.metadata.compressed_size_bytes
+                    );
+                }
+            }
+            SnapshotCommand::Import => {
+                let report = snapshot_import(&repo)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("Imported snapshot from {}", report.artifact_path.display());
+                    if report.rebuilt_search {
+                        println!("Rebuilt Tantivy search index from imported SQLite index");
+                    }
+                    for warning in &report.warnings {
+                        println!("warning: {warning}");
+                    }
+                }
+            }
+            SnapshotCommand::Doctor => {
+                let report = snapshot_doctor(&repo);
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_snapshot_doctor_report(&report);
+                }
+            }
+        },
         Command::Watch { repo: command_repo } => {
             let repo = resolve_repo(&repo, command_repo);
             open_kioku_watch::watch_repo(&repo)?;
@@ -5517,6 +5681,574 @@ fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {
     } else {
         Ok(path)
     }
+}
+
+fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<SnapshotExportReport> {
+    let repo = absolutize(repo)?;
+    let index_path = index_sqlite_path(&repo);
+    if !index_path.exists() {
+        anyhow::bail!(
+            "index database is missing at {}; run `ok index` first",
+            index_path.display()
+        );
+    }
+
+    let artifact_dir = snapshot_artifact_dir(&repo);
+    fs::create_dir_all(&artifact_dir)?;
+    ensure_snapshot_gitattributes(&artifact_dir)?;
+    checkpoint_sqlite(&index_path);
+
+    let temp_db = unique_temp_path(&artifact_dir, "index.snapshot", "sqlite.tmp");
+    match quality {
+        SnapshotQuality::Best => {
+            let conn = Connection::open_with_flags(&index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("opening {} read-only", index_path.display()))?;
+            let temp_db_string = temp_db.to_string_lossy().to_string();
+            conn.execute("VACUUM INTO ?1", params![temp_db_string])
+                .with_context(|| {
+                    format!("compacting snapshot database to {}", temp_db.display())
+                })?;
+        }
+        SnapshotQuality::Fast => {
+            fs::copy(&index_path, &temp_db).with_context(|| {
+                format!(
+                    "copying index database from {} to {}",
+                    index_path.display(),
+                    temp_db.display()
+                )
+            })?;
+        }
+    }
+
+    integrity_check_sqlite(&temp_db)?;
+    ensure_required_snapshot_tables(&temp_db)?;
+
+    let manifest = read_manifest_from_sqlite(&temp_db)?
+        .ok_or_else(|| anyhow::anyhow!("snapshot source database has no index manifest"))?;
+    let graph_counts = read_graph_counts_from_sqlite(&temp_db)?;
+    let sqlite_user_version = sqlite_user_version(&temp_db)?;
+    let original_size_bytes = fs::metadata(&temp_db)?.len();
+
+    let artifact_path = snapshot_artifact_path(&repo);
+    let artifact_tmp = unique_temp_path(&artifact_dir, "index.snapshot", "zst.tmp");
+    compress_file(&temp_db, &artifact_tmp, quality.compression_level())?;
+    fs::rename(&artifact_tmp, &artifact_path).with_context(|| {
+        format!(
+            "promoting snapshot artifact {} to {}",
+            artifact_tmp.display(),
+            artifact_path.display()
+        )
+    })?;
+    let compressed_size_bytes = fs::metadata(&artifact_path)?.len();
+
+    let metadata = SnapshotMetadata {
+        schema_version: SNAPSHOT_SCHEMA_VERSION.to_string(),
+        sqlite_user_version,
+        open_kioku_version: env!("CARGO_PKG_VERSION").to_string(),
+        index_mode: manifest.index_mode.to_string(),
+        repo_commit: manifest
+            .repository
+            .commit
+            .clone()
+            .or_else(|| open_kioku_git::commit(&repo))
+            .unwrap_or_else(|| "unknown".to_string()),
+        indexed_at: manifest.indexed_at.to_rfc3339(),
+        file_count: manifest.file_count,
+        symbol_count: manifest.symbol_count,
+        chunk_count: manifest.chunk_count,
+        graph_node_count: graph_counts.0,
+        graph_edge_count: graph_counts.1,
+        original_size_bytes,
+        compressed_size_bytes,
+        compression_level: quality.compression_level(),
+        source_root_hash: source_root_hash(&repo),
+        artifact_kind: SNAPSHOT_ARTIFACT_KIND.to_string(),
+    };
+    atomic_write_json(&snapshot_metadata_path(&repo), &metadata)?;
+    let _ = fs::remove_file(&temp_db);
+
+    Ok(SnapshotExportReport {
+        ok: true,
+        quality,
+        artifact_path,
+        metadata_path: snapshot_metadata_path(&repo),
+        metadata,
+    })
+}
+
+fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
+    let repo = absolutize(repo)?;
+    let artifact_path = snapshot_artifact_path(&repo);
+    let metadata_path = snapshot_metadata_path(&repo);
+    let metadata = read_snapshot_metadata(&metadata_path)?;
+    let warnings = validate_snapshot_metadata(&metadata)?;
+    if !artifact_path.exists() {
+        anyhow::bail!("snapshot artifact is missing: {}", artifact_path.display());
+    }
+    validate_compressed_snapshot_size(&artifact_path, &metadata)?;
+
+    let artifact_dir = snapshot_artifact_dir(&repo);
+    fs::create_dir_all(&artifact_dir)?;
+    let temp_db = unique_temp_path(&artifact_dir, "index.snapshot.import", "sqlite.tmp");
+    decompress_file(&artifact_path, &temp_db)?;
+    validate_decompressed_snapshot_size(&temp_db, &metadata)?;
+    integrity_check_sqlite(&temp_db)?;
+    ensure_required_snapshot_tables(&temp_db)?;
+    let temp_user_version = sqlite_user_version(&temp_db)?;
+    if temp_user_version != metadata.sqlite_user_version {
+        let _ = fs::remove_file(&temp_db);
+        anyhow::bail!(
+            "snapshot metadata user_version {} does not match database user_version {}",
+            metadata.sqlite_user_version,
+            temp_user_version
+        );
+    }
+    let temp_manifest = read_manifest_from_sqlite(&temp_db)?;
+    if temp_manifest.is_none() {
+        let _ = fs::remove_file(&temp_db);
+        anyhow::bail!("snapshot database has no index manifest");
+    }
+
+    let index_path = index_sqlite_path(&repo);
+    promote_snapshot_db(&repo, &temp_db)?;
+    let store = open_store(&repo)?;
+    rebuild_search_from_store(&repo, &store)?;
+
+    Ok(SnapshotImportReport {
+        ok: true,
+        imported: true,
+        rebuilt_search: true,
+        artifact_path,
+        metadata_path,
+        index_path,
+        metadata,
+        warnings,
+    })
+}
+
+fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
+    let repo = absolutize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let artifact_path = snapshot_artifact_path(&repo);
+    let metadata_path = snapshot_metadata_path(&repo);
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    let metadata = match read_snapshot_metadata(&metadata_path) {
+        Ok(metadata) => {
+            match validate_snapshot_metadata(&metadata) {
+                Ok(metadata_warnings) => warnings.extend(metadata_warnings),
+                Err(err) => errors.push(err.to_string()),
+            }
+            Some(metadata)
+        }
+        Err(err) => {
+            errors.push(err.to_string());
+            None
+        }
+    };
+
+    if !artifact_path.exists() {
+        errors.push(format!(
+            "snapshot artifact is missing: {}",
+            artifact_path.display()
+        ));
+    } else {
+        if let Some(metadata) = &metadata {
+            if let Err(err) = validate_compressed_snapshot_size(&artifact_path, metadata) {
+                errors.push(err.to_string());
+            }
+        }
+        let artifact_dir = snapshot_artifact_dir(&repo);
+        if let Err(err) = fs::create_dir_all(&artifact_dir) {
+            errors.push(format!(
+                "cannot create artifact temp directory {}: {err}",
+                artifact_dir.display()
+            ));
+        } else {
+            let temp_db = unique_temp_path(&artifact_dir, "index.snapshot.doctor", "sqlite.tmp");
+            match decompress_file(&artifact_path, &temp_db)
+                .and_then(|_| {
+                    if let Some(metadata) = &metadata {
+                        validate_decompressed_snapshot_size(&temp_db, metadata)?;
+                    }
+                    Ok(())
+                })
+                .and_then(|_| integrity_check_sqlite(&temp_db))
+                .and_then(|_| ensure_required_snapshot_tables(&temp_db))
+            {
+                Ok(()) => {
+                    if let Some(metadata) = &metadata {
+                        match sqlite_user_version(&temp_db) {
+                            Ok(user_version) if user_version != metadata.sqlite_user_version => {
+                                errors.push(format!(
+                                    "metadata user_version {} does not match artifact user_version {}",
+                                    metadata.sqlite_user_version, user_version
+                                ));
+                            }
+                            Ok(_) => {}
+                            Err(err) => errors.push(err.to_string()),
+                        }
+                    }
+                }
+                Err(err) => errors.push(err.to_string()),
+            }
+            let _ = fs::remove_file(&temp_db);
+        }
+    }
+
+    SnapshotDoctorReport {
+        ok: errors.is_empty(),
+        artifact_path,
+        metadata_path,
+        metadata,
+        warnings,
+        errors,
+    }
+}
+
+fn print_snapshot_doctor_report(report: &SnapshotDoctorReport) {
+    println!("Open Kioku snapshot doctor");
+    println!(
+        "{} metadata: {}",
+        if report.metadata.is_some() {
+            "[ok]  "
+        } else {
+            "[fail]"
+        },
+        report.metadata_path.display()
+    );
+    println!(
+        "{} artifact: {}",
+        if report.artifact_path.exists() {
+            "[ok]  "
+        } else {
+            "[fail]"
+        },
+        report.artifact_path.display()
+    );
+    for warning in &report.warnings {
+        println!("[warn] {warning}");
+    }
+    for error in &report.errors {
+        println!("[fail] {error}");
+    }
+    if report.ok {
+        println!("[ok]   snapshot is importable");
+    }
+}
+
+fn snapshot_artifact_dir(repo: &Path) -> PathBuf {
+    repo.join(".ok/artifacts")
+}
+
+fn snapshot_artifact_path(repo: &Path) -> PathBuf {
+    snapshot_artifact_dir(repo).join("index.snapshot.zst")
+}
+
+fn snapshot_metadata_path(repo: &Path) -> PathBuf {
+    snapshot_artifact_dir(repo).join("index.snapshot.json")
+}
+
+fn index_sqlite_path(repo: &Path) -> PathBuf {
+    repo.join(".ok/index.sqlite")
+}
+
+fn unique_temp_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
+    let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    dir.join(format!(
+        ".{stem}.{}.{}.{}",
+        std::process::id(),
+        nanos,
+        suffix
+    ))
+}
+
+fn ensure_snapshot_gitattributes(artifact_dir: &Path) -> anyhow::Result<()> {
+    let path = artifact_dir.join(".gitattributes");
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(
+        &path,
+        "*.snapshot.zst binary -merge\n*.snapshot.json text\n",
+    )
+    .with_context(|| format!("writing {}", path.display()))
+}
+
+fn checkpoint_sqlite(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Ok(conn) = Connection::open(path) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+}
+
+fn read_snapshot_metadata(path: &Path) -> anyhow::Result<SnapshotMetadata> {
+    let file = File::open(path)
+        .with_context(|| format!("snapshot metadata is missing: {}", path.display()))?;
+    serde_json::from_reader(file)
+        .with_context(|| format!("reading snapshot metadata {}", path.display()))
+}
+
+fn validate_snapshot_metadata(metadata: &SnapshotMetadata) -> anyhow::Result<Vec<String>> {
+    if metadata.artifact_kind != SNAPSHOT_ARTIFACT_KIND {
+        anyhow::bail!(
+            "unsupported snapshot artifact kind {}; expected {}",
+            metadata.artifact_kind,
+            SNAPSHOT_ARTIFACT_KIND
+        );
+    }
+    if metadata.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported snapshot schema version {}; expected {}",
+            metadata.schema_version,
+            SNAPSHOT_SCHEMA_VERSION
+        );
+    }
+    if metadata.sqlite_user_version > SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION {
+        anyhow::bail!(
+            "snapshot sqlite user_version {} is newer than supported version {}",
+            metadata.sqlite_user_version,
+            SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
+        );
+    }
+    let mut warnings = Vec::new();
+    if metadata.open_kioku_version != env!("CARGO_PKG_VERSION") {
+        warnings.push(format!(
+            "snapshot was exported by Open Kioku {}; current binary is {}",
+            metadata.open_kioku_version,
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    Ok(warnings)
+}
+
+fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let tmp = unique_temp_path(parent, "index.snapshot.metadata", "json.tmp");
+    {
+        let mut file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("promoting metadata {} to {}", tmp.display(), path.display()))
+}
+
+fn compress_file(input: &Path, output: &Path, level: i32) -> anyhow::Result<()> {
+    let mut reader = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    let writer = File::create(output).with_context(|| format!("creating {}", output.display()))?;
+    zstd::stream::copy_encode(&mut reader, writer, level)
+        .with_context(|| format!("compressing {}", input.display()))?;
+    Ok(())
+}
+
+fn decompress_file(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let mut reader = File::open(input).with_context(|| format!("opening {}", input.display()))?;
+    let writer = File::create(output).with_context(|| format!("creating {}", output.display()))?;
+    zstd::stream::copy_decode(&mut reader, writer)
+        .with_context(|| format!("decompressing {}", input.display()))?;
+    Ok(())
+}
+
+fn validate_compressed_snapshot_size(
+    artifact_path: &Path,
+    metadata: &SnapshotMetadata,
+) -> anyhow::Result<()> {
+    let actual = fs::metadata(artifact_path)
+        .with_context(|| format!("reading metadata for {}", artifact_path.display()))?
+        .len();
+    if actual != metadata.compressed_size_bytes {
+        anyhow::bail!(
+            "snapshot compressed size mismatch: metadata says {} bytes, artifact is {} bytes",
+            metadata.compressed_size_bytes,
+            actual
+        );
+    }
+    Ok(())
+}
+
+fn validate_decompressed_snapshot_size(
+    db_path: &Path,
+    metadata: &SnapshotMetadata,
+) -> anyhow::Result<()> {
+    let actual = fs::metadata(db_path)
+        .with_context(|| format!("reading metadata for {}", db_path.display()))?
+        .len();
+    if actual != metadata.original_size_bytes {
+        anyhow::bail!(
+            "snapshot original size mismatch: metadata says {} bytes, artifact expands to {} bytes",
+            metadata.original_size_bytes,
+            actual
+        );
+    }
+    Ok(())
+}
+
+fn integrity_check_sqlite(path: &Path) -> anyhow::Result<()> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for integrity check", path.display()))?;
+    let result: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .with_context(|| format!("running integrity_check on {}", path.display()))?;
+    if result != "ok" {
+        anyhow::bail!(
+            "sqlite integrity_check failed for {}: {result}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn sqlite_user_version(path: &Path) -> anyhow::Result<i64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for user_version", path.display()))?;
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .with_context(|| format!("reading sqlite user_version from {}", path.display()))
+}
+
+fn read_manifest_from_sqlite(path: &Path) -> anyhow::Result<Option<IndexManifest>> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for manifest read", path.display()))?;
+    let raw: Option<String> = conn
+        .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .with_context(|| format!("reading index manifest from {}", path.display()))?;
+    raw.map(|json| serde_json::from_str(&json).map_err(Into::into))
+        .transpose()
+}
+
+fn read_graph_counts_from_sqlite(path: &Path) -> anyhow::Result<(usize, usize)> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for graph counts", path.display()))?;
+    let nodes: usize = conn
+        .query_row("SELECT COUNT(*) FROM graph_nodes", [], |row| row.get(0))
+        .with_context(|| format!("counting graph nodes in {}", path.display()))?;
+    let edges: usize = conn
+        .query_row("SELECT COUNT(*) FROM graph_edges", [], |row| row.get(0))
+        .with_context(|| format!("counting graph edges in {}", path.display()))?;
+    Ok((nodes, edges))
+}
+
+fn ensure_required_snapshot_tables(path: &Path) -> anyhow::Result<()> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {} for schema check", path.display()))?;
+    let required = [
+        "manifests",
+        "files",
+        "symbols",
+        "chunks",
+        "tests",
+        "imports",
+        "occurrences",
+        "analysis_facts",
+        "graph_nodes",
+        "graph_edges",
+    ];
+    for table in required {
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("checking for required table {table}"))?;
+        if exists.is_none() {
+            anyhow::bail!("snapshot database is missing required table `{table}`");
+        }
+    }
+    Ok(())
+}
+
+fn promote_snapshot_db(repo: &Path, temp_db: &Path) -> anyhow::Result<()> {
+    let ok_dir = repo.join(".ok");
+    fs::create_dir_all(&ok_dir)?;
+    let index_path = index_sqlite_path(repo);
+    checkpoint_sqlite(&index_path);
+    let backup_path = unique_temp_path(&ok_dir, "index.sqlite", "backup");
+    let had_existing = index_path.exists();
+    if had_existing {
+        fs::rename(&index_path, &backup_path).with_context(|| {
+            format!(
+                "moving existing index {} to rollback backup {}",
+                index_path.display(),
+                backup_path.display()
+            )
+        })?;
+    }
+
+    if let Err(err) = fs::rename(temp_db, &index_path) {
+        if had_existing {
+            let _ = fs::rename(&backup_path, &index_path);
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "promoting imported snapshot {} to {}",
+                temp_db.display(),
+                index_path.display()
+            )
+        });
+    }
+    remove_sqlite_sidecars(&index_path);
+
+    match SqliteStore::open(&index_path) {
+        Ok(_) => {
+            if had_existing {
+                let _ = fs::remove_file(&backup_path);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&index_path);
+            if had_existing {
+                let _ = fs::rename(&backup_path, &index_path);
+            }
+            remove_sqlite_sidecars(&index_path);
+            Err(anyhow::Error::from(err)).context("imported snapshot failed SQLite open")
+        }
+    }
+}
+
+fn remove_sqlite_sidecars(index_path: &Path) {
+    let wal = index_path.with_extension("sqlite-wal");
+    let shm = index_path.with_extension("sqlite-shm");
+    let _ = fs::remove_file(wal);
+    let _ = fs::remove_file(shm);
+}
+
+fn rebuild_search_from_store(repo: &Path, store: &SqliteStore) -> anyhow::Result<()> {
+    let chunks = store.all_chunks()?;
+    let files = store.list_files(usize::MAX, 0)?;
+    let symbols = store.list_symbols(None, usize::MAX, 0)?;
+    let graph_nodes = store.all_graph_nodes()?;
+    rebuild_disk_index_with_graph(
+        default_index_dir(repo),
+        &chunks,
+        &files,
+        &symbols,
+        &graph_nodes,
+    )?;
+    Ok(())
+}
+
+fn source_root_hash(repo: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"open-kioku-source-root-v1\0");
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    if let Some(commit) = open_kioku_git::commit(repo) {
+        hasher.update(commit.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn open_store(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {
