@@ -9,6 +9,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.1.1] — 2026-06-21
+
+### Fixed
+- **SQLite Ingestion & Backfill Performance**:
+  - Wrapped SQLite node and edge backfill updates (`backfill_graph_query_columns`) inside transactions. This critical performance fix reduces backfill time on large codebases (such as Elasticsearch with 269k stale edges) from several hours to under 25 seconds.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.1.0] — 2026-06-21
 
 ### Added
@@ -218,6 +238,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.1.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.1
 [2.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.0
 [2.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.1
 [2.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.0

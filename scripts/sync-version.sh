@@ -39,11 +39,37 @@ if [[ -f "$MARKETPLACE_JSON" ]]; then
   echo "  ✓ .cursor-plugin/marketplace.json"
 fi
 
-# ── Claude: claude-plugin.json (if present) ───────────────────────────────────
+# ── Claude: claude_plugin.json (if present) ───────────────────────────────────
+CLAUDE_JSON_UNDERSCORE="$ROOT/claude_plugin.json"
+if [[ -f "$CLAUDE_JSON_UNDERSCORE" ]]; then
+  sync_json_version "$CLAUDE_JSON_UNDERSCORE"
+  echo "  ✓ claude_plugin.json"
+fi
+
 CLAUDE_JSON="$ROOT/claude-plugin.json"
 if [[ -f "$CLAUDE_JSON" ]]; then
   sync_json_version "$CLAUDE_JSON"
   echo "  ✓ claude-plugin.json"
+fi
+
+# ── Claude plugin folder JSONs ───────────────────────────────────────────────
+CLAUDE_DIR_JSON1="$ROOT/.claude-plugin/plugin.json"
+if [[ -f "$CLAUDE_DIR_JSON1" ]]; then
+  sync_json_version "$CLAUDE_DIR_JSON1"
+  echo "  ✓ .claude-plugin/plugin.json"
+fi
+
+CLAUDE_DIR_JSON2="$ROOT/.claude-plugin/marketplace.json"
+if [[ -f "$CLAUDE_DIR_JSON2" ]]; then
+  sync_json_version "$CLAUDE_DIR_JSON2"
+  echo "  ✓ .claude-plugin/marketplace.json"
+fi
+
+# ── Codex plugin folder JSONs ────────────────────────────────────────────────
+CODEX_DIR_JSON="$ROOT/.codex-plugin/plugin.json"
+if [[ -f "$CODEX_DIR_JSON" ]]; then
+  sync_json_version "$CODEX_DIR_JSON"
+  echo "  ✓ .codex-plugin/plugin.json"
 fi
 
 # ── NPM packages ──────────────────────────────────────────────────────────────
@@ -71,6 +97,14 @@ if [[ -f "$FORMULA" ]]; then
   sed -i.bak -E "s/version \"[^\"]+\"/version \"$VERSION\"/g; s/releases\\/download\\/v[0-9]+\\.[0-9]+\\.[0-9]+/releases\\/download\\/v$VERSION/g" "$FORMULA"
   rm -f "${FORMULA}.bak"
   echo "  ✓ Formula/open-kioku.rb"
+fi
+
+# ── Release checklist ────────────────────────────────────────────────────────
+CHECKLIST="$ROOT/docs/release-checklist.md"
+if [[ -f "$CHECKLIST" ]]; then
+  sed -i.bak -E "s/version is \`[^\`]+\`/version is \`$VERSION\`/g; s/tag \`v[^\`]+\`/tag \`v$VERSION\`/g; s/tag is exactly \`v[^\`]+\`/tag is exactly \`v$VERSION\`/g; s/has a \`[^\`]+\` section/has a \`$VERSION\` section/g; s/matching \`\[[^\`]+\]\`/matching \`\[$VERSION\]\`/g" "$CHECKLIST"
+  rm -f "${CHECKLIST}.bak"
+  echo "  ✓ docs/release-checklist.md"
 fi
 
 echo "Done. All manifests are at $VERSION."
