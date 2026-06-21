@@ -216,6 +216,29 @@ ok mcp install zed --repo /absolute/path/to/repo
 
 `ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
 
+For a fleet or multi-service workspace, index each project first, then create a
+workspace config:
+
+```toml
+[workspace]
+projects = [
+  { name = "service-a", repo = "../service-a" },
+  { name = "service-b", repo = "../service-b" },
+]
+```
+
+Run the cross-project linker without reparsing source:
+
+```sh
+ok index --mode cross-project --workspace /absolute/path/to/workspace
+ok architecture fleet --workspace /absolute/path/to/workspace
+```
+
+The linker opens each project `.ok/index.sqlite` read-only, matches route and
+async channel facts across projects, and writes only
+`/absolute/path/to/workspace/.ok/workspace.sqlite`. Ambiguous matches are
+reported as caveats, and recompute replaces stale workspace edges.
+
 Teams and CI can share a known-good local index without sharing personal memory
 or compressed context state:
 

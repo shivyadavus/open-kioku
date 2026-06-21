@@ -657,6 +657,251 @@ fn index_mode_is_reported_by_index_and_status_json() {
 }
 
 #[test]
+fn cross_project_workspace_links_existing_project_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("fleet");
+    let service_a = temp.path().join("service-a");
+    let service_b = temp.path().join("service-b");
+    let service_c = temp.path().join("service-c");
+    let service_missing = temp.path().join("service-missing");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&service_a).unwrap();
+    fs::create_dir_all(&service_b).unwrap();
+    fs::create_dir_all(&service_c).unwrap();
+    fs::create_dir_all(&service_missing).unwrap();
+
+    fs::write(
+        service_a.join("index.ts"),
+        r#"
+export function register(router: { get: Function }, consumer: { subscribe: Function }) {
+  router.get("/v1/orders", () => "ok");
+  consumer.subscribe("orders.created", () => {});
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        service_b.join("index.ts"),
+        r#"
+export async function callOrders() {
+  return fetch("https://service-a.local/v1/orders");
+}
+
+export function publishOrder(producer: { send: Function }) {
+  producer.send({ topic: "orders.created" });
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        service_c.join("index.ts"),
+        r#"
+export function register(router: { get: Function }) {
+  router.get("/v1/orders", () => "alternate");
+}
+"#,
+    )
+    .unwrap();
+
+    for repo in [&service_a, &service_b, &service_c] {
+        run({
+            let mut command = ok();
+            command.arg("init").arg(repo);
+            command
+        });
+        run({
+            let mut command = ok();
+            command.arg("index").arg(repo);
+            command
+        });
+    }
+
+    let service_a_index = service_a.join(".ok/index.sqlite");
+    let service_a_modified = fs::metadata(&service_a_index).unwrap().modified().unwrap();
+
+    fs::write(
+        workspace.join("ok-workspace.toml"),
+        format!(
+            r#"[workspace]
+projects = [
+  {{ name = "service-a", repo = "{}" }},
+  {{ name = "service-b", repo = "{}" }},
+]
+"#,
+            service_a.display(),
+            service_b.display()
+        ),
+    )
+    .unwrap();
+
+    let linked = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("index")
+            .arg("--mode")
+            .arg("cross-project")
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    });
+    let linked: serde_json::Value = serde_json::from_str(&linked).unwrap();
+    assert_eq!(linked["project_count"], 2);
+    assert_eq!(linked["link_count"], 2);
+    assert!(linked["graph_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("workspace.sqlite"));
+    assert!(workspace.join(".ok/workspace.sqlite").exists());
+    assert_eq!(
+        fs::metadata(&service_a_index).unwrap().modified().unwrap(),
+        service_a_modified,
+        "cross-project indexing must not mutate project indexes"
+    );
+    assert!(linked["links"].as_array().unwrap().iter().any(|link| {
+        link["source_project"] == "service-b"
+            && link["target_project"] == "service-a"
+            && link["target"] == "/v1/orders"
+            && link["edge_type"] == "CALLS_ENDPOINT"
+    }));
+    assert!(linked["links"].as_array().unwrap().iter().any(|link| {
+        link["source_project"] == "service-b"
+            && link["target_project"] == "service-a"
+            && link["target"] == "orders.created"
+            && link["edge_type"] == "PUBLISHES_EVENT"
+    }));
+
+    let fleet = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("architecture")
+            .arg("fleet")
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    });
+    let fleet: serde_json::Value = serde_json::from_str(&fleet).unwrap();
+    assert_eq!(fleet["project_count"], 2);
+    assert_eq!(fleet["link_count"], 2);
+
+    fs::write(
+        service_a.join("alternate.ts"),
+        r#"
+export function registerAlternate(router: { get: Function }) {
+  router.get("/v1/orders", () => "alternate");
+}
+"#,
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&service_a);
+        command
+    });
+    fs::write(
+        workspace.join("ok-workspace.toml"),
+        format!(
+            r#"[workspace]
+projects = [
+  {{ name = "service-a", repo = "{}" }},
+  {{ name = "service-b", repo = "{}" }},
+  {{ name = "service-c", repo = "{}" }},
+]
+"#,
+            service_a.display(),
+            service_b.display(),
+            service_c.display()
+        ),
+    )
+    .unwrap();
+    let ambiguous = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("index")
+            .arg("--mode")
+            .arg("cross-project")
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    });
+    let ambiguous: serde_json::Value = serde_json::from_str(&ambiguous).unwrap();
+    let ambiguous_http_links = ambiguous["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|link| {
+            link["source_project"] == "service-b"
+                && link["target_project"] == "service-a"
+                && link["target"] == "/v1/orders"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ambiguous_http_links.len(), 2);
+    assert!(ambiguous_http_links.iter().all(|link| {
+        link["confidence"] == "medium"
+            && link["ambiguity"].as_array().unwrap().iter().any(|note| {
+                note.as_str()
+                    .unwrap_or_default()
+                    .contains("candidate cross-project targets")
+            })
+    }));
+
+    fs::write(
+        workspace.join("ok-workspace.toml"),
+        format!(
+            r#"[workspace]
+projects = [
+  {{ name = "service-a", repo = "{}" }},
+]
+"#,
+            service_a.display()
+        ),
+    )
+    .unwrap();
+    let relinked = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("index")
+            .arg("--mode")
+            .arg("cross-project")
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    });
+    let relinked: serde_json::Value = serde_json::from_str(&relinked).unwrap();
+    assert_eq!(
+        relinked["link_count"], 0,
+        "stale workspace edges are removed"
+    );
+
+    fs::write(
+        workspace.join("ok-workspace.toml"),
+        format!(
+            r#"[workspace]
+projects = [
+  {{ name = "service-missing", repo = "{}" }},
+]
+"#,
+            service_missing.display()
+        ),
+    )
+    .unwrap();
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("index")
+            .arg("--mode")
+            .arg("cross-project")
+            .arg("--workspace")
+            .arg(&workspace);
+        command
+    });
+    assert!(stderr.contains("missing project index"));
+}
+
+#[test]
 fn mcp_install_prints_client_config() {
     let temp = tempfile::tempdir().unwrap();
     let output = run({
