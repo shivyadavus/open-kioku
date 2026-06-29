@@ -314,7 +314,7 @@ Default indexing consumes existing SCIP files such as `index.scip` and `.ok/inde
 
 SCIP is the primary precision provider. The default quality model stays local and free: indexed symbols/chunks/imports, language-specific static facts, indexed tests, build-system detection, and SCIP exact references when an `index.scip` is available. Java/Gradle repositories get scoped validation commands when the test file path is known, for example `./gradlew :x-pack:plugin:ml:test --tests org.example.SomeTests` instead of a generic repository-wide test command.
 
-Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Git-history analysis is local and enabled by default: `ok index` and `ok watch` read a bounded local history window, store typed commit metadata and complete per-file touches (including detected renames), and preserve co-change and path-to-test co-run facts for planning, ranking, impact, and test selection. Configure the window with `[history] max_commits = 500`, or disable it with `[history] enabled = false` in `ok.toml`.
+Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Git-history analysis is local and enabled by default: `ok index` and `ok watch` read a bounded local history window, store typed commit metadata and complete per-file touches (including detected renames), and preserve co-change, path-to-test co-run, churn, provenance, and ownership evidence for planning, ranking, impact, and test selection. Configure the window with `[history] max_commits = 500`, or disable it with `[history] enabled = false` in `ok.toml`.
 
 Runtime analysis is opt-in evidence ingestion only: place local JSONL trace, span, log, incident, error, or failure artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths plus fields such as service, symbol/function, route, HTTP method, status code, duration, timestamp, SQL statement, and message, then re-run `ok index`. Open Kioku turns matching entries into runtime signals and aggregates for context, ranking, impact, test selection, and post-edit verification. Aggregate runtime facts include count, error count/rate, p50/p95/p99 latency, first/last observed timestamps, freshness, sampled redacted messages, and confidence. Runtime evidence is local observation only: it can say a route or file has recent failures and can require targeted validation during `ok verify`, but it never replaces source, symbol, test, or exact-reference truth. Inputs are capped and secret-like message tokens such as `password=`, `token=`, and `api_key=` are redacted.
 
@@ -382,6 +382,7 @@ ok --repo /path/to/repo symbol refs PolicyGate
 ok --repo /path/to/repo history provenance --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo history provenance --symbol PolicyGate
 ok --repo /path/to/repo history churn --path crates/open-kioku-core/src/lib.rs
+ok --repo /path/to/repo history ownership --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo context "update MCP docs" --format markdown
@@ -427,7 +428,7 @@ from private repos.
 
 Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance and churn hotspots: [`docs/storage-model.md#historical-churn-and-hotspots`](docs/storage-model.md#historical-churn-and-hotspots). Full MCP tool reference (55 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance, churn hotspots, and ownership lookup: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (56 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
@@ -471,12 +472,12 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 This is a 44-crate Cargo workspace. Important crates:
 
-- `open-kioku-cli`: the `ok` binary (32 subcommands).
-- `open-kioku-mcp`: JSON-RPC MCP server over stdio (55 tools).
+- `open-kioku-cli`: the `ok` binary (33 subcommands).
+- `open-kioku-mcp`: JSON-RPC MCP server over stdio (56 tools).
 - `open-kioku-core`: shared types, evidence data model, and report schemas.
 - `open-kioku-ingest`: repository indexing pipeline with static analysis and runtime evidence ingestion.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
-- `open-kioku-git`: local git history analysis, co-change evidence, and rename tracking.
+- `open-kioku-git`: local git history analysis, co-change evidence, rename tracking, and ownership resolution.
 - `open-kioku-graph`: evidence graph storage, buffered writes, query DSL, and versioned schema.
 - `open-kioku-architecture`: architecture detection, boundary analysis, and policy edge evaluation.
 - `open-kioku-storage-sqlite`: SQLite metadata, graph, and typed history storage.

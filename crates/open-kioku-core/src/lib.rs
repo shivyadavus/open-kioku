@@ -782,6 +782,58 @@ pub struct FileProvenance {
     pub uncertainty: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipSourceType {
+    Codeowners,
+    GitHistory,
+    RepoMemory,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnershipEvidence {
+    pub source_type: OwnershipSourceType,
+    pub owner: Owner,
+    pub source: String,
+    pub message: String,
+    pub confidence: Confidence,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnershipConfidenceBreakdown {
+    pub codeowners: f32,
+    pub git_history: f32,
+    pub memory: f32,
+    pub freshness: f32,
+    pub ambiguity_penalty: f32,
+    pub final_score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnerSuggestion {
+    pub owner: Owner,
+    pub rationale: String,
+    pub confidence: Confidence,
+    pub score: f32,
+    pub source_types: Vec<OwnershipSourceType>,
+    pub stale: bool,
+    pub evidence: Vec<OwnershipEvidence>,
+    pub confidence_breakdown: OwnershipConfidenceBreakdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnershipReport {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub components: Vec<PolicyComponentMatch>,
+    pub generated_at: DateTime<Utc>,
+    pub owners: Vec<OwnerSuggestion>,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolProvenance {
     pub symbol_id: SymbolId,

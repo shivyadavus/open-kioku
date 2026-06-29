@@ -1,3 +1,5 @@
+mod ownership;
+
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
     GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, HistoryRecordId, LineRange, Owner,
@@ -12,6 +14,8 @@ use std::process::Command;
 const COMMIT_RECORD_SEPARATOR: u8 = 0x1e;
 const GIT_COMMIT_FORMAT: &str =
     "--format=%x1e%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%B%x00";
+
+pub use ownership::{ownership_for_path, OwnershipInput};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitHistory {

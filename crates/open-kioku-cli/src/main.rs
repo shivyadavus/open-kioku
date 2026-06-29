@@ -16,7 +16,7 @@ use open_kioku_contract::{
 use open_kioku_core::{
     ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
-    IndexMode, NodeId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
+    IndexMode, NodeId, OwnershipReport, PlanReport, PolicyCheckReport, PolicyComponentMatch,
     PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, Symbol, SymbolId,
     SymbolProvenance,
 };
@@ -892,6 +892,11 @@ enum HistoryCommand {
         /// Exact symbol name, qualified name, or symbol ID.
         #[arg(long, conflicts_with_all = ["path", "module"])]
         symbol: Option<String>,
+    },
+    /// Resolve path ownership from CODEOWNERS, local git history, and repo memory.
+    Ownership {
+        #[arg(long)]
+        path: PathBuf,
     },
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
@@ -2698,6 +2703,23 @@ async fn main() -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&summary)?);
                     } else {
                         print_churn_summary(&summary);
+                    }
+                }
+                HistoryCommand::Ownership { path } => {
+                    let components = ownership_components(&repo, &store, &path)?;
+                    let memory_facts = ownership_memory_facts(&repo, &path, &components)?;
+                    let report =
+                        open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+                            repo: &repo,
+                            path: &path,
+                            history: &store,
+                            memory_facts: &memory_facts,
+                            components,
+                        })?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_ownership_report(&report);
                     }
                 }
                 HistoryCommand::Provenance {
@@ -8146,6 +8168,57 @@ where
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
 }
 
+fn ownership_components<S>(
+    repo: &Path,
+    store: &S,
+    path: &Path,
+) -> anyhow::Result<Vec<PolicyComponentMatch>>
+where
+    S: MetadataStore,
+{
+    if let Some(policy) = load_architecture_policy(repo)? {
+        let resolver = PolicyResolver::new(&policy)?;
+        return Ok(resolver.resolve_file(path));
+    }
+
+    let path_text = path.display().to_string();
+    let summary = ArchitectureDetector::new(store, None).detect()?;
+    Ok(summary
+        .components
+        .into_iter()
+        .filter(|component| {
+            component
+                .paths
+                .iter()
+                .any(|candidate| candidate == &path_text)
+        })
+        .map(|component| PolicyComponentMatch {
+            component_id: component.id,
+            matched_glob: "inferred_component_path".into(),
+        })
+        .collect())
+}
+
+fn ownership_memory_facts(
+    repo: &Path,
+    path: &Path,
+    components: &[PolicyComponentMatch],
+) -> anyhow::Result<Vec<open_kioku_core::MemorySearchResult>> {
+    let mut query_terms = vec![
+        "ownership".to_string(),
+        "owner".to_string(),
+        "owners".to_string(),
+        "maintainer".to_string(),
+        path.display().to_string(),
+    ];
+    query_terms.extend(
+        components
+            .iter()
+            .map(|component| component.component_id.clone()),
+    );
+    Ok(RepoMemoryStore::open_repo(repo)?.search(&query_terms.join(" "), 20)?)
+}
+
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     index_repo_with_config(repo, OkConfig::load_from_repo(repo)?, IndexMode::Full)
 }
@@ -10139,6 +10212,61 @@ fn print_churn_summary(summary: &ChurnSummary) {
     if !summary.uncertainty.is_empty() {
         println!("Uncertainty:");
         for note in &summary.uncertainty {
+            println!("- {note}");
+        }
+    }
+}
+
+fn print_ownership_report(report: &OwnershipReport) {
+    println!("Ownership target: {}", report.path.display());
+    if !report.components.is_empty() {
+        println!("Components:");
+        for component in &report.components {
+            println!(
+                "- {} via {}",
+                component.component_id, component.matched_glob
+            );
+        }
+    }
+    println!("Generated at: {}", report.generated_at);
+    if report.owners.is_empty() {
+        println!("Owners: none");
+    } else {
+        println!("Owners:");
+        for suggestion in &report.owners {
+            let email = suggestion
+                .owner
+                .email
+                .as_deref()
+                .map(|email| format!(" <{email}>"))
+                .unwrap_or_default();
+            let sources = suggestion
+                .source_types
+                .iter()
+                .map(|source| format!("{source:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "- {}{} confidence={:?} score={:.3} stale={} sources=[{}]",
+                suggestion.owner.name,
+                email,
+                suggestion.confidence,
+                suggestion.score,
+                suggestion.stale,
+                sources
+            );
+            println!("  rationale: {}", suggestion.rationale);
+            for evidence in &suggestion.evidence {
+                println!(
+                    "  - {:?} {} confidence={:?} stale={}",
+                    evidence.source_type, evidence.source, evidence.confidence, evidence.stale
+                );
+            }
+        }
+    }
+    if !report.uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in &report.uncertainty {
             println!("- {note}");
         }
     }
