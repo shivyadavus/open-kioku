@@ -84,6 +84,7 @@ Evaluate indexed dependency edges against the resolved policy:
 
 ```bash
 ok --repo /path/to/repo architecture policy check
+ok --repo /path/to/repo architecture policy check --format markdown
 ```
 
 The check evaluates indexed `imports`, `references`, and `calls` graph edges.
@@ -96,23 +97,30 @@ component, target component, severity, paths, edge type, and graph-edge
 evidence. Unknown edges are counted exactly, while returned unknown samples are
 bounded so large repositories do not produce unbounded output.
 
-Explain a public API boundary decision for a file or symbol:
+Explain public API boundary decisions for the repository, a file, or a symbol:
 
 ```bash
+ok --repo /path/to/repo architecture policy explain
 ok --repo /path/to/repo architecture policy explain --symbol crate::api::handler
 ok --repo /path/to/repo architecture policy explain --file src/api/internal/session.rs
+ok --repo /path/to/repo architecture policy explain --format markdown
 ```
 
-The explanation reports policy component matches plus any boundary violations
-or exemptions involving the queried file or symbol. Exemptions are returned as
-evidence records with their exemption id, rule id, scope, reason, paths, and
-graph edge evidence; they do not silently remove unrelated findings.
+Repository-scope explanation returns all public API boundary violations and
+exemptions. File and symbol explanations report policy component matches plus
+any boundary violations or exemptions involving the queried file or symbol.
+Exemptions are returned as evidence records with their exemption id, rule id,
+scope, reason, paths, and graph edge evidence; they do not silently remove
+unrelated findings.
 
-Add global `--json` for stable structured output. Repositories with no policy
-remain valid and explicitly report that heuristic architecture detection is
-still active.
+Add global `--json` or per-command `--format json` for stable structured
+output. `validate`, `check`, and `explain` also accept `--format markdown` for
+readable reports. Repositories with no policy remain valid and explicitly
+report that heuristic architecture detection is still active.
 
-The MCP tool `architecture_policy_check` returns the same structured policy
-check report for indexed repositories. `architecture_policy_explain` accepts
-exactly one `file` or `symbol` argument and returns the same explanation shape
-as the CLI. Plan/impact/contract integration is intentionally out of scope.
+The MCP tool `architecture_policy_validate` validates the resolved repository
+policy or an explicit `path`. `architecture_policy_check` returns the same
+structured policy check report for indexed repositories.
+`architecture_policy_explain` accepts exactly one of `file`, `symbol`, or
+`scope: "repo"` and returns the same explanation shape as the CLI.
+Plan/impact/contract integration is intentionally out of scope.

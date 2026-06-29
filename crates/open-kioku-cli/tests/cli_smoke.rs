@@ -98,6 +98,21 @@ fn architecture_policy_validate_and_print_are_index_independent() {
     assert_eq!(validation["source"], "canonical");
     assert_eq!(validation["policy"]["version"], "v1");
 
+    let validation_markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("policy")
+            .arg("validate")
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(validation_markdown.contains("# Architecture Policy Validation"));
+    assert!(validation_markdown.contains("- Layers:"));
+
     let printed = run({
         let mut command = ok();
         command
@@ -224,6 +239,21 @@ reason = "domain code must use the api facade"
     assert_eq!(check["public_api_violation_count"], 1);
     assert_eq!(check["violations"][0]["rule_id"], "api-public-boundary");
 
+    let check_markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("policy")
+            .arg("check")
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(check_markdown.contains("# Architecture Policy Check"));
+    assert!(check_markdown.contains("api-public-boundary"));
+
     let explain = run({
         let mut command = ok();
         command
@@ -241,6 +271,72 @@ reason = "domain code must use the api facade"
     assert_eq!(explain["configured"], true);
     assert_eq!(explain["components"][0]["component_id"], "api");
     assert_eq!(explain["violations"][0]["rule_id"], "api-public-boundary");
+
+    let repo_explain = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("policy")
+            .arg("explain");
+        command
+    });
+    let repo_explain: serde_json::Value = serde_json::from_str(&repo_explain).unwrap();
+    assert_eq!(repo_explain["query_kind"], "repo");
+    assert_eq!(
+        repo_explain["violations"][0]["rule_id"],
+        "api-public-boundary"
+    );
+
+    let explain_markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("policy")
+            .arg("explain")
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(explain_markdown.contains("# Architecture Policy Explanation"));
+    assert!(explain_markdown.contains("api-public-boundary"));
+
+    let mcp_validate = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"architecture_policy_validate","arguments":{}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_validate.trim()).unwrap();
+    assert_eq!(response["result"]["structuredContent"]["configured"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["source"],
+        "canonical"
+    );
+
+    let mcp_explain = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"architecture_policy_explain","arguments":{"scope":"repo"}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_explain.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["query_kind"],
+        "repo"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["violations"][0]["rule_id"],
+        "api-public-boundary"
+    );
 }
 
 #[test]
