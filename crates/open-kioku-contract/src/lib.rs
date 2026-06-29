@@ -247,6 +247,90 @@ pub struct ValidationCommand {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidationRequirement {
+    #[schemars(length(min = 1))]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<ContractFile>,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAllowlistStatus {
+    Allowed,
+    Denied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationOutcome {
+    Passed,
+    Failed,
+    Denied,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AttestedCommandResult {
+    #[schemars(length(min = 1))]
+    pub command: String,
+    #[schemars(length(min = 1))]
+    pub cwd: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub exit_code: Option<i32>,
+    pub allowlist_status: CommandAllowlistStatus,
+    pub outcome: ValidationOutcome,
+    pub stdout_summary: String,
+    pub stderr_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidationAttestation {
+    #[schemars(length(min = 1))]
+    pub id: String,
+    pub contract_id: ContractId,
+    #[schemars(length(min = 1))]
+    pub verification_run_id: String,
+    #[schemars(length(min = 1))]
+    pub contract_digest: String,
+    #[schemars(length(min = 1))]
+    pub requirement_digest: String,
+    pub created_at: DateTime<Utc>,
+    pub result: AttestedCommandResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidationAttestationSummary {
+    #[schemars(length(min = 1))]
+    pub id: String,
+    pub contract_id: ContractId,
+    #[schemars(length(min = 1))]
+    pub verification_run_id: String,
+    #[schemars(length(min = 1))]
+    pub command: String,
+    pub outcome: ValidationOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidationLedger {
+    #[schemars(length(min = 1))]
+    pub run_id: String,
+    pub contract_id: ContractId,
+    #[schemars(length(min = 1))]
+    pub contract_digest: String,
+    pub generated_at: DateTime<Utc>,
+    pub attestations: Vec<ValidationAttestation>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
@@ -356,6 +440,8 @@ pub struct ChangeContractV1 {
     pub expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
     #[schemars(length(min = 1))]
     pub validation_commands: Vec<ValidationCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_requirements: Vec<ValidationRequirement>,
     pub risk: RiskAssessment,
     pub confidence: ConfidenceAssessment,
     pub timestamps: ContractTimestamps,
@@ -386,6 +472,8 @@ struct UnvalidatedChangeContractV1 {
     #[serde(default)]
     expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
     validation_commands: Vec<ValidationCommand>,
+    #[serde(default)]
+    validation_requirements: Vec<ValidationRequirement>,
     risk: RiskAssessment,
     confidence: ConfidenceAssessment,
     timestamps: ContractTimestamps,
@@ -412,6 +500,7 @@ impl From<UnvalidatedChangeContractV1> for ChangeContractV1 {
             traceability: value.traceability,
             expansion_approval_requirements: value.expansion_approval_requirements,
             validation_commands: value.validation_commands,
+            validation_requirements: value.validation_requirements,
             risk: value.risk,
             confidence: value.confidence,
             timestamps: value.timestamps,
@@ -607,6 +696,30 @@ impl ChangeContractV1 {
                 &mut violations,
                 &format!("validation_commands[{index}].reason"),
                 &command.reason,
+            );
+        }
+        for (index, requirement) in self.validation_requirements.iter().enumerate() {
+            require_text(
+                &mut violations,
+                &format!("validation_requirements[{index}].command"),
+                &requirement.command,
+            );
+            if let Some(cwd) = &requirement.cwd {
+                validate_repo_path(
+                    &mut violations,
+                    &format!("validation_requirements[{index}].cwd"),
+                    cwd.as_str(),
+                );
+            }
+            require_text(
+                &mut violations,
+                &format!("validation_requirements[{index}].reason"),
+                &requirement.reason,
+            );
+            validate_evidence_refs(
+                &mut violations,
+                &format!("validation_requirements[{index}].evidence_refs"),
+                &requirement.evidence_refs,
             );
         }
 
@@ -953,6 +1066,9 @@ fn required_traceability_fields(contract: &ChangeContractV1) -> Vec<&'static str
     if !contract.dependency_delta_constraints.is_empty() {
         fields.push("dependency_delta_constraints");
     }
+    if !contract.validation_requirements.is_empty() {
+        fields.push("validation_requirements");
+    }
     fields
 }
 
@@ -994,6 +1110,14 @@ fn validate_known_evidence_refs(
             violations,
             &format!("dependency_delta_constraints[{index}].evidence_refs"),
             &constraint.evidence_refs,
+            &known,
+        );
+    }
+    for (index, requirement) in contract.validation_requirements.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("validation_requirements[{index}].evidence_refs"),
+            &requirement.evidence_refs,
             &known,
         );
     }
@@ -1056,6 +1180,7 @@ const CONTRACT_FIELDS: &[&str] = &[
     "traceability",
     "expansion_approval_requirements",
     "validation_commands",
+    "validation_requirements",
     "risk",
     "confidence",
     "timestamps",

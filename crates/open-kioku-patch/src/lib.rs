@@ -3,9 +3,11 @@ use open_kioku_architecture::PolicyResolver;
 use open_kioku_config::{ArchitecturePolicy, DependencyAction, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_contract::{
-    validate_traceability, ApiSurfaceChangeKind, ChangeContractV1, ConstraintSeverity,
-    ContractFile, ContractStore, ContractVerificationRecord, DependencyDeltaAction,
-    DependencyDeltaClassification, DependencyDeltaFinding, EvidenceRef, PublicApiFingerprint,
+    validate_traceability, ApiSurfaceChangeKind, AttestedCommandResult, ChangeContractV1,
+    CommandAllowlistStatus, ConstraintSeverity, ContractFile, ContractStore,
+    ContractVerificationRecord, DependencyDeltaAction, DependencyDeltaClassification,
+    DependencyDeltaFinding, EvidenceRef, PublicApiFingerprint, StoreError, ValidationAttestation,
+    ValidationAttestationSummary, ValidationLedger, ValidationOutcome, ValidationRequirement,
 };
 use open_kioku_core::{
     AnalysisFact, BoundaryExpansionRequirement, BoundaryForbiddenRule, ChangeBoundary, Confidence,
@@ -78,6 +80,7 @@ impl<'a> PatchPlanner<'a> {
 pub struct ChangeVerifier<'a> {
     store: &'a dyn OkStore,
     search_index: Option<&'a dyn SearchIndex>,
+    contract_store: Option<&'a dyn ContractStore>,
 }
 
 pub struct ContractVerifier<'a> {
@@ -96,6 +99,10 @@ pub struct VerifyChangeInput {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub run_commands: bool,
+    #[serde(default)]
+    pub write_attestation: bool,
+    #[serde(default)]
+    pub validation_attestations: Vec<ValidationAttestation>,
     #[serde(default)]
     pub traceability_strict: bool,
     #[serde(default)]
@@ -123,6 +130,10 @@ pub struct ChangeVerificationReport {
     pub dependency_deltas: Vec<DependencyDeltaFinding>,
     pub recommended_tests: Vec<TestTarget>,
     pub command_results: Vec<ValidationCommandResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_attestations: Vec<ValidationAttestation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_ledger_path: Option<PathBuf>,
     pub evidence_refs: Vec<String>,
 }
 
@@ -209,6 +220,10 @@ pub struct ValidationCommandResult {
     pub command: String,
     pub status: String,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_run_id: Option<String>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -218,11 +233,17 @@ impl<'a> ChangeVerifier<'a> {
         Self {
             store,
             search_index: None,
+            contract_store: None,
         }
     }
 
     pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
         self.search_index = search_index;
+        self
+    }
+
+    pub fn with_contract_store(mut self, contract_store: Option<&'a dyn ContractStore>) -> Self {
+        self.contract_store = contract_store;
         self
     }
 
@@ -235,6 +256,7 @@ impl<'a> ChangeVerifier<'a> {
         if let Ok(contract) = ContractBuilder::from_plan(plan) {
             return ContractVerifier::new(self.store)
                 .with_search_index(self.search_index)
+                .with_contract_store(self.contract_store)
                 .verify_plan_adapter(repo, &contract, plan, input)
                 .map(|report| report.change_report);
         }
@@ -264,7 +286,7 @@ impl<'a> ChangeVerifier<'a> {
         let missing_tests = missing_tests(plan, &recommended_tests);
         let changed_impact = changed_impact(self.store, self.search_index, plan, &changed_files)?;
         let command_results = if input.run_commands {
-            run_validation_commands(repo, plan)
+            run_validation_commands(repo, plan)?
         } else {
             Vec::new()
         };
@@ -316,6 +338,8 @@ impl<'a> ChangeVerifier<'a> {
             dependency_deltas: Vec::new(),
             recommended_tests,
             command_results,
+            validation_attestations: Vec::new(),
+            validation_ledger_path: None,
             evidence_refs: input.evidence_refs,
         })
     }
@@ -382,11 +406,20 @@ impl<'a> ContractVerifier<'a> {
         let check_api_surface = input.check_api_surface;
         let check_dependency_delta = input.check_dependency_delta;
         let delta_input = input.clone();
+        let validation_input = input.clone();
+        let mut base_input = input;
+        base_input.run_commands = false;
+        base_input.write_attestation = false;
+        base_input.validation_attestations.clear();
         let mut change_report = ChangeVerifier {
             store: self.store,
             search_index: self.search_index,
+            contract_store: None,
         }
-        .verify_plan_direct(repo, plan, input)?;
+        .verify_plan_direct(repo, plan, base_input)?;
+        let validation_report =
+            verify_contract_validation(repo, contract, &validation_input, self.contract_store)?;
+        apply_validation_report(&mut change_report, validation_report);
         let api_surface = if check_api_surface {
             Some(diff_public_api_surface(
                 self.store,
@@ -423,14 +456,440 @@ impl<'a> ContractVerifier<'a> {
                 success: decision != VerificationDecision::Fail,
                 stdout: serde_json::to_string(&report).map_err(OkError::Json)?,
                 stderr: String::new(),
+                validation_attestations: report
+                    .change_report
+                    .validation_attestations
+                    .iter()
+                    .map(|attestation| ValidationAttestationSummary {
+                        id: attestation.id.clone(),
+                        contract_id: attestation.contract_id.clone(),
+                        verification_run_id: attestation.verification_run_id.clone(),
+                        command: attestation.result.command.clone(),
+                        outcome: attestation.result.outcome,
+                        ledger_path: report
+                            .change_report
+                            .validation_ledger_path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().replace('\\', "/")),
+                        created_at: attestation.created_at,
+                    })
+                    .collect(),
                 report: Some(report_value),
             };
-            store
-                .append_verification(&contract.id, &record)
-                .map_err(|err| OkError::Storage(err.to_string()))?;
+            match store.append_verification(&contract.id, &record) {
+                Ok(()) => {}
+                Err(StoreError::NotFound(_)) => {
+                    store
+                        .save(contract)
+                        .map_err(|err| OkError::Storage(err.to_string()))?;
+                    store
+                        .append_verification(&contract.id, &record)
+                        .map_err(|err| OkError::Storage(err.to_string()))?;
+                }
+                Err(err) => return Err(OkError::Storage(err.to_string())),
+            }
         }
         Ok(report)
     }
+}
+
+struct ValidationRunReport {
+    command_results: Vec<ValidationCommandResult>,
+    attestations: Vec<ValidationAttestation>,
+    ledger_path: Option<PathBuf>,
+    findings: Vec<VerificationFinding>,
+}
+
+fn verify_contract_validation(
+    repo: &Path,
+    contract: &ChangeContractV1,
+    input: &VerifyChangeInput,
+    contract_store: Option<&dyn ContractStore>,
+) -> Result<ValidationRunReport> {
+    let requirements = validation_requirements_for_contract(contract);
+    if requirements.is_empty() {
+        return Ok(ValidationRunReport {
+            command_results: Vec::new(),
+            attestations: Vec::new(),
+            ledger_path: None,
+            findings: Vec::new(),
+        });
+    }
+
+    let contract_digest = digest_json(contract)?;
+    let run_id = validation_run_id(contract, &requirements);
+    let (attestations, command_results) = if input.run_commands {
+        let config = OkConfig::load_from_repo(repo)?;
+        run_attested_validation_commands(
+            repo,
+            contract,
+            &requirements,
+            &contract_digest,
+            &run_id,
+            &config,
+        )
+    } else {
+        (
+            input.validation_attestations.clone(),
+            input
+                .validation_attestations
+                .iter()
+                .map(validation_command_result_from_attestation)
+                .collect(),
+        )
+    };
+
+    let mut findings =
+        validate_attestations(contract, &requirements, &contract_digest, &attestations);
+    let mut ledger_path = None;
+    if input.write_attestation {
+        if attestations.is_empty() {
+            findings.push(VerificationFinding {
+                path: None,
+                kind: "validation_attestation_missing".into(),
+                reason: "write_attestation was requested but no validation attestation records were available".into(),
+                evidence_refs: Vec::new(),
+            });
+        } else if let Some(store) = contract_store {
+            let ledger = ValidationLedger {
+                run_id: run_id.clone(),
+                contract_id: contract.id.clone(),
+                contract_digest: contract_digest.clone(),
+                generated_at: chrono::Utc::now(),
+                attestations: attestations.clone(),
+            };
+            ledger_path = Some(
+                store
+                    .save_validation_ledger(&ledger)
+                    .map_err(|err| OkError::Storage(err.to_string()))?,
+            );
+        } else {
+            findings.push(VerificationFinding {
+                path: None,
+                kind: "validation_ledger_store_missing".into(),
+                reason: "write_attestation requires a contract store so the validation ledger can be persisted".into(),
+                evidence_refs: Vec::new(),
+            });
+        }
+    }
+
+    Ok(ValidationRunReport {
+        command_results,
+        attestations,
+        ledger_path,
+        findings,
+    })
+}
+
+fn apply_validation_report(report: &mut ChangeVerificationReport, validation: ValidationRunReport) {
+    report.command_results = validation.command_results;
+    report.validation_attestations = validation.attestations;
+    report.validation_ledger_path = validation.ledger_path;
+    report.boundary_violations.extend(validation.findings);
+    refresh_verdict(report);
+}
+
+fn validation_requirements_for_contract(contract: &ChangeContractV1) -> Vec<ValidationRequirement> {
+    if !contract.validation_requirements.is_empty() {
+        return contract.validation_requirements.clone();
+    }
+    contract
+        .validation_commands
+        .iter()
+        .map(|command| ValidationRequirement {
+            command: command.command.clone(),
+            cwd: None,
+            reason: command.reason.clone(),
+            evidence_refs: Vec::new(),
+        })
+        .collect()
+}
+
+fn run_attested_validation_commands(
+    repo: &Path,
+    contract: &ChangeContractV1,
+    requirements: &[ValidationRequirement],
+    contract_digest: &str,
+    run_id: &str,
+    config: &OkConfig,
+) -> (Vec<ValidationAttestation>, Vec<ValidationCommandResult>) {
+    let attestations = requirements
+        .iter()
+        .map(|requirement| {
+            run_attested_validation_command(
+                repo,
+                contract,
+                requirement,
+                contract_digest,
+                run_id,
+                config,
+            )
+        })
+        .collect::<Vec<_>>();
+    let command_results = attestations
+        .iter()
+        .map(validation_command_result_from_attestation)
+        .collect();
+    (attestations, command_results)
+}
+
+fn run_attested_validation_command(
+    repo: &Path,
+    contract: &ChangeContractV1,
+    requirement: &ValidationRequirement,
+    contract_digest: &str,
+    run_id: &str,
+    config: &OkConfig,
+) -> ValidationAttestation {
+    let started_at = chrono::Utc::now();
+    let requirement_digest =
+        digest_json(requirement).unwrap_or_else(|err| stable_id(&format!("{requirement:?}:{err}")));
+    let cwd = requirement
+        .cwd
+        .as_ref()
+        .map(|cwd| cwd.as_str().to_string())
+        .unwrap_or_else(|| ".".into());
+    let mut result = AttestedCommandResult {
+        command: requirement.command.clone(),
+        cwd: cwd.clone(),
+        started_at,
+        finished_at: started_at,
+        exit_code: None,
+        allowlist_status: CommandAllowlistStatus::Allowed,
+        outcome: ValidationOutcome::Error,
+        stdout_summary: String::new(),
+        stderr_summary: String::new(),
+    };
+
+    if let Err(err) = PolicyGate::new(config).ensure_command_allowed(&requirement.command) {
+        result.allowlist_status = CommandAllowlistStatus::Denied;
+        result.outcome = ValidationOutcome::Denied;
+        result.stderr_summary = truncate_output(&err.to_string());
+        result.finished_at = chrono::Utc::now();
+        return attestation_from_result(
+            contract,
+            contract_digest,
+            run_id,
+            &requirement_digest,
+            result,
+        );
+    }
+
+    let current_dir = requirement
+        .cwd
+        .as_ref()
+        .map(|cwd| repo.join(cwd.as_path()))
+        .unwrap_or_else(|| repo.to_path_buf());
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(&requirement.command)
+        .current_dir(current_dir)
+        .output();
+    match output {
+        Ok(output) => {
+            result.exit_code = output.status.code();
+            result.outcome = if output.status.success() {
+                ValidationOutcome::Passed
+            } else {
+                ValidationOutcome::Failed
+            };
+            result.stdout_summary = truncate_output(&String::from_utf8_lossy(&output.stdout));
+            result.stderr_summary = truncate_output(&String::from_utf8_lossy(&output.stderr));
+        }
+        Err(err) => {
+            result.outcome = ValidationOutcome::Error;
+            result.stderr_summary = truncate_output(&err.to_string());
+        }
+    }
+    result.finished_at = chrono::Utc::now();
+    attestation_from_result(
+        contract,
+        contract_digest,
+        run_id,
+        &requirement_digest,
+        result,
+    )
+}
+
+fn attestation_from_result(
+    contract: &ChangeContractV1,
+    contract_digest: &str,
+    run_id: &str,
+    requirement_digest: &str,
+    result: AttestedCommandResult,
+) -> ValidationAttestation {
+    let id = stable_id(&format!(
+        "{}:{}:{}:{}",
+        contract.id, run_id, requirement_digest, result.started_at
+    ));
+    ValidationAttestation {
+        id,
+        contract_id: contract.id.clone(),
+        verification_run_id: run_id.into(),
+        contract_digest: contract_digest.into(),
+        requirement_digest: requirement_digest.into(),
+        created_at: chrono::Utc::now(),
+        result,
+    }
+}
+
+fn validate_attestations(
+    contract: &ChangeContractV1,
+    requirements: &[ValidationRequirement],
+    contract_digest: &str,
+    attestations: &[ValidationAttestation],
+) -> Vec<VerificationFinding> {
+    let mut findings = Vec::new();
+    if attestations.is_empty() {
+        return findings;
+    }
+
+    let mut attestations_by_requirement = BTreeMap::new();
+    for attestation in attestations {
+        attestations_by_requirement.insert(attestation.requirement_digest.as_str(), attestation);
+        if attestation.contract_id != contract.id {
+            findings.push(validation_finding(
+                "validation_attestation_contract_mismatch",
+                format!(
+                    "attestation `{}` references contract `{}` but verification is for `{}`",
+                    attestation.id, attestation.contract_id, contract.id
+                ),
+            ));
+        }
+        if attestation.contract_digest != contract_digest {
+            findings.push(validation_finding(
+                "validation_attestation_contract_mismatch",
+                format!(
+                    "attestation `{}` contract digest does not match the current contract",
+                    attestation.id
+                ),
+            ));
+        }
+        if attestation.created_at < contract.timestamps.updated_at {
+            findings.push(validation_finding(
+                "validation_attestation_stale",
+                format!(
+                    "attestation `{}` was created before the contract was last updated",
+                    attestation.id
+                ),
+            ));
+        }
+        match attestation.result.outcome {
+            ValidationOutcome::Passed => {}
+            ValidationOutcome::Failed => findings.push(validation_finding(
+                "validation_command_failed",
+                format!(
+                    "validation command `{}` exited with {:?}",
+                    attestation.result.command, attestation.result.exit_code
+                ),
+            )),
+            ValidationOutcome::Denied => findings.push(validation_finding(
+                "validation_command_denied",
+                format!(
+                    "validation command `{}` was denied by the command allowlist",
+                    attestation.result.command
+                ),
+            )),
+            ValidationOutcome::Error => findings.push(validation_finding(
+                "validation_command_error",
+                format!(
+                    "validation command `{}` could not be executed: {}",
+                    attestation.result.command, attestation.result.stderr_summary
+                ),
+            )),
+        }
+    }
+
+    for requirement in requirements {
+        let requirement_digest = match digest_json(requirement) {
+            Ok(digest) => digest,
+            Err(err) => {
+                findings.push(validation_finding(
+                    "validation_requirement_digest_error",
+                    format!(
+                        "could not digest validation requirement `{}`: {err}",
+                        requirement.command
+                    ),
+                ));
+                continue;
+            }
+        };
+        let Some(attestation) = attestations_by_requirement.get(requirement_digest.as_str()) else {
+            findings.push(validation_finding(
+                "validation_attestation_missing",
+                format!(
+                    "required validation command `{}` does not have a matching attestation",
+                    requirement.command
+                ),
+            ));
+            continue;
+        };
+        let cwd = requirement
+            .cwd
+            .as_ref()
+            .map(|cwd| cwd.as_str().to_string())
+            .unwrap_or_else(|| ".".into());
+        if attestation.result.command != requirement.command || attestation.result.cwd != cwd {
+            findings.push(validation_finding(
+                "validation_command_replay_mismatch",
+                format!(
+                    "attestation `{}` does not match required command `{}` in cwd `{}`",
+                    attestation.id, requirement.command, cwd
+                ),
+            ));
+        }
+    }
+
+    findings
+}
+
+fn validation_command_result_from_attestation(
+    attestation: &ValidationAttestation,
+) -> ValidationCommandResult {
+    ValidationCommandResult {
+        command: attestation.result.command.clone(),
+        status: validation_status(attestation.result.outcome).into(),
+        exit_code: attestation.result.exit_code,
+        attestation_id: Some(attestation.id.clone()),
+        verification_run_id: Some(attestation.verification_run_id.clone()),
+        stdout: attestation.result.stdout_summary.clone(),
+        stderr: attestation.result.stderr_summary.clone(),
+    }
+}
+
+fn validation_status(outcome: ValidationOutcome) -> &'static str {
+    match outcome {
+        ValidationOutcome::Passed => "pass",
+        ValidationOutcome::Failed | ValidationOutcome::Denied | ValidationOutcome::Error => "fail",
+    }
+}
+
+fn validation_finding(kind: impl Into<String>, reason: impl Into<String>) -> VerificationFinding {
+    VerificationFinding {
+        path: None,
+        kind: kind.into(),
+        reason: reason.into(),
+        evidence_refs: Vec::new(),
+    }
+}
+
+fn validation_run_id(
+    contract: &ChangeContractV1,
+    requirements: &[ValidationRequirement],
+) -> String {
+    stable_id(&format!(
+        "{}:{}:{:?}",
+        contract.id,
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        requirements
+    ))
+}
+
+fn digest_json<T: Serialize>(value: &T) -> Result<String> {
+    let json = serde_json::to_vec(value).map_err(OkError::Json)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&json);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
@@ -2205,7 +2664,8 @@ fn impact_finding(result: &SearchResult) -> VerificationFinding {
     }
 }
 
-fn run_validation_commands(repo: &Path, plan: &PlanReport) -> Vec<ValidationCommandResult> {
+fn run_validation_commands(repo: &Path, plan: &PlanReport) -> Result<Vec<ValidationCommandResult>> {
+    let config = OkConfig::load_from_repo(repo)?;
     let mut seen = BTreeSet::new();
     let commands = plan
         .validation
@@ -2213,13 +2673,28 @@ fn run_validation_commands(repo: &Path, plan: &PlanReport) -> Vec<ValidationComm
         .filter_map(|test| test.command.clone())
         .filter(|command| seen.insert(command.clone()))
         .collect::<Vec<_>>();
-    commands
+    Ok(commands
         .into_iter()
-        .map(|command| run_validation_command(repo, &command))
-        .collect()
+        .map(|command| run_validation_command(repo, &command, &config))
+        .collect())
 }
 
-fn run_validation_command(repo: &Path, command: &str) -> ValidationCommandResult {
+fn run_validation_command(
+    repo: &Path,
+    command: &str,
+    config: &OkConfig,
+) -> ValidationCommandResult {
+    if let Err(err) = PolicyGate::new(config).ensure_command_allowed(command) {
+        return ValidationCommandResult {
+            command: command.into(),
+            status: "fail".into(),
+            exit_code: None,
+            attestation_id: None,
+            verification_run_id: None,
+            stdout: String::new(),
+            stderr: truncate_output(&err.to_string()),
+        };
+    }
     let output = Command::new("sh")
         .arg("-lc")
         .arg(command)
@@ -2234,6 +2709,8 @@ fn run_validation_command(repo: &Path, command: &str) -> ValidationCommandResult
                 "fail".into()
             },
             exit_code: output.status.code(),
+            attestation_id: None,
+            verification_run_id: None,
             stdout: truncate_output(&String::from_utf8_lossy(&output.stdout)),
             stderr: truncate_output(&String::from_utf8_lossy(&output.stderr)),
         },
@@ -2241,6 +2718,8 @@ fn run_validation_command(repo: &Path, command: &str) -> ValidationCommandResult
             command: command.into(),
             status: "fail".into(),
             exit_code: None,
+            attestation_id: None,
+            verification_run_id: None,
             stdout: String::new(),
             stderr: truncate_output(&err.to_string()),
         },
@@ -2756,6 +3235,141 @@ mod tests {
     }
 
     #[test]
+    fn contract_verifier_writes_validation_ledger_and_attestation_summary() {
+        let repo = tempfile::tempdir().unwrap();
+        write_minimal_cargo_project(repo.path());
+        let store = RuntimeStore::new();
+        let plan = plan_with_validation_command("cargo test");
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let contract_store = FsContractStore::new(dir.path());
+
+        let report = ContractVerifier::new(&store)
+            .with_contract_store(Some(&contract_store))
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    run_commands: true,
+                    write_attestation: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.change_report.command_results[0].status, "pass");
+        assert_eq!(report.change_report.validation_attestations.len(), 1);
+        let ledger_path = report
+            .change_report
+            .validation_ledger_path
+            .as_ref()
+            .expect("ledger path recorded");
+        assert!(ledger_path.exists());
+        let ledger: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(ledger_path).unwrap()).unwrap();
+        assert_eq!(ledger["attestations"][0]["result"]["command"], "cargo test");
+
+        let verification_path = dir.path().join(format!("{}.verify.jsonl", contract.id.0));
+        let jsonl = fs::read_to_string(verification_path).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            record["validation_attestations"][0]["id"],
+            report.change_report.validation_attestations[0].id
+        );
+    }
+
+    #[test]
+    fn contract_verifier_denies_unallowlisted_validation_command() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::new();
+        let plan = plan_with_validation_command("rm -rf /");
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    run_commands: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert_eq!(
+            report.change_report.validation_attestations[0]
+                .result
+                .allowlist_status,
+            CommandAllowlistStatus::Denied
+        );
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "validation_command_denied"));
+    }
+
+    #[test]
+    fn contract_verifier_rejects_stale_validation_attestation() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_validation_command("cargo test");
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+        let mut attestation = passed_attestation_for_contract(&contract);
+        attestation.created_at = contract.timestamps.updated_at - chrono::Duration::seconds(1);
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    validation_attestations: vec![attestation],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "validation_attestation_stale"));
+    }
+
+    #[test]
+    fn contract_verifier_detects_command_replay_mismatch() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_validation_command("cargo test");
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+        let mut attestation = passed_attestation_for_contract(&contract);
+        attestation.result.command = "cargo check".into();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    validation_attestations: vec![attestation],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "validation_command_replay_mismatch"));
+    }
+
+    #[test]
     fn contract_verifier_warns_on_public_api_addition() {
         let repo = tempfile::tempdir().unwrap();
         fs::create_dir_all(repo.path().join("src")).unwrap();
@@ -3033,6 +3647,67 @@ mod tests {
                 caveats: vec!["runtime corroboration is absent".into()],
             },
             score_breakdown: vec![],
+        }
+    }
+
+    fn plan_with_validation_command(command: &str) -> PlanReport {
+        let mut plan = plan_with_boundary_evidence();
+        plan.validation = vec![TestTarget {
+            id: "validation:handler".into(),
+            name: "handler validation".into(),
+            file_id: FileId::new("tests/handler_test.rs"),
+            range: None,
+            command: Some(command.into()),
+            confidence: Confidence::High,
+            reason: "validate handler change".into(),
+            evidence_refs: vec!["boundary:allow".into()],
+            score_breakdown: Vec::new(),
+        }];
+        plan.evidence_by_section
+            .insert("validation".into(), vec!["boundary:allow".into()]);
+        plan
+    }
+
+    fn write_minimal_cargo_project(repo: &Path) {
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"attestation-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn fixture() -> bool { true }\n",
+        )
+        .unwrap();
+    }
+
+    fn passed_attestation_for_contract(contract: &ChangeContractV1) -> ValidationAttestation {
+        let requirement = validation_requirements_for_contract(contract)
+            .into_iter()
+            .next()
+            .expect("contract has validation requirement");
+        let contract_digest = digest_json(contract).unwrap();
+        let requirement_digest = digest_json(&requirement).unwrap();
+        let now = chrono::Utc::now();
+        ValidationAttestation {
+            id: "attestation-1".into(),
+            contract_id: contract.id.clone(),
+            verification_run_id: "run-1".into(),
+            contract_digest,
+            requirement_digest,
+            created_at: now,
+            result: AttestedCommandResult {
+                command: requirement.command,
+                cwd: ".".into(),
+                started_at: now,
+                finished_at: now,
+                exit_code: Some(0),
+                allowlist_status: CommandAllowlistStatus::Allowed,
+                outcome: ValidationOutcome::Passed,
+                stdout_summary: "ok".into(),
+                stderr_summary: String::new(),
+            },
         }
     }
 }
