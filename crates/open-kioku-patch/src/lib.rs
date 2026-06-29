@@ -1,16 +1,23 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
 use open_kioku_config::OkConfig;
 use open_kioku_context::ContextPackBuilder;
+use open_kioku_contract::{
+    validate_traceability, ChangeContractV1, ConstraintSeverity, ContractStore,
+    ContractVerificationRecord, EvidenceRef,
+};
 use open_kioku_core::{
-    AnalysisFact, EvidenceSourceType, PatchId, PatchPlan, PlanReport, SearchResult, TestTarget,
+    AnalysisFact, BoundaryExpansionRequirement, BoundaryForbiddenRule, ChangeBoundary, Confidence,
+    ConfidenceBreakdown, EvidenceSourceType, FileId, ImpactReport, PatchId, PatchPlan, PlanReport,
+    RiskReport, SearchResult, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_impact::ImpactEngine;
+use open_kioku_plan::ContractBuilder;
 use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -70,6 +77,12 @@ pub struct ChangeVerifier<'a> {
     search_index: Option<&'a dyn SearchIndex>,
 }
 
+pub struct ContractVerifier<'a> {
+    store: &'a dyn OkStore,
+    search_index: Option<&'a dyn SearchIndex>,
+    contract_store: Option<&'a dyn ContractStore>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerifyChangeInput {
     #[serde(default)]
@@ -116,6 +129,43 @@ pub enum VerificationVerdict {
     Fail,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationDecision {
+    Pass,
+    Warn,
+    Fail,
+}
+
+impl From<VerificationVerdict> for VerificationDecision {
+    fn from(value: VerificationVerdict) -> Self {
+        match value {
+            VerificationVerdict::Pass => Self::Pass,
+            VerificationVerdict::Warn => Self::Warn,
+            VerificationVerdict::Fail => Self::Fail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationPolicySnapshot {
+    pub contract_version: String,
+    pub traceability_strict: bool,
+    pub primary_files: Vec<PathBuf>,
+    pub secondary_files: Vec<PathBuf>,
+    pub forbidden_files: Vec<PathBuf>,
+    pub architecture_constraints: Vec<String>,
+    pub expansion_requirements: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractVerificationReport {
+    pub contract_id: String,
+    pub decision: VerificationDecision,
+    pub policy_snapshot: VerificationPolicySnapshot,
+    pub change_report: ChangeVerificationReport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationFinding {
     pub path: Option<PathBuf>,
@@ -148,6 +198,21 @@ impl<'a> ChangeVerifier<'a> {
     }
 
     pub fn verify(
+        &self,
+        repo: &Path,
+        plan: &PlanReport,
+        input: VerifyChangeInput,
+    ) -> Result<ChangeVerificationReport> {
+        if let Ok(contract) = ContractBuilder::from_plan(plan) {
+            return ContractVerifier::new(self.store)
+                .with_search_index(self.search_index)
+                .verify_plan_adapter(repo, &contract, plan, input)
+                .map(|report| report.change_report);
+        }
+        self.verify_plan_direct(repo, plan, input)
+    }
+
+    fn verify_plan_direct(
         &self,
         repo: &Path,
         plan: &PlanReport,
@@ -225,6 +290,268 @@ impl<'a> ChangeVerifier<'a> {
     }
 }
 
+impl<'a> ContractVerifier<'a> {
+    pub fn new(store: &'a dyn OkStore) -> Self {
+        Self {
+            store,
+            search_index: None,
+            contract_store: None,
+        }
+    }
+
+    pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
+        self.search_index = search_index;
+        self
+    }
+
+    pub fn with_contract_store(mut self, contract_store: Option<&'a dyn ContractStore>) -> Self {
+        self.contract_store = contract_store;
+        self
+    }
+
+    pub fn verify(
+        &self,
+        repo: &Path,
+        contract: &ChangeContractV1,
+        input: VerifyChangeInput,
+    ) -> Result<ContractVerificationReport> {
+        let plan = contract_to_plan_report(contract);
+        self.verify_with_plan(repo, contract, &plan, input)
+    }
+
+    pub fn verify_plan_adapter(
+        &self,
+        repo: &Path,
+        contract: &ChangeContractV1,
+        plan: &PlanReport,
+        input: VerifyChangeInput,
+    ) -> Result<ContractVerificationReport> {
+        self.verify_with_plan(repo, contract, plan, input)
+    }
+
+    fn verify_with_plan(
+        &self,
+        repo: &Path,
+        contract: &ChangeContractV1,
+        plan: &PlanReport,
+        input: VerifyChangeInput,
+    ) -> Result<ContractVerificationReport> {
+        contract.validate().map_err(|err| {
+            OkError::Config(format!("contract verification input is invalid: {err}"))
+        })?;
+        if input.traceability_strict {
+            validate_traceability(contract).map_err(|err| {
+                OkError::Config(format!(
+                    "contract verification input is missing traceability: {err}"
+                ))
+            })?;
+        }
+
+        let traceability_strict = input.traceability_strict;
+        let change_report = ChangeVerifier {
+            store: self.store,
+            search_index: self.search_index,
+        }
+        .verify_plan_direct(repo, plan, input)?;
+        let decision = VerificationDecision::from(change_report.verdict);
+        let report = ContractVerificationReport {
+            contract_id: contract.id.0.clone(),
+            decision,
+            policy_snapshot: policy_snapshot(contract, traceability_strict),
+            change_report,
+        };
+        if let Some(store) = self.contract_store {
+            let report_value = serde_json::to_value(&report).map_err(OkError::Json)?;
+            let record = ContractVerificationRecord {
+                verified_at: chrono::Utc::now(),
+                success: decision != VerificationDecision::Fail,
+                stdout: serde_json::to_string(&report).map_err(OkError::Json)?,
+                stderr: String::new(),
+                report: Some(report_value),
+            };
+            store
+                .append_verification(&contract.id, &record)
+                .map_err(|err| OkError::Storage(err.to_string()))?;
+        }
+        Ok(report)
+    }
+}
+
+fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
+    let evidence_refs = evidence_ref_strings(&contract.evidence_refs);
+    let mut evidence_by_section = BTreeMap::new();
+    evidence_by_section.insert("contract".into(), evidence_refs.clone());
+    for trace in &contract.traceability {
+        evidence_by_section.insert(
+            trace.field.clone(),
+            evidence_ref_strings(&trace.evidence_refs),
+        );
+    }
+
+    PlanReport {
+        task: contract.task.clone(),
+        summary: format!("verification adapter for contract {}", contract.id),
+        primary_context: Vec::new(),
+        relevant_symbols: Vec::new(),
+        impact: ImpactReport {
+            target: contract.task.clone(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: contract_risk_report(contract),
+            evidence: Vec::new(),
+            score_breakdown: Vec::new(),
+        },
+        validation: contract_validation_targets(contract),
+        risk: contract_risk_report(contract),
+        recommended_change_boundary: contract_change_boundary(contract),
+        recommended_next_steps: Vec::new(),
+        tool_calls: Vec::new(),
+        memory_facts: Vec::new(),
+        runtime_signals: Vec::new(),
+        evidence: Vec::new(),
+        evidence_by_section,
+        negative_evidence: Vec::new(),
+        confidence_summary: contract.confidence.basis.join("; "),
+        confidence_breakdown: ConfidenceBreakdown {
+            overall_enum: contract_confidence(contract),
+            overall_score: contract.confidence.score as f32,
+            components: Vec::new(),
+            blockers: Vec::new(),
+            caveats: contract.confidence.uncertainty.clone(),
+        },
+        score_breakdown: Vec::new(),
+    }
+}
+
+fn contract_change_boundary(contract: &ChangeContractV1) -> ChangeBoundary {
+    let evidence_refs = evidence_ref_strings(&contract.evidence_refs);
+    let mut forbidden_rules = contract
+        .forbidden_files
+        .iter()
+        .map(|file| BoundaryForbiddenRule {
+            pattern: file.as_str().into(),
+            reason: "forbidden by contract boundary".into(),
+            evidence_refs: evidence_refs.clone(),
+        })
+        .collect::<Vec<_>>();
+    for constraint in &contract.architecture_constraints {
+        if constraint.severity == ConstraintSeverity::Forbidden {
+            forbidden_rules.push(BoundaryForbiddenRule {
+                pattern: constraint
+                    .rule
+                    .strip_prefix("forbidden-boundary:")
+                    .unwrap_or(&constraint.rule)
+                    .into(),
+                reason: constraint.reason.clone(),
+                evidence_refs: evidence_ref_strings(&constraint.evidence_refs),
+            });
+        }
+    }
+    ChangeBoundary {
+        allowed_files: contract_file_paths(&contract.primary_files),
+        caution_files: contract_file_paths(&contract.secondary_files),
+        forbidden_files: contract_file_paths(&contract.forbidden_files),
+        evidence_refs: evidence_refs.clone(),
+        allowed_symbols: contract
+            .impacted_symbols
+            .iter()
+            .map(|symbol| symbol.0.clone())
+            .collect(),
+        allowed_rules: Vec::new(),
+        caution_rules: Vec::new(),
+        forbidden_rules,
+        expansion_requirements: contract
+            .expansion_approval_requirements
+            .iter()
+            .map(|requirement| BoundaryExpansionRequirement {
+                reason: requirement.reason.clone(),
+                required_evidence_refs: evidence_ref_strings(&requirement.required_evidence_refs),
+            })
+            .collect(),
+        signal_hooks: Default::default(),
+    }
+}
+
+fn contract_validation_targets(contract: &ChangeContractV1) -> Vec<TestTarget> {
+    contract
+        .required_tests
+        .iter()
+        .enumerate()
+        .map(|(index, test)| TestTarget {
+            id: test.target.clone(),
+            name: test.target.clone(),
+            file_id: FileId::new(&test.target),
+            range: None,
+            command: contract
+                .validation_commands
+                .get(index)
+                .or_else(|| contract.validation_commands.first())
+                .map(|command| command.command.clone()),
+            confidence: Confidence::High,
+            reason: test.reason.clone(),
+            evidence_refs: evidence_ref_strings(&test.evidence_refs),
+            score_breakdown: Vec::new(),
+        })
+        .collect()
+}
+
+fn policy_snapshot(
+    contract: &ChangeContractV1,
+    traceability_strict: bool,
+) -> VerificationPolicySnapshot {
+    VerificationPolicySnapshot {
+        contract_version: contract.version.to_string(),
+        traceability_strict,
+        primary_files: contract_file_paths(&contract.primary_files),
+        secondary_files: contract_file_paths(&contract.secondary_files),
+        forbidden_files: contract_file_paths(&contract.forbidden_files),
+        architecture_constraints: contract
+            .architecture_constraints
+            .iter()
+            .map(|constraint| constraint.rule.clone())
+            .collect(),
+        expansion_requirements: contract
+            .expansion_approval_requirements
+            .iter()
+            .map(|requirement| requirement.scope.clone())
+            .collect(),
+    }
+}
+
+fn contract_file_paths(files: &[open_kioku_contract::ContractFile]) -> Vec<PathBuf> {
+    files
+        .iter()
+        .map(|file| PathBuf::from(file.as_str()))
+        .collect()
+}
+
+fn evidence_ref_strings(refs: &[EvidenceRef]) -> Vec<String> {
+    refs.iter().map(|reference| reference.0.clone()).collect()
+}
+
+fn contract_risk_report(contract: &ChangeContractV1) -> RiskReport {
+    RiskReport {
+        score: contract.risk.score as f32,
+        level: match contract.risk.level {
+            open_kioku_contract::RiskLevel::Low => "low",
+            open_kioku_contract::RiskLevel::Medium => "medium",
+            open_kioku_contract::RiskLevel::High => "high",
+            open_kioku_contract::RiskLevel::Critical => "critical",
+        }
+        .into(),
+        reasons: contract.risk.reasons.clone(),
+    }
+}
+
+fn contract_confidence(contract: &ChangeContractV1) -> Confidence {
+    match contract.confidence.level {
+        open_kioku_contract::ConfidenceLevel::Low => Confidence::Low,
+        open_kioku_contract::ConfidenceLevel::Medium => Confidence::Medium,
+        open_kioku_contract::ConfidenceLevel::High => Confidence::High,
+        open_kioku_contract::ConfidenceLevel::Exact => Confidence::Exact,
+    }
+}
+
 pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
     let mut pending_old: Option<String> = None;
@@ -294,9 +621,23 @@ fn boundary_violations(
         .iter()
         .map(|path| normalize_path(path))
         .collect::<BTreeSet<_>>();
+    let forbidden = boundary
+        .forbidden_files
+        .iter()
+        .map(|path| normalize_path(path))
+        .collect::<BTreeSet<_>>();
     let mut findings = Vec::new();
     for path in changed_files {
         let normalized = normalize_path(path);
+        if forbidden.contains(&normalized) {
+            findings.push(VerificationFinding {
+                path: Some(path.clone()),
+                kind: "forbidden_boundary".into(),
+                reason: "matches forbidden contract file".into(),
+                evidence_refs: boundary.evidence_refs.clone(),
+            });
+            continue;
+        }
         if let Some(rule) = boundary
             .forbidden_rules
             .iter()
@@ -801,13 +1142,16 @@ fn stable_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use open_kioku_contract::{ContractFile, ContractStore, FsContractStore};
     use open_kioku_core::{
         ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, File, FileId, GraphEdge,
         GraphEdgeType, GraphNode, GraphNodeType, Import, IndexManifest, Language, LineRange,
         RepositoryId, RiskReport, Symbol, SymbolId, SymbolOccurrence,
     };
     use open_kioku_errors::Result;
+    use open_kioku_plan::ContractBuilder;
     use open_kioku_storage::{GraphStore, IndexData};
+    use std::fs;
 
     struct RuntimeStore {
         file: File,
@@ -1049,6 +1393,119 @@ mod tests {
             trace.field == "boundary_expansion"
                 && trace.evidence_refs == vec!["boundary:allow".to_string()]
         }));
+    }
+
+    #[test]
+    fn plan_verification_uses_contract_adapter_without_changing_verdict() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let input = VerifyChangeInput {
+            changed_files: vec![PathBuf::from("src/outside.rs")],
+            evidence_refs: vec!["boundary:allow".into()],
+            traceability_strict: true,
+            ..Default::default()
+        };
+        let verifier = ChangeVerifier::new(&store);
+
+        let direct = verifier
+            .verify_plan_direct(Path::new("."), &plan, input.clone())
+            .unwrap();
+        let adapted = verifier.verify(Path::new("."), &plan, input).unwrap();
+
+        assert_eq!(adapted.verdict, direct.verdict);
+        assert_eq!(
+            adapted.boundary_violations.len(),
+            direct.boundary_violations.len()
+        );
+        assert_eq!(adapted.warnings.len(), direct.warnings.len());
+    }
+
+    #[test]
+    fn contract_verifier_reports_contract_id_and_policy_snapshot() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    traceability_strict: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.contract_id, contract.id.0);
+        assert_eq!(report.decision, VerificationDecision::Warn);
+        assert_eq!(
+            report.policy_snapshot.primary_files,
+            vec![PathBuf::from("src/handler.rs")]
+        );
+        assert!(report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "nearby_runtime_signal"));
+    }
+
+    #[test]
+    fn contract_verifier_fails_exact_forbidden_contract_files() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let mut contract = ContractBuilder::from_plan(&plan).unwrap();
+        contract
+            .forbidden_files
+            .push(ContractFile::new("src/forbidden.rs"));
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/forbidden.rs")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "forbidden_boundary"));
+    }
+
+    #[test]
+    fn contract_verifier_persists_verification_records_when_store_is_present() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let contract_store = FsContractStore::new(dir.path());
+        contract_store.save(&contract).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .with_contract_store(Some(&contract_store))
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let verification_path = dir.path().join(format!("{}.verify.jsonl", contract.id.0));
+        let jsonl = fs::read_to_string(verification_path).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        assert_eq!(record["success"], true);
+        assert_eq!(record["report"]["contract_id"], report.contract_id);
     }
 
     fn plan_with_boundary_evidence() -> PlanReport {
