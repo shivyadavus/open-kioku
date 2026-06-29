@@ -210,6 +210,7 @@ async fn dispatch(
             let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
             context.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let report = PlanEngine::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
                 .with_memory_facts(memory_facts)
                 .plan_from_context(&task, limit, context)?;
             let format_arg = params
@@ -263,7 +264,9 @@ async fn dispatch(
         }
         "impact_analysis" => {
             let path = required_str(&params, "path")?;
-            let mut report = ImpactEngine::new(store).for_file(Path::new(path))?;
+            let mut report = ImpactEngine::new(store)
+                .with_history_store(Some(store))
+                .for_file(Path::new(path))?;
             report.architecture_policy = configured_architecture_policy_report(repo, store)?;
             Ok(json!(report))
         }
@@ -284,6 +287,27 @@ async fn dispatch(
                     anyhow::bail!("provide exactly one of `path` or `symbol`")
                 }
                 (None, None) => anyhow::bail!("missing required `path` or `symbol` argument"),
+            }
+        }
+        "churn_analysis" => {
+            let path = params.get("path").and_then(Value::as_str);
+            let module = params.get("module").and_then(Value::as_str);
+            let symbol = params.get("symbol").and_then(Value::as_str);
+            let provided = usize::from(path.is_some())
+                + usize::from(module.is_some())
+                + usize::from(symbol.is_some());
+            if provided != 1 {
+                anyhow::bail!("provide exactly one of `path`, `module`, or `symbol`");
+            }
+            if let Some(path) = path {
+                Ok(json!(store.churn_for_file(Path::new(path))?))
+            } else if let Some(module) = module {
+                Ok(json!(store.churn_for_module(Path::new(module))?))
+            } else if let Some(query) = symbol {
+                let symbol = resolve_history_symbol(store, query)?;
+                Ok(json!(store.churn_for_symbol(&symbol.id)?))
+            } else {
+                unreachable!("exactly one churn target was checked above");
             }
         }
         "find_tests_for_change" | "recommend_validation_plan" => {
@@ -834,6 +858,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected.", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name."}}})),
         ("impact_analysis", "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze."}}})),
         ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
+        ("churn_analysis", "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path to inspect."},"module":{"type":"string","description":"Repository-relative module or directory path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."}},"oneOf":[{"required":["path"]},{"required":["module"]},{"required":["symbol"]}]})),
         ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for."},"limit":{"type":"integer","description":"Maximum number of context results to include. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The output format of the context pack."}}})),
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
@@ -922,6 +947,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "get_callers"
         | "get_callees"
         | "history_provenance_lookup"
+        | "churn_analysis"
         | "explain_flow"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
@@ -1236,6 +1262,7 @@ fn contract_plan_from_params(
     let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
     context.architecture_policy = configured_architecture_policy_report(repo, store)?;
     Ok(PlanEngine::new(store as &dyn OkStore)
+        .with_history_store(Some(store))
         .with_memory_facts(memory_facts)
         .plan_from_context(&task, limit, context)?)
 }
@@ -1900,6 +1927,11 @@ mod tests {
             .find(|tool| tool["name"] == "history_provenance_lookup")
             .unwrap();
         assert_eq!(provenance["maturity"], "experimental");
+        let churn = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "churn_analysis")
+            .unwrap();
+        assert_eq!(churn["maturity"], "experimental");
 
         let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;

@@ -862,6 +862,72 @@ pub struct HistorySummary {
     pub uncertainty: Vec<String>,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ChurnEntityKind {
+    File,
+    Module,
+    Symbol,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChurnStats {
+    pub all_time: usize,
+    pub last_30d: usize,
+    pub last_90d: usize,
+    pub recency_weighted: f32,
+    pub touch_count: usize,
+    pub hotspot_score: f32,
+}
+
+impl ChurnStats {
+    pub fn empty() -> Self {
+        Self {
+            all_time: 0,
+            last_30d: 0,
+            last_90d: 0,
+            recency_weighted: 0.0,
+            touch_count: 0,
+            hotspot_score: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChurnSummary {
+    pub entity_kind: ChurnEntityKind,
+    pub key: String,
+    pub path: Option<PathBuf>,
+    pub symbol_id: Option<SymbolId>,
+    pub qualified_name: Option<String>,
+    pub generated_at: DateTime<Utc>,
+    pub stats: ChurnStats,
+    pub confidence: Confidence,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
+impl ChurnSummary {
+    pub fn missing(entity_kind: ChurnEntityKind, key: impl Into<String>) -> Self {
+        let key = key.into();
+        Self {
+            entity_kind,
+            key: key.clone(),
+            path: None,
+            symbol_id: None,
+            qualified_name: None,
+            generated_at: Utc::now(),
+            stats: ChurnStats::empty(),
+            confidence: Confidence::Low,
+            uncertainty: vec![format!(
+                "no persisted churn summary is available for `{key}`"
+            )],
+        }
+    }
+}
+
 impl HistorySummary {
     pub fn empty(path: impl Into<PathBuf>) -> Self {
         Self {

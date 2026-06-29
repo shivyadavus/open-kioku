@@ -14,7 +14,7 @@ use open_kioku_contract::{
     DependencyDeltaConstraint, FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
-    Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
+    ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
     IndexMode, NodeId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
     PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, Symbol, SymbolId,
@@ -883,6 +883,16 @@ enum ArchitecturePolicyFormat {
 
 #[derive(Subcommand)]
 enum HistoryCommand {
+    /// Show materialized churn and hotspot stats for a file, module, or symbol.
+    Churn {
+        #[arg(long, conflicts_with_all = ["module", "symbol"])]
+        path: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["path", "symbol"])]
+        module: Option<PathBuf>,
+        /// Exact symbol name, qualified name, or symbol ID.
+        #[arg(long, conflicts_with_all = ["path", "module"])]
+        symbol: Option<String>,
+    },
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
         path: Option<PathBuf>,
@@ -2183,7 +2193,8 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
             let engine = ImpactEngine::new(&store)
-                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_history_store(Some(&store));
             let architecture_policy = configured_architecture_policy_report(&repo, &store)?;
 
             if let Some(since) = args.since.as_deref() {
@@ -2343,6 +2354,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let report = PlanEngine::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_history_store(Some(&store))
                 .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
@@ -2661,6 +2673,33 @@ async fn main() -> anyhow::Result<()> {
         Command::History { command } => {
             let store = open_store(&repo)?;
             match command {
+                HistoryCommand::Churn {
+                    path,
+                    module,
+                    symbol,
+                } => {
+                    let provided = usize::from(path.is_some())
+                        + usize::from(module.is_some())
+                        + usize::from(symbol.is_some());
+                    if provided != 1 {
+                        anyhow::bail!("provide exactly one of --path, --module, or --symbol");
+                    }
+                    let summary = if let Some(path) = path {
+                        store.churn_for_file(&path)?
+                    } else if let Some(module) = module {
+                        store.churn_for_module(&module)?
+                    } else if let Some(query) = symbol {
+                        let symbol = resolve_provenance_symbol(&store, &query)?;
+                        store.churn_for_symbol(&symbol.id)?
+                    } else {
+                        unreachable!("exactly one churn target was checked above");
+                    };
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&summary)?);
+                    } else {
+                        print_churn_summary(&summary);
+                    }
+                }
                 HistoryCommand::Provenance {
                     path,
                     symbol,
@@ -5213,7 +5252,8 @@ fn run_workflow_bench(args: WorkflowBenchArgs) -> anyhow::Result<WorkflowBenchRe
         None
     };
     let planner = PlanEngine::new(&store as &dyn OkStore)
-        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+        .with_history_store(Some(&store));
     let verifier = ChangeVerifier::new(&store as &dyn OkStore)
         .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
     let limit = args.limit.clamp(1, 100);
@@ -5618,7 +5658,8 @@ fn run_contract_bench(args: ContractBenchArgs) -> anyhow::Result<ContractBenchRe
             None
         };
         let planner = PlanEngine::new(&store as &dyn OkStore)
-            .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+            .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+            .with_history_store(Some(&store));
         let generation_started = Instant::now();
         let plan = workflow_plan(
             &temp_repo.path,
@@ -6860,6 +6901,7 @@ fn contract_plan_from_input(
             };
             Ok(PlanEngine::new(store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_history_store(Some(store))
                 .with_memory_facts(RepoMemoryStore::open_repo(repo)?.search(&task, 8)?)
                 .plan_from_context(&task, limit, context)?)
         }
@@ -7675,7 +7717,8 @@ fn run_proof(args: ProveArgs) -> anyhow::Result<ProofReport> {
         None
     };
     let planner = PlanEngine::new(&store as &dyn OkStore)
-        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+        .with_history_store(Some(&store));
     let mut task_reports = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let plan = planner.plan(task, limit)?;
@@ -10072,6 +10115,33 @@ fn print_symbol_provenance(provenance: &SymbolProvenance) {
         provenance.truncated,
         &provenance.uncertainty,
     );
+}
+
+fn print_churn_summary(summary: &ChurnSummary) {
+    println!("Churn target: {:?} {}", summary.entity_kind, summary.key);
+    if let Some(path) = &summary.path {
+        println!("Path: {}", path.display());
+    }
+    if let Some(name) = &summary.qualified_name {
+        println!("Symbol: {name}");
+    }
+    if let Some(symbol_id) = &summary.symbol_id {
+        println!("Symbol ID: {symbol_id}");
+    }
+    println!("Generated at: {}", summary.generated_at);
+    println!("Confidence: {:?}", summary.confidence);
+    println!("Touches: {}", summary.stats.touch_count);
+    println!("All time: {}", summary.stats.all_time);
+    println!("Last 30d: {}", summary.stats.last_30d);
+    println!("Last 90d: {}", summary.stats.last_90d);
+    println!("Recency weighted: {:.3}", summary.stats.recency_weighted);
+    println!("Hotspot score: {:.3}", summary.stats.hotspot_score);
+    if !summary.uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in &summary.uncertainty {
+            println!("- {note}");
+        }
+    }
 }
 
 fn print_provenance_summary(
