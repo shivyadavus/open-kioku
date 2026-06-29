@@ -1475,6 +1475,27 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(verify_warn.contains("\"verdict\": \"warn\""));
     assert!(verify_warn.contains("boundary_expansion"));
+    assert!(verify_warn.contains("\"traceability\""));
+
+    let (verify_strict_stdout, verify_strict_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/out_of_scope.rs")
+            .arg("--evidence-ref")
+            .arg("tampered:evidence")
+            .arg("--traceability-strict");
+        command
+    });
+    assert!(verify_strict_stdout.contains("\"verdict\": \"fail\""));
+    assert!(verify_strict_stdout.contains("unknown_evidence_ref"));
+    assert!(verify_strict_stderr.contains("change verification failed"));
 
     let (verify_fail_stdout, verify_fail_stderr) = run_failure({
         let mut command = ok();
