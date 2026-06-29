@@ -966,6 +966,30 @@ pub struct PolicyExemptionEvidence {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyViolationEvidenceRef {
+    pub id: String,
+    pub rule_id: String,
+    pub severity: String,
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub edge_type: EnforcedEdgeType,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicySignalSummary {
+    pub configured: bool,
+    pub evaluated_edge_count: usize,
+    pub allowed_edges: usize,
+    pub violation_count: usize,
+    pub public_api_violation_count: usize,
+    pub exempted_violation_count: usize,
+    pub unknown_edge_count: usize,
+    pub evidence_refs: Vec<String>,
+    pub violation_refs: Vec<PolicyViolationEvidenceRef>,
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PublicApiBoundaryReport {
     pub configured: bool,
