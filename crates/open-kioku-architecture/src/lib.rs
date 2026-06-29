@@ -53,6 +53,14 @@ where
                 .map(|path| (symbol.id.0.clone(), path.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let symbol_label_paths = symbols
+        .iter()
+        .filter_map(|symbol| {
+            file_paths
+                .get(&symbol.file_id.0)
+                .map(|path| (symbol.qualified_name.clone(), path.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut report = PolicyCheckReport {
         configured: true,
@@ -82,10 +90,16 @@ where
                     edge_type,
                     &file_paths,
                     &symbol_paths,
+                    &symbol_label_paths,
                 )?;
-                if let Some(evidence) =
-                    edge_evidence(store, edge, edge_type, &file_paths, &symbol_paths)?
-                {
+                if let Some(evidence) = edge_evidence(
+                    store,
+                    edge,
+                    edge_type,
+                    &file_paths,
+                    &symbol_paths,
+                    &symbol_label_paths,
+                )? {
                     evaluate_public_api_evidence(
                         &mut report,
                         resolver,
@@ -188,6 +202,14 @@ where
                 .map(|path| (symbol.id.0.clone(), path.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let symbol_label_paths = symbols
+        .iter()
+        .filter_map(|symbol| {
+            file_paths
+                .get(&symbol.file_id.0)
+                .map(|path| (symbol.qualified_name.clone(), path.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut report = PolicyCheckReport {
         configured: true,
@@ -207,9 +229,14 @@ where
                 break;
             }
             for edge in &batch {
-                if let Some(evidence) =
-                    edge_evidence(store, edge, edge_type, &file_paths, &symbol_paths)?
-                {
+                if let Some(evidence) = edge_evidence(
+                    store,
+                    edge,
+                    edge_type,
+                    &file_paths,
+                    &symbol_paths,
+                    &symbol_label_paths,
+                )? {
                     report.evaluated_edge_count += 1;
                     evaluate_public_api_evidence(
                         &mut report,
@@ -269,8 +296,17 @@ fn evaluate_edge(
     edge_type: EnforcedEdgeType,
     file_paths: &BTreeMap<String, PathBuf>,
     symbol_paths: &BTreeMap<String, PathBuf>,
+    symbol_label_paths: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    let Some(evidence) = edge_evidence(store, edge, edge_type, file_paths, symbol_paths)? else {
+    let Some(evidence) = edge_evidence(
+        store,
+        edge,
+        edge_type,
+        file_paths,
+        symbol_paths,
+        symbol_label_paths,
+    )?
+    else {
         return Ok(());
     };
     if evidence.source_path == evidence.target_path {
@@ -600,6 +636,7 @@ fn edge_evidence(
     edge_type: EnforcedEdgeType,
     file_paths: &BTreeMap<String, PathBuf>,
     symbol_paths: &BTreeMap<String, PathBuf>,
+    symbol_label_paths: &BTreeMap<String, PathBuf>,
 ) -> Result<Option<PolicyMatchEvidence>> {
     let Some(source_node) = store.node_by_id(&edge.from.0)? else {
         return Ok(None);
@@ -607,10 +644,23 @@ fn edge_evidence(
     let Some(target_node) = store.node_by_id(&edge.to.0)? else {
         return Ok(None);
     };
-    let Some(source_path) = node_path(&source_node, file_paths, symbol_paths) else {
+    let allow_label_fallback = edge_type == EnforcedEdgeType::Calls;
+    let Some(source_path) = node_path(
+        &source_node,
+        file_paths,
+        symbol_paths,
+        symbol_label_paths,
+        allow_label_fallback,
+    ) else {
         return Ok(None);
     };
-    let Some(target_path) = node_path(&target_node, file_paths, symbol_paths) else {
+    let Some(target_path) = node_path(
+        &target_node,
+        file_paths,
+        symbol_paths,
+        symbol_label_paths,
+        allow_label_fallback,
+    ) else {
         return Ok(None);
     };
     Ok(Some(PolicyMatchEvidence {
@@ -629,6 +679,8 @@ fn node_path(
     node: &GraphNode,
     file_paths: &BTreeMap<String, PathBuf>,
     symbol_paths: &BTreeMap<String, PathBuf>,
+    symbol_label_paths: &BTreeMap<String, PathBuf>,
+    allow_label_fallback: bool,
 ) -> Option<PathBuf> {
     node.file_id
         .as_ref()
@@ -639,6 +691,11 @@ fn node_path(
                 .as_ref()
                 .and_then(|id| symbol_paths.get(&id.0))
                 .cloned()
+        })
+        .or_else(|| {
+            allow_label_fallback
+                .then(|| symbol_label_paths.get(&node.label).cloned())
+                .flatten()
         })
         .or_else(|| {
             if node.node_type == open_kioku_core::GraphNodeType::File {

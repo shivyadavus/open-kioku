@@ -10,10 +10,10 @@ use open_kioku_config::{
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
-    Confidence, ContextHandleId, EdgeId, Evidence, EvidenceId, EvidenceSourceType, FileProvenance,
-    GraphEdge, GraphEdgeType, GraphNode, IndexManifest, IndexMode, NodeId, PlanReport,
-    PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch,
-    ScoreComponent, Symbol, SymbolId, SymbolProvenance,
+    Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
+    EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
+    IndexMode, NodeId, PlanReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
+    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -573,6 +573,37 @@ struct WorkflowBenchArgs {
 }
 
 #[derive(Args)]
+struct ArchitectureBenchArgs {
+    /// Repository to index and evaluate.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// JSON file containing architecture policy benchmark cases.
+    #[arg(long, default_value = "benchmarks/architecture-policy-cases.json")]
+    cases_file: PathBuf,
+
+    /// Use the existing .ok index instead of re-indexing before benchmarking.
+    #[arg(long, default_value_t = false)]
+    no_index: bool,
+
+    /// Number of warmed policy-check iterations used for latency reporting.
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+
+    /// Fail when overall precision is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_precision: f64,
+
+    /// Fail when overall recall is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_recall: f64,
+
+    /// Fail when repo-wide policy-check p95 latency exceeds this value.
+    #[arg(long)]
+    max_p95_ms: Option<f64>,
+}
+
+#[derive(Args)]
 struct ProveArgs {
     /// Repository to index and evaluate.
     #[arg(default_value = ".")]
@@ -666,6 +697,7 @@ enum ArchitectureCommand {
     Detect,
     Boundaries,
     Violations,
+    Bench(ArchitectureBenchArgs),
     Fleet {
         #[arg(long, value_name = "WORKSPACE")]
         workspace: PathBuf,
@@ -941,6 +973,104 @@ struct WorkflowBenchCaseReport {
     top_context_paths: Vec<PathBuf>,
     top_impact_paths: Vec<PathBuf>,
     top_tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ArchitecturePolicyBenchCase {
+    id: String,
+    rule_family: ArchitecturePolicyRuleFamily,
+    expected: ArchitecturePolicyBenchOutcome,
+    #[serde(default)]
+    rule_id: Option<String>,
+    source_path: PathBuf,
+    target_path: PathBuf,
+    edge_type: EnforcedEdgeType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchitecturePolicyRuleFamily {
+    DependencyRule,
+    PublicApiRule,
+    InternalOnlyRule,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchitecturePolicyBenchOutcome {
+    Allowed,
+    Violation,
+    Exempted,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct ArchitecturePolicyActualFinding {
+    rule_family: ArchitecturePolicyRuleFamily,
+    outcome: ArchitecturePolicyBenchOutcome,
+    rule_id: Option<String>,
+    source_path: PathBuf,
+    target_path: PathBuf,
+    edge_type: EnforcedEdgeType,
+}
+
+#[derive(Serialize)]
+struct ArchitecturePolicyBenchReport {
+    repo: PathBuf,
+    cases_file: PathBuf,
+    case_count: usize,
+    iterations: usize,
+    p95_policy_check_ms: f64,
+    summary: ArchitecturePolicyBenchSummary,
+    rule_families: Vec<ArchitecturePolicyBenchFamilyReport>,
+    cases: Vec<ArchitecturePolicyBenchCaseReport>,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct ArchitecturePolicyBenchSummary {
+    precision: f64,
+    recall: f64,
+    true_positives: usize,
+    false_positives: usize,
+    false_negatives: usize,
+    expected_positive_count: usize,
+    actual_positive_count: usize,
+}
+
+#[derive(Default)]
+struct ArchitecturePolicyBenchCounts {
+    true_positives: usize,
+    false_positives: usize,
+    false_negatives: usize,
+    expected_positive_count: usize,
+    actual_positive_count: usize,
+}
+
+#[derive(Serialize)]
+struct ArchitecturePolicyBenchFamilyReport {
+    rule_family: ArchitecturePolicyRuleFamily,
+    precision: f64,
+    recall: f64,
+    true_positives: usize,
+    false_positives: usize,
+    false_negatives: usize,
+    expected_positive_count: usize,
+    actual_positive_count: usize,
+}
+
+#[derive(Serialize)]
+struct ArchitecturePolicyBenchCaseReport {
+    id: String,
+    rule_family: ArchitecturePolicyRuleFamily,
+    expected: ArchitecturePolicyBenchOutcome,
+    actual: Vec<ArchitecturePolicyBenchOutcome>,
+    rule_id: Option<String>,
+    source_path: PathBuf,
+    target_path: PathBuf,
+    edge_type: EnforcedEdgeType,
+    passed: bool,
+    notes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -2112,6 +2242,40 @@ async fn main() -> anyhow::Result<()> {
                 let store = open_store(&repo)?;
                 let summary = ArchitectureDetector::new(&store, None).detect()?;
                 output(cli.json, &summary.violations, || {})?;
+            }
+            ArchitectureCommand::Bench(args) => {
+                let min_precision = args.min_precision;
+                let min_recall = args.min_recall;
+                let max_p95_ms = args.max_p95_ms;
+                let report = run_architecture_policy_bench(args)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_architecture_policy_bench_report(&report);
+                }
+                if report.summary.precision < min_precision {
+                    anyhow::bail!(
+                        "architecture policy benchmark precision {:.3} is below required {:.3}",
+                        report.summary.precision,
+                        min_precision
+                    );
+                }
+                if report.summary.recall < min_recall {
+                    anyhow::bail!(
+                        "architecture policy benchmark recall {:.3} is below required {:.3}",
+                        report.summary.recall,
+                        min_recall
+                    );
+                }
+                if let Some(max_p95_ms) = max_p95_ms {
+                    if report.p95_policy_check_ms > max_p95_ms {
+                        anyhow::bail!(
+                            "architecture policy p95 {:.2}ms exceeds required {:.2}ms",
+                            report.p95_policy_check_ms,
+                            max_p95_ms
+                        );
+                    }
+                }
             }
             ArchitectureCommand::Fleet { workspace } => {
                 let report = load_fleet_architecture_report(&workspace)?;
@@ -4237,6 +4401,417 @@ fn print_bench_report(report: &BenchReport) {
                 "  {status}: query {:?}, expected {:?}, rank {}, top {}",
                 case.query, case.expected_path, rank, top_path
             );
+        }
+    }
+}
+
+fn run_architecture_policy_bench(
+    args: ArchitectureBenchArgs,
+) -> anyhow::Result<ArchitecturePolicyBenchReport> {
+    let repo = absolutize(&args.path)?;
+    let cases_file = absolutize(&args.cases_file)?;
+    let cases = load_architecture_policy_bench_cases(&cases_file)?;
+    if cases.is_empty() {
+        anyhow::bail!(
+            "architecture policy benchmark cases file is empty: {}",
+            cases_file.display()
+        );
+    }
+    if !args.no_index {
+        index_repo(&repo)?;
+    }
+    let Some(policy) = load_architecture_policy(&repo)? else {
+        anyhow::bail!(
+            "architecture policy benchmark requires a configured policy in {}",
+            repo.display()
+        );
+    };
+    let store = open_store(&repo)?;
+    let resolver = PolicyResolver::new(&policy)?;
+    let iterations = args.iterations.max(1);
+    let mut durations = Vec::with_capacity(iterations);
+    let mut report = None;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let check = evaluate_policy(&store, &resolver, &policy)?;
+        durations.push(started.elapsed());
+        report = Some(check);
+    }
+    let report = report.expect("at least one architecture policy benchmark iteration");
+    let actual_findings = architecture_policy_actual_findings(&policy, &report);
+    let (summary, families, case_reports) =
+        score_architecture_policy_cases(&policy, &cases, &actual_findings);
+
+    Ok(ArchitecturePolicyBenchReport {
+        repo,
+        cases_file,
+        case_count: cases.len(),
+        iterations,
+        p95_policy_check_ms: percentile_duration_ms(&durations, 0.95),
+        summary,
+        rule_families: families,
+        cases: case_reports,
+    })
+}
+
+fn load_architecture_policy_bench_cases(
+    path: &Path,
+) -> anyhow::Result<Vec<ArchitecturePolicyBenchCase>> {
+    let raw = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read architecture policy cases {}",
+            path.display()
+        )
+    })?;
+    let cases: Vec<ArchitecturePolicyBenchCase> =
+        serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "failed to parse architecture policy cases {}",
+                path.display()
+            )
+        })?;
+    let mut seen = BTreeMap::new();
+    for case in &cases {
+        if case.id.trim().is_empty() {
+            anyhow::bail!("architecture policy benchmark case id must be non-empty");
+        }
+        if let Some(previous) = seen.insert(case.id.clone(), true) {
+            if previous {
+                anyhow::bail!(
+                    "duplicate architecture policy benchmark case id `{}`",
+                    case.id
+                );
+            }
+        }
+        if matches!(
+            case.expected,
+            ArchitecturePolicyBenchOutcome::Violation | ArchitecturePolicyBenchOutcome::Exempted
+        ) && case.rule_id.as_deref().unwrap_or_default().is_empty()
+        {
+            anyhow::bail!(
+                "architecture policy benchmark case `{}` requires rule_id for {:?}",
+                case.id,
+                case.expected
+            );
+        }
+    }
+    Ok(cases)
+}
+
+fn architecture_policy_actual_findings(
+    policy: &ArchitecturePolicy,
+    report: &open_kioku_core::PolicyCheckReport,
+) -> Vec<ArchitecturePolicyActualFinding> {
+    let mut findings = Vec::new();
+    for violation in &report.violations {
+        findings.push(ArchitecturePolicyActualFinding {
+            rule_family: architecture_policy_rule_family(policy, &violation.rule_id),
+            outcome: ArchitecturePolicyBenchOutcome::Violation,
+            rule_id: Some(violation.rule_id.clone()),
+            source_path: violation.source_path.clone(),
+            target_path: violation.target_path.clone(),
+            edge_type: violation.edge_type,
+        });
+    }
+    for exemption in &report.exemptions {
+        findings.push(ArchitecturePolicyActualFinding {
+            rule_family: architecture_policy_rule_family(policy, &exemption.rule_id),
+            outcome: ArchitecturePolicyBenchOutcome::Exempted,
+            rule_id: Some(exemption.rule_id.clone()),
+            source_path: exemption.source_path.clone(),
+            target_path: exemption.target_path.clone(),
+            edge_type: exemption.evidence.edge_type,
+        });
+    }
+    for unknown in &report.unknown_edges {
+        findings.push(ArchitecturePolicyActualFinding {
+            rule_family: ArchitecturePolicyRuleFamily::Unknown,
+            outcome: ArchitecturePolicyBenchOutcome::Unknown,
+            rule_id: None,
+            source_path: unknown.evidence.source_path.clone(),
+            target_path: unknown.evidence.target_path.clone(),
+            edge_type: unknown.evidence.edge_type,
+        });
+    }
+    findings.sort_by(|left, right| {
+        left.rule_family
+            .cmp(&right.rule_family)
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+            .then_with(|| format!("{:?}", left.outcome).cmp(&format!("{:?}", right.outcome)))
+    });
+    findings.dedup_by(|left, right| {
+        left.rule_family == right.rule_family
+            && left.outcome == right.outcome
+            && left.rule_id == right.rule_id
+            && same_architecture_bench_path(&left.source_path, &right.source_path)
+            && same_architecture_bench_path(&left.target_path, &right.target_path)
+            && left.edge_type == right.edge_type
+    });
+    findings
+}
+
+fn score_architecture_policy_cases(
+    _policy: &ArchitecturePolicy,
+    cases: &[ArchitecturePolicyBenchCase],
+    actual_findings: &[ArchitecturePolicyActualFinding],
+) -> (
+    ArchitecturePolicyBenchSummary,
+    Vec<ArchitecturePolicyBenchFamilyReport>,
+    Vec<ArchitecturePolicyBenchCaseReport>,
+) {
+    let mut overall = ArchitecturePolicyBenchCounts::default();
+    let mut families: BTreeMap<ArchitecturePolicyRuleFamily, ArchitecturePolicyBenchCounts> =
+        BTreeMap::new();
+    let mut matched_positive_cases = vec![false; cases.len()];
+    let mut case_reports = Vec::with_capacity(cases.len());
+
+    for (case_index, case) in cases.iter().enumerate() {
+        let matching = actual_findings
+            .iter()
+            .filter(|finding| architecture_policy_case_selector_matches(case, finding))
+            .collect::<Vec<_>>();
+        let actual = matching
+            .iter()
+            .map(|finding| finding.outcome)
+            .collect::<Vec<_>>();
+        let matched = matching
+            .iter()
+            .any(|finding| architecture_policy_case_exact_match(case, finding));
+        let passed = if case.expected == ArchitecturePolicyBenchOutcome::Allowed {
+            matching.is_empty()
+        } else {
+            matched
+        };
+        if matched && case.expected != ArchitecturePolicyBenchOutcome::Allowed {
+            matched_positive_cases[case_index] = true;
+        }
+        let mut notes = Vec::new();
+        if !passed {
+            if case.expected == ArchitecturePolicyBenchOutcome::Allowed {
+                notes.push("expected no policy finding, but at least one finding matched".into());
+            } else if matching.is_empty() {
+                notes.push("expected policy finding was not reported".into());
+            } else {
+                notes.push(
+                    "reported policy finding did not match expected outcome, family, or rule"
+                        .into(),
+                );
+            }
+        }
+        case_reports.push(ArchitecturePolicyBenchCaseReport {
+            id: case.id.clone(),
+            rule_family: case.rule_family,
+            expected: case.expected,
+            actual,
+            rule_id: case.rule_id.clone(),
+            source_path: case.source_path.clone(),
+            target_path: case.target_path.clone(),
+            edge_type: case.edge_type,
+            passed,
+            notes,
+        });
+    }
+
+    for case in cases {
+        if case.expected != ArchitecturePolicyBenchOutcome::Allowed {
+            overall.expected_positive_count += 1;
+            families
+                .entry(case.rule_family)
+                .or_default()
+                .expected_positive_count += 1;
+        }
+    }
+
+    for finding in actual_findings {
+        let Some((case_index, case)) = cases
+            .iter()
+            .enumerate()
+            .find(|(_, case)| architecture_policy_case_selector_matches(case, finding))
+        else {
+            continue;
+        };
+        overall.actual_positive_count += 1;
+        families
+            .entry(finding.rule_family)
+            .or_default()
+            .actual_positive_count += 1;
+        if architecture_policy_case_exact_match(case, finding) {
+            overall.true_positives += 1;
+            families
+                .entry(finding.rule_family)
+                .or_default()
+                .true_positives += 1;
+            matched_positive_cases[case_index] = true;
+        } else {
+            overall.false_positives += 1;
+            families
+                .entry(finding.rule_family)
+                .or_default()
+                .false_positives += 1;
+        }
+    }
+
+    for (case_index, case) in cases.iter().enumerate() {
+        if case.expected != ArchitecturePolicyBenchOutcome::Allowed
+            && !matched_positive_cases[case_index]
+        {
+            overall.false_negatives += 1;
+            families
+                .entry(case.rule_family)
+                .or_default()
+                .false_negatives += 1;
+        }
+    }
+
+    let summary = architecture_policy_counts_summary(overall);
+    let family_reports = families
+        .into_iter()
+        .map(|(rule_family, counts)| architecture_policy_family_report(rule_family, counts))
+        .collect::<Vec<_>>();
+
+    (summary, family_reports, case_reports)
+}
+
+fn architecture_policy_case_selector_matches(
+    case: &ArchitecturePolicyBenchCase,
+    finding: &ArchitecturePolicyActualFinding,
+) -> bool {
+    same_architecture_bench_path(&case.source_path, &finding.source_path)
+        && same_architecture_bench_path(&case.target_path, &finding.target_path)
+        && case.edge_type == finding.edge_type
+        && case
+            .rule_id
+            .as_ref()
+            .map(|rule_id| finding.rule_id.as_ref() == Some(rule_id))
+            .unwrap_or(true)
+}
+
+fn architecture_policy_case_exact_match(
+    case: &ArchitecturePolicyBenchCase,
+    finding: &ArchitecturePolicyActualFinding,
+) -> bool {
+    architecture_policy_case_selector_matches(case, finding)
+        && case.expected == finding.outcome
+        && case.rule_family == finding.rule_family
+}
+
+fn same_architecture_bench_path(left: &Path, right: &Path) -> bool {
+    normalize_path_fragment(&left.display().to_string())
+        == normalize_path_fragment(&right.display().to_string())
+}
+
+fn architecture_policy_rule_family(
+    policy: &ArchitecturePolicy,
+    rule_id: &str,
+) -> ArchitecturePolicyRuleFamily {
+    if policy
+        .dependency_rules
+        .iter()
+        .any(|rule| rule.id == rule_id)
+    {
+        ArchitecturePolicyRuleFamily::DependencyRule
+    } else if policy
+        .public_api_rules
+        .iter()
+        .any(|rule| rule.id == rule_id)
+    {
+        ArchitecturePolicyRuleFamily::PublicApiRule
+    } else if policy
+        .internal_only_rules
+        .iter()
+        .any(|rule| rule.id == rule_id)
+    {
+        ArchitecturePolicyRuleFamily::InternalOnlyRule
+    } else {
+        ArchitecturePolicyRuleFamily::Unknown
+    }
+}
+
+fn architecture_policy_counts_summary(
+    counts: ArchitecturePolicyBenchCounts,
+) -> ArchitecturePolicyBenchSummary {
+    ArchitecturePolicyBenchSummary {
+        precision: ratio(counts.true_positives, counts.actual_positive_count),
+        recall: ratio(counts.true_positives, counts.expected_positive_count),
+        true_positives: counts.true_positives,
+        false_positives: counts.false_positives,
+        false_negatives: counts.false_negatives,
+        expected_positive_count: counts.expected_positive_count,
+        actual_positive_count: counts.actual_positive_count,
+    }
+}
+
+fn architecture_policy_family_report(
+    rule_family: ArchitecturePolicyRuleFamily,
+    counts: ArchitecturePolicyBenchCounts,
+) -> ArchitecturePolicyBenchFamilyReport {
+    ArchitecturePolicyBenchFamilyReport {
+        rule_family,
+        precision: ratio(counts.true_positives, counts.actual_positive_count),
+        recall: ratio(counts.true_positives, counts.expected_positive_count),
+        true_positives: counts.true_positives,
+        false_positives: counts.false_positives,
+        false_negatives: counts.false_negatives,
+        expected_positive_count: counts.expected_positive_count,
+        actual_positive_count: counts.actual_positive_count,
+    }
+}
+
+fn percentile_duration_ms(durations: &[Duration], percentile: f64) -> f64 {
+    if durations.is_empty() {
+        return 0.0;
+    }
+    let mut values = durations
+        .iter()
+        .map(|duration| duration_ms(*duration))
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((values.len() as f64 * percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+    values[rank]
+}
+
+fn print_architecture_policy_bench_report(report: &ArchitecturePolicyBenchReport) {
+    println!(
+        "Architecture policy benchmark: {} case(s), p95 {:.2}ms",
+        report.case_count, report.p95_policy_check_ms
+    );
+    println!(
+        "Overall: precision {:.3}, recall {:.3}, TP {}, FP {}, FN {}",
+        report.summary.precision,
+        report.summary.recall,
+        report.summary.true_positives,
+        report.summary.false_positives,
+        report.summary.false_negatives
+    );
+    for family in &report.rule_families {
+        println!(
+            "  {:?}: precision {:.3}, recall {:.3}, TP {}, FP {}, FN {}",
+            family.rule_family,
+            family.precision,
+            family.recall,
+            family.true_positives,
+            family.false_positives,
+            family.false_negatives
+        );
+    }
+    for case in &report.cases {
+        let status = if case.passed { "pass" } else { "fail" };
+        println!(
+            "  {status}: {} {:?} {:?} {} -> {} via {:?}",
+            case.id,
+            case.rule_family,
+            case.expected,
+            case.source_path.display(),
+            case.target_path.display(),
+            case.edge_type
+        );
+        for note in &case.notes {
+            println!("    note: {note}");
         }
     }
 }
