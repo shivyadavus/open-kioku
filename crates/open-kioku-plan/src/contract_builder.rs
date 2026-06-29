@@ -195,6 +195,8 @@ impl ContractBuilder {
             impacted_symbols,
             required_tests,
             architecture_constraints,
+            api_surface_constraints: Vec::new(),
+            dependency_delta_constraints: Vec::new(),
             traceability,
             expansion_approval_requirements,
             validation_commands,

@@ -1442,6 +1442,7 @@ version = "2.1.1"
 dependencies = [
  "chrono",
  "open-kioku-actions",
+ "open-kioku-architecture",
  "open-kioku-config",
  "open-kioku-context",
  "open-kioku-contract",

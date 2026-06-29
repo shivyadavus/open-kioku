@@ -127,6 +127,96 @@ pub struct ArchitectureConstraint {
     pub evidence_refs: Vec<EvidenceRef>,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiSurfaceChangeKind {
+    Added,
+    Removed,
+    SignatureChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApiSurfaceConstraint {
+    #[schemars(length(min = 1))]
+    pub scope: String,
+    #[serde(default)]
+    pub allowed_changes: Vec<ApiSurfaceChangeKind>,
+    pub severity: ConstraintSeverity,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyDeltaAction {
+    Allow,
+    Forbid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DependencyDeltaConstraint {
+    #[schemars(length(min = 1))]
+    pub source: String,
+    #[schemars(length(min = 1))]
+    pub target: String,
+    #[serde(default)]
+    pub edge_types: Vec<String>,
+    pub action: DependencyDeltaAction,
+    pub severity: ConstraintSeverity,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PublicApiFingerprint {
+    pub path: ContractFile,
+    #[schemars(length(min = 1))]
+    pub symbol: String,
+    #[schemars(length(min = 1))]
+    pub kind: String,
+    #[schemars(length(min = 1))]
+    pub signature: String,
+    #[schemars(length(min = 1))]
+    pub digest: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyDeltaClassification {
+    NoRelevantDelta,
+    AllowedDelta,
+    ViolatingDelta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DependencyDeltaFinding {
+    pub classification: DependencyDeltaClassification,
+    #[schemars(length(min = 1))]
+    pub edge_type: String,
+    #[schemars(length(min = 1))]
+    pub source: String,
+    #[schemars(length(min = 1))]
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<ContractFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<ContractFile>,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+    #[serde(default)]
+    pub rule_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContractEvidenceTrace {
     #[schemars(length(min = 1))]
@@ -257,6 +347,10 @@ pub struct ChangeContractV1 {
     #[schemars(length(min = 1))]
     pub architecture_constraints: Vec<ArchitectureConstraint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_surface_constraints: Vec<ApiSurfaceConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_delta_constraints: Vec<DependencyDeltaConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traceability: Vec<ContractEvidenceTrace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
@@ -284,6 +378,10 @@ struct UnvalidatedChangeContractV1 {
     required_tests: Vec<RequiredTest>,
     architecture_constraints: Vec<ArchitectureConstraint>,
     #[serde(default)]
+    api_surface_constraints: Vec<ApiSurfaceConstraint>,
+    #[serde(default)]
+    dependency_delta_constraints: Vec<DependencyDeltaConstraint>,
+    #[serde(default)]
     traceability: Vec<ContractEvidenceTrace>,
     #[serde(default)]
     expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
@@ -309,6 +407,8 @@ impl From<UnvalidatedChangeContractV1> for ChangeContractV1 {
             impacted_symbols: value.impacted_symbols,
             required_tests: value.required_tests,
             architecture_constraints: value.architecture_constraints,
+            api_surface_constraints: value.api_surface_constraints,
+            dependency_delta_constraints: value.dependency_delta_constraints,
             traceability: value.traceability,
             expansion_approval_requirements: value.expansion_approval_requirements,
             validation_commands: value.validation_commands,
@@ -446,6 +546,52 @@ impl ChangeContractV1 {
             validate_evidence_refs(
                 &mut violations,
                 &format!("architecture_constraints[{index}].evidence_refs"),
+                &constraint.evidence_refs,
+            );
+        }
+        for (index, constraint) in self.api_surface_constraints.iter().enumerate() {
+            require_text(
+                &mut violations,
+                &format!("api_surface_constraints[{index}].scope"),
+                &constraint.scope,
+            );
+            require_text(
+                &mut violations,
+                &format!("api_surface_constraints[{index}].reason"),
+                &constraint.reason,
+            );
+            validate_evidence_refs(
+                &mut violations,
+                &format!("api_surface_constraints[{index}].evidence_refs"),
+                &constraint.evidence_refs,
+            );
+        }
+        for (index, constraint) in self.dependency_delta_constraints.iter().enumerate() {
+            require_text(
+                &mut violations,
+                &format!("dependency_delta_constraints[{index}].source"),
+                &constraint.source,
+            );
+            require_text(
+                &mut violations,
+                &format!("dependency_delta_constraints[{index}].target"),
+                &constraint.target,
+            );
+            for (edge_index, edge_type) in constraint.edge_types.iter().enumerate() {
+                require_text(
+                    &mut violations,
+                    &format!("dependency_delta_constraints[{index}].edge_types[{edge_index}]"),
+                    edge_type,
+                );
+            }
+            require_text(
+                &mut violations,
+                &format!("dependency_delta_constraints[{index}].reason"),
+                &constraint.reason,
+            );
+            validate_evidence_refs(
+                &mut violations,
+                &format!("dependency_delta_constraints[{index}].evidence_refs"),
                 &constraint.evidence_refs,
             );
         }
@@ -801,6 +947,12 @@ fn required_traceability_fields(contract: &ChangeContractV1) -> Vec<&'static str
     if !contract.forbidden_files.is_empty() {
         fields.push("forbidden_files");
     }
+    if !contract.api_surface_constraints.is_empty() {
+        fields.push("api_surface_constraints");
+    }
+    if !contract.dependency_delta_constraints.is_empty() {
+        fields.push("dependency_delta_constraints");
+    }
     fields
 }
 
@@ -825,6 +977,22 @@ fn validate_known_evidence_refs(
         validate_refs_known(
             violations,
             &format!("architecture_constraints[{index}].evidence_refs"),
+            &constraint.evidence_refs,
+            &known,
+        );
+    }
+    for (index, constraint) in contract.api_surface_constraints.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("api_surface_constraints[{index}].evidence_refs"),
+            &constraint.evidence_refs,
+            &known,
+        );
+    }
+    for (index, constraint) in contract.dependency_delta_constraints.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("dependency_delta_constraints[{index}].evidence_refs"),
             &constraint.evidence_refs,
             &known,
         );
@@ -883,6 +1051,8 @@ const CONTRACT_FIELDS: &[&str] = &[
     "impacted_symbols",
     "required_tests",
     "architecture_constraints",
+    "api_surface_constraints",
+    "dependency_delta_constraints",
     "traceability",
     "expansion_approval_requirements",
     "validation_commands",
