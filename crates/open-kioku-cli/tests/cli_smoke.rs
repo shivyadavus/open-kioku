@@ -560,6 +560,53 @@ fn architecture_policy_bench_scores_checked_in_corpus() {
 }
 
 #[test]
+fn contract_bench_scores_checked_in_corpus() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = root.join("benchmarks/contract-fixture");
+    let cases = root.join("benchmarks/contract-cases.json");
+
+    let report = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("contract-bench")
+            .arg(&fixture)
+            .arg("--cases-file")
+            .arg(&cases)
+            .arg("--min-cases")
+            .arg("7")
+            .arg("--min-verdict-accuracy")
+            .arg("0.95")
+            .arg("--min-verification-precision")
+            .arg("0.95")
+            .arg("--min-boundary-precision")
+            .arg("0.97")
+            .arg("--min-boundary-recall")
+            .arg("0.90")
+            .arg("--min-toon-reduction")
+            .arg("0.35");
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["case_count"], 7);
+    assert_eq!(report["summary"]["verdict_accuracy"], 1.0);
+    assert_eq!(report["summary"]["verification_precision"], 1.0);
+    assert!(report["summary"]["min_toon_reduction"].as_f64().unwrap() >= 0.35);
+    assert!(report["failures"].as_array().unwrap().is_empty());
+    assert!(report["rule_families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|family| family["rule_family"] == "api_surface_delta"
+            && family["verdict_accuracy"] == 1.0));
+    assert!(report["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|case| case["id"] == "contract-dependency-delta" && case["passed"] == true));
+}
+
+#[test]
 fn init_index_search_and_doctor_work_together() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
