@@ -7,7 +7,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
-use open_kioku_storage::{MetadataStore, OkStore, SearchIndex};
+use open_kioku_storage::{HistoryStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +43,7 @@ impl PlanFormat {
 pub struct PlanEngine<'a> {
     store: &'a dyn OkStore,
     search_index: Option<&'a dyn SearchIndex>,
+    history_store: Option<&'a dyn HistoryStore>,
     memory_facts: Vec<MemorySearchResult>,
 }
 
@@ -51,12 +52,18 @@ impl<'a> PlanEngine<'a> {
         Self {
             store,
             search_index: None,
+            history_store: None,
             memory_facts: Vec::new(),
         }
     }
 
     pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
         self.search_index = search_index;
+        self
+    }
+
+    pub fn with_history_store(mut self, history_store: Option<&'a dyn HistoryStore>) -> Self {
+        self.history_store = history_store;
         self
     }
 
@@ -221,6 +228,7 @@ impl<'a> PlanEngine<'a> {
         if let Some(target) = impact_target {
             ImpactEngine::new(self.store as &dyn MetadataStore)
                 .with_search_index(self.search_index)
+                .with_history_store(self.history_store)
                 .for_file(&target.path)
         } else {
             Ok(ImpactReport {

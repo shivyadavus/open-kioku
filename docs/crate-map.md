@@ -168,7 +168,7 @@ graph TD
 | Crate | Description |
 |---|---|
 | `open-kioku-storage` | Abstract metadata, graph, history, and search storage traits. |
-| `open-kioku-storage-sqlite` | SQLite-backed persistent storage and indexed file/symbol provenance lookup for typed history evidence. |
+| `open-kioku-storage-sqlite` | SQLite-backed persistent storage, typed history evidence, provenance lookup, and materialized churn/hotspot summaries. |
 | `open-kioku-storage-kv` | Lightweight key-value store for caching and ephemeral data. |
 | `open-kioku-search` | Abstract search trait for full-text and symbol search. |
 | `open-kioku-search-regex` | Regex-based search backend (zero dependencies, always available). |

@@ -1,8 +1,8 @@
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge,
-    GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistorySnapshot,
-    HistorySummary, ImpactReport, Import, IndexManifest, SearchResult, Symbol, SymbolId,
-    SymbolOccurrence, SymbolProvenance, TestTarget,
+    AnalysisFact, ChurnSummary, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance,
+    GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
+    HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest, SearchResult, Symbol,
+    SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use std::path::Path;
@@ -439,6 +439,21 @@ pub trait GraphStore: Send + Sync {
 pub trait HistoryStore: Send + Sync {
     fn put_history_snapshot(&self, snapshot: &HistorySnapshot) -> Result<()>;
     fn history_for_file(&self, path: &Path, limit: usize) -> Result<HistorySummary>;
+    fn churn_for_file(&self, _path: &Path) -> Result<ChurnSummary> {
+        Err(OkError::Unsupported(
+            "file churn lookup is not implemented by this history store".into(),
+        ))
+    }
+    fn churn_for_module(&self, _module: &Path) -> Result<ChurnSummary> {
+        Err(OkError::Unsupported(
+            "module churn lookup is not implemented by this history store".into(),
+        ))
+    }
+    fn churn_for_symbol(&self, _symbol_id: &SymbolId) -> Result<ChurnSummary> {
+        Err(OkError::Unsupported(
+            "symbol churn lookup is not implemented by this history store".into(),
+        ))
+    }
     fn provenance_for_path(&self, _path: &Path, _limit: usize) -> Result<FileProvenance> {
         Err(OkError::Unsupported(
             "file provenance lookup is not implemented by this history store".into(),

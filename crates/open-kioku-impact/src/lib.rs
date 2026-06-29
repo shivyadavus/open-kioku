@@ -1,18 +1,19 @@
 use chrono::Utc;
 use open_kioku_core::{
-    search_result_evidence_ids, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId,
-    EvidenceSourceType, File, FileId, FileRange, GraphEdgeType, GraphNodeType, ImpactReport,
-    RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
+    search_result_evidence_ids, AnalysisFact, ChurnSummary, CodeChunk, Confidence, Evidence,
+    EvidenceId, EvidenceSourceType, File, FileId, FileRange, GraphEdgeType, GraphNodeType,
+    ImpactReport, RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::{MetadataStore, SearchIndex};
+use open_kioku_storage::{HistoryStore, MetadataStore, SearchIndex};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 pub struct ImpactEngine<'a> {
     store: &'a dyn MetadataStore,
     search_index: Option<&'a dyn SearchIndex>,
+    history_store: Option<&'a dyn HistoryStore>,
 }
 
 impl<'a> ImpactEngine<'a> {
@@ -20,11 +21,17 @@ impl<'a> ImpactEngine<'a> {
         Self {
             store,
             search_index: None,
+            history_store: None,
         }
     }
 
     pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
         self.search_index = search_index;
+        self
+    }
+
+    pub fn with_history_store(mut self, history_store: Option<&'a dyn HistoryStore>) -> Self {
+        self.history_store = history_store;
         self
     }
 
@@ -54,6 +61,13 @@ impl<'a> ImpactEngine<'a> {
             complexity_facts_for_file(self.store, &file.id)?
         } else {
             Vec::new()
+        };
+        let churn_summary = if file.is_some() {
+            self.history_store
+                .map(|store| store.churn_for_file(path))
+                .transpose()?
+        } else {
+            None
         };
 
         let direct = if let Some(file) = &file {
@@ -173,6 +187,15 @@ impl<'a> ImpactEngine<'a> {
                 complexity_facts.len()
             ));
         }
+        if let Some(churn) = churn_summary
+            .as_ref()
+            .filter(|churn| churn.stats.touch_count > 0)
+        {
+            reasons.push(format!(
+                "history hotspot score {:.2} from {} touch(es), confidence {:?}",
+                churn.stats.hotspot_score, churn.stats.touch_count, churn.confidence
+            ));
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
@@ -183,10 +206,15 @@ impl<'a> ImpactEngine<'a> {
         let git_score = (git_facts.len() as f32 / 12.0).min(0.20);
         let service_score = (service_facts.len() as f32 / 12.0).min(0.25);
         let complexity_score = complexity_risk_score(&complexity_facts);
+        let churn_score = churn_risk_score(churn_summary.as_ref());
         let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
-        let score =
-            (direct_reference_score + runtime_score + git_score + service_score + complexity_score)
-                .min(1.0);
+        let score = (direct_reference_score
+            + runtime_score
+            + git_score
+            + service_score
+            + complexity_score
+            + churn_score)
+            .min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
             source: "open-kioku-impact".into(),
@@ -234,6 +262,10 @@ impl<'a> ImpactEngine<'a> {
             .iter()
             .map(|fact| complexity_fact_evidence(fact, path))
             .collect::<Vec<_>>();
+        let churn_evidence = churn_summary
+            .as_ref()
+            .filter(|churn| churn.stats.touch_count > 0)
+            .map(|churn| churn_summary_evidence(churn, path));
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -255,6 +287,7 @@ impl<'a> ImpactEngine<'a> {
                 .chain(git_evidence)
                 .chain(service_evidence)
                 .chain(complexity_evidence)
+                .chain(churn_evidence)
                 .collect(),
             architecture_policy: None,
             score_breakdown: vec![ScoreComponent::single(
@@ -294,6 +327,17 @@ impl<'a> ImpactEngine<'a> {
                 complexity_score,
                 complexity_facts.iter().map(|fact| fact.id.clone()).collect(),
                 "impact risk adjusted by complexity, nested-loop, recursion, and hot-path static signals",
+            ));
+        }
+        if let Some(churn) = churn_summary
+            .as_ref()
+            .filter(|churn| churn_score > 0.0 && churn.stats.touch_count > 0)
+        {
+            report.score_breakdown.push(ScoreComponent::adjustment(
+                "history_hotspot",
+                churn_score,
+                vec![format!("history-churn:{}", churn.key)],
+                "impact risk adjusted by materialized churn and hotspot history",
             ));
         }
         report.reconcile_score_breakdown();
@@ -367,6 +411,46 @@ fn complexity_risk_score(facts: &[AnalysisFact]) -> f32 {
         })
         .sum::<f32>()
         .min(0.25)
+}
+
+fn churn_risk_score(summary: Option<&ChurnSummary>) -> f32 {
+    let Some(summary) = summary else {
+        return 0.0;
+    };
+    if summary.stats.touch_count == 0 {
+        return 0.0;
+    }
+    if summary.stats.hotspot_score >= 3.0 {
+        0.15
+    } else if summary.stats.hotspot_score >= 1.5 {
+        0.08
+    } else {
+        0.03
+    }
+}
+
+fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
+    Evidence {
+        id: EvidenceId::new(format!("history-churn:{}", summary.key)),
+        source: "open-kioku-history-churn".into(),
+        source_type: EvidenceSourceType::GitHistory,
+        file_range: Some(FileRange {
+            path: path.to_path_buf(),
+            line_range: None,
+        }),
+        symbol_id: summary.symbol_id.clone(),
+        confidence: summary.confidence,
+        message: format!(
+            "history_hotspot_score={:.3}; touch_count={}; last_30d={}; last_90d={}; confidence={:?}",
+            summary.stats.hotspot_score,
+            summary.stats.touch_count,
+            summary.stats.last_30d,
+            summary.stats.last_90d,
+            summary.confidence
+        ),
+        indexed_at: summary.generated_at,
+        ..Default::default()
+    }
 }
 
 fn is_service_boundary_fact(fact: &AnalysisFact) -> bool {
@@ -858,11 +942,13 @@ fn is_generic_symbol_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use open_kioku_core::{
-        CodeChunk, File, FileId, IndexManifest, IndexQuality, Language, LineRange, Repository,
-        RepositoryId, SymbolId, SymbolKind,
+        CodeChunk, File, FileId, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
+        HistoryRecordId, HistorySnapshot, IndexManifest, IndexQuality, Language, LineRange, Owner,
+        Repository, RepositoryId, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
     };
-    use open_kioku_storage::IndexData;
+    use open_kioku_storage::{HistoryStore, IndexData};
     use open_kioku_storage_sqlite::SqliteStore;
     use std::path::PathBuf;
 
@@ -1278,5 +1364,114 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "complexity_hot_path"));
+    }
+
+    #[test]
+    fn materialized_churn_surfaces_as_impact_risk_signal() {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let file = File {
+            id: FileId::new("hot-history"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/hot_history.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hot-history".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 1,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: std::slice::from_ref(&file),
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+            })
+            .unwrap();
+
+        let oldest = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let middle = Utc.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
+        let newest = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
+        let commits = [("oldest", oldest), ("middle", middle), ("newest", newest)]
+            .into_iter()
+            .map(|(id, at)| GitCommitRecord {
+                id: GitCommitId::new(id),
+                parent_ids: Vec::new(),
+                author: Owner {
+                    name: format!("{id} author"),
+                    email: None,
+                },
+                committer: None,
+                authored_at: at,
+                committed_at: at,
+                summary: format!("{id} change"),
+                message: format!("{id} change"),
+                file_count: 1,
+            })
+            .collect::<Vec<_>>();
+        let file_touches = commits
+            .iter()
+            .map(|commit| GitFileTouch {
+                id: HistoryRecordId::new(format!("touch-{}", commit.id.0)),
+                commit_id: commit.id.clone(),
+                path: PathBuf::from("src/hot_history.rs"),
+                previous_path: None,
+                change_kind: GitChangeKind::Modified,
+                additions: Some(20),
+                deletions: Some(10),
+                touched_at: commit.committed_at,
+            })
+            .collect::<Vec<_>>();
+        store
+            .put_history_snapshot(&HistorySnapshot {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                commits,
+                file_touches,
+                symbol_touches: Vec::new(),
+                cochange_edges: Vec::new(),
+                reviewer_evidence: Vec::new(),
+            })
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_history_store(Some(&store))
+            .for_file(Path::new("src/hot_history.rs"))
+            .unwrap();
+
+        assert!(report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("history hotspot score")));
+        assert!(report
+            .evidence
+            .iter()
+            .any(|evidence| evidence.id.0 == "history-churn:src/hot_history.rs"));
+        assert!(report
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "history_hotspot"));
     }
 }
