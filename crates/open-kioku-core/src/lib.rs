@@ -955,16 +955,44 @@ pub struct UnknownPolicyEdge {
     pub evidence: PolicyMatchEvidence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyExemptionEvidence {
+    pub exemption_id: String,
+    pub rule_id: String,
+    pub scope: String,
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub evidence: PolicyMatchEvidence,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PublicApiBoundaryReport {
+    pub configured: bool,
+    pub evaluated_edge_count: usize,
+    pub violation_count: usize,
+    pub exempted_violation_count: usize,
+    pub violations: Vec<PolicyViolation>,
+    pub exemptions: Vec<PolicyExemptionEvidence>,
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyCheckReport {
     pub configured: bool,
     pub evaluated_edge_count: usize,
     pub allowed_edges: usize,
     pub violation_count: usize,
+    #[serde(default)]
+    pub public_api_violation_count: usize,
+    #[serde(default)]
+    pub exempted_violation_count: usize,
     pub unknown_edge_count: usize,
     pub unknown_sample_count: usize,
     pub unknown_edges_truncated: bool,
     pub violations: Vec<PolicyViolation>,
+    #[serde(default)]
+    pub exemptions: Vec<PolicyExemptionEvidence>,
     pub unknown_edges: Vec<UnknownPolicyEdge>,
     pub uncertainty: Vec<String>,
 }

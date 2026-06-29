@@ -84,7 +84,7 @@ pub struct DependencyRule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublicApiRule {
+pub struct PublicApiBoundaryRule {
     pub id: String,
     pub component: String,
     pub public_globs: Vec<String>,
@@ -94,11 +94,35 @@ pub struct PublicApiRule {
     pub reason: String,
 }
 
+pub type PublicApiRule = PublicApiBoundaryRule;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InternalOnlyRule {
+    pub id: String,
+    pub component: String,
+    pub globs: Vec<String>,
+    pub severity: Severity,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExemptionScope {
+    Tests,
+    Vendor,
+    Generated,
+    Configured,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExemptionRule {
     pub id: String,
     pub rules: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<ExemptionScope>,
+    #[serde(default)]
     pub paths: Vec<String>,
     pub reason: String,
 }
@@ -115,6 +139,8 @@ pub struct ArchitecturePolicy {
     pub dependency_rules: Vec<DependencyRule>,
     #[serde(default)]
     pub public_api_rules: Vec<PublicApiRule>,
+    #[serde(default)]
+    pub internal_only_rules: Vec<InternalOnlyRule>,
     #[serde(default)]
     pub exemptions: Vec<ExemptionRule>,
     #[serde(skip, default)]
@@ -188,6 +214,13 @@ impl ArchitecturePolicy {
             validate_globs(path, &item, "internal_globs", &rule.internal_globs, false)?;
             validate_text(path, &item, "reason", &rule.reason)?;
         }
+        for (index, rule) in self.internal_only_rules.iter().enumerate() {
+            let item = format!("internal_only_rules[{index}]");
+            validate_rule_id(path, &item, &rule.id, &mut rule_ids)?;
+            validate_component_ref(path, &item, "component", &rule.component, &components)?;
+            validate_globs(path, &item, "globs", &rule.globs, true)?;
+            validate_text(path, &item, "reason", &rule.reason)?;
+        }
 
         let mut exemption_ids = BTreeSet::new();
         for (index, exemption) in self.exemptions.iter().enumerate() {
@@ -219,7 +252,24 @@ impl ArchitecturePolicy {
                     ));
                 }
             }
-            validate_globs(path, &item, "paths", &exemption.paths, true)?;
+            validate_globs(path, &item, "paths", &exemption.paths, false)?;
+            if exemption.paths.is_empty() && exemption.scopes.is_empty() {
+                return Err(policy_error(
+                    path,
+                    &item,
+                    "paths/scopes",
+                    "must define at least one path glob or exemption scope",
+                ));
+            }
+            if exemption.scopes.contains(&ExemptionScope::Configured) && exemption.paths.is_empty()
+            {
+                return Err(policy_error(
+                    path,
+                    &item,
+                    "paths",
+                    "must contain at least one glob when scope is `configured`",
+                ));
+            }
             validate_text(path, &item, "reason", &exemption.reason)?;
         }
         Ok(())
