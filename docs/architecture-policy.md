@@ -124,3 +124,25 @@ structured policy check report for indexed repositories.
 `architecture_policy_explain` accepts exactly one of `file`, `symbol`, or
 `scope: "repo"` and returns the same explanation shape as the CLI.
 Plan/impact/contract integration is intentionally out of scope.
+
+## Benchmark Corpus
+
+Architecture policy quality is checked with a durable fixture corpus:
+
+```bash
+ok architecture bench benchmarks/architecture-policy-fixture \
+  --cases-file benchmarks/architecture-policy-cases.json \
+  --min-precision 0.95 \
+  --min-recall 0.90
+```
+
+The case file is JSON. Each case identifies the expected `rule_family`,
+`expected` outcome (`allowed`, `violation`, `exempted`, or `unknown`), optional
+`rule_id`, source path, target path, and enforced edge type (`imports`,
+`references`, or `calls`). The benchmark emits machine-readable JSON with
+overall and per-family precision/recall when run with global `--json`.
+
+The checked-in corpus covers forbidden imports, forbidden calls, internal API
+leaks, public API boundary violations, explicit exemptions, unmapped inputs,
+and allowed facade access. CI runs the corpus from `.github/workflows/bench.yml`
+to prevent architecture-policy regressions from becoming informal checks.

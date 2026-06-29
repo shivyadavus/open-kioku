@@ -1,0 +1,72 @@
+[
+  {
+    "id": "dependency-forbidden-import",
+    "rule_family": "dependency_rule",
+    "expected": "violation",
+    "rule_id": "domain-no-storage",
+    "source_path": "src/domain/forbidden_import.rs",
+    "target_path": "src/storage/mod.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "dependency-forbidden-call",
+    "rule_family": "dependency_rule",
+    "expected": "violation",
+    "rule_id": "domain-no-storage",
+    "source_path": "src/domain/call_violation.rs",
+    "target_path": "src/storage/mod.rs",
+    "edge_type": "calls"
+  },
+  {
+    "id": "public-api-internal-leak",
+    "rule_family": "public_api_rule",
+    "expected": "violation",
+    "rule_id": "api-public-boundary",
+    "source_path": "src/domain/internal_leak.rs",
+    "target_path": "src/api/internal/mod.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "public-api-private-boundary",
+    "rule_family": "public_api_rule",
+    "expected": "violation",
+    "rule_id": "api-public-boundary",
+    "source_path": "src/domain/private_boundary.rs",
+    "target_path": "src/api/private_facade.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "public-api-test-exemption",
+    "rule_family": "public_api_rule",
+    "expected": "exempted",
+    "rule_id": "api-public-boundary",
+    "source_path": "src/domain/tests/internal_test.rs",
+    "target_path": "src/api/internal/mod.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "internal-only-storage-leak",
+    "rule_family": "internal_only_rule",
+    "expected": "violation",
+    "rule_id": "storage-internal-only",
+    "source_path": "src/domain/storage_internal_leak.rs",
+    "target_path": "src/storage/internal/mod.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "unmapped-source-import",
+    "rule_family": "unknown",
+    "expected": "unknown",
+    "source_path": "src/orphan/mod.rs",
+    "target_path": "src/storage/mod.rs",
+    "edge_type": "imports"
+  },
+  {
+    "id": "public-api-facade-allowed",
+    "rule_family": "public_api_rule",
+    "expected": "allowed",
+    "source_path": "src/domain/api_ok.rs",
+    "target_path": "src/api/mod.rs",
+    "edge_type": "imports"
+  }
+]
