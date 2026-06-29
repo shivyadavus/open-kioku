@@ -192,6 +192,8 @@ mod tests {
                 reason: "some reason".into(),
                 evidence_refs: vec![crate::EvidenceRef::new("ev-1")],
             }],
+            traceability: vec![],
+            expansion_approval_requirements: vec![],
             validation_commands: vec![crate::ValidationCommand {
                 command: "cargo test".into(),
                 reason: "validate".into(),

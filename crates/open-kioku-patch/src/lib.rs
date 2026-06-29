@@ -80,6 +80,8 @@ pub struct VerifyChangeInput {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub run_commands: bool,
+    #[serde(default)]
+    pub traceability_strict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,12 +89,22 @@ pub struct ChangeVerificationReport {
     pub verdict: VerificationVerdict,
     pub changed_files: Vec<PathBuf>,
     pub changed_symbols: Vec<String>,
+    #[serde(default)]
+    pub traceability: Vec<VerificationTrace>,
     pub boundary_violations: Vec<VerificationFinding>,
     pub warnings: Vec<VerificationFinding>,
     pub missing_tests: Vec<VerificationFinding>,
     pub changed_impact: Vec<VerificationFinding>,
     pub recommended_tests: Vec<TestTarget>,
     pub command_results: Vec<ValidationCommandResult>,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationTrace {
+    pub field: String,
+    pub rationale: String,
+    #[serde(default)]
     pub evidence_refs: Vec<String>,
 }
 
@@ -148,7 +160,11 @@ impl<'a> ChangeVerifier<'a> {
             ));
         }
 
-        let boundary_violations = boundary_violations(plan, &changed_files, &input.evidence_refs);
+        let mut boundary_violations =
+            boundary_violations(plan, &changed_files, &input.evidence_refs);
+        if input.traceability_strict {
+            boundary_violations.extend(unknown_evidence_ref_violations(plan, &input.evidence_refs));
+        }
         let changed_symbols = changed_symbols(self.store, &changed_files)?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
         let missing_tests = missing_tests(plan, &recommended_tests);
@@ -180,6 +196,7 @@ impl<'a> ChangeVerifier<'a> {
             &input.evidence_refs,
         ));
         warnings.extend(runtime_warnings(self.store, &changed_files)?);
+        let traceability = verification_traceability(plan, &input);
 
         let verdict = if !boundary_violations.is_empty() || !command_failures.is_empty() {
             VerificationVerdict::Fail
@@ -196,6 +213,7 @@ impl<'a> ChangeVerifier<'a> {
             verdict,
             changed_files,
             changed_symbols,
+            traceability,
             boundary_violations: all_boundary_violations,
             warnings,
             missing_tests,
@@ -372,6 +390,147 @@ fn expansion_warnings(
             })
         })
         .collect()
+}
+
+fn unknown_evidence_ref_violations(
+    plan: &PlanReport,
+    evidence_refs: &[String],
+) -> Vec<VerificationFinding> {
+    if evidence_refs.is_empty() {
+        return Vec::new();
+    }
+    let known = known_plan_evidence_refs(plan);
+    evidence_refs
+        .iter()
+        .filter(|evidence_ref| !known.contains(evidence_ref.as_str()))
+        .map(|evidence_ref| VerificationFinding {
+            path: None,
+            kind: "unknown_evidence_ref".into(),
+            reason: format!("evidence ref `{evidence_ref}` is not present in the saved plan"),
+            evidence_refs: vec![evidence_ref.clone()],
+        })
+        .collect()
+}
+
+fn verification_traceability(
+    plan: &PlanReport,
+    input: &VerifyChangeInput,
+) -> Vec<VerificationTrace> {
+    let mut traces = vec![
+        VerificationTrace {
+            field: "changed_files".into(),
+            rationale: "Changed files are normalized from explicit changed_files and unified diff verification input".into(),
+            evidence_refs: Vec::new(),
+        },
+        VerificationTrace {
+            field: "boundary_violations".into(),
+            rationale: "Boundary findings are derived from the saved plan allowed, caution, forbidden, and expansion rules".into(),
+            evidence_refs: boundary_plan_evidence_refs(plan),
+        },
+        VerificationTrace {
+            field: "missing_tests".into(),
+            rationale: "Missing-test findings compare post-edit recommendations with saved plan validation targets".into(),
+            evidence_refs: validation_plan_evidence_refs(plan),
+        },
+        VerificationTrace {
+            field: "changed_impact".into(),
+            rationale: "Changed-impact findings compare post-edit impact candidates with saved plan impact and boundary evidence".into(),
+            evidence_refs: impact_plan_evidence_refs(plan),
+        },
+    ];
+    if !input.evidence_refs.is_empty() {
+        traces.push(VerificationTrace {
+            field: "boundary_expansion".into(),
+            rationale: "Caller-supplied evidence references are used to justify boundary expansion and are checked in strict mode".into(),
+            evidence_refs: input.evidence_refs.clone(),
+        });
+    }
+    traces
+}
+
+fn boundary_plan_evidence_refs(plan: &PlanReport) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    push_evidence_refs(&mut refs, &plan.recommended_change_boundary.evidence_refs);
+    for rule in &plan.recommended_change_boundary.allowed_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for rule in &plan.recommended_change_boundary.caution_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for rule in &plan.recommended_change_boundary.forbidden_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for requirement in &plan.recommended_change_boundary.expansion_requirements {
+        push_evidence_refs(&mut refs, &requirement.required_evidence_refs);
+    }
+    refs.into_iter().collect()
+}
+
+fn validation_plan_evidence_refs(plan: &PlanReport) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    for test in &plan.validation {
+        push_evidence_refs(&mut refs, &test.evidence_refs);
+    }
+    refs.into_iter().collect()
+}
+
+fn impact_plan_evidence_refs(plan: &PlanReport) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    for evidence in &plan.impact.evidence {
+        push_evidence_ref(&mut refs, &evidence.id.0);
+    }
+    if let Some(section_refs) = plan.evidence_by_section.get("impact") {
+        push_evidence_refs(&mut refs, section_refs);
+    }
+    refs.into_iter().collect()
+}
+
+fn known_plan_evidence_refs(plan: &PlanReport) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for evidence in &plan.evidence {
+        push_evidence_ref(&mut refs, &evidence.id.0);
+    }
+    for refs_for_section in plan.evidence_by_section.values() {
+        push_evidence_refs(&mut refs, refs_for_section);
+    }
+    for ctx in &plan.primary_context {
+        for evidence_ref in ctx.derived_evidence_ids() {
+            push_evidence_ref(&mut refs, &evidence_ref);
+        }
+    }
+    for evidence in &plan.impact.evidence {
+        push_evidence_ref(&mut refs, &evidence.id.0);
+    }
+    push_evidence_refs(&mut refs, &plan.recommended_change_boundary.evidence_refs);
+    for rule in &plan.recommended_change_boundary.allowed_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for rule in &plan.recommended_change_boundary.caution_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for rule in &plan.recommended_change_boundary.forbidden_rules {
+        push_evidence_refs(&mut refs, &rule.evidence_refs);
+    }
+    for requirement in &plan.recommended_change_boundary.expansion_requirements {
+        push_evidence_refs(&mut refs, &requirement.required_evidence_refs);
+    }
+    for test in &plan.validation {
+        push_evidence_refs(&mut refs, &test.evidence_refs);
+    }
+    refs
+}
+
+fn push_evidence_refs(refs: &mut BTreeSet<String>, values: &[String]) {
+    for value in values {
+        push_evidence_ref(refs, value);
+    }
+}
+
+fn push_evidence_ref(refs: &mut BTreeSet<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() {
+        refs.insert(value.to_string());
+    }
 }
 
 fn changed_symbols(store: &dyn MetadataStore, changed_files: &[PathBuf]) -> Result<Vec<String>> {
@@ -643,9 +802,9 @@ fn stable_id(value: &str) -> String {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        CodeChunk, Confidence, File, FileId, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-        Import, IndexManifest, Language, LineRange, RepositoryId, Symbol, SymbolId,
-        SymbolOccurrence,
+        ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, File, FileId, GraphEdge,
+        GraphEdgeType, GraphNode, GraphNodeType, Import, IndexManifest, Language, LineRange,
+        RepositoryId, RiskReport, Symbol, SymbolId, SymbolOccurrence,
     };
     use open_kioku_errors::Result;
     use open_kioku_storage::{GraphStore, IndexData};
@@ -837,5 +996,106 @@ mod tests {
         assert_eq!(warnings[0].kind, "runtime_validation_required");
         assert!(warnings[0].reason.contains("run targeted validation"));
         assert_eq!(warnings[0].evidence_refs, vec!["runtime-aggregate"]);
+    }
+
+    #[test]
+    fn strict_traceability_rejects_unknown_expansion_evidence_refs() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let report = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/outside.rs")],
+                    evidence_refs: vec!["tampered:evidence".into()],
+                    traceability_strict: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.verdict, VerificationVerdict::Fail);
+        assert!(report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "unknown_evidence_ref"));
+    }
+
+    #[test]
+    fn strict_traceability_accepts_known_expansion_evidence_refs() {
+        let store = RuntimeStore::new();
+        let plan = plan_with_boundary_evidence();
+        let report = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/outside.rs")],
+                    evidence_refs: vec!["boundary:allow".into()],
+                    traceability_strict: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.verdict, VerificationVerdict::Warn);
+        assert!(report.boundary_violations.is_empty());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "boundary_expansion"));
+        assert!(report.traceability.iter().any(|trace| {
+            trace.field == "boundary_expansion"
+                && trace.evidence_refs == vec!["boundary:allow".to_string()]
+        }));
+    }
+
+    fn plan_with_boundary_evidence() -> PlanReport {
+        PlanReport {
+            task: "change handler".into(),
+            summary: "summary".into(),
+            primary_context: vec![],
+            relevant_symbols: vec![],
+            impact: open_kioku_core::ImpactReport {
+                target: "target".into(),
+                direct_impacts: vec![],
+                indirect_impacts: vec![],
+                risk_report: RiskReport {
+                    score: 0.1,
+                    level: "low".into(),
+                    reasons: vec!["low impact".into()],
+                },
+                evidence: vec![],
+                score_breakdown: vec![],
+            },
+            validation: vec![],
+            risk: RiskReport {
+                score: 0.1,
+                level: "low".into(),
+                reasons: vec!["low risk".into()],
+            },
+            recommended_change_boundary: ChangeBoundary {
+                allowed_files: vec![PathBuf::from("src/handler.rs")],
+                evidence_refs: vec!["boundary:allow".into()],
+                ..Default::default()
+            },
+            recommended_next_steps: vec![],
+            tool_calls: vec![],
+            memory_facts: vec![],
+            runtime_signals: vec![],
+            evidence: vec![],
+            evidence_by_section: Default::default(),
+            negative_evidence: vec![],
+            confidence_summary: "medium confidence".into(),
+            confidence_breakdown: ConfidenceBreakdown {
+                overall_enum: Confidence::Medium,
+                overall_score: 0.6,
+                components: vec![],
+                blockers: vec![],
+                caveats: vec!["runtime corroboration is absent".into()],
+            },
+            score_breakdown: vec![],
+        }
     }
 }

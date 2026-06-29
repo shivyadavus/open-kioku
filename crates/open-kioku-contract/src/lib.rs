@@ -128,6 +128,28 @@ pub struct ArchitectureConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContractEvidenceTrace {
+    #[schemars(length(min = 1))]
+    pub field: String,
+    #[schemars(length(min = 1))]
+    pub rationale: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unspecified_rationale: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExpansionApprovalRequirement {
+    #[schemars(length(min = 1))]
+    pub scope: String,
+    #[schemars(length(min = 1))]
+    pub reason: String,
+    #[schemars(length(min = 1))]
+    pub required_evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ValidationCommand {
     #[schemars(length(min = 1))]
     pub command: String,
@@ -234,6 +256,10 @@ pub struct ChangeContractV1 {
     pub required_tests: Vec<RequiredTest>,
     #[schemars(length(min = 1))]
     pub architecture_constraints: Vec<ArchitectureConstraint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traceability: Vec<ContractEvidenceTrace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
     #[schemars(length(min = 1))]
     pub validation_commands: Vec<ValidationCommand>,
     pub risk: RiskAssessment,
@@ -257,6 +283,10 @@ struct UnvalidatedChangeContractV1 {
     impacted_symbols: Vec<ImpactedSymbol>,
     required_tests: Vec<RequiredTest>,
     architecture_constraints: Vec<ArchitectureConstraint>,
+    #[serde(default)]
+    traceability: Vec<ContractEvidenceTrace>,
+    #[serde(default)]
+    expansion_approval_requirements: Vec<ExpansionApprovalRequirement>,
     validation_commands: Vec<ValidationCommand>,
     risk: RiskAssessment,
     confidence: ConfidenceAssessment,
@@ -279,6 +309,8 @@ impl From<UnvalidatedChangeContractV1> for ChangeContractV1 {
             impacted_symbols: value.impacted_symbols,
             required_tests: value.required_tests,
             architecture_constraints: value.architecture_constraints,
+            traceability: value.traceability,
+            expansion_approval_requirements: value.expansion_approval_requirements,
             validation_commands: value.validation_commands,
             risk: value.risk,
             confidence: value.confidence,
@@ -417,6 +449,8 @@ impl ChangeContractV1 {
                 &constraint.evidence_refs,
             );
         }
+        validate_traceability_shape(&mut violations, &self.traceability);
+        validate_expansion_approval_shape(&mut violations, &self.expansion_approval_requirements);
         for (index, command) in self.validation_commands.iter().enumerate() {
             require_text(
                 &mut violations,
@@ -502,6 +536,26 @@ impl ChangeContractV1 {
         } else {
             Err(ContractValidationErrors { violations })
         }
+    }
+}
+
+/// Strictly validate field-level traceability and boundary-expansion proof rules.
+///
+/// This is intentionally separate from `ChangeContractV1::validate` so legacy v1
+/// contracts without traceability extensions remain readable. New generated
+/// contracts should pass this check before they are used as authoritative
+/// verification inputs.
+pub fn validate_traceability(contract: &ChangeContractV1) -> Result<(), ContractValidationErrors> {
+    contract.validate()?;
+    let mut violations = Vec::new();
+    validate_traceability_shape(&mut violations, &contract.traceability);
+    validate_expansion_approval_shape(&mut violations, &contract.expansion_approval_requirements);
+    validate_traceability_completeness(&mut violations, contract);
+    validate_known_evidence_refs(&mut violations, contract);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationErrors { violations })
     }
 }
 
@@ -617,6 +671,198 @@ fn validate_evidence_refs(
     }
 }
 
+fn validate_traceability_shape(
+    violations: &mut Vec<ContractViolation>,
+    traces: &[ContractEvidenceTrace],
+) {
+    validate_unique_trace_fields(violations, traces);
+    for (index, trace) in traces.iter().enumerate() {
+        require_text(
+            violations,
+            &format!("traceability[{index}].field"),
+            &trace.field,
+        );
+        require_text(
+            violations,
+            &format!("traceability[{index}].rationale"),
+            &trace.rationale,
+        );
+        validate_evidence_refs(
+            violations,
+            &format!("traceability[{index}].evidence_refs"),
+            &trace.evidence_refs,
+        );
+        if let Some(rationale) = &trace.unspecified_rationale {
+            require_text(
+                violations,
+                &format!("traceability[{index}].unspecified_rationale"),
+                rationale,
+            );
+        }
+        if trace.evidence_refs.is_empty()
+            && trace
+                .unspecified_rationale
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            violations.push(ContractViolation::new(
+                format!("traceability[{index}]"),
+                "must carry evidence_refs or an explicit unspecified_rationale",
+            ));
+        }
+    }
+}
+
+fn validate_unique_trace_fields(
+    violations: &mut Vec<ContractViolation>,
+    traces: &[ContractEvidenceTrace],
+) {
+    let mut seen = BTreeSet::new();
+    if traces
+        .iter()
+        .any(|trace| !seen.insert(trace.field.as_str()))
+    {
+        violations.push(ContractViolation::new(
+            "traceability",
+            "must not contain duplicate field entries",
+        ));
+    }
+}
+
+fn validate_expansion_approval_shape(
+    violations: &mut Vec<ContractViolation>,
+    requirements: &[ExpansionApprovalRequirement],
+) {
+    for (index, requirement) in requirements.iter().enumerate() {
+        require_text(
+            violations,
+            &format!("expansion_approval_requirements[{index}].scope"),
+            &requirement.scope,
+        );
+        require_text(
+            violations,
+            &format!("expansion_approval_requirements[{index}].reason"),
+            &requirement.reason,
+        );
+        require_non_empty(
+            violations,
+            &format!("expansion_approval_requirements[{index}].required_evidence_refs"),
+            &requirement.required_evidence_refs,
+        );
+        validate_evidence_refs(
+            violations,
+            &format!("expansion_approval_requirements[{index}].required_evidence_refs"),
+            &requirement.required_evidence_refs,
+        );
+    }
+}
+
+fn validate_traceability_completeness(
+    violations: &mut Vec<ContractViolation>,
+    contract: &ChangeContractV1,
+) {
+    let traced_fields = contract
+        .traceability
+        .iter()
+        .map(|trace| trace.field.as_str())
+        .collect::<BTreeSet<_>>();
+    for field in required_traceability_fields(contract) {
+        if !traced_fields.contains(field) {
+            violations.push(ContractViolation::new(
+                format!("traceability.{field}"),
+                "must explain this constraining contract field",
+            ));
+        }
+    }
+    if contract.expansion_approval_requirements.is_empty() {
+        violations.push(ContractViolation::new(
+            "expansion_approval_requirements",
+            "must describe boundary-expansion proof requirements",
+        ));
+    }
+}
+
+fn required_traceability_fields(contract: &ChangeContractV1) -> Vec<&'static str> {
+    let mut fields = vec![
+        "task",
+        "primary_files",
+        "impacted_symbols",
+        "required_tests",
+        "architecture_constraints",
+        "validation_commands",
+        "risk",
+        "confidence",
+    ];
+    if !contract.secondary_files.is_empty() {
+        fields.push("secondary_files");
+    }
+    if !contract.forbidden_files.is_empty() {
+        fields.push("forbidden_files");
+    }
+    fields
+}
+
+fn validate_known_evidence_refs(
+    violations: &mut Vec<ContractViolation>,
+    contract: &ChangeContractV1,
+) {
+    let known = contract
+        .evidence_refs
+        .iter()
+        .map(|evidence| evidence.0.as_str())
+        .collect::<BTreeSet<_>>();
+    for (index, test) in contract.required_tests.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("required_tests[{index}].evidence_refs"),
+            &test.evidence_refs,
+            &known,
+        );
+    }
+    for (index, constraint) in contract.architecture_constraints.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("architecture_constraints[{index}].evidence_refs"),
+            &constraint.evidence_refs,
+            &known,
+        );
+    }
+    for (index, trace) in contract.traceability.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("traceability[{index}].evidence_refs"),
+            &trace.evidence_refs,
+            &known,
+        );
+    }
+    for (index, requirement) in contract.expansion_approval_requirements.iter().enumerate() {
+        validate_refs_known(
+            violations,
+            &format!("expansion_approval_requirements[{index}].required_evidence_refs"),
+            &requirement.required_evidence_refs,
+            &known,
+        );
+    }
+}
+
+fn validate_refs_known(
+    violations: &mut Vec<ContractViolation>,
+    field: &str,
+    refs: &[EvidenceRef],
+    known: &BTreeSet<&str>,
+) {
+    for (index, evidence_ref) in refs.iter().enumerate() {
+        if !known.contains(evidence_ref.0.as_str()) {
+            violations.push(ContractViolation::new(
+                format!("{field}[{index}]"),
+                "must reference an entry in evidence_refs",
+            ));
+        }
+    }
+}
+
 fn validate_score(violations: &mut Vec<ContractViolation>, field: &str, score: f64) {
     if !score.is_finite() || !(0.0..=1.0).contains(&score) {
         violations.push(ContractViolation::new(
@@ -637,6 +883,8 @@ const CONTRACT_FIELDS: &[&str] = &[
     "impacted_symbols",
     "required_tests",
     "architecture_constraints",
+    "traceability",
+    "expansion_approval_requirements",
     "validation_commands",
     "risk",
     "confidence",
@@ -656,6 +904,36 @@ mod tests {
 
     fn fixture() -> ChangeContractV1 {
         serde_json::from_str(include_str!("../tests/fixtures/change_contract_v1.json")).unwrap()
+    }
+
+    fn traceable_fixture() -> ChangeContractV1 {
+        let mut contract = fixture();
+        let refs = vec![EvidenceRef::new("issue:60")];
+        contract.traceability = [
+            "task",
+            "primary_files",
+            "secondary_files",
+            "impacted_symbols",
+            "required_tests",
+            "architecture_constraints",
+            "validation_commands",
+            "risk",
+            "confidence",
+        ]
+        .into_iter()
+        .map(|field| ContractEvidenceTrace {
+            field: field.into(),
+            rationale: format!("{field} is constrained by the source issue evidence"),
+            evidence_refs: refs.clone(),
+            unspecified_rationale: None,
+        })
+        .collect();
+        contract.expansion_approval_requirements = vec![ExpansionApprovalRequirement {
+            scope: "outside_declared_contract_boundary".into(),
+            reason: "Contract boundary expansion requires explicit issue evidence".into(),
+            required_evidence_refs: refs,
+        }];
+        contract
     }
 
     #[test]
@@ -882,5 +1160,40 @@ mod tests {
             .violations
             .iter()
             .any(|item| item.field == "extensions.task"));
+    }
+
+    #[test]
+    fn strict_traceability_accepts_field_level_chains() {
+        validate_traceability(&traceable_fixture()).expect("traceability is complete");
+    }
+
+    #[test]
+    fn strict_traceability_rejects_missing_chains_without_breaking_legacy_deserialization() {
+        let contract = fixture();
+        contract
+            .validate()
+            .expect("legacy fixture remains a valid v1 contract");
+
+        let error = validate_traceability(&contract).unwrap_err();
+        assert!(error
+            .violations
+            .iter()
+            .any(|item| item.field == "traceability.task"));
+        assert!(error
+            .violations
+            .iter()
+            .any(|item| item.field == "expansion_approval_requirements"));
+    }
+
+    #[test]
+    fn strict_traceability_rejects_unknown_evidence_refs() {
+        let mut contract = traceable_fixture();
+        contract.traceability[0].evidence_refs = vec![EvidenceRef::new("issue:999")];
+
+        let error = validate_traceability(&contract).unwrap_err();
+        assert!(error
+            .violations
+            .iter()
+            .any(|item| item.field == "traceability[0].evidence_refs[0]"));
     }
 }

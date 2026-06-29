@@ -970,6 +970,10 @@
             "since_plan": {
               "description": "Optional git revision/range used with git diff --unified=0 to derive changed files and diff input.",
               "type": "string"
+            },
+            "traceability_strict": {
+              "description": "Set true to reject supplied evidence references that are not present in the saved plan.",
+              "type": "boolean"
             }
           },
           "type": "object"
