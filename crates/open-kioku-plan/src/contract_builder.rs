@@ -6,13 +6,20 @@ use open_kioku_contract::{
     RequiredTest, RiskAssessment, RiskLevel, SourcePlanRef, ValidationCommand,
     ValidationRequirement,
 };
-use open_kioku_core::{PlanReport, PolicyCheckReport, PolicyViolation};
+use open_kioku_core::{
+    PlanReport, PolicyCheckReport, PolicySignalSummary, PolicyViolation, PolicyViolationEvidenceRef,
+};
 use open_kioku_errors::{OkError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
 
 pub struct ContractBuilder;
+
+pub fn summarize_policy_for_contract(plan: &PlanReport) -> Option<PolicySignalSummary> {
+    let report = architecture_policy_report(plan)?;
+    Some(policy_signal_summary_from_report(report))
+}
 
 impl ContractBuilder {
     pub fn build(task: &str, _limit: usize) -> Result<ChangeContractV1> {
@@ -383,19 +390,9 @@ fn architecture_policy_report(plan: &PlanReport) -> Option<&PolicyCheckReport> {
 }
 
 fn architecture_policy_evidence_ref_strings(plan: &PlanReport) -> Vec<String> {
-    let Some(report) = architecture_policy_report(plan) else {
-        return Vec::new();
-    };
-    let mut refs = vec!["architecture-policy:summary".into()];
-    refs.extend(
-        report
-            .violations
-            .iter()
-            .take(25)
-            .enumerate()
-            .map(|(index, violation)| architecture_policy_violation_ref(index, violation)),
-    );
-    refs
+    summarize_policy_for_contract(plan)
+        .map(|summary| summary.evidence_refs)
+        .unwrap_or_default()
 }
 
 fn architecture_policy_evidence_refs(plan: &PlanReport) -> Vec<EvidenceRef> {
@@ -412,6 +409,7 @@ fn architecture_policy_constraints(
     let Some(report) = architecture_policy_report(plan) else {
         return Vec::new();
     };
+    let summary = policy_signal_summary_from_report(report);
     let summary_refs = policy_refs
         .iter()
         .filter(|evidence_ref| evidence_ref.0 == "architecture-policy:summary")
@@ -424,19 +422,19 @@ fn architecture_policy_constraints(
     };
     let mut constraints = vec![ArchitectureConstraint {
         rule: "architecture-policy-summary".into(),
-        severity: if report.violation_count > 0 {
+        severity: if summary.violation_count > 0 {
             ConstraintSeverity::Forbidden
-        } else if report.unknown_edge_count > 0 {
+        } else if summary.unknown_edge_count > 0 {
             ConstraintSeverity::Required
         } else {
             ConstraintSeverity::Advisory
         },
         reason: format!(
             "Architecture policy evaluated {} edge(s): {} allowed, {} violation(s), {} unknown.",
-            report.evaluated_edge_count,
-            report.allowed_edges,
-            report.violation_count,
-            report.unknown_edge_count
+            summary.evaluated_edge_count,
+            summary.allowed_edges,
+            summary.violation_count,
+            summary.unknown_edge_count
         ),
         evidence_refs: summary_refs,
     }];
@@ -466,6 +464,41 @@ fn architecture_policy_constraints(
             }),
     );
     constraints
+}
+
+fn policy_signal_summary_from_report(report: &PolicyCheckReport) -> PolicySignalSummary {
+    let violation_refs = report
+        .violations
+        .iter()
+        .take(25)
+        .enumerate()
+        .map(|(index, violation)| PolicyViolationEvidenceRef {
+            id: architecture_policy_violation_ref(index, violation),
+            rule_id: violation.rule_id.clone(),
+            severity: violation.severity.clone(),
+            source_path: violation.source_path.clone(),
+            target_path: violation.target_path.clone(),
+            edge_type: violation.edge_type,
+        })
+        .collect::<Vec<_>>();
+    let mut evidence_refs = vec!["architecture-policy:summary".into()];
+    evidence_refs.extend(
+        violation_refs
+            .iter()
+            .map(|evidence_ref| evidence_ref.id.clone()),
+    );
+    PolicySignalSummary {
+        configured: report.configured,
+        evaluated_edge_count: report.evaluated_edge_count,
+        allowed_edges: report.allowed_edges,
+        violation_count: report.violation_count,
+        public_api_violation_count: report.public_api_violation_count,
+        exempted_violation_count: report.exempted_violation_count,
+        unknown_edge_count: report.unknown_edge_count,
+        evidence_refs,
+        violation_refs,
+        uncertainty: report.uncertainty.clone(),
+    }
 }
 
 fn architecture_policy_violation_ref(index: usize, violation: &PolicyViolation) -> String {
@@ -783,6 +816,13 @@ mod tests {
         };
 
         let contract = ContractBuilder::from_plan(&plan).expect("builds contract");
+        let policy_summary =
+            summarize_policy_for_contract(&plan).expect("policy summary is available");
+        assert_eq!(policy_summary.violation_count, 1);
+        assert_eq!(
+            policy_summary.violation_refs[0].id,
+            "architecture-policy:violation:0:domain-api"
+        );
         assert_eq!(contract.task, "change handler");
         assert_eq!(contract.risk.score, 0.5);
         assert_eq!(contract.risk.reasons, vec!["some risk"]);

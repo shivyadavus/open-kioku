@@ -127,6 +127,8 @@ pub struct ArchitectureConstraint {
     pub evidence_refs: Vec<EvidenceRef>,
 }
 
+pub type ContractArchitectureConstraint = ArchitectureConstraint;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
