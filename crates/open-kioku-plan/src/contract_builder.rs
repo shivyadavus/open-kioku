@@ -4,6 +4,7 @@ use open_kioku_contract::{
     ConfidenceLevel, ConstraintSeverity, ContractEvidenceTrace, ContractFile, ContractId,
     ContractTimestamps, ContractVersion, EvidenceRef, ExpansionApprovalRequirement, ImpactedSymbol,
     RequiredTest, RiskAssessment, RiskLevel, SourcePlanRef, ValidationCommand,
+    ValidationRequirement,
 };
 use open_kioku_core::PlanReport;
 use open_kioku_errors::{OkError, Result};
@@ -138,6 +139,15 @@ impl ContractBuilder {
                 reason: "No executable validation command was selected by the plan".into(),
             });
         }
+        let validation_requirements = validation_commands
+            .iter()
+            .map(|command| ValidationRequirement {
+                command: command.command.clone(),
+                cwd: None,
+                reason: command.reason.clone(),
+                evidence_refs: test_refs.clone(),
+            })
+            .collect::<Vec<_>>();
 
         let risk = RiskAssessment {
             level: RiskLevel::from_score(plan.risk.score as f64),
@@ -200,6 +210,7 @@ impl ContractBuilder {
             traceability,
             expansion_approval_requirements,
             validation_commands,
+            validation_requirements,
             risk,
             confidence,
             timestamps,
@@ -390,6 +401,11 @@ fn traceability_entries(
         trace(
             "validation_commands",
             "Validation commands come from test commands or explicit manual validation targets",
+            test_refs,
+        ),
+        trace(
+            "validation_requirements",
+            "Validation requirements bind commands to attestation evidence for post-edit verification",
             test_refs,
         ),
         trace(

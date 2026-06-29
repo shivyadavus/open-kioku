@@ -17,6 +17,7 @@ open-kioku-architecture = { version = "2.0.0", path = "../open-kioku-architectur
 open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
 open-kioku-context = { version = "2.0.0", path = "../open-kioku-context" }
 open-kioku-context-compress = { version = "2.0.0", path = "../open-kioku-context-compress" }
+open-kioku-contract = { version = "2.0.0", path = "../open-kioku-contract" }
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-format = { version = "2.0.0", path = "../open-kioku-format" }
 open-kioku-graph = { version = "2.0.0", path = "../open-kioku-graph" }
