@@ -28,11 +28,15 @@ them in:
 - `git_symbol_touches`
 - `git_cochange_edges`
 - `git_review_events`
+- `history_hotspots`
 
 `open-kioku-storage::HistoryStore` exposes:
 
 - `put_history_snapshot`
 - `history_for_file`
+- `churn_for_file`
+- `churn_for_module`
+- `churn_for_symbol`
 - `provenance_for_path`
 - `provenance_for_symbol`
 - `cochange_neighbors`
@@ -65,6 +69,67 @@ Historical coordinate drift, equally specific overlaps, missing symbol ranges,
 rename mapping, and bounded-window first-seen results remain explicit in typed
 provenance confidence and uncertainty fields. Reviewer evidence is supplied by
 later ownership work.
+
+## Historical Churn And Hotspots
+
+`put_history_snapshot` also materializes file, module, and symbol churn
+summaries into `history_hotspots`. The table is keyed by entity kind and entity
+key, stores query columns for hotspot ordering, and keeps the full typed
+`ChurnSummary` JSON payload. Churn lookups read that cached table, so
+`churn_for_file`, `churn_for_module`, `churn_for_symbol`, CLI `history churn`,
+and MCP `churn_analysis` do not scan raw commit history on every request.
+
+Each `ChurnSummary` includes:
+
+- `all_time`, `last_30d`, and `last_90d` touch counts;
+- `recency_weighted` touch count;
+- `touch_count` and `hotspot_score`;
+- `confidence` and explicit `uncertainty`.
+
+Refreshes are deterministic for the same ingested history snapshot. Window
+calculations use the newest persisted file or symbol touch as the reference
+time, not wall-clock time. Module churn is aggregated from persisted file
+touches in the directory tree. Symbol churn is keyed by stable symbol ID when
+line-level history can be mapped; missing or low-confidence symbol history is
+reported explicitly instead of silently fabricating a score.
+
+Query a repository-relative file path:
+
+```sh
+ok --repo /path/to/repo history churn \
+  --path crates/open-kioku-core/src/lib.rs
+```
+
+Query a module directory:
+
+```sh
+ok --repo /path/to/repo history churn --module crates/open-kioku-core/src
+```
+
+Query an indexed symbol by exact name, qualified name, or stable symbol ID:
+
+```sh
+ok --repo /path/to/repo history churn --symbol PolicyGate
+```
+
+The experimental MCP tool `churn_analysis` accepts exactly one of:
+
+```json
+{"path":"crates/open-kioku-core/src/lib.rs"}
+```
+
+```json
+{"module":"crates/open-kioku-core/src"}
+```
+
+```json
+{"symbol":"PolicyGate"}
+```
+
+Impact and planning reports can surface materialized file hotspot signals as
+risk evidence when a history store is available. These signals are labeled as
+local-history risk evidence and do not replace exact references, ranking, or
+contract verification.
 
 ## Provenance Lookup
 

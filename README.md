@@ -381,6 +381,7 @@ ok --repo /path/to/repo symbol definition PolicyGate
 ok --repo /path/to/repo symbol refs PolicyGate
 ok --repo /path/to/repo history provenance --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo history provenance --symbol PolicyGate
+ok --repo /path/to/repo history churn --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
 ok --repo /path/to/repo tests --changed crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo context "update MCP docs" --format markdown
@@ -426,7 +427,7 @@ from private repos.
 
 Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool reference (54 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance and churn hotspots: [`docs/storage-model.md#historical-churn-and-hotspots`](docs/storage-model.md#historical-churn-and-hotspots). Full MCP tool reference (55 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
@@ -471,7 +472,7 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 This is a 44-crate Cargo workspace. Important crates:
 
 - `open-kioku-cli`: the `ok` binary (32 subcommands).
-- `open-kioku-mcp`: JSON-RPC MCP server over stdio (54 tools).
+- `open-kioku-mcp`: JSON-RPC MCP server over stdio (55 tools).
 - `open-kioku-core`: shared types, evidence data model, and report schemas.
 - `open-kioku-ingest`: repository indexing pipeline with static analysis and runtime evidence ingestion.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.

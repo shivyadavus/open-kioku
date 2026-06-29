@@ -2274,6 +2274,23 @@ fn index_captures_git_history() {
         "first commit"
     );
 
+    let file_churn = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("churn")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let file_churn: serde_json::Value = serde_json::from_str(&file_churn).unwrap();
+    assert_eq!(file_churn["stats"]["all_time"], 1);
+    assert_eq!(file_churn["stats"]["last_90d"], 1);
+    assert_eq!(file_churn["confidence"], "exact");
+
     let symbol_provenance = run({
         let mut command = ok();
         command
@@ -2337,6 +2354,24 @@ fn index_captures_git_history() {
     assert_eq!(
         response["result"]["structuredContent"]["first_seen"]["commit"]["summary"],
         "first commit"
+    );
+
+    let mcp_churn = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"churn_analysis","arguments":{"path":"src/a.rs"}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_churn.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["stats"]["all_time"],
+        1
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["confidence"],
+        "exact"
     );
 
     let mcp_symbol = run_with_stdin(

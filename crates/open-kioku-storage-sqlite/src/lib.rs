@@ -1,9 +1,11 @@
+use chrono::{DateTime, Utc};
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, FileProvenance,
-    GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge,
-    GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary,
-    Import, IndexManifest, ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
-    TestTarget, HISTORY_SCHEMA_VERSION,
+    AnalysisFact, ChurnEntityKind, ChurnStats, ChurnSummary, CodeChunk, Confidence,
+    EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge, GitCommitId,
+    GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
+    GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, Import, IndexManifest,
+    ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{
@@ -11,7 +13,7 @@ use open_kioku_storage::{
     PartialIndexUpdate,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -93,6 +95,25 @@ CREATE INDEX IF NOT EXISTS idx_git_review_events_commit
   ON git_review_events(commit_id, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_git_review_events_reviewer
   ON git_review_events(reviewer_identity, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS history_hotspots (
+  entity_kind TEXT NOT NULL,
+  entity_key TEXT NOT NULL,
+  path TEXT,
+  symbol_id TEXT,
+  qualified_name TEXT,
+  hotspot_score REAL NOT NULL,
+  touch_count INTEGER NOT NULL,
+  generated_at TEXT NOT NULL,
+  json TEXT NOT NULL,
+  PRIMARY KEY(entity_kind, entity_key)
+);
+CREATE INDEX IF NOT EXISTS idx_history_hotspots_kind_score
+  ON history_hotspots(entity_kind, hotspot_score DESC, touch_count DESC, entity_key);
+CREATE INDEX IF NOT EXISTS idx_history_hotspots_path
+  ON history_hotspots(path);
+CREATE INDEX IF NOT EXISTS idx_history_hotspots_symbol
+  ON history_hotspots(symbol_id);
 "#;
 
 pub struct SqliteStore {
@@ -123,6 +144,33 @@ impl SqliteStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn churn_by_kind_and_key<F>(
+        &self,
+        kind: ChurnEntityKind,
+        key: &str,
+        missing: F,
+    ) -> Result<ChurnSummary>
+    where
+        F: FnOnce() -> ChurnSummary,
+    {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let raw = conn
+            .query_row(
+                "SELECT json FROM history_hotspots WHERE entity_kind = ?1 AND entity_key = ?2",
+                params![churn_entity_kind_key(kind), key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        match raw {
+            Some(raw) => Ok(serde_json::from_str(&raw)?),
+            None => Ok(missing()),
+        }
     }
 }
 
@@ -766,6 +814,8 @@ impl HistoryStore for SqliteStore {
 
         tx.execute("DELETE FROM git_review_events", [])
             .map_err(storage_err)?;
+        tx.execute("DELETE FROM history_hotspots", [])
+            .map_err(storage_err)?;
         tx.execute("DELETE FROM git_cochange_edges", [])
             .map_err(storage_err)?;
         tx.execute("DELETE FROM git_symbol_touches", [])
@@ -851,6 +901,24 @@ impl HistoryStore for SqliteStore {
                     reviewer_identity,
                     evidence.observed_at.to_rfc3339(),
                     serde_json::to_string(evidence)?,
+                ],
+            )
+            .map_err(storage_err)?;
+        }
+        for summary in materialize_churn_summaries(snapshot)? {
+            tx.execute(
+                "INSERT INTO history_hotspots(entity_kind, entity_key, path, symbol_id, qualified_name, hotspot_score, touch_count, generated_at, json)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    churn_entity_kind_key(summary.entity_kind),
+                    &summary.key,
+                    summary.path.as_deref().map(history_path).transpose()?,
+                    summary.symbol_id.as_ref().map(|id| id.0.as_str()),
+                    summary.qualified_name.as_deref(),
+                    summary.stats.hotspot_score,
+                    usize_to_i64(summary.stats.touch_count, "history hotspot touch count")?,
+                    summary.generated_at.to_rfc3339(),
+                    serde_json::to_string(&summary)?,
                 ],
             )
             .map_err(storage_err)?;
@@ -1106,6 +1174,34 @@ impl HistoryStore for SqliteStore {
             confidence,
             truncated,
             uncertainty,
+        })
+    }
+
+    fn churn_for_file(&self, path: &Path) -> Result<ChurnSummary> {
+        let normalized_path = history_path(path)?;
+        self.churn_by_kind_and_key(ChurnEntityKind::File, &normalized_path, || {
+            ChurnSummary::missing(ChurnEntityKind::File, normalized_path.clone())
+        })
+    }
+
+    fn churn_for_module(&self, module: &Path) -> Result<ChurnSummary> {
+        let normalized_module = if module == Path::new(".") || module.as_os_str().is_empty() {
+            "__root__".to_string()
+        } else {
+            history_path(module)?
+        };
+        self.churn_by_kind_and_key(ChurnEntityKind::Module, &normalized_module, || {
+            ChurnSummary::missing(ChurnEntityKind::Module, normalized_module.clone())
+        })
+    }
+
+    fn churn_for_symbol(&self, symbol_id: &SymbolId) -> Result<ChurnSummary> {
+        self.churn_by_kind_and_key(ChurnEntityKind::Symbol, &symbol_id.0, || {
+            let mut summary = ChurnSummary::missing(ChurnEntityKind::Symbol, symbol_id.0.clone());
+            summary.symbol_id = Some(symbol_id.clone());
+            summary.uncertainty =
+                vec!["no persisted symbol-level churn is available for this symbol".into()];
+            summary
         })
     }
 
@@ -2192,6 +2288,309 @@ fn history_path(path: &Path) -> Result<String> {
     Ok(value.to_string())
 }
 
+#[derive(Debug, Clone)]
+struct ChurnTouchSample {
+    id: String,
+    touched_at: DateTime<Utc>,
+    additions: u32,
+    deletions: u32,
+    confidence: Confidence,
+    uncertainty: Vec<String>,
+}
+
+fn materialize_churn_summaries(snapshot: &HistorySnapshot) -> Result<Vec<ChurnSummary>> {
+    let Some(reference_at) = newest_history_touch(snapshot) else {
+        return Ok(Vec::new());
+    };
+
+    let mut file_samples = BTreeMap::<String, Vec<ChurnTouchSample>>::new();
+    let mut file_aliases = Vec::<(String, String)>::new();
+    let mut module_samples = BTreeMap::<String, BTreeMap<String, ChurnTouchSample>>::new();
+    let mut symbol_samples = BTreeMap::<String, SymbolChurnAccumulator>::new();
+
+    for touch in &snapshot.file_touches {
+        let path = history_path(&touch.path)?;
+        let sample = ChurnTouchSample {
+            id: touch.id.0.clone(),
+            touched_at: touch.touched_at,
+            additions: touch.additions.unwrap_or_default(),
+            deletions: touch.deletions.unwrap_or_default(),
+            confidence: Confidence::Exact,
+            uncertainty: Vec::new(),
+        };
+        file_samples
+            .entry(path.clone())
+            .or_default()
+            .push(sample.clone());
+        if let Some(previous_path) = &touch.previous_path {
+            file_aliases.push((path, history_path(previous_path)?));
+        }
+    }
+    let file_samples = expand_file_churn_aliases(file_samples, file_aliases);
+    for (path, samples) in &file_samples {
+        for module in churn_modules_for_path(Path::new(path)) {
+            let module_entry = module_samples.entry(module).or_default();
+            for sample in samples {
+                module_entry.insert(sample.id.clone(), sample.clone());
+            }
+        }
+    }
+
+    for touch in &snapshot.symbol_touches {
+        let Some(symbol_id) = &touch.symbol_id else {
+            continue;
+        };
+        let file_path = history_path(&touch.file_path)?;
+        let entry = symbol_samples
+            .entry(symbol_id.0.clone())
+            .or_insert_with(|| SymbolChurnAccumulator {
+                file_path: PathBuf::from(&file_path),
+                symbol_id: symbol_id.clone(),
+                qualified_name: touch.qualified_name.clone(),
+                samples: Vec::new(),
+                saw_uncertainty: false,
+            });
+        entry.samples.push(ChurnTouchSample {
+            id: touch.id.0.clone(),
+            touched_at: touch.touched_at,
+            additions: 0,
+            deletions: 0,
+            confidence: touch.confidence,
+            uncertainty: touch.uncertainty.clone(),
+        });
+        if !touch.uncertainty.is_empty() {
+            entry.saw_uncertainty = true;
+        }
+    }
+
+    let mut summaries = Vec::new();
+    for (path, samples) in file_samples {
+        summaries.push(ChurnSummary {
+            entity_kind: ChurnEntityKind::File,
+            key: path.clone(),
+            path: Some(PathBuf::from(path)),
+            symbol_id: None,
+            qualified_name: None,
+            generated_at: reference_at,
+            stats: churn_stats(&samples, reference_at),
+            confidence: Confidence::Exact,
+            uncertainty: Vec::new(),
+        });
+    }
+    for (module, samples) in module_samples {
+        let samples = samples.into_values().collect::<Vec<_>>();
+        summaries.push(ChurnSummary {
+            entity_kind: ChurnEntityKind::Module,
+            key: module.clone(),
+            path: Some(PathBuf::from(module)),
+            symbol_id: None,
+            qualified_name: None,
+            generated_at: reference_at,
+            stats: churn_stats(&samples, reference_at),
+            confidence: Confidence::Medium,
+            uncertainty: vec![
+                "module churn is aggregated from persisted file touches in this directory tree"
+                    .into(),
+            ],
+        });
+    }
+    for (key, entry) in symbol_samples {
+        let mut uncertainty = entry
+            .samples
+            .iter()
+            .flat_map(|sample| sample.uncertainty.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if entry.saw_uncertainty {
+            uncertainty.push("symbol churn inherits uncertainty from line-level history".into());
+        }
+        summaries.push(ChurnSummary {
+            entity_kind: ChurnEntityKind::Symbol,
+            key,
+            path: Some(entry.file_path),
+            symbol_id: Some(entry.symbol_id),
+            qualified_name: Some(entry.qualified_name),
+            generated_at: reference_at,
+            stats: churn_stats(&entry.samples, reference_at),
+            confidence: minimum_churn_confidence(&entry.samples),
+            uncertainty,
+        });
+    }
+
+    summaries.sort_by(|left, right| {
+        left.entity_kind
+            .cmp(&right.entity_kind)
+            .then_with(|| {
+                right
+                    .stats
+                    .hotspot_score
+                    .total_cmp(&left.stats.hotspot_score)
+            })
+            .then_with(|| right.stats.touch_count.cmp(&left.stats.touch_count))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    Ok(summaries)
+}
+
+#[derive(Debug, Clone)]
+struct SymbolChurnAccumulator {
+    file_path: PathBuf,
+    symbol_id: SymbolId,
+    qualified_name: String,
+    samples: Vec<ChurnTouchSample>,
+    saw_uncertainty: bool,
+}
+
+fn newest_history_touch(snapshot: &HistorySnapshot) -> Option<DateTime<Utc>> {
+    snapshot
+        .file_touches
+        .iter()
+        .map(|touch| touch.touched_at)
+        .chain(snapshot.symbol_touches.iter().map(|touch| touch.touched_at))
+        .max()
+}
+
+fn churn_modules_for_path(path: &Path) -> Vec<String> {
+    let mut modules = Vec::new();
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        let key = if parent.as_os_str().is_empty() {
+            "__root__".to_string()
+        } else {
+            parent.to_string_lossy().to_string()
+        };
+        modules.push(key);
+        current = parent.parent();
+    }
+    if modules.is_empty() {
+        modules.push("__root__".to_string());
+    }
+    modules
+}
+
+fn expand_file_churn_aliases(
+    samples: BTreeMap<String, Vec<ChurnTouchSample>>,
+    aliases: Vec<(String, String)>,
+) -> BTreeMap<String, Vec<ChurnTouchSample>> {
+    if aliases.is_empty() {
+        return samples;
+    }
+
+    let mut groups = samples
+        .keys()
+        .map(|path| BTreeSet::from([path.clone()]))
+        .collect::<Vec<_>>();
+    for (path, previous_path) in aliases {
+        merge_file_alias_group(&mut groups, path, previous_path);
+    }
+
+    let mut expanded = BTreeMap::new();
+    for group in groups {
+        let mut combined = Vec::new();
+        for path in &group {
+            if let Some(path_samples) = samples.get(path) {
+                combined.extend(path_samples.clone());
+            }
+        }
+        if combined.is_empty() {
+            continue;
+        }
+        for path in group {
+            expanded.insert(path, combined.clone());
+        }
+    }
+    expanded
+}
+
+fn merge_file_alias_group(groups: &mut Vec<BTreeSet<String>>, path: String, previous_path: String) {
+    let left = groups.iter().position(|group| group.contains(&path));
+    let right = groups
+        .iter()
+        .position(|group| group.contains(&previous_path));
+    match (left, right) {
+        (Some(left), Some(right)) if left == right => {}
+        (Some(left), Some(right)) => {
+            let (keep, remove) = if left < right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            let removed = groups.remove(remove);
+            groups[keep].extend(removed);
+        }
+        (Some(index), None) => {
+            groups[index].insert(previous_path);
+        }
+        (None, Some(index)) => {
+            groups[index].insert(path);
+        }
+        (None, None) => {
+            groups.push(BTreeSet::from([path, previous_path]));
+        }
+    }
+}
+
+fn churn_stats(samples: &[ChurnTouchSample], reference_at: DateTime<Utc>) -> ChurnStats {
+    let mut last_30d = 0;
+    let mut last_90d = 0;
+    let mut recency_weighted = 0.0_f32;
+    let mut churn_volume = 0_u64;
+
+    for sample in samples {
+        let age_seconds = reference_at
+            .signed_duration_since(sample.touched_at)
+            .num_seconds()
+            .max(0) as f32;
+        let age_days = age_seconds / 86_400.0;
+        if age_days <= 30.0 {
+            last_30d += 1;
+        }
+        if age_days <= 90.0 {
+            last_90d += 1;
+        }
+        recency_weighted += 1.0 / (1.0 + age_days / 30.0);
+        churn_volume += u64::from(sample.additions) + u64::from(sample.deletions);
+    }
+
+    let touch_count = samples.len();
+    let hotspot_score =
+        recency_weighted * (touch_count as f32).ln_1p() + (churn_volume as f32).ln_1p() / 10.0;
+    ChurnStats {
+        all_time: touch_count,
+        last_30d,
+        last_90d,
+        recency_weighted,
+        touch_count,
+        hotspot_score,
+    }
+}
+
+fn minimum_churn_confidence(samples: &[ChurnTouchSample]) -> Confidence {
+    samples
+        .iter()
+        .map(|sample| sample.confidence)
+        .min_by_key(|confidence| confidence_rank(*confidence))
+        .unwrap_or(Confidence::Low)
+}
+
+fn confidence_rank(confidence: Confidence) -> u8 {
+    match confidence {
+        Confidence::Low => 0,
+        Confidence::Medium => 1,
+        Confidence::High => 2,
+        Confidence::Exact => 3,
+    }
+}
+
+fn churn_entity_kind_key(kind: ChurnEntityKind) -> &'static str {
+    match kind {
+        ChurnEntityKind::File => "file",
+        ChurnEntityKind::Module => "module",
+        ChurnEntityKind::Symbol => "symbol",
+    }
+}
+
 fn usize_to_i64(value: usize, field: &str) -> Result<i64> {
     i64::try_from(value)
         .map_err(|_| OkError::Storage(format!("{field} exceeds SQLite integer range")))
@@ -2279,18 +2678,19 @@ mod tests {
     use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION};
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
-        AnalysisFact, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId, EvidenceSourceType,
-        File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId, GitCommitRecord, GitFileTouch,
-        GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId,
-        HistorySnapshot, IndexManifest, IndexQuality, Language, LineRange, NodeId, Owner,
-        Repository, RepositoryId, ReviewerEvidence, ReviewerRole, Symbol, SymbolId, SymbolKind,
-        SymbolOccurrence, HISTORY_SCHEMA_VERSION,
+        AnalysisFact, ChurnEntityKind, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId,
+        EvidenceSourceType, File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId,
+        GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
+        GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, IndexQuality, Language,
+        LineRange, NodeId, Owner, Repository, RepositoryId, ReviewerEvidence, ReviewerRole, Symbol,
+        SymbolId, SymbolKind, SymbolOccurrence, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
     };
     use rusqlite::{params, Connection};
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     fn make_store() -> SqliteStore {
         SqliteStore::open(":memory:").expect("in-memory store")
@@ -2507,13 +2907,14 @@ mod tests {
                      'git_file_touches',
                      'git_symbol_touches',
                      'git_cochange_edges',
-                     'git_review_events'
+                     'git_review_events',
+                     'history_hotspots'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(history_table_count, 5);
+        assert_eq!(history_table_count, 6);
         let legacy_fact_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM analysis_facts", [], |row| row.get(0))
             .unwrap();
@@ -2597,6 +2998,144 @@ mod tests {
             .uncertainty
             .iter()
             .any(|note| note.contains("truncated")));
+    }
+
+    #[test]
+    fn churn_summaries_are_materialized_with_deterministic_windows() {
+        let store = make_store();
+        store.put_history_snapshot(&history_snapshot()).unwrap();
+
+        let file = store
+            .churn_for_file(std::path::Path::new("src/lib.rs"))
+            .unwrap();
+        assert_eq!(file.entity_kind, ChurnEntityKind::File);
+        assert_eq!(file.stats.all_time, 2);
+        assert_eq!(file.stats.last_30d, 1);
+        assert_eq!(file.stats.last_90d, 2);
+        assert_eq!(file.stats.touch_count, 2);
+        assert!(file.stats.recency_weighted > 1.4);
+        assert!(file.stats.hotspot_score > file.stats.recency_weighted);
+        assert_eq!(
+            file.generated_at,
+            Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap()
+        );
+        assert_eq!(file.confidence, Confidence::Exact);
+
+        let module = store.churn_for_module(std::path::Path::new("src")).unwrap();
+        assert_eq!(module.entity_kind, ChurnEntityKind::Module);
+        assert_eq!(module.stats.all_time, 2);
+        assert_eq!(module.stats.last_30d, 1);
+        assert_eq!(module.confidence, Confidence::Medium);
+        assert!(module
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("aggregated from persisted file touches")));
+
+        let symbol_id = SymbolId::new("symbol-1");
+        let symbol = store.churn_for_symbol(&symbol_id).unwrap();
+        assert_eq!(symbol.entity_kind, ChurnEntityKind::Symbol);
+        assert_eq!(symbol.stats.all_time, 1);
+        assert_eq!(symbol.stats.last_30d, 1);
+        assert_eq!(symbol.stats.last_90d, 1);
+        assert_eq!(symbol.confidence, Confidence::Medium);
+        assert_eq!(
+            symbol.qualified_name.as_deref(),
+            Some("crate::history_for_file")
+        );
+        assert!(symbol
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("historical coordinates may have shifted")));
+
+        let missing = store
+            .churn_for_symbol(&SymbolId::new("missing-symbol"))
+            .unwrap();
+        assert_eq!(missing.stats.touch_count, 0);
+        assert_eq!(missing.confidence, Confidence::Low);
+        assert!(missing
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("no persisted symbol-level churn")));
+    }
+
+    #[test]
+    fn hotspot_ordering_and_lookup_use_persisted_summary_table() {
+        let store = make_store();
+        let mut snapshot = history_snapshot();
+        snapshot.file_touches.push(GitFileTouch {
+            id: HistoryRecordId::new("file-touch-docs"),
+            commit_id: GitCommitId::new("older"),
+            path: "docs/readme.md".into(),
+            previous_path: None,
+            change_kind: GitChangeKind::Modified,
+            additions: Some(1),
+            deletions: Some(0),
+            touched_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+        });
+        store.put_history_snapshot(&snapshot).unwrap();
+
+        let conn = store.connection.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT entity_key FROM history_hotspots
+                 WHERE entity_kind = 'file'
+                 ORDER BY hotspot_score DESC, touch_count DESC, entity_key
+                 LIMIT 2",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        assert_eq!(rows, vec!["src/lib.rs", "docs/readme.md"]);
+
+        let mut elapsed = Vec::new();
+        for _ in 0..40 {
+            let started = std::time::Instant::now();
+            let summary = store
+                .churn_for_file(std::path::Path::new("src/lib.rs"))
+                .unwrap();
+            assert_eq!(summary.stats.touch_count, 2);
+            elapsed.push(started.elapsed());
+        }
+        elapsed.sort();
+        let p95 = elapsed[(elapsed.len() * 95 / 100).min(elapsed.len() - 1)];
+        assert!(
+            p95 < Duration::from_millis(200),
+            "persisted churn lookup p95 was {p95:?}"
+        );
+    }
+
+    #[test]
+    fn churn_summaries_follow_rename_aliases_without_module_double_counting() {
+        let store = make_store();
+        let mut snapshot = history_snapshot();
+        snapshot.file_touches[0].path = "src/old.rs".into();
+        snapshot.file_touches[1].previous_path = Some("src/old.rs".into());
+        snapshot.file_touches[1].change_kind = GitChangeKind::Renamed;
+        store.put_history_snapshot(&snapshot).unwrap();
+
+        let current = store
+            .churn_for_file(std::path::Path::new("src/lib.rs"))
+            .unwrap();
+        let historical = store
+            .churn_for_file(std::path::Path::new("src/old.rs"))
+            .unwrap();
+        assert_eq!(current.stats.all_time, 2);
+        assert_eq!(historical.stats.all_time, 2);
+        assert_eq!(current.stats.last_30d, 1);
+        assert_eq!(historical.stats.last_30d, 1);
+
+        let module = store.churn_for_module(std::path::Path::new("src")).unwrap();
+        assert_eq!(module.stats.all_time, 2);
+        assert_eq!(module.stats.last_90d, 2);
+
+        let root = store.churn_for_module(std::path::Path::new(".")).unwrap();
+        assert_eq!(root.key, "__root__");
+        assert_eq!(root.stats.all_time, 2);
     }
 
     #[test]

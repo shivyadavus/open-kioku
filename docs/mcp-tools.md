@@ -121,7 +121,7 @@ Stable source-read tools:
 - `detect_architecture`, `architecture_boundaries`, `architecture_violations`, `architecture_policy_validate`, `architecture_policy_check`, `architecture_policy_explain`, `summarize_architecture`
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
-- `dependency_path`, `impact_analysis`, `module_dependencies`
+- `dependency_path`, `impact_analysis`, `churn_analysis`, `module_dependencies`
 - `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
 - `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
@@ -130,6 +130,7 @@ Stable source-read tools:
 Experimental tools:
 
 - `history_provenance_lookup`: returns bounded first-seen, last-touched, and recent commit provenance for exactly one `path` or `symbol`, including confidence and uncertainty. `symbol` accepts an exact name, qualified name, or symbol ID.
+- `churn_analysis`: returns materialized all-time, 30-day, 90-day, recency-weighted, and hotspot stats for exactly one `path`, `module`, or `symbol`, including confidence and uncertainty. Lookups read persisted summaries instead of scanning raw commit history.
 - `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
 - `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
 - `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.
