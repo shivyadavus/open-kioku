@@ -3,7 +3,7 @@ use open_kioku_actions::{ActionKind, PolicyGate};
 use open_kioku_architecture::{
     evaluate_policy, evaluate_public_api_boundary, ArchitectureDetector, PolicyResolver,
 };
-use open_kioku_config::{load_architecture_policy, OkConfig};
+use open_kioku_config::{load_architecture_policy, load_architecture_policy_from_path, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{Confidence, ContextHandleId, PlanReport, SymbolId};
@@ -261,6 +261,7 @@ async fn dispatch(
         "detect_architecture" | "architecture_boundaries" | "architecture_violations" => {
             Ok(json!(ArchitectureDetector::new(store, None).detect()?))
         }
+        "architecture_policy_validate" => architecture_policy_validate_tool(repo, &params),
         "architecture_policy_check" => {
             let Some(policy) = load_architecture_policy(repo)? else {
                 return Ok(json!(open_kioku_core::PolicyCheckReport {
@@ -730,8 +731,9 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("detect_architecture", "Detect high-level architectural components and directories in the repository based on file layouts.", json!({"type":"object","properties":{}})),
         ("architecture_boundaries", "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Report any import or boundary violations that deviate from the defined codebase architecture rules.", json!({"type":"object","properties":{}})),
+        ("architecture_policy_validate", "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.", json!({"type":"object","properties":{"path":{"type":"string","description":"Optional repository-relative or absolute path to a standalone architecture policy TOML file."}}})),
         ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
-        ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file or symbol.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."}},"oneOf":[{"required":["file"]},{"required":["symbol"]}]})),
+        ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
         ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
         ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
         ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
@@ -850,6 +852,40 @@ fn limit(params: &Value) -> usize {
         .min(100) as usize
 }
 
+fn architecture_policy_validate_tool(repo: &Path, params: &Value) -> anyhow::Result<Value> {
+    let (policy, paths) = if let Some(path) = params.get("path").and_then(Value::as_str) {
+        let path = Path::new(path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo.join(path)
+        };
+        (Some(load_architecture_policy_from_path(&path)?), vec![path])
+    } else {
+        let policy = load_architecture_policy(repo)?;
+        let paths = policy
+            .as_ref()
+            .map(|policy| policy.source_paths(repo))
+            .unwrap_or_default();
+        (policy, paths)
+    };
+    let source = policy.as_ref().map(|policy| policy.source);
+    let configured = policy.is_some();
+    let message = if let Some(source) = source {
+        format!("Architecture policy is valid ({source}).")
+    } else {
+        "No architecture policy configured. Heuristic architecture detection remains active.".into()
+    };
+    Ok(json!({
+        "valid": true,
+        "configured": configured,
+        "source": source,
+        "paths": paths,
+        "policy": policy,
+        "message": message,
+    }))
+}
+
 fn architecture_policy_explain_tool(
     repo: &Path,
     store: &SqliteStore,
@@ -859,52 +895,76 @@ fn architecture_policy_explain_tool(
 ) -> anyhow::Result<Value> {
     let file = params.get("file").and_then(Value::as_str);
     let symbol = params.get("symbol").and_then(Value::as_str);
-    let (query_kind, query, file_path, symbol_value) = match (file, symbol) {
-        (Some(path), None) => {
+    let scope = params.get("scope").and_then(Value::as_str);
+    if let Some(scope) = scope {
+        anyhow::ensure!(
+            scope == "repo",
+            "unsupported architecture policy scope `{scope}`"
+        );
+    }
+    let selectors = file.is_some() as u8 + symbol.is_some() as u8 + scope.is_some() as u8;
+    anyhow::ensure!(
+        selectors <= 1,
+        "provide exactly one of `file`, `symbol`, or `scope`"
+    );
+    let (query_kind, query, file_path, symbol_value) = match (file, symbol, scope) {
+        (Some(path), None, None) => {
             let path = repo_relative_path(repo, Path::new(path));
-            ("file", path.display().to_string(), path, Value::Null)
+            ("file", path.display().to_string(), Some(path), Value::Null)
         }
-        (None, Some(query)) => {
+        (None, Some(query), None) => {
             let symbol = SymbolEngine::new(store).definition(query)?;
             let file_path = file_path_for_symbol(store, &symbol)?;
             (
                 "symbol",
                 query.to_string(),
-                file_path,
+                Some(file_path),
                 serde_json::to_value(symbol)?,
             )
         }
-        (Some(_), Some(_)) => anyhow::bail!("provide exactly one of `file` or `symbol`"),
-        (None, None) => anyhow::bail!("missing required `file` or `symbol` argument"),
+        (None, None, Some("repo")) | (None, None, None) => {
+            ("repo", repo.display().to_string(), None, Value::Null)
+        }
+        _ => unreachable!("selector count was validated above"),
     };
     let mut uncertainty = Vec::new();
-    let components = match resolver.resolve_node(&file_path, None) {
-        Ok(resolved) => resolved.components,
-        Err(unmapped) => {
-            uncertainty.push(format!(
-                "{} did not match any architecture policy component",
-                unmapped.file_path.display()
-            ));
-            Vec::new()
+    let components = if let Some(file_path) = &file_path {
+        match resolver.resolve_node(file_path, None) {
+            Ok(resolved) => resolved.components,
+            Err(unmapped) => {
+                uncertainty.push(format!(
+                    "{} did not match any architecture policy component",
+                    unmapped.file_path.display()
+                ));
+                Vec::new()
+            }
         }
+    } else {
+        Vec::new()
     };
     let boundary = evaluate_public_api_boundary(store, resolver, policy)?;
     let violations = boundary
         .violations
         .into_iter()
-        .filter(|violation| {
-            violation.source_path == file_path || violation.target_path == file_path
+        .filter(|violation| match &file_path {
+            Some(file_path) => {
+                violation.source_path == *file_path || violation.target_path == *file_path
+            }
+            None => true,
         })
         .collect::<Vec<_>>();
     let exemptions = boundary
         .exemptions
         .into_iter()
-        .filter(|exemption| {
-            exemption.source_path == file_path || exemption.target_path == file_path
+        .filter(|exemption| match &file_path {
+            Some(file_path) => {
+                exemption.source_path == *file_path || exemption.target_path == *file_path
+            }
+            None => true,
         })
         .collect::<Vec<_>>();
     uncertainty.extend(boundary.uncertainty);
-    if violations.is_empty() && exemptions.is_empty() {
+    if file_path.is_some() && violations.is_empty() && exemptions.is_empty() {
         uncertainty.push("no public API boundary findings matched this query".into());
     }
     uncertainty.sort();
