@@ -706,6 +706,94 @@
         "name": "plan_change"
       },
       {
+        "description": "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility.",
+        "experimental": false,
+        "inputSchema": {
+          "oneOf": [
+            {
+              "required": [
+                "task"
+              ]
+            },
+            {
+              "required": [
+                "plan"
+              ]
+            },
+            {
+              "required": [
+                "plan_json"
+              ]
+            }
+          ],
+          "properties": {
+            "format": {
+              "description": "Return format. Defaults to json.",
+              "enum": [
+                "json",
+                "markdown",
+                "toon"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "description": "Maximum planning results to generate when task is provided. Defaults to 20.",
+              "type": "integer"
+            },
+            "plan": {
+              "description": "Inline PlanReport object used as the source plan.",
+              "type": "object"
+            },
+            "plan_json": {
+              "description": "JSON-encoded PlanReport used as the source plan.",
+              "type": "string"
+            },
+            "since": {
+              "description": "Optional git revision/range used with git diff --unified=0 when planning from task.",
+              "type": "string"
+            },
+            "store": {
+              "description": "Persist the contract under .ok/contracts. Defaults to true.",
+              "type": "boolean"
+            },
+            "task": {
+              "description": "Natural language task used to build a fresh plan before contract creation.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "create_change_contract"
+      },
+      {
+        "description": "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON.",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "contract_id": {
+              "description": "Stored contract id.",
+              "type": "string"
+            },
+            "format": {
+              "description": "Return format. Defaults to json.",
+              "enum": [
+                "json",
+                "markdown",
+                "toon"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract_id"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "get_change_contract"
+      },
+      {
         "description": "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters.",
         "experimental": false,
         "inputSchema": {
@@ -992,6 +1080,144 @@
         },
         "maturity": "stable",
         "name": "verify_change"
+      },
+      {
+        "description": "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts.",
+        "experimental": false,
+        "inputSchema": {
+          "oneOf": [
+            {
+              "required": [
+                "contract_id"
+              ]
+            },
+            {
+              "required": [
+                "contract"
+              ]
+            },
+            {
+              "required": [
+                "contract_json"
+              ]
+            }
+          ],
+          "properties": {
+            "changed_files": {
+              "description": "List of repository-relative paths of changed files.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "check_api_surface": {
+              "description": "Set true to detect public API additions, removals, and signature changes during verification.",
+              "type": "boolean"
+            },
+            "check_dependency_delta": {
+              "description": "Set true to detect dependency graph deltas and flag forbidden dependency additions.",
+              "type": "boolean"
+            },
+            "contract": {
+              "description": "Inline ChangeContractV1 or StoredContractRecord object.",
+              "type": "object"
+            },
+            "contract_id": {
+              "description": "Stored contract id.",
+              "type": "string"
+            },
+            "contract_json": {
+              "description": "JSON-encoded ChangeContractV1 or StoredContractRecord.",
+              "type": "string"
+            },
+            "diff": {
+              "description": "The unified diff showing the actual changes.",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "description": "List of evidence reference identifiers.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "format": {
+              "description": "Return format. Defaults to json.",
+              "enum": [
+                "json",
+                "markdown",
+                "toon"
+              ],
+              "type": "string"
+            },
+            "run_commands": {
+              "description": "Set true to execute validation commands defined in the contract.",
+              "type": "boolean"
+            },
+            "since_plan": {
+              "description": "Optional git revision/range used with git diff --unified=0 to derive changed files and diff input.",
+              "type": "string"
+            },
+            "traceability_strict": {
+              "description": "Set true to reject supplied evidence references that are not present in the contract.",
+              "type": "boolean"
+            },
+            "validation_attestations": {
+              "description": "Previously recorded validation attestations to replay during verification.",
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "write_attestation": {
+              "description": "Set true with run_commands and a stored contract id to persist validation attestations.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "verify_change_contract"
+      },
+      {
+        "description": "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.",
+        "experimental": false,
+        "inputSchema": {
+          "oneOf": [
+            {
+              "required": [
+                "verification"
+              ]
+            },
+            {
+              "required": [
+                "verification_json"
+              ]
+            }
+          ],
+          "properties": {
+            "format": {
+              "description": "Return format. Defaults to json.",
+              "enum": [
+                "json",
+                "markdown",
+                "toon"
+              ],
+              "type": "string"
+            },
+            "verification": {
+              "description": "Inline ContractVerificationReport object.",
+              "type": "object"
+            },
+            "verification_json": {
+              "description": "JSON-encoded ContractVerificationReport.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "explain_verification"
       },
       {
         "description": "Map a runtime stack trace to indexed source locations and file lines.",

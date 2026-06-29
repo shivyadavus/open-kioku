@@ -6,12 +6,16 @@ use open_kioku_architecture::{
 use open_kioku_config::{load_architecture_policy, load_architecture_policy_from_path, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
-use open_kioku_contract::{ContractStore, FsContractStore};
+use open_kioku_contract::{
+    ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
+};
 use open_kioku_core::{Confidence, ContextHandleId, PlanReport, PolicyCheckReport, SymbolId};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
-use open_kioku_patch::{ChangeVerifier, PatchPlanner, VerifyChangeInput};
-use open_kioku_plan::{PlanEngine, PlanFormat};
+use open_kioku_patch::{
+    ChangeVerifier, ContractVerificationReport, ContractVerifier, PatchPlanner, VerifyChangeInput,
+};
+use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
@@ -217,6 +221,28 @@ async fn dispatch(
                 "toon" => Ok(json!(PlanFormat::Toon.render(&report)?)),
                 _ => Ok(json!(report)),
             }
+        }
+        "create_change_contract" => {
+            let plan = contract_plan_from_params(repo, store, &params)?;
+            let contract = ContractBuilder::from_plan(&plan)?;
+            let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
+            let should_store = params.get("store").and_then(Value::as_bool).unwrap_or(true);
+            if should_store {
+                contract_store.save(&contract)?;
+            }
+            let output = ContractCreateToolOutput {
+                contract_id: contract.id.0.clone(),
+                stored: should_store,
+                store_path: should_store.then(|| {
+                    repo.join(".ok/contracts")
+                        .join(format!("{}.json", contract.id.0))
+                }),
+                contract,
+            };
+            Ok(format_contract_create_output(
+                &output,
+                format_arg(&params, "json"),
+            )?)
         }
         "remember_fact" => {
             let text = required_str(&params, "text")?;
@@ -458,6 +484,24 @@ async fn dispatch(
                         architecture_policy,
                     },
                 )?))
+        }
+        "verify_change_contract" => verify_change_contract_tool(repo, store, &params),
+        "get_change_contract" => {
+            let contract_id = required_str(&params, "contract_id")?;
+            let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
+            let contract = contract_store.load(&ContractId::new(contract_id))?;
+            Ok(format_contract_output(
+                &contract,
+                format_arg(&params, "json"),
+            )?)
+        }
+        "explain_verification" => {
+            let report = verification_report_from_params(&params)?;
+            let explanation = explain_verification_report(&report);
+            Ok(format_verification_explanation(
+                &explanation,
+                format_arg(&params, "json"),
+            )?)
         }
         "apply_patch" => {
             gate.ensure_allowed(ActionKind::ApplyPatch)?;
@@ -795,6 +839,8 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_compressed_context."}}})),
         ("plan_change", "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The format of the plan."}}})),
+        ("create_change_contract", "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility.", json!({"type":"object","properties":{"task":{"type":"string","description":"Natural language task used to build a fresh plan before contract creation."},"plan":{"type":"object","description":"Inline PlanReport object used as the source plan."},"plan_json":{"type":"string","description":"JSON-encoded PlanReport used as the source plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 when planning from task."},"limit":{"type":"integer","description":"Maximum planning results to generate when task is provided. Defaults to 20."},"store":{"type":"boolean","description":"Persist the contract under .ok/contracts. Defaults to true."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["task"]},{"required":["plan"]},{"required":["plan_json"]}]})),
+        ("get_change_contract", "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON.", json!({"type":"object","required":["contract_id"],"properties":{"contract_id":{"type":"string","description":"Stored contract id."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}}})),
         ("remember_fact", "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters.", json!({"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"The fact text to remember."},"source":{"type":"string","description":"The source or tool that observed the fact. Defaults to 'mcp'."},"confidence":{"type":"string","enum":["low","medium","high","exact"],"description":"The confidence level of the fact."}}})),
         ("search_memory", "Search through the append-only repository memory facts using keyword and entity matches.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against facts."},"limit":{"type":"integer","description":"Maximum number of facts to return. Defaults to 20."}}})),
         ("explain_file", "Retrieve the metadata, syntax parsing status, and all code chunks for a single repository file.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file."}}})),
@@ -808,6 +854,8 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("review_patch", "Review a proposed patch plan for safety, target constraints, and completeness.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier associated with the patch."}}})),
         ("validate_patch", "Validate a patch plan against codebase boundaries and references to detect warnings.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier."}}})),
         ("verify_change", "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the saved plan."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API additions, removals, and signature changes during verification."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph deltas and flag forbidden dependency additions."},"run_commands":{"type":"boolean","description":"Set true to execute the validation commands defined in the plan."},"write_attestation":{"type":"boolean","description":"Set true with run_commands to persist validation attestations under .ok/contracts/validation."}}})),
+        ("verify_change_contract", "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts.", json!({"type":"object","properties":{"contract_id":{"type":"string","description":"Stored contract id."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the contract."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API additions, removals, and signature changes during verification."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph deltas and flag forbidden dependency additions."},"run_commands":{"type":"boolean","description":"Set true to execute validation commands defined in the contract."},"write_attestation":{"type":"boolean","description":"Set true with run_commands and a stored contract id to persist validation attestations."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during verification."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["contract_id"]},{"required":["contract"]},{"required":["contract_json"]}]})),
+        ("explain_verification", "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.", json!({"type":"object","properties":{"verification":{"type":"object","description":"Inline ContractVerificationReport object."},"verification_json":{"type":"string","description":"JSON-encoded ContractVerificationReport."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["verification"]},{"required":["verification_json"]}]})),
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),
@@ -1134,6 +1182,593 @@ fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
         );
     }
     Ok(Some(String::from_utf8(output.stdout)?))
+}
+
+#[derive(Debug, Serialize)]
+struct ContractCreateToolOutput {
+    contract_id: String,
+    stored: bool,
+    store_path: Option<PathBuf>,
+    contract: ChangeContractV1,
+}
+
+#[derive(Debug, Serialize)]
+struct VerificationExplanationOutput {
+    contract_id: String,
+    decision: String,
+    changed_files: Vec<String>,
+    boundary_failures: Vec<String>,
+    warnings: Vec<String>,
+    dependency_deltas: Vec<String>,
+    api_surface_findings: Vec<String>,
+    validation_attestations: Vec<String>,
+    recommended_tests: Vec<String>,
+    evidence_refs: Vec<String>,
+}
+
+fn contract_plan_from_params(
+    repo: &Path,
+    store: &SqliteStore,
+    params: &Value,
+) -> anyhow::Result<PlanReport> {
+    let task = params.get("task").and_then(Value::as_str);
+    let plan = params.get("plan").filter(|value| !value.is_null());
+    let plan_json = params.get("plan_json").and_then(Value::as_str);
+    let selectors = task.is_some() as u8 + plan.is_some() as u8 + plan_json.is_some() as u8;
+    anyhow::ensure!(
+        selectors == 1,
+        "create_change_contract requires exactly one of `task`, `plan`, or `plan_json`"
+    );
+
+    if let Some(plan) = plan {
+        return Ok(serde_json::from_value(plan.clone())?);
+    }
+    if let Some(plan_json) = plan_json {
+        return Ok(serde_json::from_str(plan_json)?);
+    }
+
+    let mut task = task.unwrap_or_default().to_string();
+    if let Some(since) = params.get("since").and_then(Value::as_str) {
+        task = task_with_changed_ranges(repo, &task, since)?;
+    }
+    let limit = limit(params);
+    let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
+    let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
+    context.architecture_policy = configured_architecture_policy_report(repo, store)?;
+    Ok(PlanEngine::new(store as &dyn OkStore)
+        .with_memory_facts(memory_facts)
+        .plan_from_context(&task, limit, context)?)
+}
+
+fn verify_change_contract_tool(
+    repo: &Path,
+    store: &SqliteStore,
+    params: &Value,
+) -> anyhow::Result<Value> {
+    let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
+    let (contract, stored) = contract_from_params(&contract_store, params)?;
+    let write_attestation = bool_arg(params, "write_attestation");
+    if write_attestation && !stored {
+        anyhow::bail!("write_attestation requires a stored `contract_id`");
+    }
+
+    let mut changed_files = path_array_arg(params, "changed_files")
+        .or_else(|| path_array_arg(params, "changed"))
+        .unwrap_or_default();
+    let mut unified_diff = params
+        .get("diff")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
+        for change in changed_ranges_since(repo, since)? {
+            if let Some(path) = change.new_path.or(change.old_path) {
+                changed_files.push(path);
+            }
+        }
+        if unified_diff.is_none() {
+            unified_diff = git_diff_since(repo, since)?;
+        }
+    }
+
+    let architecture_policy = load_architecture_policy(repo)?;
+    let check_dependency_delta = bool_arg(params, "check_dependency_delta")
+        || bool_arg(params, "check_deps")
+        || architecture_policy.is_some();
+    let validation_attestations = params
+        .get("validation_attestations")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let index_dir = default_index_dir(repo);
+    let search_index = if TantivySearchIndex::exists(&index_dir) {
+        Some(TantivySearchIndex::open_or_create(index_dir)?)
+    } else {
+        None
+    };
+
+    let report = ContractVerifier::new(store as &dyn OkStore)
+        .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+        .with_contract_store(if stored {
+            Some(&contract_store as &dyn ContractStore)
+        } else {
+            None
+        })
+        .verify(
+            repo,
+            &contract,
+            VerifyChangeInput {
+                changed_files,
+                unified_diff,
+                evidence_refs: string_array_arg(params, "evidence_refs").unwrap_or_default(),
+                run_commands: bool_arg(params, "run_commands"),
+                write_attestation,
+                validation_attestations,
+                traceability_strict: bool_arg(params, "traceability_strict"),
+                check_api_surface: bool_arg(params, "check_api_surface"),
+                check_dependency_delta,
+                architecture_policy,
+            },
+        )?;
+    format_contract_verification_output(&report, format_arg(params, "json"))
+}
+
+fn contract_from_params(
+    store: &FsContractStore,
+    params: &Value,
+) -> anyhow::Result<(ChangeContractV1, bool)> {
+    let contract_id = params
+        .get("contract_id")
+        .or_else(|| params.get("id"))
+        .and_then(Value::as_str);
+    let contract = params.get("contract").filter(|value| !value.is_null());
+    let contract_json = params.get("contract_json").and_then(Value::as_str);
+    let selectors =
+        contract_id.is_some() as u8 + contract.is_some() as u8 + contract_json.is_some() as u8;
+    anyhow::ensure!(
+        selectors == 1,
+        "contract input requires exactly one of `contract_id`, `contract`, or `contract_json`"
+    );
+
+    if let Some(id) = contract_id {
+        return Ok((store.load(&ContractId::new(id))?, true));
+    }
+    if let Some(contract) = contract {
+        return Ok((contract_from_value(contract.clone())?, false));
+    }
+    Ok((
+        contract_from_json(contract_json.unwrap_or_default())?,
+        false,
+    ))
+}
+
+fn contract_from_value(value: Value) -> anyhow::Result<ChangeContractV1> {
+    if let Ok(contract) = serde_json::from_value::<ChangeContractV1>(value.clone()) {
+        return Ok(contract);
+    }
+    let record: StoredContractRecord = serde_json::from_value(value)?;
+    Ok(record.contract)
+}
+
+fn contract_from_json(json: &str) -> anyhow::Result<ChangeContractV1> {
+    if let Ok(contract) = serde_json::from_str::<ChangeContractV1>(json) {
+        return Ok(contract);
+    }
+    let record: StoredContractRecord = serde_json::from_str(json)?;
+    Ok(record.contract)
+}
+
+fn verification_report_from_params(params: &Value) -> anyhow::Result<ContractVerificationReport> {
+    if let Some(report) = params
+        .get("verification")
+        .or_else(|| params.get("report"))
+        .filter(|value| !value.is_null())
+    {
+        return Ok(serde_json::from_value(report.clone())?);
+    }
+    if let Some(json) = params.get("verification_json").and_then(Value::as_str) {
+        return Ok(serde_json::from_str(json)?);
+    }
+    anyhow::bail!("explain_verification requires `verification` object or `verification_json`")
+}
+
+fn explain_verification_report(
+    report: &ContractVerificationReport,
+) -> VerificationExplanationOutput {
+    VerificationExplanationOutput {
+        contract_id: report.contract_id.clone(),
+        decision: format!("{:?}", report.decision),
+        changed_files: report
+            .change_report
+            .changed_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        boundary_failures: verification_finding_summaries(
+            &report.change_report.boundary_violations,
+        ),
+        warnings: verification_finding_summaries(&report.change_report.warnings),
+        dependency_deltas: report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .map(|finding| {
+                format!(
+                    "{:?}: {} -> {} ({})",
+                    finding.classification, finding.source, finding.target, finding.reason
+                )
+            })
+            .collect(),
+        api_surface_findings: report
+            .api_surface
+            .as_ref()
+            .map(|surface| verification_finding_summaries(&surface.findings))
+            .unwrap_or_default(),
+        validation_attestations: report
+            .change_report
+            .validation_attestations
+            .iter()
+            .map(|attestation| attestation.id.clone())
+            .collect(),
+        recommended_tests: report
+            .change_report
+            .recommended_tests
+            .iter()
+            .map(|test| format!("{}: {}", test.name, test.reason))
+            .collect(),
+        evidence_refs: report.change_report.evidence_refs.clone(),
+    }
+}
+
+fn format_arg<'a>(params: &'a Value, default: &'a str) -> &'a str {
+    params
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+}
+
+fn bool_arg(params: &Value, key: &str) -> bool {
+    params.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn path_array_arg(params: &Value, key: &str) -> Option<Vec<PathBuf>> {
+    params.get(key).and_then(Value::as_array).map(|values| {
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(PathBuf::from)
+            .collect()
+    })
+}
+
+fn string_array_arg(params: &Value, key: &str) -> Option<Vec<String>> {
+    params.get(key).and_then(Value::as_array).map(|values| {
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn format_contract_create_output(
+    output: &ContractCreateToolOutput,
+    format: &str,
+) -> anyhow::Result<Value> {
+    match format {
+        "markdown" => Ok(json!(render_contract_create_markdown(output))),
+        "toon" => Ok(json!(render_contract_create_toon(output))),
+        "json" => Ok(json!(output)),
+        other => anyhow::bail!("unsupported contract format `{other}`"),
+    }
+}
+
+fn format_contract_output(contract: &ChangeContractV1, format: &str) -> anyhow::Result<Value> {
+    match format {
+        "markdown" => Ok(json!(render_contract_markdown(contract))),
+        "toon" => Ok(json!(render_contract_toon(contract))),
+        "json" => Ok(json!(contract)),
+        other => anyhow::bail!("unsupported contract format `{other}`"),
+    }
+}
+
+fn format_contract_verification_output(
+    report: &ContractVerificationReport,
+    format: &str,
+) -> anyhow::Result<Value> {
+    match format {
+        "markdown" => Ok(json!(render_contract_verification_markdown(report))),
+        "toon" => Ok(json!(render_contract_verification_toon(report))),
+        "json" => Ok(json!(report)),
+        other => anyhow::bail!("unsupported contract format `{other}`"),
+    }
+}
+
+fn format_verification_explanation(
+    explanation: &VerificationExplanationOutput,
+    format: &str,
+) -> anyhow::Result<Value> {
+    match format {
+        "markdown" => Ok(json!(render_verification_explanation_markdown(explanation))),
+        "toon" => Ok(json!(render_verification_explanation_toon(explanation))),
+        "json" => Ok(json!(explanation)),
+        other => anyhow::bail!("unsupported verification explanation format `{other}`"),
+    }
+}
+
+fn render_contract_create_markdown(output: &ContractCreateToolOutput) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Change Contract `{}`\n\n", output.contract_id));
+    out.push_str(&format!("- Stored: `{}`\n", output.stored));
+    if let Some(path) = &output.store_path {
+        out.push_str(&format!("- Path: `{}`\n", path.display()));
+    }
+    out.push('\n');
+    out.push_str(&render_contract_markdown(&output.contract));
+    out
+}
+
+fn render_contract_create_toon(output: &ContractCreateToolOutput) -> String {
+    let path = output
+        .store_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    format!(
+        "type: contract_create\nid: {}\nstored: {}\npath: {}\n{}",
+        output.contract_id,
+        output.stored,
+        path,
+        render_contract_toon(&output.contract)
+    )
+}
+
+fn render_contract_markdown(contract: &ChangeContractV1) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Change Contract `{}`\n\n", contract.id.0));
+    out.push_str(&format!("Task: {}\n\n", contract.task));
+    push_markdown_list(
+        &mut out,
+        "Primary Files",
+        &contract_files(&contract.primary_files),
+    );
+    push_markdown_list(
+        &mut out,
+        "Secondary Files",
+        &contract_files(&contract.secondary_files),
+    );
+    push_markdown_list(
+        &mut out,
+        "Forbidden Files",
+        &contract_files(&contract.forbidden_files),
+    );
+    push_markdown_list(
+        &mut out,
+        "Architecture Constraints",
+        &contract
+            .architecture_constraints
+            .iter()
+            .map(|constraint| {
+                format!(
+                    "{} ({:?}): {}",
+                    constraint.rule, constraint.severity, constraint.reason
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    push_markdown_list(
+        &mut out,
+        "Validation Commands",
+        &contract
+            .validation_commands
+            .iter()
+            .map(|command| format!("{}: {}", command.command, command.reason))
+            .collect::<Vec<_>>(),
+    );
+    out.push_str(&format!(
+        "\nRisk: `{:?}` {:.2}\nConfidence: `{:?}` {:.2}\nEvidence refs: `{}`\n",
+        contract.risk.level,
+        contract.risk.score,
+        contract.confidence.level,
+        contract.confidence.score,
+        contract.evidence_refs.len()
+    ));
+    out
+}
+
+fn render_contract_toon(contract: &ChangeContractV1) -> String {
+    let mut out = format!(
+        "type: change_contract\nid: {}\ntask: {}\nrisk: {:?} {:.2}\nconfidence: {:?} {:.2}\n",
+        contract.id.0,
+        contract.task,
+        contract.risk.level,
+        contract.risk.score,
+        contract.confidence.level,
+        contract.confidence.score
+    );
+    push_toon_list(
+        &mut out,
+        "primary_files",
+        &contract_files(&contract.primary_files),
+    );
+    push_toon_list(
+        &mut out,
+        "architecture_constraints",
+        &contract
+            .architecture_constraints
+            .iter()
+            .map(|constraint| constraint.rule.clone())
+            .collect::<Vec<_>>(),
+    );
+    push_toon_list(
+        &mut out,
+        "validation_commands",
+        &contract
+            .validation_commands
+            .iter()
+            .map(|command| command.command.clone())
+            .collect::<Vec<_>>(),
+    );
+    out
+}
+
+fn render_contract_verification_markdown(report: &ContractVerificationReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Contract Verification `{}`\n\nDecision: `{:?}`\n\n",
+        report.contract_id, report.decision
+    ));
+    push_markdown_list(
+        &mut out,
+        "Changed Files",
+        &report
+            .change_report
+            .changed_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+    );
+    push_markdown_list(
+        &mut out,
+        "Boundary Failures",
+        &verification_finding_summaries(&report.change_report.boundary_violations),
+    );
+    push_markdown_list(
+        &mut out,
+        "Warnings",
+        &verification_finding_summaries(&report.change_report.warnings),
+    );
+    push_markdown_list(
+        &mut out,
+        "Dependency Deltas",
+        &report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .map(|finding| {
+                format!(
+                    "{:?}: {} -> {} ({})",
+                    finding.classification, finding.source, finding.target, finding.reason
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    out
+}
+
+fn render_contract_verification_toon(report: &ContractVerificationReport) -> String {
+    let mut out = format!(
+        "type: contract_verification\nid: {}\ndecision: {:?}\n",
+        report.contract_id, report.decision
+    );
+    push_toon_list(
+        &mut out,
+        "changed_files",
+        &report
+            .change_report
+            .changed_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+    );
+    push_toon_list(
+        &mut out,
+        "dependency_deltas",
+        &report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .map(|finding| format!("{:?}:{}", finding.classification, finding.reason))
+            .collect::<Vec<_>>(),
+    );
+    out
+}
+
+fn render_verification_explanation_markdown(explanation: &VerificationExplanationOutput) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Verification Explanation `{}`\n\nDecision: `{}`\n\n",
+        explanation.contract_id, explanation.decision
+    ));
+    push_markdown_list(&mut out, "Changed Files", &explanation.changed_files);
+    push_markdown_list(
+        &mut out,
+        "Boundary Failures",
+        &explanation.boundary_failures,
+    );
+    push_markdown_list(&mut out, "Warnings", &explanation.warnings);
+    push_markdown_list(
+        &mut out,
+        "Dependency Deltas",
+        &explanation.dependency_deltas,
+    );
+    push_markdown_list(
+        &mut out,
+        "API Surface Findings",
+        &explanation.api_surface_findings,
+    );
+    push_markdown_list(
+        &mut out,
+        "Validation Attestations",
+        &explanation.validation_attestations,
+    );
+    push_markdown_list(
+        &mut out,
+        "Recommended Tests",
+        &explanation.recommended_tests,
+    );
+    out
+}
+
+fn render_verification_explanation_toon(explanation: &VerificationExplanationOutput) -> String {
+    let mut out = format!(
+        "type: verification_explanation\nid: {}\ndecision: {}\n",
+        explanation.contract_id, explanation.decision
+    );
+    push_toon_list(&mut out, "changed_files", &explanation.changed_files);
+    push_toon_list(
+        &mut out,
+        "boundary_failures",
+        &explanation.boundary_failures,
+    );
+    push_toon_list(&mut out, "warnings", &explanation.warnings);
+    push_toon_list(
+        &mut out,
+        "dependency_deltas",
+        &explanation.dependency_deltas,
+    );
+    out
+}
+
+fn contract_files(files: &[open_kioku_contract::ContractFile]) -> Vec<String> {
+    files.iter().map(|file| file.as_str().to_string()).collect()
+}
+
+fn verification_finding_summaries(
+    findings: &[open_kioku_patch::VerificationFinding],
+) -> Vec<String> {
+    findings
+        .iter()
+        .map(|finding| format!("{}: {}", finding.kind, finding.reason))
+        .collect()
+}
+
+fn push_markdown_list(out: &mut String, title: &str, values: &[String]) {
+    out.push_str(&format!("## {title}\n\n"));
+    if values.is_empty() {
+        out.push_str("- None\n\n");
+    } else {
+        for value in values {
+            out.push_str(&format!("- `{value}`\n"));
+        }
+        out.push('\n');
+    }
+}
+
+fn push_toon_list(out: &mut String, name: &str, values: &[String]) {
+    out.push_str(&format!("{name}[{}]:\n", values.len()));
+    for value in values {
+        out.push_str(&format!("  - {value}\n"));
+    }
 }
 
 fn plan_from_params(params: &Value) -> anyhow::Result<PlanReport> {
