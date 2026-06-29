@@ -10,7 +10,8 @@ use open_kioku_config::{
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
-    ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
+    ApiSurfaceConstraint, ChangeContractV1, ContractFile, ContractId, ContractStore,
+    DependencyDeltaConstraint, FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
     Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
@@ -46,7 +47,7 @@ use open_kioku_tests::TestSelector;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
@@ -218,6 +219,7 @@ enum Command {
     },
     Bench(BenchArgs),
     WorkflowBench(WorkflowBenchArgs),
+    ContractBench(ContractBenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),
 
@@ -587,6 +589,49 @@ struct WorkflowBenchArgs {
     /// Fail unless at least this many cases are loaded.
     #[arg(long, default_value_t = 20)]
     min_cases: usize,
+}
+
+#[derive(Args)]
+struct ContractBenchArgs {
+    /// Repository fixture to index and benchmark.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// JSON file containing contract benchmark cases.
+    #[arg(long, default_value = "benchmarks/contract-cases.json")]
+    cases_file: PathBuf,
+
+    /// Number of context/test/impact results considered while generating contracts.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+
+    /// Use the existing .ok index in each benchmark copy instead of re-indexing.
+    #[arg(long, default_value_t = false)]
+    no_index: bool,
+
+    /// Fail unless at least this many cases are loaded.
+    #[arg(long, default_value_t = 7)]
+    min_cases: usize,
+
+    /// Fail when exact contract-verification verdict accuracy is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_verdict_accuracy: f64,
+
+    /// Fail when non-pass verification precision is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_verification_precision: f64,
+
+    /// Fail when generated contract boundary precision is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_boundary_precision: f64,
+
+    /// Fail when generated contract boundary recall is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_boundary_recall: f64,
+
+    /// Fail when the smallest TOON byte reduction is below this threshold.
+    #[arg(long, default_value_t = 0.0)]
+    min_toon_reduction: f64,
 }
 
 #[derive(Args)]
@@ -1070,6 +1115,147 @@ struct WorkflowBenchCaseReport {
     top_context_paths: Vec<PathBuf>,
     top_impact_paths: Vec<PathBuf>,
     top_tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ContractBenchCase {
+    id: String,
+    rule_family: ContractBenchRuleFamily,
+    task: String,
+    expected_verdict: VerificationVerdict,
+    #[serde(default)]
+    expected_contract: ContractBenchExpectedContract,
+    #[serde(default)]
+    contract_overlay: ContractBenchContractOverlay,
+    #[serde(default)]
+    edits: Vec<ContractBenchEdit>,
+    #[serde(default)]
+    changed_files: Vec<PathBuf>,
+    #[serde(default)]
+    unified_diff: Option<String>,
+    #[serde(default)]
+    expected_findings: Vec<String>,
+    #[serde(default)]
+    explanation_terms: Vec<String>,
+    #[serde(default)]
+    check_api_surface: bool,
+    #[serde(default)]
+    check_dependency_delta: bool,
+    #[serde(default)]
+    traceability_strict: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ContractBenchExpectedContract {
+    #[serde(default)]
+    primary_files: Vec<String>,
+    #[serde(default)]
+    allowed_boundary: Vec<String>,
+    #[serde(default)]
+    forbidden_paths: Vec<String>,
+    #[serde(default)]
+    min_required_tests: usize,
+    #[serde(default)]
+    min_traceability: usize,
+    #[serde(default)]
+    min_architecture_constraints: usize,
+    #[serde(default)]
+    min_evidence_refs: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ContractBenchContractOverlay {
+    #[serde(default)]
+    primary_files: Vec<ContractFile>,
+    #[serde(default)]
+    secondary_files: Vec<ContractFile>,
+    #[serde(default)]
+    forbidden_files: Vec<ContractFile>,
+    #[serde(default)]
+    api_surface_constraints: Vec<ApiSurfaceConstraint>,
+    #[serde(default)]
+    dependency_delta_constraints: Vec<DependencyDeltaConstraint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ContractBenchEdit {
+    path: PathBuf,
+    content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ContractBenchRuleFamily {
+    AllowedEdit,
+    ForbiddenEdit,
+    MissingTests,
+    ArchitectureViolation,
+    DependencyDelta,
+    ApiSurfaceDelta,
+    ExplanationQuality,
+}
+
+#[derive(Serialize)]
+struct ContractBenchReport {
+    repo: PathBuf,
+    cases_file: PathBuf,
+    limit: usize,
+    case_count: usize,
+    summary: ContractBenchSummary,
+    rule_families: Vec<ContractBenchFamilyReport>,
+    failures: Vec<String>,
+    cases: Vec<ContractBenchCaseReport>,
+}
+
+#[derive(Serialize, Default, Clone)]
+struct ContractBenchSummary {
+    verdict_accuracy: f64,
+    verification_precision: f64,
+    boundary_precision: f64,
+    boundary_recall: f64,
+    min_toon_reduction: f64,
+    mean_toon_reduction: f64,
+    mean_generation_ms: f64,
+    mean_verification_ms: f64,
+    true_positives: usize,
+    false_positives: usize,
+    false_negatives: usize,
+}
+
+#[derive(Serialize)]
+struct ContractBenchFamilyReport {
+    rule_family: ContractBenchRuleFamily,
+    case_count: usize,
+    verdict_accuracy: f64,
+    boundary_precision: f64,
+    boundary_recall: f64,
+}
+
+#[derive(Serialize)]
+struct ContractBenchCaseReport {
+    id: String,
+    rule_family: ContractBenchRuleFamily,
+    task: String,
+    contract_id: String,
+    expected_verdict: VerificationVerdict,
+    actual_verdict: VerificationVerdict,
+    verdict_correct: bool,
+    boundary_precision: f64,
+    boundary_recall: f64,
+    primary_file_hits: Vec<String>,
+    boundary_hits: Vec<String>,
+    forbidden_boundary_hits: Vec<String>,
+    missing_contract_fields: Vec<String>,
+    finding_hits: Vec<String>,
+    missing_findings: Vec<String>,
+    explanation_hits: Vec<String>,
+    missing_explanation_terms: Vec<String>,
+    pretty_json_bytes: usize,
+    toon_bytes: usize,
+    toon_reduction: f64,
+    generation_ms: f64,
+    verification_ms: f64,
+    passed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2304,6 +2490,69 @@ async fn main() -> anyhow::Result<()> {
                     "workflow verification accuracy {:.3} is below required {:.3}",
                     report.workflow.verification_verdict_accuracy,
                     min_verification_accuracy
+                );
+            }
+        }
+        Command::ContractBench(args) => {
+            let min_cases = args.min_cases;
+            let min_verdict_accuracy = args.min_verdict_accuracy;
+            let min_verification_precision = args.min_verification_precision;
+            let min_boundary_precision = args.min_boundary_precision;
+            let min_boundary_recall = args.min_boundary_recall;
+            let min_toon_reduction = args.min_toon_reduction;
+            let report = run_contract_bench(args)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_contract_bench_report(&report);
+            }
+            if report.case_count < min_cases {
+                anyhow::bail!(
+                    "contract benchmark loaded {} cases, below required {}",
+                    report.case_count,
+                    min_cases
+                );
+            }
+            if !report.failures.is_empty() {
+                anyhow::bail!(
+                    "contract benchmark failed {} case expectation(s): {}",
+                    report.failures.len(),
+                    report.failures.join(", ")
+                );
+            }
+            if report.summary.verdict_accuracy < min_verdict_accuracy {
+                anyhow::bail!(
+                    "contract verdict accuracy {:.3} is below required {:.3}",
+                    report.summary.verdict_accuracy,
+                    min_verdict_accuracy
+                );
+            }
+            if report.summary.verification_precision < min_verification_precision {
+                anyhow::bail!(
+                    "contract verification precision {:.3} is below required {:.3}",
+                    report.summary.verification_precision,
+                    min_verification_precision
+                );
+            }
+            if report.summary.boundary_precision < min_boundary_precision {
+                anyhow::bail!(
+                    "contract boundary precision {:.3} is below required {:.3}",
+                    report.summary.boundary_precision,
+                    min_boundary_precision
+                );
+            }
+            if report.summary.boundary_recall < min_boundary_recall {
+                anyhow::bail!(
+                    "contract boundary recall {:.3} is below required {:.3}",
+                    report.summary.boundary_recall,
+                    min_boundary_recall
+                );
+            }
+            if report.summary.min_toon_reduction < min_toon_reduction {
+                anyhow::bail!(
+                    "contract TOON reduction {:.3} is below required {:.3}",
+                    report.summary.min_toon_reduction,
+                    min_toon_reduction
                 );
             }
         }
@@ -5338,6 +5587,638 @@ fn print_workflow_bench_report(report: &WorkflowBenchReport) {
     }
 }
 
+const REQUIRED_CONTRACT_BENCH_RULE_FAMILIES: [ContractBenchRuleFamily; 7] = [
+    ContractBenchRuleFamily::AllowedEdit,
+    ContractBenchRuleFamily::ForbiddenEdit,
+    ContractBenchRuleFamily::MissingTests,
+    ContractBenchRuleFamily::ArchitectureViolation,
+    ContractBenchRuleFamily::DependencyDelta,
+    ContractBenchRuleFamily::ApiSurfaceDelta,
+    ContractBenchRuleFamily::ExplanationQuality,
+];
+
+fn run_contract_bench(args: ContractBenchArgs) -> anyhow::Result<ContractBenchReport> {
+    let repo = absolutize(&args.path)?;
+    let cases_file = resolve_contract_bench_cases_file(&repo, &args.cases_file)?;
+    let cases = load_contract_bench_cases(&cases_file)?;
+    validate_contract_bench_coverage(&cases)?;
+    let limit = args.limit.clamp(1, 100);
+    let mut reports = Vec::with_capacity(cases.len());
+
+    for case in cases {
+        let temp_repo = prepare_contract_bench_repo(&repo, &case.id)?;
+        if !args.no_index {
+            index_repo(&temp_repo.path)?;
+        }
+        let store = open_store(&temp_repo.path)?;
+        let index_dir = default_index_dir(&temp_repo.path);
+        let search_index = if TantivySearchIndex::exists(&index_dir) {
+            Some(TantivySearchIndex::open_or_create(&index_dir)?)
+        } else {
+            None
+        };
+        let planner = PlanEngine::new(&store as &dyn OkStore)
+            .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+        let generation_started = Instant::now();
+        let plan = workflow_plan(
+            &temp_repo.path,
+            &store,
+            &planner,
+            &case.task,
+            limit,
+            &cases_file,
+        )?;
+        let mut contract = ContractBuilder::from_plan(&plan)?;
+        apply_contract_bench_overlay(&mut contract, &case.contract_overlay)?;
+        let generation_ms = duration_ms(generation_started.elapsed());
+        apply_contract_bench_edits(&temp_repo.path, &case)?;
+        let verifier = ContractVerifier::new(&store as &dyn OkStore)
+            .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+        let verification_started = Instant::now();
+        let verification = verifier.verify(
+            &temp_repo.path,
+            &contract,
+            VerifyChangeInput {
+                changed_files: contract_bench_changed_files(&case),
+                unified_diff: case.unified_diff.clone(),
+                evidence_refs: Vec::new(),
+                run_commands: false,
+                write_attestation: false,
+                validation_attestations: Vec::new(),
+                traceability_strict: case.traceability_strict,
+                check_api_surface: case.check_api_surface,
+                check_dependency_delta: case.check_dependency_delta,
+                architecture_policy: load_architecture_policy(&temp_repo.path)?,
+            },
+        )?;
+        let verification_ms = duration_ms(verification_started.elapsed());
+        reports.push(score_contract_bench_case(
+            &case,
+            &contract,
+            &verification,
+            generation_ms,
+            verification_ms,
+        )?);
+    }
+
+    let summary = summarize_contract_bench_cases(&reports);
+    let rule_families = summarize_contract_bench_families(&reports);
+    let failures = reports
+        .iter()
+        .filter(|case| !case.passed)
+        .map(|case| case.id.clone())
+        .collect::<Vec<_>>();
+    Ok(ContractBenchReport {
+        repo,
+        cases_file,
+        limit,
+        case_count: reports.len(),
+        summary,
+        rule_families,
+        failures,
+        cases: reports,
+    })
+}
+
+fn resolve_contract_bench_cases_file(repo: &Path, cases_file: &Path) -> anyhow::Result<PathBuf> {
+    if cases_file.is_absolute() {
+        return Ok(cases_file.to_path_buf());
+    }
+    let repo_relative = repo.join(cases_file);
+    if repo_relative.exists() {
+        return Ok(repo_relative);
+    }
+    absolutize(cases_file)
+}
+
+fn load_contract_bench_cases(path: &Path) -> anyhow::Result<Vec<ContractBenchCase>> {
+    let raw = fs::read_to_string(path)?;
+    let cases: Vec<ContractBenchCase> = serde_json::from_str(&raw)?;
+    let mut seen = BTreeSet::new();
+    for case in &cases {
+        if case.id.trim().is_empty() || case.task.trim().is_empty() {
+            anyhow::bail!("contract benchmark cases require non-empty id and task");
+        }
+        if !seen.insert(case.id.clone()) {
+            anyhow::bail!("duplicate contract benchmark case id `{}`", case.id);
+        }
+        if case.changed_files.is_empty() && case.unified_diff.is_none() && case.edits.is_empty() {
+            anyhow::bail!(
+                "contract benchmark case `{}` requires changed_files, unified_diff, or edits",
+                case.id
+            );
+        }
+    }
+    Ok(cases)
+}
+
+fn validate_contract_bench_coverage(cases: &[ContractBenchCase]) -> anyhow::Result<()> {
+    let covered = cases
+        .iter()
+        .map(|case| case.rule_family)
+        .collect::<BTreeSet<_>>();
+    let missing = REQUIRED_CONTRACT_BENCH_RULE_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| !covered.contains(family))
+        .map(|family| format!("{family:?}"))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "contract benchmark cases missing required rule family coverage: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+struct ContractBenchTempRepo {
+    path: PathBuf,
+}
+
+impl Drop for ContractBenchTempRepo {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn prepare_contract_bench_repo(
+    repo: &Path,
+    case_id: &str,
+) -> anyhow::Result<ContractBenchTempRepo> {
+    let stamp = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
+    let path = std::env::temp_dir().join(format!(
+        "open-kioku-contract-bench-{}-{}-{}",
+        std::process::id(),
+        stamp,
+        sanitize_temp_path_fragment(case_id)
+    ));
+    copy_contract_bench_repo(repo, &path)?;
+    Ok(ContractBenchTempRepo { path })
+}
+
+fn sanitize_temp_path_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn copy_contract_bench_repo(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    if destination.exists() {
+        fs::remove_dir_all(destination)?;
+    }
+    fs::create_dir_all(destination)?;
+    for entry in walkdir::WalkDir::new(source) {
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(source)?;
+        if relative.as_os_str().is_empty() || should_skip_contract_bench_copy(relative) {
+            continue;
+        }
+        let target = destination.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_contract_bench_copy(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(name.as_ref(), ".git" | ".ok" | "target")
+    })
+}
+
+fn apply_contract_bench_overlay(
+    contract: &mut ChangeContractV1,
+    overlay: &ContractBenchContractOverlay,
+) -> anyhow::Result<()> {
+    merge_contract_files(&mut contract.primary_files, &overlay.primary_files);
+    merge_contract_files(&mut contract.secondary_files, &overlay.secondary_files);
+    merge_contract_files(&mut contract.forbidden_files, &overlay.forbidden_files);
+    remove_contract_files(&mut contract.primary_files, &overlay.forbidden_files);
+    remove_contract_files(&mut contract.secondary_files, &overlay.forbidden_files);
+    contract
+        .api_surface_constraints
+        .extend(overlay.api_surface_constraints.clone());
+    contract
+        .dependency_delta_constraints
+        .extend(overlay.dependency_delta_constraints.clone());
+    contract.validate().map_err(|err| {
+        anyhow::anyhow!("contract benchmark overlay produced invalid contract: {err}")
+    })
+}
+
+fn merge_contract_files(target: &mut Vec<ContractFile>, additions: &[ContractFile]) {
+    for addition in additions {
+        if !target
+            .iter()
+            .any(|current| same_normalized_contract_file(current, addition))
+        {
+            target.push(addition.clone());
+        }
+    }
+}
+
+fn remove_contract_files(target: &mut Vec<ContractFile>, removals: &[ContractFile]) {
+    target.retain(|candidate| {
+        !removals
+            .iter()
+            .any(|removal| same_normalized_contract_file(candidate, removal))
+    });
+}
+
+fn same_normalized_contract_file(left: &ContractFile, right: &ContractFile) -> bool {
+    normalize_path_fragment(left.as_str()) == normalize_path_fragment(right.as_str())
+}
+
+fn apply_contract_bench_edits(repo: &Path, case: &ContractBenchCase) -> anyhow::Result<()> {
+    for edit in &case.edits {
+        let path = repo.join(&edit.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &edit.content)?;
+    }
+    Ok(())
+}
+
+fn contract_bench_changed_files(case: &ContractBenchCase) -> Vec<PathBuf> {
+    if !case.changed_files.is_empty() {
+        return case.changed_files.clone();
+    }
+    case.edits.iter().map(|edit| edit.path.clone()).collect()
+}
+
+fn score_contract_bench_case(
+    case: &ContractBenchCase,
+    contract: &ChangeContractV1,
+    verification: &ContractVerificationReport,
+    generation_ms: f64,
+    verification_ms: f64,
+) -> anyhow::Result<ContractBenchCaseReport> {
+    let contract_primary = contract_pathbufs(&contract.primary_files);
+    let contract_allowed_boundary = contract_allowed_boundary_paths(contract);
+    let contract_forbidden = contract_pathbufs(&contract.forbidden_files);
+    let primary_file_hits =
+        matching_expected_values(&case.expected_contract.primary_files, &contract_primary);
+    let boundary_hits = matching_expected_values(
+        &case.expected_contract.allowed_boundary,
+        &contract_allowed_boundary,
+    );
+    let forbidden_boundary_hits = matching_expected_values(
+        &case.expected_contract.forbidden_paths,
+        &contract_allowed_boundary,
+    );
+    let forbidden_contract_hits =
+        matching_expected_values(&case.expected_contract.forbidden_paths, &contract_forbidden);
+    let mut missing_contract_fields = Vec::new();
+    push_missing_expected_values(
+        &mut missing_contract_fields,
+        "primary_files",
+        &case.expected_contract.primary_files,
+        &primary_file_hits,
+    );
+    push_missing_expected_values(
+        &mut missing_contract_fields,
+        "allowed_boundary",
+        &case.expected_contract.allowed_boundary,
+        &boundary_hits,
+    );
+    push_missing_expected_values(
+        &mut missing_contract_fields,
+        "forbidden_files",
+        &case.expected_contract.forbidden_paths,
+        &forbidden_contract_hits,
+    );
+    if contract.required_tests.len() < case.expected_contract.min_required_tests {
+        missing_contract_fields.push(format!(
+            "required_tests: expected at least {}, got {}",
+            case.expected_contract.min_required_tests,
+            contract.required_tests.len()
+        ));
+    }
+    if contract.traceability.len() < case.expected_contract.min_traceability {
+        missing_contract_fields.push(format!(
+            "traceability: expected at least {}, got {}",
+            case.expected_contract.min_traceability,
+            contract.traceability.len()
+        ));
+    }
+    if contract.architecture_constraints.len() < case.expected_contract.min_architecture_constraints
+    {
+        missing_contract_fields.push(format!(
+            "architecture_constraints: expected at least {}, got {}",
+            case.expected_contract.min_architecture_constraints,
+            contract.architecture_constraints.len()
+        ));
+    }
+    if contract.evidence_refs.len() < case.expected_contract.min_evidence_refs {
+        missing_contract_fields.push(format!(
+            "evidence_refs: expected at least {}, got {}",
+            case.expected_contract.min_evidence_refs,
+            contract.evidence_refs.len()
+        ));
+    }
+
+    let actual_finding_keys = contract_bench_finding_keys(verification);
+    let finding_hits = matching_expected_strings(&case.expected_findings, &actual_finding_keys);
+    let mut missing_findings = Vec::new();
+    push_missing_expected_values(
+        &mut missing_findings,
+        "findings",
+        &case.expected_findings,
+        &finding_hits,
+    );
+    let explanation = render_contract_explain_markdown(&explain_contract(contract));
+    let explanation_lower = explanation.to_ascii_lowercase();
+    let explanation_hits = case
+        .explanation_terms
+        .iter()
+        .filter(|term| explanation_lower.contains(&term.to_ascii_lowercase()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut missing_explanation_terms = Vec::new();
+    push_missing_expected_values(
+        &mut missing_explanation_terms,
+        "explanation_terms",
+        &case.explanation_terms,
+        &explanation_hits,
+    );
+    let pretty_json = serde_json::to_string_pretty(contract)?;
+    let toon = render_contract_toon(contract);
+    let pretty_json_bytes = pretty_json.len();
+    let toon_bytes = toon.len();
+    let toon_reduction = if pretty_json_bytes == 0 {
+        0.0
+    } else {
+        1.0 - (toon_bytes as f64 / pretty_json_bytes as f64)
+    };
+    let actual_verdict = verification.change_report.verdict;
+    let verdict_correct = actual_verdict == case.expected_verdict;
+    let boundary_precision = boundary_precision(
+        &contract_allowed_boundary,
+        &case.expected_contract.forbidden_paths,
+    );
+    let boundary_recall = ratio(
+        boundary_hits.len(),
+        case.expected_contract.allowed_boundary.len(),
+    );
+    let passed = verdict_correct
+        && missing_contract_fields.is_empty()
+        && missing_findings.is_empty()
+        && missing_explanation_terms.is_empty()
+        && forbidden_boundary_hits.is_empty();
+    Ok(ContractBenchCaseReport {
+        id: case.id.clone(),
+        rule_family: case.rule_family,
+        task: case.task.clone(),
+        contract_id: contract.id.0.clone(),
+        expected_verdict: case.expected_verdict,
+        actual_verdict,
+        verdict_correct,
+        boundary_precision,
+        boundary_recall,
+        primary_file_hits,
+        boundary_hits,
+        forbidden_boundary_hits,
+        missing_contract_fields,
+        finding_hits,
+        missing_findings,
+        explanation_hits,
+        missing_explanation_terms,
+        pretty_json_bytes,
+        toon_bytes,
+        toon_reduction,
+        generation_ms,
+        verification_ms,
+        passed,
+    })
+}
+
+fn push_missing_expected_values(
+    target: &mut Vec<String>,
+    field: &str,
+    expected: &[String],
+    hits: &[String],
+) {
+    for value in expected {
+        if !hits.iter().any(|hit| hit == value) {
+            target.push(format!("{field}: missing `{value}`"));
+        }
+    }
+}
+
+fn contract_pathbufs(files: &[ContractFile]) -> Vec<PathBuf> {
+    files
+        .iter()
+        .map(|file| PathBuf::from(file.as_str()))
+        .collect()
+}
+
+fn contract_allowed_boundary_paths(contract: &ChangeContractV1) -> Vec<PathBuf> {
+    contract
+        .primary_files
+        .iter()
+        .chain(contract.secondary_files.iter())
+        .map(|file| PathBuf::from(file.as_str()))
+        .collect()
+}
+
+fn contract_bench_finding_keys(report: &ContractVerificationReport) -> Vec<String> {
+    let mut keys = Vec::new();
+    keys.extend(
+        report
+            .change_report
+            .boundary_violations
+            .iter()
+            .map(|finding| finding.kind.clone()),
+    );
+    keys.extend(
+        report
+            .change_report
+            .warnings
+            .iter()
+            .map(|finding| finding.kind.clone()),
+    );
+    keys.extend(
+        report
+            .change_report
+            .missing_tests
+            .iter()
+            .map(|finding| finding.kind.clone()),
+    );
+    keys.extend(
+        report
+            .change_report
+            .changed_impact
+            .iter()
+            .map(|finding| finding.kind.clone()),
+    );
+    keys.extend(
+        report
+            .change_report
+            .api_surface_deltas
+            .iter()
+            .map(|finding| finding.kind.clone()),
+    );
+    keys.extend(
+        report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .map(|finding| {
+                format!("dependency_delta:{:?}", finding.classification).to_ascii_lowercase()
+            }),
+    );
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn summarize_contract_bench_cases(reports: &[ContractBenchCaseReport]) -> ContractBenchSummary {
+    let count = reports.len() as f64;
+    let verdict_correct = reports.iter().filter(|case| case.verdict_correct).count() as f64;
+    let mut true_positives = 0;
+    let mut false_positives = 0;
+    let mut false_negatives = 0;
+    for case in reports {
+        let expected_positive = case.expected_verdict != VerificationVerdict::Pass;
+        let actual_positive = case.actual_verdict != VerificationVerdict::Pass;
+        match (expected_positive, actual_positive) {
+            (true, true) => true_positives += 1,
+            (false, true) => false_positives += 1,
+            (true, false) => false_negatives += 1,
+            (false, false) => {}
+        }
+    }
+    let min_toon_reduction = reports
+        .iter()
+        .map(|case| case.toon_reduction)
+        .fold(1.0, f64::min);
+    ContractBenchSummary {
+        verdict_accuracy: mean(verdict_correct, count),
+        verification_precision: mean(
+            true_positives as f64,
+            (true_positives + false_positives) as f64,
+        ),
+        boundary_precision: mean(
+            reports
+                .iter()
+                .map(|case| case.boundary_precision)
+                .sum::<f64>(),
+            count,
+        ),
+        boundary_recall: mean(
+            reports.iter().map(|case| case.boundary_recall).sum::<f64>(),
+            count,
+        ),
+        min_toon_reduction,
+        mean_toon_reduction: mean(
+            reports.iter().map(|case| case.toon_reduction).sum::<f64>(),
+            count,
+        ),
+        mean_generation_ms: mean(
+            reports.iter().map(|case| case.generation_ms).sum::<f64>(),
+            count,
+        ),
+        mean_verification_ms: mean(
+            reports.iter().map(|case| case.verification_ms).sum::<f64>(),
+            count,
+        ),
+        true_positives,
+        false_positives,
+        false_negatives,
+    }
+}
+
+fn summarize_contract_bench_families(
+    reports: &[ContractBenchCaseReport],
+) -> Vec<ContractBenchFamilyReport> {
+    let mut grouped = BTreeMap::<ContractBenchRuleFamily, Vec<&ContractBenchCaseReport>>::new();
+    for report in reports {
+        grouped.entry(report.rule_family).or_default().push(report);
+    }
+    grouped
+        .into_iter()
+        .map(|(rule_family, cases)| {
+            let count = cases.len() as f64;
+            ContractBenchFamilyReport {
+                rule_family,
+                case_count: cases.len(),
+                verdict_accuracy: mean(
+                    cases.iter().filter(|case| case.verdict_correct).count() as f64,
+                    count,
+                ),
+                boundary_precision: mean(
+                    cases
+                        .iter()
+                        .map(|case| case.boundary_precision)
+                        .sum::<f64>(),
+                    count,
+                ),
+                boundary_recall: mean(
+                    cases.iter().map(|case| case.boundary_recall).sum::<f64>(),
+                    count,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn print_contract_bench_report(report: &ContractBenchReport) {
+    println!(
+        "Contract benchmark: {} case(s), limit {}",
+        report.case_count, report.limit
+    );
+    println!(
+        "Summary: verdict accuracy {:.3}, verification precision {:.3}, boundary precision {:.3}, boundary recall {:.3}, min TOON reduction {:.3}, mean TOON reduction {:.3}",
+        report.summary.verdict_accuracy,
+        report.summary.verification_precision,
+        report.summary.boundary_precision,
+        report.summary.boundary_recall,
+        report.summary.min_toon_reduction,
+        report.summary.mean_toon_reduction
+    );
+    for family in &report.rule_families {
+        println!(
+            "  {:?}: {} case(s), verdict {:.3}, boundary {:.3}/{:.3}",
+            family.rule_family,
+            family.case_count,
+            family.verdict_accuracy,
+            family.boundary_precision,
+            family.boundary_recall
+        );
+    }
+    for case in &report.cases {
+        println!(
+            "  {}: {:?}, verdict {:?}/{:?}, boundary {:.3}/{:.3}, TOON {:+.1}%, {}",
+            case.id,
+            case.rule_family,
+            case.actual_verdict,
+            case.expected_verdict,
+            case.boundary_precision,
+            case.boundary_recall,
+            case.toon_reduction * 100.0,
+            if case.passed { "pass" } else { "fail" }
+        );
+    }
+}
+
 fn run_eval(args: EvalArgs) -> anyhow::Result<EvalReport> {
     let repo = absolutize(&args.path)?;
     let limit = args.limit.clamp(1, 100);
@@ -5817,6 +6698,8 @@ struct ContractExplainOutput {
     secondary_files: Vec<String>,
     forbidden_files: Vec<String>,
     architecture_constraints: Vec<String>,
+    api_surface_constraints: Vec<String>,
+    dependency_delta_constraints: Vec<String>,
     required_tests: Vec<String>,
     validation_commands: Vec<String>,
     traceability: Vec<String>,
@@ -6018,6 +6901,26 @@ fn explain_contract(contract: &ChangeContractV1) -> ContractExplainOutput {
             .iter()
             .map(|constraint| format!("{} ({:?})", constraint.rule, constraint.severity))
             .collect(),
+        api_surface_constraints: contract
+            .api_surface_constraints
+            .iter()
+            .map(|constraint| {
+                format!(
+                    "{} {:?} ({:?})",
+                    constraint.scope, constraint.allowed_changes, constraint.severity
+                )
+            })
+            .collect(),
+        dependency_delta_constraints: contract
+            .dependency_delta_constraints
+            .iter()
+            .map(|constraint| {
+                format!(
+                    "{} -> {} {:?} ({:?})",
+                    constraint.source, constraint.target, constraint.action, constraint.severity
+                )
+            })
+            .collect(),
         required_tests: contract
             .required_tests
             .iter()
@@ -6217,6 +7120,16 @@ fn render_contract_explain_markdown(explanation: &ContractExplainOutput) -> Stri
         "Architecture Constraints",
         &explanation.architecture_constraints,
     );
+    push_markdown_list(
+        &mut out,
+        "API Surface Constraints",
+        &explanation.api_surface_constraints,
+    );
+    push_markdown_list(
+        &mut out,
+        "Dependency Delta Constraints",
+        &explanation.dependency_delta_constraints,
+    );
     push_markdown_list(&mut out, "Required Tests", &explanation.required_tests);
     push_markdown_list(
         &mut out,
@@ -6241,6 +7154,16 @@ fn render_contract_explain_toon(explanation: &ContractExplainOutput) -> String {
         &mut out,
         "architecture_constraints",
         &explanation.architecture_constraints,
+    );
+    push_toon_list(
+        &mut out,
+        "api_surface_constraints",
+        &explanation.api_surface_constraints,
+    );
+    push_toon_list(
+        &mut out,
+        "dependency_delta_constraints",
+        &explanation.dependency_delta_constraints,
     );
     push_toon_list(&mut out, "traceability", &explanation.traceability);
     out

@@ -1,0 +1,178 @@
+[
+  {
+    "id": "allowed-domain-pricing",
+    "rule_family": "allowed_edit",
+    "task": "update domain pricing discount calculation in src/domain/pricing.rs",
+    "expected_verdict": "warn",
+    "expected_contract": {
+      "primary_files": ["src/domain/pricing.rs"],
+      "allowed_boundary": ["src/domain/pricing.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "changed_files": ["src/domain/pricing.rs"],
+    "explanation_terms": ["primary", "traceability", "validation"]
+  },
+  {
+    "id": "forbidden-storage-boundary",
+    "rule_family": "forbidden_edit",
+    "task": "update domain pricing discount calculation in src/domain/pricing.rs",
+    "expected_verdict": "fail",
+    "expected_contract": {
+      "primary_files": ["src/domain/pricing.rs"],
+      "allowed_boundary": ["src/domain/pricing.rs"],
+      "forbidden_paths": ["src/storage/mod.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "contract_overlay": {
+      "forbidden_files": ["src/storage/mod.rs"]
+    },
+    "changed_files": ["src/storage/mod.rs"],
+    "expected_findings": ["forbidden_boundary"],
+    "explanation_terms": ["forbidden", "traceability"]
+  },
+  {
+    "id": "missing-pricing-test",
+    "rule_family": "missing_tests",
+    "task": "update checkout summary formatting in src/domain/checkout.rs",
+    "expected_verdict": "warn",
+    "expected_contract": {
+      "primary_files": ["src/domain/checkout.rs"],
+      "allowed_boundary": ["src/domain/checkout.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "changed_files": ["src/domain/pricing.rs"],
+    "expected_findings": ["missing_test"],
+    "explanation_terms": ["required", "validation"]
+  },
+  {
+    "id": "architecture-policy-violation",
+    "rule_family": "architecture_violation",
+    "task": "update domain pricing discount calculation in src/domain/pricing.rs",
+    "expected_verdict": "fail",
+    "expected_contract": {
+      "primary_files": ["src/domain/pricing.rs"],
+      "allowed_boundary": ["src/domain/pricing.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "contract_overlay": {
+      "dependency_delta_constraints": [
+        {
+          "source": "src/domain/pricing.rs",
+          "target": "crate::storage::*",
+          "edge_types": ["imports"],
+          "action": "forbid",
+          "severity": "forbidden",
+          "reason": "domain pricing must not add direct storage dependencies",
+          "evidence_refs": []
+        }
+      ]
+    },
+    "edits": [
+      {
+        "path": "src/domain/pricing.rs",
+        "content": "use crate::api::calculate_discount;\nuse crate::storage::save_order;\n\npub fn final_price(amount: u32) -> u32 {\n    let _ = save_order(\"bench\");\n    amount.saturating_sub(calculate_discount(amount))\n}\n"
+      }
+    ],
+    "check_dependency_delta": true,
+    "expected_findings": ["dependency_delta_violation"],
+    "explanation_terms": ["architecture", "boundary"]
+  },
+  {
+    "id": "contract-dependency-delta",
+    "rule_family": "dependency_delta",
+    "task": "update checkout summary formatting in src/domain/checkout.rs",
+    "expected_verdict": "fail",
+    "expected_contract": {
+      "primary_files": ["src/domain/checkout.rs"],
+      "allowed_boundary": ["src/domain/checkout.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "contract_overlay": {
+      "dependency_delta_constraints": [
+        {
+          "source": "src/domain/checkout.rs",
+          "target": "crate::storage::*",
+          "edge_types": ["imports"],
+          "action": "forbid",
+          "severity": "forbidden",
+          "reason": "checkout must not add direct storage dependencies",
+          "evidence_refs": []
+        }
+      ]
+    },
+    "edits": [
+      {
+        "path": "src/domain/checkout.rs",
+        "content": "use crate::api::format_receipt;\nuse crate::storage::save_order;\n\npub fn checkout_summary(amount: u32) -> String {\n    let _ = save_order(\"bench\");\n    format_receipt(amount)\n}\n"
+      }
+    ],
+    "check_dependency_delta": true,
+    "expected_findings": ["dependency_delta_violation"],
+    "explanation_terms": ["dependency", "validation"]
+  },
+  {
+    "id": "api-surface-addition",
+    "rule_family": "api_surface_delta",
+    "task": "update api receipt formatting in src/api/mod.rs",
+    "expected_verdict": "fail",
+    "expected_contract": {
+      "primary_files": ["src/api/mod.rs"],
+      "allowed_boundary": ["src/api/mod.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "contract_overlay": {
+      "api_surface_constraints": [
+        {
+          "scope": "src/api/mod.rs",
+          "allowed_changes": [],
+          "severity": "forbidden",
+          "reason": "public API additions require explicit contract approval",
+          "evidence_refs": []
+        }
+      ]
+    },
+    "edits": [
+      {
+        "path": "src/api/mod.rs",
+        "content": "pub fn calculate_discount(amount: u32) -> u32 {\n    amount / 10\n}\n\npub fn format_receipt(amount: u32) -> String {\n    format!(\"receipt:{amount}\")\n}\n\npub fn experimental_receipt(amount: u32) -> String {\n    format!(\"experimental:{amount}\")\n}\n"
+      }
+    ],
+    "check_api_surface": true,
+    "expected_findings": ["api_surface_violation"],
+    "explanation_terms": ["api", "traceability"]
+  },
+  {
+    "id": "explanation-quality",
+    "rule_family": "explanation_quality",
+    "task": "explain contract evidence for checkout summary in src/domain/checkout.rs",
+    "expected_verdict": "warn",
+    "expected_contract": {
+      "primary_files": ["src/domain/checkout.rs"],
+      "allowed_boundary": ["src/domain/checkout.rs"],
+      "min_required_tests": 1,
+      "min_traceability": 5,
+      "min_architecture_constraints": 1,
+      "min_evidence_refs": 1
+    },
+    "changed_files": ["src/domain/checkout.rs"],
+    "explanation_terms": ["primary", "required", "traceability", "evidence"]
+  }
+]

@@ -1,0 +1,29 @@
+version = "v1"
+
+[[layers]]
+id = "api"
+paths = ["src/api/**"]
+
+[[layers]]
+id = "domain"
+paths = ["src/domain/**"]
+
+[[layers]]
+id = "storage"
+paths = ["src/storage/**"]
+
+[[dependency_rules]]
+id = "domain-can-use-api"
+from = "domain"
+to = "api"
+action = "allow"
+severity = "info"
+reason = "domain code may use the public api facade"
+
+[[dependency_rules]]
+id = "domain-no-storage"
+from = "domain"
+to = "storage"
+action = "forbid"
+severity = "error"
+reason = "domain code must not depend directly on storage"
