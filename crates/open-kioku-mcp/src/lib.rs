@@ -405,6 +405,19 @@ async fn dispatch(
                 .get("traceability_strict")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let check_api_surface = params
+                .get("check_api_surface")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let check_dependency_delta = params
+                .get("check_dependency_delta")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let architecture_policy = if check_dependency_delta {
+                load_architecture_policy(repo)?
+            } else {
+                None
+            };
             let index_dir = default_index_dir(repo);
             let search_index = if TantivySearchIndex::exists(&index_dir) {
                 Some(TantivySearchIndex::open_or_create(index_dir)?)
@@ -422,6 +435,9 @@ async fn dispatch(
                         evidence_refs,
                         run_commands,
                         traceability_strict,
+                        check_api_surface,
+                        check_dependency_delta,
+                        architecture_policy,
                     },
                 )?))
         }
@@ -773,7 +789,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("propose_patch", "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the changes to propose."}}})),
         ("review_patch", "Review a proposed patch plan for safety, target constraints, and completeness.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier associated with the patch."}}})),
         ("validate_patch", "Validate a patch plan against codebase boundaries and references to detect warnings.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier."}}})),
-        ("verify_change", "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the saved plan."},"run_commands":{"type":"boolean","description":"Set true to execute the validation commands defined in the plan."}}})),
+        ("verify_change", "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the saved plan."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API additions, removals, and signature changes during verification."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph deltas and flag forbidden dependency additions."},"run_commands":{"type":"boolean","description":"Set true to execute the validation commands defined in the plan."}}})),
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),

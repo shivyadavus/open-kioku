@@ -1,14 +1,16 @@
 use open_kioku_actions::{ActionKind, PolicyGate};
-use open_kioku_config::OkConfig;
+use open_kioku_architecture::PolicyResolver;
+use open_kioku_config::{ArchitecturePolicy, DependencyAction, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_contract::{
-    validate_traceability, ChangeContractV1, ConstraintSeverity, ContractStore,
-    ContractVerificationRecord, EvidenceRef,
+    validate_traceability, ApiSurfaceChangeKind, ChangeContractV1, ConstraintSeverity,
+    ContractFile, ContractStore, ContractVerificationRecord, DependencyDeltaAction,
+    DependencyDeltaClassification, DependencyDeltaFinding, EvidenceRef, PublicApiFingerprint,
 };
 use open_kioku_core::{
     AnalysisFact, BoundaryExpansionRequirement, BoundaryForbiddenRule, ChangeBoundary, Confidence,
-    ConfidenceBreakdown, EvidenceSourceType, FileId, ImpactReport, PatchId, PatchPlan, PlanReport,
-    RiskReport, SearchResult, TestTarget,
+    ConfidenceBreakdown, EvidenceSourceType, FileId, GraphEdge, GraphEdgeType, GraphNode,
+    ImpactReport, PatchId, PatchPlan, PlanReport, RiskReport, SearchResult, SymbolKind, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_impact::ImpactEngine;
@@ -18,6 +20,7 @@ use open_kioku_tests::TestSelector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -95,6 +98,12 @@ pub struct VerifyChangeInput {
     pub run_commands: bool,
     #[serde(default)]
     pub traceability_strict: bool,
+    #[serde(default)]
+    pub check_api_surface: bool,
+    #[serde(default)]
+    pub check_dependency_delta: bool,
+    #[serde(skip)]
+    pub architecture_policy: Option<ArchitecturePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +117,10 @@ pub struct ChangeVerificationReport {
     pub warnings: Vec<VerificationFinding>,
     pub missing_tests: Vec<VerificationFinding>,
     pub changed_impact: Vec<VerificationFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_surface_deltas: Vec<VerificationFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_deltas: Vec<DependencyDeltaFinding>,
     pub recommended_tests: Vec<TestTarget>,
     pub command_results: Vec<ValidationCommandResult>,
     pub evidence_refs: Vec<String>,
@@ -163,7 +176,23 @@ pub struct ContractVerificationReport {
     pub contract_id: String,
     pub decision: VerificationDecision,
     pub policy_snapshot: VerificationPolicySnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_surface: Option<ApiSurfaceDeltaReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_delta: Option<DependencyDeltaReport>,
     pub change_report: ChangeVerificationReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiSurfaceDeltaReport {
+    pub before: Vec<PublicApiFingerprint>,
+    pub after: Vec<PublicApiFingerprint>,
+    pub findings: Vec<VerificationFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyDeltaReport {
+    pub findings: Vec<DependencyDeltaFinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +312,8 @@ impl<'a> ChangeVerifier<'a> {
             warnings,
             missing_tests,
             changed_impact,
+            api_surface_deltas: Vec::new(),
+            dependency_deltas: Vec::new(),
             recommended_tests,
             command_results,
             evidence_refs: input.evidence_refs,
@@ -348,16 +379,41 @@ impl<'a> ContractVerifier<'a> {
         }
 
         let traceability_strict = input.traceability_strict;
-        let change_report = ChangeVerifier {
+        let check_api_surface = input.check_api_surface;
+        let check_dependency_delta = input.check_dependency_delta;
+        let delta_input = input.clone();
+        let mut change_report = ChangeVerifier {
             store: self.store,
             search_index: self.search_index,
         }
         .verify_plan_direct(repo, plan, input)?;
+        let api_surface = if check_api_surface {
+            Some(diff_public_api_surface(
+                self.store,
+                repo,
+                contract,
+                &change_report.changed_files,
+            )?)
+        } else {
+            None
+        };
+        let dependency_delta = if check_dependency_delta {
+            Some(diff_dependencies(self.store, repo, contract, &delta_input)?)
+        } else {
+            None
+        };
+        apply_delta_reports(
+            &mut change_report,
+            api_surface.as_ref(),
+            dependency_delta.as_ref(),
+        );
         let decision = VerificationDecision::from(change_report.verdict);
         let report = ContractVerificationReport {
             contract_id: contract.id.0.clone(),
             decision,
             policy_snapshot: policy_snapshot(contract, traceability_strict),
+            api_surface,
+            dependency_delta,
             change_report,
         };
         if let Some(store) = self.contract_store {
@@ -549,6 +605,1107 @@ fn contract_confidence(contract: &ChangeContractV1) -> Confidence {
         open_kioku_contract::ConfidenceLevel::Medium => Confidence::Medium,
         open_kioku_contract::ConfidenceLevel::High => Confidence::High,
         open_kioku_contract::ConfidenceLevel::Exact => Confidence::Exact,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicApiFingerprintSource {
+    Indexed,
+    WorkingTree,
+}
+
+pub fn fingerprint_public_api(
+    store: &dyn MetadataStore,
+    repo: &Path,
+    changed_files: &[PathBuf],
+    source: PublicApiFingerprintSource,
+) -> Result<Vec<PublicApiFingerprint>> {
+    let mut fingerprints = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in changed_files {
+        let normalized = PathBuf::from(normalize_path(path));
+        let extracted = match source {
+            PublicApiFingerprintSource::Indexed => {
+                if let Some(text) = indexed_file_text(store, &normalized)? {
+                    public_api_fingerprints_from_text(&normalized, &text)
+                } else {
+                    indexed_symbol_fingerprints(store, &normalized)?
+                }
+            }
+            PublicApiFingerprintSource::WorkingTree => {
+                let path_on_disk = repo.join(&normalized);
+                if path_on_disk.exists() {
+                    public_api_fingerprints_from_text(
+                        &normalized,
+                        &fs::read_to_string(path_on_disk)?,
+                    )
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        for fingerprint in extracted {
+            let key = (
+                fingerprint.path.0.clone(),
+                fingerprint.kind.clone(),
+                fingerprint.symbol.clone(),
+            );
+            if seen.insert(key) {
+                fingerprints.push(fingerprint);
+            }
+        }
+    }
+    fingerprints.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    Ok(fingerprints)
+}
+
+fn diff_public_api_surface(
+    store: &dyn MetadataStore,
+    repo: &Path,
+    contract: &ChangeContractV1,
+    changed_files: &[PathBuf],
+) -> Result<ApiSurfaceDeltaReport> {
+    let before = fingerprint_public_api(
+        store,
+        repo,
+        changed_files,
+        PublicApiFingerprintSource::Indexed,
+    )?;
+    let after = fingerprint_public_api(
+        store,
+        repo,
+        changed_files,
+        PublicApiFingerprintSource::WorkingTree,
+    )?;
+    let before_by_key = before
+        .iter()
+        .map(|fingerprint| (api_fingerprint_key(fingerprint), fingerprint))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_key = after
+        .iter()
+        .map(|fingerprint| (api_fingerprint_key(fingerprint), fingerprint))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut findings = Vec::new();
+    for (key, before_fingerprint) in &before_by_key {
+        match after_by_key.get(key) {
+            None => findings.push(api_surface_delta_finding(
+                contract,
+                ApiSurfaceChangeKind::Removed,
+                Some(before_fingerprint),
+                None,
+            )),
+            Some(after_fingerprint) if before_fingerprint.digest != after_fingerprint.digest => {
+                findings.push(api_surface_delta_finding(
+                    contract,
+                    ApiSurfaceChangeKind::SignatureChanged,
+                    Some(before_fingerprint),
+                    Some(after_fingerprint),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, after_fingerprint) in &after_by_key {
+        if !before_by_key.contains_key(key) {
+            findings.push(api_surface_delta_finding(
+                contract,
+                ApiSurfaceChangeKind::Added,
+                None,
+                Some(after_fingerprint),
+            ));
+        }
+    }
+    if findings.is_empty() {
+        findings.push(VerificationFinding {
+            path: None,
+            kind: "api_surface_no_relevant_delta".into(),
+            reason: "no public API additions, removals, or signature changes were detected".into(),
+            evidence_refs: Vec::new(),
+        });
+    }
+    Ok(ApiSurfaceDeltaReport {
+        before,
+        after,
+        findings,
+    })
+}
+
+pub fn diff_dependencies(
+    store: &dyn OkStore,
+    repo: &Path,
+    contract: &ChangeContractV1,
+    input: &VerifyChangeInput,
+) -> Result<DependencyDeltaReport> {
+    let changed_files = changed_files_from_input(input);
+    let before = dependency_edges_from_index(store, &changed_files)?;
+    let after = dependency_edges_from_worktree(repo, &changed_files)?;
+    let before_by_key = before
+        .iter()
+        .map(|edge| (edge.key.clone(), edge.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let after_by_key = after
+        .iter()
+        .map(|edge| (edge.key.clone(), edge.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut findings = Vec::new();
+    for (key, edge) in &after_by_key {
+        if !before_by_key.contains_key(key) {
+            findings.push(classify_dependency_delta(
+                contract,
+                input.architecture_policy.as_ref(),
+                edge,
+                DependencyEdgeChange::Added,
+            )?);
+        }
+    }
+    for (key, edge) in &before_by_key {
+        if !after_by_key.contains_key(key) {
+            findings.push(classify_dependency_delta(
+                contract,
+                input.architecture_policy.as_ref(),
+                edge,
+                DependencyEdgeChange::Removed,
+            )?);
+        }
+    }
+    if findings.is_empty() {
+        findings.push(DependencyDeltaFinding {
+            classification: DependencyDeltaClassification::NoRelevantDelta,
+            edge_type: "imports/references/calls".into(),
+            source: "changed files".into(),
+            target: "indexed dependency graph".into(),
+            source_path: None,
+            target_path: None,
+            reason: "no dependency graph delta was detected for the changed files".into(),
+            evidence_refs: Vec::new(),
+            rule_refs: Vec::new(),
+        });
+    }
+    findings.sort_by(|left, right| {
+        left.classification
+            .to_string_key()
+            .cmp(right.classification.to_string_key())
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+    });
+    Ok(DependencyDeltaReport { findings })
+}
+
+fn apply_delta_reports(
+    report: &mut ChangeVerificationReport,
+    api_surface: Option<&ApiSurfaceDeltaReport>,
+    dependency_delta: Option<&DependencyDeltaReport>,
+) {
+    if let Some(api_surface) = api_surface {
+        for finding in &api_surface.findings {
+            report.api_surface_deltas.push(finding.clone());
+            match finding.kind.as_str() {
+                "api_surface_violation" => report.boundary_violations.push(finding.clone()),
+                "api_surface_review_required" => report.warnings.push(finding.clone()),
+                _ => {}
+            }
+        }
+    }
+    if let Some(dependency_delta) = dependency_delta {
+        for finding in &dependency_delta.findings {
+            report.dependency_deltas.push(finding.clone());
+            if finding.classification == DependencyDeltaClassification::ViolatingDelta {
+                report
+                    .boundary_violations
+                    .push(dependency_delta_verification_finding(finding));
+            }
+        }
+    }
+    refresh_verdict(report);
+}
+
+fn refresh_verdict(report: &mut ChangeVerificationReport) {
+    report.verdict = if !report.boundary_violations.is_empty() {
+        VerificationVerdict::Fail
+    } else if !report.warnings.is_empty()
+        || !report.missing_tests.is_empty()
+        || !report.changed_impact.is_empty()
+    {
+        VerificationVerdict::Warn
+    } else {
+        VerificationVerdict::Pass
+    };
+}
+
+fn indexed_file_text(store: &dyn MetadataStore, path: &Path) -> Result<Option<String>> {
+    let Some(file) = store.get_file_by_path(path)? else {
+        return Ok(None);
+    };
+    let mut chunks = store.chunks_for_file(&file.id)?;
+    if chunks.is_empty() {
+        return Ok(None);
+    }
+    chunks.sort_by(|left, right| {
+        left.range
+            .start
+            .cmp(&right.range.start)
+            .then_with(|| left.range.end.cmp(&right.range.end))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(Some(
+        chunks
+            .into_iter()
+            .map(|chunk| chunk.text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))
+}
+
+fn indexed_symbol_fingerprints(
+    store: &dyn MetadataStore,
+    path: &Path,
+) -> Result<Vec<PublicApiFingerprint>> {
+    let Some(file) = store.get_file_by_path(path)? else {
+        return Ok(Vec::new());
+    };
+    let mut fingerprints = Vec::new();
+    for symbol in store.symbols_for_file(&file.id)? {
+        if !public_symbol_kind(&symbol.kind) || symbol.name.starts_with('_') {
+            continue;
+        }
+        let kind = format!("{:?}", symbol.kind).to_ascii_lowercase();
+        let signature = symbol.qualified_name.clone();
+        fingerprints.push(PublicApiFingerprint {
+            path: ContractFile::new(path),
+            symbol: symbol.name,
+            kind,
+            digest: stable_id(&signature),
+            signature,
+            evidence_refs: vec![EvidenceRef::new(format!("symbol:{}", symbol.id.0))],
+        });
+    }
+    Ok(fingerprints)
+}
+
+fn public_symbol_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Class
+            | SymbolKind::Trait
+            | SymbolKind::Interface
+            | SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constant
+            | SymbolKind::Endpoint
+            | SymbolKind::DatabaseTable
+    )
+}
+
+fn public_api_fingerprints_from_text(path: &Path, text: &str) -> Vec<PublicApiFingerprint> {
+    let mut fingerprints = Vec::new();
+    let mut seen = BTreeSet::new();
+    let extension = path.extension().and_then(|value| value.to_str());
+    for line in text.lines() {
+        let Some((symbol, kind, signature)) = public_api_signature(line, extension) else {
+            continue;
+        };
+        let key = (kind.clone(), symbol.clone(), signature.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        fingerprints.push(PublicApiFingerprint {
+            path: ContractFile::new(path),
+            symbol: symbol.clone(),
+            kind,
+            digest: stable_id(&format!("{}:{}:{signature}", normalize_path(path), symbol)),
+            signature,
+            evidence_refs: vec![EvidenceRef::new(format!(
+                "api:{}:{symbol}",
+                normalize_path(path)
+            ))],
+        });
+    }
+    fingerprints
+}
+
+fn public_api_signature(line: &str, extension: Option<&str>) -> Option<(String, String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with('#')
+        || trimmed.starts_with('*')
+    {
+        return None;
+    }
+    match extension.unwrap_or_default() {
+        "rs" => rust_public_signature(trimmed),
+        "ts" | "tsx" | "js" | "jsx" => ts_public_signature(trimmed),
+        "py" => python_public_signature(line),
+        "go" => go_public_signature(trimmed),
+        "java" | "kt" => java_public_signature(trimmed),
+        _ => rust_public_signature(trimmed)
+            .or_else(|| ts_public_signature(trimmed))
+            .or_else(|| python_public_signature(line))
+            .or_else(|| go_public_signature(trimmed))
+            .or_else(|| java_public_signature(trimmed)),
+    }
+}
+
+fn rust_public_signature(line: &str) -> Option<(String, String, String)> {
+    let rest = if let Some(rest) = line.strip_prefix("pub ") {
+        rest
+    } else if let Some(rest) = line.strip_prefix("pub(") {
+        let close = rest.find(')')?;
+        rest.get(close + 1..)?.trim_start()
+    } else {
+        return None;
+    };
+    let rest = strip_prefix_words(rest, &["async", "unsafe", "extern", "const"]);
+    keyword_signature(
+        rest,
+        &[
+            ("fn", "function"),
+            ("struct", "struct"),
+            ("enum", "enum"),
+            ("trait", "trait"),
+            ("type", "type"),
+            ("const", "constant"),
+            ("static", "constant"),
+            ("mod", "module"),
+        ],
+    )
+}
+
+fn ts_public_signature(line: &str) -> Option<(String, String, String)> {
+    let mut rest = line.strip_prefix("export ")?;
+    rest = rest.strip_prefix("default ").unwrap_or(rest);
+    rest = strip_prefix_words(rest, &["async", "declare"]);
+    keyword_signature(
+        rest,
+        &[
+            ("function", "function"),
+            ("class", "class"),
+            ("interface", "interface"),
+            ("type", "type"),
+            ("const", "constant"),
+            ("let", "variable"),
+            ("var", "variable"),
+            ("enum", "enum"),
+        ],
+    )
+}
+
+fn python_public_signature(line: &str) -> Option<(String, String, String)> {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let trimmed = line.trim();
+    let (symbol, kind, signature) =
+        keyword_signature(trimmed, &[("def", "function"), ("class", "class")])?;
+    (!symbol.starts_with('_')).then_some((symbol, kind, signature))
+}
+
+fn go_public_signature(line: &str) -> Option<(String, String, String)> {
+    let (symbol, kind, signature) = keyword_signature(
+        line,
+        &[
+            ("func", "function"),
+            ("type", "type"),
+            ("const", "constant"),
+            ("var", "variable"),
+        ],
+    )?;
+    symbol
+        .chars()
+        .next()
+        .is_some_and(char::is_uppercase)
+        .then_some((symbol, kind, signature))
+}
+
+fn java_public_signature(line: &str) -> Option<(String, String, String)> {
+    if !line.split_whitespace().any(|part| part == "public") {
+        return None;
+    }
+    let compact = normalize_signature(line);
+    for (keyword, kind) in [
+        ("class", "class"),
+        ("interface", "interface"),
+        ("enum", "enum"),
+        ("record", "class"),
+    ] {
+        if let Some(index) = compact.find(&format!("{keyword} ")) {
+            let symbol = take_ident(compact[index + keyword.len()..].trim_start())?;
+            return Some((symbol, kind.into(), compact));
+        }
+    }
+    let before_paren = compact.split('(').next()?;
+    let symbol = before_paren.split_whitespace().last()?.to_string();
+    (!symbol.is_empty()).then_some((symbol, "method".into(), compact))
+}
+
+fn keyword_signature(line: &str, keywords: &[(&str, &str)]) -> Option<(String, String, String)> {
+    for (keyword, kind) in keywords {
+        if let Some(rest) = line.strip_prefix(&format!("{keyword} ")) {
+            let symbol = take_ident(rest.trim_start())?;
+            return Some((symbol, (*kind).into(), normalize_signature(line)));
+        }
+    }
+    None
+}
+
+fn strip_prefix_words<'a>(mut value: &'a str, words: &[&str]) -> &'a str {
+    loop {
+        let mut changed = false;
+        for word in words {
+            if let Some(rest) = value.strip_prefix(&format!("{word} ")) {
+                value = rest.trim_start();
+                changed = true;
+            }
+        }
+        if !changed {
+            return value;
+        }
+    }
+}
+
+fn take_ident(value: &str) -> Option<String> {
+    let mut ident = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            ident.push(ch);
+        } else {
+            break;
+        }
+    }
+    (!ident.is_empty()).then_some(ident)
+}
+
+fn normalize_signature(value: &str) -> String {
+    let value = value
+        .split("//")
+        .next()
+        .unwrap_or(value)
+        .split('{')
+        .next()
+        .unwrap_or(value)
+        .split(';')
+        .next()
+        .unwrap_or(value);
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn api_fingerprint_key(fingerprint: &PublicApiFingerprint) -> (String, String, String) {
+    (
+        fingerprint.path.0.clone(),
+        fingerprint.kind.clone(),
+        fingerprint.symbol.clone(),
+    )
+}
+
+fn api_surface_delta_finding(
+    contract: &ChangeContractV1,
+    change: ApiSurfaceChangeKind,
+    before: Option<&PublicApiFingerprint>,
+    after: Option<&PublicApiFingerprint>,
+) -> VerificationFinding {
+    let fingerprint = after.or(before).expect("delta has at least one side");
+    let matching_constraints = contract
+        .api_surface_constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, constraint)| constraint_matches_scope(&constraint.scope, &fingerprint.path.0))
+        .collect::<Vec<_>>();
+    let allowed_constraint = matching_constraints
+        .iter()
+        .find(|(_, constraint)| constraint.allowed_changes.contains(&change));
+    let forbidden_constraint = matching_constraints.iter().find(|(_, constraint)| {
+        constraint.severity == ConstraintSeverity::Forbidden
+            && !constraint.allowed_changes.contains(&change)
+    });
+
+    let (kind, reason, evidence_refs) = if let Some((index, constraint)) = allowed_constraint {
+        (
+            "api_surface_allowed_delta",
+            format!(
+                "public API {:?} for `{}` is allowed by api_surface_constraints[{index}]: {}",
+                change, fingerprint.symbol, constraint.reason
+            ),
+            evidence_ref_strings(&constraint.evidence_refs),
+        )
+    } else if let Some((index, constraint)) = forbidden_constraint {
+        (
+            "api_surface_violation",
+            format!(
+                "public API {:?} for `{}` violates api_surface_constraints[{index}]: {}",
+                change, fingerprint.symbol, constraint.reason
+            ),
+            evidence_ref_strings(&constraint.evidence_refs),
+        )
+    } else if change == ApiSurfaceChangeKind::Added {
+        (
+            "api_surface_review_required",
+            format!(
+                "public API addition detected for `{}`; review compatibility before accepting",
+                fingerprint.symbol
+            ),
+            evidence_ref_strings(&fingerprint.evidence_refs),
+        )
+    } else {
+        (
+            "api_surface_violation",
+            format!(
+                "public API {:?} detected for `{}`; removals and signature changes require explicit approval",
+                change, fingerprint.symbol
+            ),
+            evidence_ref_strings(&fingerprint.evidence_refs),
+        )
+    };
+
+    let before_signature = before
+        .map(|fingerprint| fingerprint.signature.as_str())
+        .unwrap_or("<none>");
+    let after_signature = after
+        .map(|fingerprint| fingerprint.signature.as_str())
+        .unwrap_or("<none>");
+    VerificationFinding {
+        path: Some(PathBuf::from(&fingerprint.path.0)),
+        kind: kind.into(),
+        reason: format!("{reason}; before `{before_signature}`, after `{after_signature}`"),
+        evidence_refs,
+    }
+}
+
+fn constraint_matches_scope(scope: &str, path: &str) -> bool {
+    let scope = scope.trim();
+    scope == "*"
+        || scope == "public_api"
+        || scope == path
+        || boundary_pattern_matches(scope, path)
+        || path.starts_with(scope.trim_end_matches('/'))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DependencyEdgeKey {
+    source_path: PathBuf,
+    target: String,
+    edge_type: String,
+}
+
+#[derive(Debug, Clone)]
+struct DependencyEdgeSnapshot {
+    key: DependencyEdgeKey,
+    target_path: Option<PathBuf>,
+    evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyEdgeChange {
+    Added,
+    Removed,
+}
+
+fn dependency_edges_from_index(
+    store: &dyn OkStore,
+    changed_files: &[PathBuf],
+) -> Result<Vec<DependencyEdgeSnapshot>> {
+    let changed = changed_files
+        .iter()
+        .map(|path| normalize_path(path))
+        .collect::<BTreeSet<_>>();
+    let files = store.list_files(usize::MAX, 0)?;
+    let files_by_id = files
+        .iter()
+        .map(|file| (file.id.0.clone(), file.path.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for import in store.imports()? {
+        let Some(source_path) = files_by_id.get(&import.file_id.0) else {
+            continue;
+        };
+        if !changed.contains(&normalize_path(source_path)) {
+            continue;
+        }
+        let snapshot = DependencyEdgeSnapshot {
+            key: DependencyEdgeKey {
+                source_path: source_path.clone(),
+                target: import.imported.clone(),
+                edge_type: "imports".into(),
+            },
+            target_path: None,
+            evidence_refs: vec![format!(
+                "import:{}:{}",
+                normalize_path(source_path),
+                import.imported
+            )],
+        };
+        if seen.insert(snapshot.key.clone()) {
+            edges.push(snapshot);
+        }
+    }
+
+    for edge_type in [
+        GraphEdgeType::Imports,
+        GraphEdgeType::References,
+        GraphEdgeType::Calls,
+    ] {
+        let mut offset = 0;
+        loop {
+            let batch = store.edges_by_type(edge_type.clone(), 1_000, offset)?;
+            if batch.is_empty() {
+                break;
+            }
+            for edge in &batch {
+                let Some(snapshot) = graph_dependency_edge(store, &files_by_id, edge)? else {
+                    continue;
+                };
+                if changed.contains(&normalize_path(&snapshot.key.source_path))
+                    && seen.insert(snapshot.key.clone())
+                {
+                    edges.push(snapshot);
+                }
+            }
+            offset += batch.len();
+            if batch.len() < 1_000 {
+                break;
+            }
+        }
+    }
+    Ok(edges)
+}
+
+fn dependency_edges_from_worktree(
+    repo: &Path,
+    changed_files: &[PathBuf],
+) -> Result<Vec<DependencyEdgeSnapshot>> {
+    let mut edges = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in changed_files {
+        let normalized = PathBuf::from(normalize_path(path));
+        let path_on_disk = repo.join(&normalized);
+        if !path_on_disk.exists() {
+            continue;
+        }
+        let text = fs::read_to_string(&path_on_disk)?;
+        for target in dependency_targets_from_text(&text, &normalized) {
+            let target_path = resolve_dependency_target(repo, &normalized, &target);
+            let snapshot = DependencyEdgeSnapshot {
+                key: DependencyEdgeKey {
+                    source_path: normalized.clone(),
+                    target: target.clone(),
+                    edge_type: "imports".into(),
+                },
+                target_path,
+                evidence_refs: vec![format!(
+                    "dependency:{}:{target}",
+                    normalize_path(&normalized)
+                )],
+            };
+            if seen.insert(snapshot.key.clone()) {
+                edges.push(snapshot);
+            }
+        }
+    }
+    Ok(edges)
+}
+
+fn graph_dependency_edge(
+    store: &dyn OkStore,
+    files_by_id: &BTreeMap<String, PathBuf>,
+    edge: &GraphEdge,
+) -> Result<Option<DependencyEdgeSnapshot>> {
+    let Some(source_node) = store.node_by_id(&edge.from.0)? else {
+        return Ok(None);
+    };
+    let Some(target_node) = store.node_by_id(&edge.to.0)? else {
+        return Ok(None);
+    };
+    let Some(source_path) = graph_node_path(&source_node, files_by_id) else {
+        return Ok(None);
+    };
+    let target_path = graph_node_path(&target_node, files_by_id);
+    let target = target_path
+        .as_ref()
+        .map(|path| normalize_path(path))
+        .unwrap_or_else(|| target_node.label.clone());
+    Ok(Some(DependencyEdgeSnapshot {
+        key: DependencyEdgeKey {
+            source_path,
+            target,
+            edge_type: graph_edge_type_name(&edge.edge_type),
+        },
+        target_path,
+        evidence_refs: vec![edge.evidence.id.0.clone()],
+    }))
+}
+
+fn graph_node_path(node: &GraphNode, files_by_id: &BTreeMap<String, PathBuf>) -> Option<PathBuf> {
+    if let Some(file_id) = &node.file_id {
+        if let Some(path) = files_by_id.get(&file_id.0) {
+            return Some(path.clone());
+        }
+    }
+    if node.node_type == open_kioku_core::GraphNodeType::File && !node.label.is_empty() {
+        return Some(PathBuf::from(&node.label));
+    }
+    node.properties
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+}
+
+fn graph_edge_type_name(edge_type: &GraphEdgeType) -> String {
+    match edge_type {
+        GraphEdgeType::Imports => "imports",
+        GraphEdgeType::References => "references",
+        GraphEdgeType::Calls => "calls",
+        _ => "dependency",
+    }
+    .into()
+}
+
+fn dependency_targets_from_text(text: &str, source_path: &Path) -> Vec<String> {
+    let extension = source_path.extension().and_then(|value| value.to_str());
+    let mut targets = Vec::new();
+    let mut in_go_import_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+            continue;
+        }
+        if extension == Some("go") && trimmed == "import (" {
+            in_go_import_block = true;
+            continue;
+        }
+        if in_go_import_block && trimmed == ")" {
+            in_go_import_block = false;
+            continue;
+        }
+        if in_go_import_block {
+            if let Some(target) = quoted_value(trimmed) {
+                targets.push(target);
+            }
+            continue;
+        }
+        if let Some(target) = dependency_target_from_line(trimmed, extension) {
+            targets.push(target);
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn dependency_target_from_line(line: &str, extension: Option<&str>) -> Option<String> {
+    match extension.unwrap_or_default() {
+        "rs" => rust_dependency_target(line),
+        "ts" | "tsx" | "js" | "jsx" => ts_dependency_target(line),
+        "py" => python_dependency_target(line),
+        "go" => go_dependency_target(line),
+        "java" | "kt" => java_dependency_target(line),
+        _ => rust_dependency_target(line)
+            .or_else(|| ts_dependency_target(line))
+            .or_else(|| python_dependency_target(line))
+            .or_else(|| go_dependency_target(line))
+            .or_else(|| java_dependency_target(line)),
+    }
+}
+
+fn rust_dependency_target(line: &str) -> Option<String> {
+    let rest = line
+        .strip_prefix("use ")
+        .or_else(|| line.strip_prefix("pub use "))?;
+    Some(
+        rest.trim_end_matches(';')
+            .split(" as ")
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .to_string(),
+    )
+}
+
+fn ts_dependency_target(line: &str) -> Option<String> {
+    if line.starts_with("import ") || line.starts_with("export ") {
+        if let Some(index) = line.find(" from ") {
+            return quoted_value(&line[index + " from ".len()..]);
+        }
+        return quoted_value(line);
+    }
+    if let Some(index) = line.find("require(") {
+        return quoted_value(&line[index + "require(".len()..]);
+    }
+    None
+}
+
+fn python_dependency_target(line: &str) -> Option<String> {
+    if let Some(rest) = line.strip_prefix("import ") {
+        return rest
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    if let Some(rest) = line.strip_prefix("from ") {
+        return rest
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    None
+}
+
+fn go_dependency_target(line: &str) -> Option<String> {
+    line.strip_prefix("import ")
+        .and_then(quoted_value)
+        .or_else(|| quoted_value(line))
+}
+
+fn java_dependency_target(line: &str) -> Option<String> {
+    line.strip_prefix("import ")
+        .map(|rest| rest.trim_end_matches(';').trim().to_string())
+}
+
+fn quoted_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        let Some(start) = value.find(quote) else {
+            continue;
+        };
+        let rest = &value[start + 1..];
+        let Some(end) = rest.find(quote) else {
+            continue;
+        };
+        let target = rest[..end].trim();
+        if !target.is_empty() {
+            return Some(target.to_string());
+        }
+    }
+    None
+}
+
+fn resolve_dependency_target(repo: &Path, source_path: &Path, target: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if target.starts_with('.') {
+        if let Some(parent) = source_path.parent() {
+            candidates.push(parent.join(target));
+        }
+    } else if let Some(rest) = target.strip_prefix("crate::") {
+        candidates.push(PathBuf::from("src").join(rest.replace("::", "/")));
+    } else if target.contains("::") {
+        candidates.push(PathBuf::from("src").join(target.replace("::", "/")));
+    } else if target.contains('.') {
+        candidates.push(PathBuf::from(target.replace('.', "/")));
+    } else if target.contains('/') {
+        candidates.push(PathBuf::from(target));
+    }
+
+    for candidate in candidates {
+        if let Some(path) = existing_source_path(repo, &candidate) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn existing_source_path(repo: &Path, candidate: &Path) -> Option<PathBuf> {
+    let normalized = normalize_relative_path(candidate);
+    let mut candidates = vec![normalized.clone()];
+    if normalized.extension().is_none() {
+        for extension in ["rs", "ts", "tsx", "js", "jsx", "py", "go", "java"] {
+            candidates.push(normalized.with_extension(extension));
+        }
+        candidates.push(normalized.join("mod.rs"));
+        candidates.push(normalized.join("index.ts"));
+        candidates.push(normalized.join("index.js"));
+        candidates.push(normalized.join("__init__.py"));
+    }
+    candidates.into_iter().find(|path| repo.join(path).exists())
+}
+
+fn normalize_relative_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(value) => normalized.push(value),
+            _ => {}
+        }
+    }
+    normalized
+}
+
+fn classify_dependency_delta(
+    contract: &ChangeContractV1,
+    policy: Option<&ArchitecturePolicy>,
+    edge: &DependencyEdgeSnapshot,
+    change: DependencyEdgeChange,
+) -> Result<DependencyDeltaFinding> {
+    let mut rule_refs = Vec::new();
+    let mut evidence_refs = edge
+        .evidence_refs
+        .iter()
+        .map(|value| EvidenceRef::new(value.clone()))
+        .collect::<Vec<_>>();
+    let mut reason = match change {
+        DependencyEdgeChange::Added => "dependency edge was added".to_string(),
+        DependencyEdgeChange::Removed => "dependency edge was removed".to_string(),
+    };
+
+    if change == DependencyEdgeChange::Added {
+        for (index, constraint) in contract.dependency_delta_constraints.iter().enumerate() {
+            if dependency_constraint_matches(constraint, edge) {
+                rule_refs.push(format!("dependency_delta_constraints[{index}]"));
+                evidence_refs.extend(constraint.evidence_refs.clone());
+                reason = constraint.reason.clone();
+                if constraint.action == DependencyDeltaAction::Forbid {
+                    return Ok(dependency_delta_finding(
+                        DependencyDeltaClassification::ViolatingDelta,
+                        edge,
+                        reason,
+                        evidence_refs,
+                        rule_refs,
+                    ));
+                }
+            }
+        }
+        if let Some(policy) = policy {
+            let policy_rules = forbidden_policy_rule_refs(policy, edge)?;
+            if !policy_rules.is_empty() {
+                reason = "added dependency edge violates architecture policy".into();
+                rule_refs.extend(policy_rules);
+                return Ok(dependency_delta_finding(
+                    DependencyDeltaClassification::ViolatingDelta,
+                    edge,
+                    reason,
+                    evidence_refs,
+                    rule_refs,
+                ));
+            }
+        }
+    }
+
+    Ok(dependency_delta_finding(
+        DependencyDeltaClassification::AllowedDelta,
+        edge,
+        reason,
+        evidence_refs,
+        rule_refs,
+    ))
+}
+
+fn dependency_delta_finding(
+    classification: DependencyDeltaClassification,
+    edge: &DependencyEdgeSnapshot,
+    reason: String,
+    evidence_refs: Vec<EvidenceRef>,
+    rule_refs: Vec<String>,
+) -> DependencyDeltaFinding {
+    DependencyDeltaFinding {
+        classification,
+        edge_type: edge.key.edge_type.clone(),
+        source: normalize_path(&edge.key.source_path),
+        target: edge.key.target.clone(),
+        source_path: Some(ContractFile::new(&edge.key.source_path)),
+        target_path: edge.target_path.as_ref().map(ContractFile::new),
+        reason,
+        evidence_refs,
+        rule_refs,
+    }
+}
+
+fn dependency_delta_verification_finding(finding: &DependencyDeltaFinding) -> VerificationFinding {
+    VerificationFinding {
+        path: finding
+            .source_path
+            .as_ref()
+            .map(|path| PathBuf::from(path.as_str())),
+        kind: "dependency_delta_violation".into(),
+        reason: format!(
+            "{}: {} -> {} ({})",
+            finding.reason, finding.source, finding.target, finding.edge_type
+        ),
+        evidence_refs: evidence_ref_strings(&finding.evidence_refs),
+    }
+}
+
+fn dependency_constraint_matches(
+    constraint: &open_kioku_contract::DependencyDeltaConstraint,
+    edge: &DependencyEdgeSnapshot,
+) -> bool {
+    let source = normalize_path(&edge.key.source_path);
+    let target_path = edge
+        .target_path
+        .as_ref()
+        .map(|path| normalize_path(path))
+        .unwrap_or_default();
+    let edge_type = edge.key.edge_type.to_ascii_lowercase();
+    let edge_type_matches = constraint.edge_types.is_empty()
+        || constraint
+            .edge_types
+            .iter()
+            .any(|candidate| candidate.to_ascii_lowercase() == edge_type);
+    edge_type_matches
+        && pattern_or_exact_matches(&constraint.source, &source)
+        && (pattern_or_exact_matches(&constraint.target, &edge.key.target)
+            || (!target_path.is_empty()
+                && pattern_or_exact_matches(&constraint.target, &target_path)))
+}
+
+fn pattern_or_exact_matches(pattern: &str, value: &str) -> bool {
+    pattern == "*"
+        || pattern == value
+        || boundary_pattern_matches(pattern, value)
+        || value.contains(pattern.trim_matches('*'))
+}
+
+fn forbidden_policy_rule_refs(
+    policy: &ArchitecturePolicy,
+    edge: &DependencyEdgeSnapshot,
+) -> Result<Vec<String>> {
+    let Some(target_path) = &edge.target_path else {
+        return Ok(Vec::new());
+    };
+    let resolver = PolicyResolver::new(policy)?;
+    let source_components = resolver.resolve_file(&edge.key.source_path);
+    let target_components = resolver.resolve_file(target_path);
+    let mut rule_refs = Vec::new();
+    for source_component in &source_components {
+        for target_component in &target_components {
+            for rule in policy.dependency_rules.iter().filter(|rule| {
+                rule.action == DependencyAction::Forbid
+                    && (rule.from == "*" || rule.from == source_component.component_id)
+                    && (rule.to == "*" || rule.to == target_component.component_id)
+            }) {
+                rule_refs.push(rule.id.clone());
+            }
+        }
+    }
+    rule_refs.sort();
+    rule_refs.dedup();
+    Ok(rule_refs)
+}
+
+trait DependencyDeltaClassificationKey {
+    fn to_string_key(self) -> &'static str;
+}
+
+impl DependencyDeltaClassificationKey for DependencyDeltaClassification {
+    fn to_string_key(self) -> &'static str {
+        match self {
+            DependencyDeltaClassification::NoRelevantDelta => "0-no-relevant-delta",
+            DependencyDeltaClassification::AllowedDelta => "1-allowed-delta",
+            DependencyDeltaClassification::ViolatingDelta => "2-violating-delta",
+        }
     }
 }
 
@@ -1142,7 +2299,11 @@ fn stable_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_contract::{ContractFile, ContractStore, FsContractStore};
+    use open_kioku_config::{ArchitecturePolicy, PolicyLayer, PolicyVersion, Severity};
+    use open_kioku_contract::{
+        ApiSurfaceChangeKind, ApiSurfaceConstraint, ContractFile, ContractStore,
+        DependencyDeltaAction, DependencyDeltaConstraint, FsContractStore,
+    };
     use open_kioku_core::{
         ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown, File, FileId, GraphEdge,
         GraphEdgeType, GraphNode, GraphNodeType, Import, IndexManifest, Language, LineRange,
@@ -1155,7 +2316,14 @@ mod tests {
 
     struct RuntimeStore {
         file: File,
+        files: Vec<File>,
+        chunks: Vec<CodeChunk>,
+        symbols: Vec<Symbol>,
+        imports: Vec<Import>,
+        nodes: Vec<GraphNode>,
+        edges: Vec<GraphEdge>,
         fact: AnalysisFact,
+        facts: Vec<AnalysisFact>,
     }
 
     impl RuntimeStore {
@@ -1183,12 +2351,57 @@ mod tests {
                 source_type: EvidenceSourceType::Runtime,
                 message: "runtime incident observed in local log or failure artifact".into(),
             };
-            Self { file, fact }
+            Self {
+                file: file.clone(),
+                files: vec![file],
+                chunks: Vec::new(),
+                symbols: Vec::new(),
+                imports: Vec::new(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                fact: fact.clone(),
+                facts: vec![fact],
+            }
         }
 
         fn with_fact(mut self, fact: AnalysisFact) -> Self {
-            self.fact = fact;
+            self.fact = fact.clone();
+            self.facts = vec![fact];
             self
+        }
+
+        fn with_file_text(mut self, path: &str, text: &str) -> Self {
+            let file = self.ensure_file(path);
+            self.chunks.push(CodeChunk {
+                id: format!("chunk-{path}"),
+                file_id: file.id,
+                range: LineRange {
+                    start: 1,
+                    end: text.lines().count().max(1) as u32,
+                },
+                language: Language::Rust,
+                text: text.into(),
+                symbol_id: None,
+            });
+            self
+        }
+
+        fn ensure_file(&mut self, path: &str) -> File {
+            if let Some(file) = self.files.iter().find(|file| file.path == Path::new(path)) {
+                return file.clone();
+            }
+            let file = File {
+                id: FileId::new(path.replace(['/', '.'], "_")),
+                repository_id: RepositoryId::new("repo"),
+                path: PathBuf::from(path),
+                language: Language::Rust,
+                size_bytes: 100,
+                content_hash: format!("hash-{path}"),
+                is_generated: false,
+                is_vendor: false,
+            };
+            self.files.push(file.clone());
+            file
         }
     }
 
@@ -1210,11 +2423,11 @@ mod tests {
         }
 
         fn list_files(&self, _limit: usize, _offset: usize) -> Result<Vec<File>> {
-            Ok(vec![self.file.clone()])
+            Ok(self.files.clone())
         }
 
         fn get_file_by_path(&self, path: &Path) -> Result<Option<File>> {
-            Ok((path == self.file.path).then(|| self.file.clone()))
+            Ok(self.files.iter().find(|file| file.path == path).cloned())
         }
 
         fn list_symbols(
@@ -1223,19 +2436,24 @@ mod tests {
             _limit: usize,
             _offset: usize,
         ) -> Result<Vec<Symbol>> {
-            Ok(Vec::new())
+            Ok(self.symbols.clone())
         }
 
         fn symbol_by_id(&self, _id: &SymbolId) -> Result<Option<Symbol>> {
             Ok(None)
         }
 
-        fn chunks_for_file(&self, _file_id: &FileId) -> Result<Vec<CodeChunk>> {
-            Ok(Vec::new())
+        fn chunks_for_file(&self, file_id: &FileId) -> Result<Vec<CodeChunk>> {
+            Ok(self
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.file_id == *file_id)
+                .cloned()
+                .collect())
         }
 
         fn all_chunks(&self) -> Result<Vec<CodeChunk>> {
-            Ok(Vec::new())
+            Ok(self.chunks.clone())
         }
 
         fn tests(&self) -> Result<Vec<TestTarget>> {
@@ -1243,7 +2461,7 @@ mod tests {
         }
 
         fn imports(&self) -> Result<Vec<Import>> {
-            Ok(Vec::new())
+            Ok(self.imports.clone())
         }
 
         fn analysis_facts(
@@ -1252,7 +2470,7 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<AnalysisFact>> {
             if source_type == Some(EvidenceSourceType::Runtime) {
-                Ok(vec![self.fact.clone()])
+                Ok(self.facts.clone())
             } else {
                 Ok(Vec::new())
             }
@@ -1268,6 +2486,15 @@ mod tests {
 
         fn occurrences_for_file(&self, _file_id: &FileId) -> Result<Vec<SymbolOccurrence>> {
             Ok(Vec::new())
+        }
+
+        fn symbols_for_file(&self, file_id: &FileId) -> Result<Vec<Symbol>> {
+            Ok(self
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.file_id == *file_id)
+                .cloned()
+                .collect())
         }
     }
 
@@ -1303,6 +2530,26 @@ mod tests {
             &self,
         ) -> Result<std::collections::HashMap<String, open_kioku_storage::TypeStats>> {
             Ok(std::collections::HashMap::new())
+        }
+
+        fn node_by_id(&self, id: &str) -> Result<Option<GraphNode>> {
+            Ok(self.nodes.iter().find(|node| node.id.0 == id).cloned())
+        }
+
+        fn edges_by_type(
+            &self,
+            edge_type: GraphEdgeType,
+            limit: usize,
+            offset: usize,
+        ) -> Result<Vec<GraphEdge>> {
+            Ok(self
+                .edges
+                .iter()
+                .filter(|edge| edge.edge_type == edge_type)
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
         }
     }
 
@@ -1506,6 +2753,239 @@ mod tests {
             serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(record["success"], true);
         assert_eq!(record["report"]["contract_id"], report.contract_id);
+    }
+
+    #[test]
+    fn contract_verifier_warns_on_public_api_addition() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src")).unwrap();
+        fs::write(
+            repo.path().join("src/handler.rs"),
+            "pub fn handle() {}\npub fn new_endpoint() {}\n",
+        )
+        .unwrap();
+        let store = RuntimeStore::new().with_file_text("src/handler.rs", "pub fn handle() {}\n");
+        let contract = ContractBuilder::from_plan(&plan_with_boundary_evidence()).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    check_api_surface: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(report.api_surface.is_some());
+        assert!(report
+            .change_report
+            .api_surface_deltas
+            .iter()
+            .any(|finding| finding.kind == "api_surface_review_required"
+                && finding.reason.contains("new_endpoint")));
+        assert!(report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "api_surface_review_required"));
+    }
+
+    #[test]
+    fn contract_verifier_fails_on_public_api_signature_change() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src")).unwrap();
+        fs::write(
+            repo.path().join("src/handler.rs"),
+            "pub fn handle(user_id: &str) {}\n",
+        )
+        .unwrap();
+        let store = RuntimeStore::new().with_file_text("src/handler.rs", "pub fn handle() {}\n");
+        let contract = ContractBuilder::from_plan(&plan_with_boundary_evidence()).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    check_api_surface: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "api_surface_violation"
+                && finding.reason.contains("SignatureChanged")));
+    }
+
+    #[test]
+    fn contract_verifier_allows_explicit_public_api_signature_change() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src")).unwrap();
+        fs::write(
+            repo.path().join("src/handler.rs"),
+            "pub fn handle(user_id: &str) {}\n",
+        )
+        .unwrap();
+        let store = RuntimeStore::new().with_file_text("src/handler.rs", "pub fn handle() {}\n");
+        let mut contract = ContractBuilder::from_plan(&plan_with_boundary_evidence()).unwrap();
+        contract.api_surface_constraints = vec![ApiSurfaceConstraint {
+            scope: "src/handler.rs".into(),
+            allowed_changes: vec![ApiSurfaceChangeKind::SignatureChanged],
+            severity: ConstraintSeverity::Required,
+            reason: "approved API migration".into(),
+            evidence_refs: contract.evidence_refs.clone(),
+        }];
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    check_api_surface: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(!report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "api_surface_violation"));
+        assert!(report
+            .change_report
+            .api_surface_deltas
+            .iter()
+            .any(|finding| finding.kind == "api_surface_allowed_delta"));
+    }
+
+    #[test]
+    fn contract_verifier_fails_for_forbidden_dependency_delta_constraint() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src/forbidden")).unwrap();
+        fs::write(
+            repo.path().join("src/handler.rs"),
+            "use crate::forbidden::secret;\npub fn handle() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("src/forbidden/secret.rs"),
+            "pub fn secret() {}\n",
+        )
+        .unwrap();
+        let store = RuntimeStore::new().with_file_text("src/handler.rs", "pub fn handle() {}\n");
+        let mut contract = ContractBuilder::from_plan(&plan_with_boundary_evidence()).unwrap();
+        contract.dependency_delta_constraints = vec![DependencyDeltaConstraint {
+            source: "src/handler.rs".into(),
+            target: "crate::forbidden::*".into(),
+            edge_types: vec!["imports".into()],
+            action: DependencyDeltaAction::Forbid,
+            severity: ConstraintSeverity::Forbidden,
+            reason: "handler must not import forbidden internals".into(),
+            evidence_refs: contract.evidence_refs.clone(),
+        }];
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    check_dependency_delta: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .any(|finding| finding.classification
+                == DependencyDeltaClassification::ViolatingDelta
+                && finding.reason.contains("forbidden internals")));
+    }
+
+    #[test]
+    fn contract_verifier_uses_architecture_policy_for_dependency_delta() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src/domain")).unwrap();
+        fs::create_dir_all(repo.path().join("src/api")).unwrap();
+        fs::write(
+            repo.path().join("src/domain/order.rs"),
+            "use crate::api::secret;\npub fn order() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("src/api/secret.rs"),
+            "pub fn secret() {}\n",
+        )
+        .unwrap();
+        let store = RuntimeStore::new()
+            .with_file_text("src/domain/order.rs", "pub fn order() {}\n")
+            .with_file_text("src/api/secret.rs", "pub fn secret() {}\n");
+        let contract = ContractBuilder::from_plan(&plan_with_boundary_evidence()).unwrap();
+        let policy = ArchitecturePolicy {
+            version: PolicyVersion::V1,
+            layers: vec![
+                PolicyLayer {
+                    id: "domain".into(),
+                    description: None,
+                    paths: vec!["src/domain/**".into()],
+                },
+                PolicyLayer {
+                    id: "api".into(),
+                    description: None,
+                    paths: vec!["src/api/**".into()],
+                },
+            ],
+            contexts: Vec::new(),
+            dependency_rules: vec![open_kioku_config::DependencyRule {
+                id: "domain-must-not-import-api".into(),
+                from: "domain".into(),
+                to: "api".into(),
+                action: DependencyAction::Forbid,
+                severity: Severity::Error,
+                reason: "domain cannot import api".into(),
+            }],
+            public_api_rules: Vec::new(),
+            internal_only_rules: Vec::new(),
+            exemptions: Vec::new(),
+            source: Default::default(),
+        };
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/domain/order.rs")],
+                    check_dependency_delta: true,
+                    architecture_policy: Some(policy),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .dependency_deltas
+            .iter()
+            .any(|finding| finding
+                .rule_refs
+                .contains(&"domain-must-not-import-api".to_string())));
     }
 
     fn plan_with_boundary_evidence() -> PlanReport {
