@@ -197,6 +197,8 @@ enum Command {
         #[arg(long = "evidence-ref", value_name = "REF")]
         evidence_refs: Vec<String>,
         #[arg(long, default_value_t = false)]
+        traceability_strict: bool,
+        #[arg(long, default_value_t = false)]
         run_commands: bool,
     },
     Bench(BenchArgs),
@@ -2088,6 +2090,7 @@ async fn main() -> anyhow::Result<()> {
             since_plan,
             changed,
             evidence_refs,
+            traceability_strict,
             run_commands,
         } => {
             let store = open_store(&repo)?;
@@ -2119,6 +2122,7 @@ async fn main() -> anyhow::Result<()> {
                         unified_diff,
                         evidence_refs,
                         run_commands,
+                        traceability_strict,
                     },
                 )?;
             if cli.json {
@@ -5010,6 +5014,7 @@ fn score_workflow_case(
                 unified_diff: case.unified_diff.clone(),
                 evidence_refs: Vec::new(),
                 run_commands: false,
+                traceability_strict: false,
             },
         )?)
     } else {
