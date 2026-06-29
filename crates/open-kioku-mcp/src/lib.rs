@@ -7,7 +7,7 @@ use open_kioku_config::{load_architecture_policy, load_architecture_policy_from_
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{ContractStore, FsContractStore};
-use open_kioku_core::{Confidence, ContextHandleId, PlanReport, SymbolId};
+use open_kioku_core::{Confidence, ContextHandleId, PlanReport, PolicyCheckReport, SymbolId};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{ChangeVerifier, PatchPlanner, VerifyChangeInput};
@@ -155,8 +155,9 @@ async fn dispatch(
         "regex_search" => search_tool(repo, store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
-            let pack =
+            let mut pack =
                 ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let format_arg = params
                 .get("format")
                 .and_then(Value::as_str)
@@ -171,8 +172,9 @@ async fn dispatch(
         }
         "build_compressed_context" => {
             let task = required_str(&params, "task")?;
-            let pack =
+            let mut pack =
                 ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
             let format_arg = params
                 .get("format")
@@ -200,9 +202,12 @@ async fn dispatch(
                 task.to_string()
             };
             let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
+            let limit = limit(&params);
+            let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
+            context.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let report = PlanEngine::new(store as &dyn OkStore)
                 .with_memory_facts(memory_facts)
-                .plan(&task, limit(&params))?;
+                .plan_from_context(&task, limit, context)?;
             let format_arg = params
                 .get("format")
                 .and_then(Value::as_str)
@@ -232,7 +237,9 @@ async fn dispatch(
         }
         "impact_analysis" => {
             let path = required_str(&params, "path")?;
-            Ok(json!(ImpactEngine::new(store).for_file(Path::new(path))?))
+            let mut report = ImpactEngine::new(store).for_file(Path::new(path))?;
+            report.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            Ok(json!(report))
         }
         "history_provenance_lookup" => {
             let path = params.get("path").and_then(Value::as_str);
@@ -418,11 +425,8 @@ async fn dispatch(
                 .get("write_attestation")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let architecture_policy = if check_dependency_delta {
-                load_architecture_policy(repo)?
-            } else {
-                None
-            };
+            let architecture_policy = load_architecture_policy(repo)?;
+            let check_dependency_delta = check_dependency_delta || architecture_policy.is_some();
             let index_dir = default_index_dir(repo);
             let search_index = if TantivySearchIndex::exists(&index_dir) {
                 Some(TantivySearchIndex::open_or_create(index_dir)?)
@@ -885,6 +889,20 @@ fn limit(params: &Value) -> usize {
         .and_then(Value::as_u64)
         .unwrap_or(20)
         .min(100) as usize
+}
+
+fn configured_architecture_policy_report<S>(
+    repo: &Path,
+    store: &S,
+) -> anyhow::Result<Option<PolicyCheckReport>>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    let Some(policy) = load_architecture_policy(repo)? else {
+        return Ok(None);
+    };
+    let resolver = PolicyResolver::new(&policy)?;
+    Ok(Some(evaluate_policy(store, &resolver, &policy)?))
 }
 
 fn architecture_policy_validate_tool(repo: &Path, params: &Value) -> anyhow::Result<Value> {

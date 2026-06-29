@@ -13,8 +13,9 @@ use open_kioku_contract::{ContractStore, FsContractStore};
 use open_kioku_core::{
     Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
-    IndexMode, NodeId, PlanReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
-    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
+    IndexMode, NodeId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
+    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, Symbol, SymbolId,
+    SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -1910,12 +1911,15 @@ async fn main() -> anyhow::Result<()> {
             };
             let engine = ImpactEngine::new(&store)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex));
+            let architecture_policy = configured_architecture_policy_report(&repo, &store)?;
 
             if let Some(since) = args.since.as_deref() {
                 let changed = changed_ranges_since(&repo, since)?;
                 let mut reports = Vec::new();
                 for file in changed.iter().filter_map(|change| change.new_path.as_ref()) {
-                    reports.push(engine.for_file(file)?);
+                    let mut report = engine.for_file(file)?;
+                    report.architecture_policy = architecture_policy.clone();
+                    reports.push(report);
                 }
                 if cli.json {
                     println!(
@@ -1942,7 +1946,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let report = if let Some(path) = args.file {
+            let mut report = if let Some(path) = args.file {
                 let normalized = normalize_to_repo_relative(&repo, &path);
                 engine.for_file(&normalized)?
             } else if let Some(symbol) = args.symbol {
@@ -1957,6 +1961,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 anyhow::bail!("provide --file or --symbol");
             };
+            report.architecture_policy = architecture_policy;
             output(cli.json, &report, || {
                 println!("Impact target: {}", report.target);
                 println!(
@@ -2122,11 +2127,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let architecture_policy = if check_deps {
-                load_architecture_policy(&repo)?
-            } else {
-                None
-            };
+            let architecture_policy = load_architecture_policy(&repo)?;
+            let check_dependency_delta = check_deps || architecture_policy.is_some();
             let contract_store =
                 write_attestation.then(|| FsContractStore::new(repo.join(".ok/contracts")));
             let verification = ChangeVerifier::new(&store as &dyn OkStore)
@@ -2148,7 +2150,7 @@ async fn main() -> anyhow::Result<()> {
                         validation_attestations: Vec::new(),
                         traceability_strict,
                         check_api_surface,
-                        check_dependency_delta: check_deps,
+                        check_dependency_delta,
                         architecture_policy,
                     },
                 )?;
@@ -6520,12 +6522,29 @@ fn build_context_pack(
     ranking_options.query = Some(task.into());
     let builder =
         ContextPackBuilder::new(store as &dyn OkStore).with_ranking_options(ranking_options);
-    if TantivySearchIndex::exists(&search_dir) {
+    let mut pack = if TantivySearchIndex::exists(&search_dir) {
         let index = TantivySearchIndex::open_or_create(&search_dir)?;
         let primary = index.search(task, ranking_candidate_limit(limit))?;
-        return Ok(builder.build_from_primary(task, limit, primary)?);
-    }
-    Ok(builder.build(task, limit)?)
+        builder.build_from_primary(task, limit, primary)?
+    } else {
+        builder.build(task, limit)?
+    };
+    pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
+    Ok(pack)
+}
+
+fn configured_architecture_policy_report<S>(
+    repo: &Path,
+    store: &S,
+) -> anyhow::Result<Option<PolicyCheckReport>>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    let Some(policy) = load_architecture_policy(repo)? else {
+        return Ok(None);
+    };
+    let resolver = PolicyResolver::new(&policy)?;
+    Ok(Some(evaluate_policy(store, &resolver, &policy)?))
 }
 
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {

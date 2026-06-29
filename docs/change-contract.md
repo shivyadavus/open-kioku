@@ -37,6 +37,16 @@ Detailed validation ledgers are persisted under
 `.ok/contracts/validation/{run_id}.json`; contract verification JSONL records
 store the corresponding attestation summaries.
 
+Contracts generated from `PlanReport` preserve architecture policy evidence
+when a plan or nested impact report includes `architecture_policy`.
+`open_kioku_plan::summarize_policy_for_contract` returns a
+`PolicySignalSummary` with bounded `PolicyViolationEvidenceRef` entries for
+contract consumers. The builder adds a policy summary constraint and bounded
+policy violation constraints under `architecture_constraints`, each citing
+stable `architecture-policy:*` evidence refs that are also present in the
+contract's top-level `evidence_refs`. Verification uses configured repository
+policy to classify dependency deltas as allowed, violating, or unknown.
+
 Use `open_kioku_contract::schema()` to obtain the JSON Schema root. The
 canonical JSON example is
 [`crates/open-kioku-contract/tests/fixtures/change_contract_v1.json`](../crates/open-kioku-contract/tests/fixtures/change_contract_v1.json).
@@ -51,4 +61,5 @@ before they cross a crate or persistence boundary. JSON deserialization invokes
 the same validation automatically.
 
 Persistence, plan adapters, builders, verification, and user-facing CLI/MCP
-commands are intentionally deferred to their dedicated trust-layer issues.
+commands live in the plan, patch, CLI, and MCP crates; the contract crate
+continues to own only the schema and validation primitives.
