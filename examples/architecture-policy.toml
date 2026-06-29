@@ -44,8 +44,22 @@ internal_globs = ["crates/*-service/src/internal/**"]
 severity = "warning"
 reason = "Consumers should use the documented service facade"
 
+[[internal_only_rules]]
+id = "storage-internals"
+component = "storage"
+globs = ["crates/*-storage/src/internal/**"]
+severity = "error"
+reason = "Storage internals must stay behind the storage facade"
+
 [[exemptions]]
 id = "generated-api-clients"
 rules = ["service-public-api"]
+scopes = ["generated"]
 paths = ["crates/*-service/src/generated/**"]
 reason = "Generated clients expose implementation-specific transport types"
+
+[[exemptions]]
+id = "storage-contract-tests"
+rules = ["storage-internals"]
+scopes = ["tests"]
+reason = "Contract tests may inspect storage internals"

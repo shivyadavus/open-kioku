@@ -162,6 +162,88 @@ fn architecture_policy_validate_and_print_are_index_independent() {
 }
 
 #[test]
+fn architecture_policy_check_and_explain_public_api_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".open-kioku")).unwrap();
+    fs::create_dir_all(repo.join("src/api/internal")).unwrap();
+    fs::create_dir_all(repo.join("src/domain")).unwrap();
+    fs::write(
+        repo.join(".open-kioku/architecture.toml"),
+        r#"version = "v1"
+
+[[layers]]
+id = "api"
+paths = ["src/api/**"]
+
+[[layers]]
+id = "domain"
+paths = ["src/domain/**"]
+
+[[public_api_rules]]
+id = "api-public-boundary"
+component = "api"
+public_globs = ["src/api/mod.rs"]
+internal_globs = ["src/api/internal/**"]
+severity = "error"
+reason = "domain code must use the api facade"
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub mod api;\npub mod domain;\n").unwrap();
+    fs::write(repo.join("src/api/mod.rs"), "pub mod internal;\n").unwrap();
+    fs::write(
+        repo.join("src/api/internal/mod.rs"),
+        "pub struct Session;\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/domain/mod.rs"),
+        "use crate::api::internal;\npub fn leak() -> internal::Session { internal::Session }\n",
+    )
+    .unwrap();
+
+    let _ = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let check = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("policy")
+            .arg("check");
+        command
+    });
+    let check: serde_json::Value = serde_json::from_str(&check).unwrap();
+    assert_eq!(check["public_api_violation_count"], 1);
+    assert_eq!(check["violations"][0]["rule_id"], "api-public-boundary");
+
+    let explain = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("policy")
+            .arg("explain")
+            .arg("--file")
+            .arg("src/api/internal/mod.rs");
+        command
+    });
+    let explain: serde_json::Value = serde_json::from_str(&explain).unwrap();
+    assert_eq!(explain["configured"], true);
+    assert_eq!(explain["components"][0]["component_id"], "api");
+    assert_eq!(explain["violations"][0]["rule_id"], "api-public-boundary");
+}
+
+#[test]
 fn init_index_search_and_doctor_work_together() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
