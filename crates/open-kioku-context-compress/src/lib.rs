@@ -344,6 +344,7 @@ mod tests {
             },
             evidence: Vec::new(),
             negative_evidence: Vec::new(),
+            architecture_policy: None,
             confidence_summary: "test".into(),
             confidence_breakdown: open_kioku_core::ConfidenceBreakdown::default(),
         };

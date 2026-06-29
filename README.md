@@ -28,6 +28,11 @@ and verifies a bounded edit against that saved plan. The recording is
 reproducible with `scripts/quickstart-demo.sh`; regenerate the GIF with
 `scripts/render-quickstart-demo.py assets/open-kioku-quickstart.gif`.
 
+When a repository defines `.open-kioku/architecture.toml`, context, plan, and
+impact outputs include the active architecture policy report. `ok verify` and
+MCP `verify_change` enforce dependency deltas against that configured policy by
+default.
+
 ## The 60-Second Pitch
 
 Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:

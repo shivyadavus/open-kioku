@@ -239,6 +239,42 @@ reason = "domain code must use the api facade"
     assert_eq!(check["public_api_violation_count"], 1);
     assert_eq!(check["violations"][0]["rule_id"], "api-public-boundary");
 
+    let plan = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("plan")
+            .arg("domain");
+        command
+    });
+    let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    assert_eq!(plan["architecture_policy"]["configured"], true);
+    assert_eq!(plan["impact"]["architecture_policy"]["configured"], true);
+    assert_eq!(
+        plan["architecture_policy"]["violations"][0]["rule_id"],
+        "api-public-boundary"
+    );
+
+    let impact = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("impact")
+            .arg("--file")
+            .arg("src/domain/mod.rs");
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact).unwrap();
+    assert_eq!(impact["architecture_policy"]["configured"], true);
+    assert_eq!(
+        impact["architecture_policy"]["violations"][0]["rule_id"],
+        "api-public-boundary"
+    );
+
     let check_markdown = run({
         let mut command = ok();
         command
@@ -337,6 +373,145 @@ reason = "domain code must use the api facade"
         response["result"]["structuredContent"]["violations"][0]["rule_id"],
         "api-public-boundary"
     );
+
+    let mcp_plan = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"domain","limit":5}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_plan.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["architecture_policy"]["configured"],
+        true
+    );
+
+    let mcp_impact = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"impact_analysis","arguments":{"path":"src/domain/mod.rs"}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_impact.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["architecture_policy"]["configured"],
+        true
+    );
+}
+
+#[test]
+fn verify_enforces_configured_architecture_policy_without_dependency_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".open-kioku")).unwrap();
+    fs::create_dir_all(repo.join("src/domain")).unwrap();
+    fs::create_dir_all(repo.join("src/api")).unwrap();
+    fs::write(
+        repo.join(".open-kioku/architecture.toml"),
+        r#"version = "v1"
+
+[[layers]]
+id = "domain"
+paths = ["src/domain/**"]
+
+[[layers]]
+id = "api"
+paths = ["src/api/**"]
+
+[[dependency_rules]]
+id = "domain-must-not-import-api"
+from = "domain"
+to = "api"
+action = "forbid"
+severity = "error"
+reason = "domain cannot import api"
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub mod api;\npub mod domain;\n").unwrap();
+    fs::write(repo.join("src/api/mod.rs"), "pub mod secret;\n").unwrap();
+    fs::write(repo.join("src/api/secret.rs"), "pub fn secret() {}\n").unwrap();
+    fs::write(repo.join("src/domain/mod.rs"), "pub mod order;\n").unwrap();
+    fs::write(
+        repo.join("src/domain/order.rs"),
+        "pub fn order() -> u32 { 1 }\n",
+    )
+    .unwrap();
+
+    let _ = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let plan_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("plan")
+            .arg("order")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    let plan_path = repo.join("plan.json");
+    fs::write(&plan_path, &plan_json).unwrap();
+
+    fs::write(
+        repo.join("src/domain/order.rs"),
+        "use crate::api::secret;\npub fn order() -> u32 { secret(); 1 }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--changed")
+            .arg("src/domain/order.rs");
+        command
+    });
+    assert!(stdout.contains("\"verdict\": \"fail\""));
+    assert!(stdout.contains("domain-must-not-import-api"));
+    assert!(stdout.contains("dependency_deltas"));
+    assert!(stderr.contains("change verification failed"));
+
+    let plan_value: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+    let mcp_verify_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "verify_change",
+            "arguments": {
+                "plan": plan_value,
+                "changed_files": ["src/domain/order.rs"]
+            }
+        }
+    })
+    .to_string();
+    let mcp_verify = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_verify_req + "\n"),
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_verify.trim()).unwrap();
+    assert_eq!(response["result"]["structuredContent"]["verdict"], "fail");
+    assert!(mcp_verify.contains("domain-must-not-import-api"));
 }
 
 #[test]

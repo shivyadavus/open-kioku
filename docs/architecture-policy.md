@@ -123,7 +123,16 @@ policy or an explicit `path`. `architecture_policy_check` returns the same
 structured policy check report for indexed repositories.
 `architecture_policy_explain` accepts exactly one of `file`, `symbol`, or
 `scope: "repo"` and returns the same explanation shape as the CLI.
-Plan/impact/contract integration is intentionally out of scope.
+
+When a repository policy is configured, `ok context`, `ok plan`, `ok impact`,
+MCP `build_context_pack`, MCP `plan_change`, and MCP `impact_analysis` include
+an `architecture_policy` report with the active `PolicyCheckReport`. Generated
+contracts convert the policy summary and bounded violation samples into
+traceable architecture constraints with stable `architecture-policy:*` evidence
+refs. `ok verify` and MCP `verify_change` load configured policy automatically
+and run dependency-delta policy checks even when `--check-deps` /
+`check_dependency_delta` is omitted; repositories with no policy keep the
+previous opt-in dependency-delta behavior.
 
 ## Benchmark Corpus
 

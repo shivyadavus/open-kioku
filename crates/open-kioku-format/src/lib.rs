@@ -581,6 +581,7 @@ mod tests {
                     reasons: Vec::new(),
                 },
                 evidence: Vec::new(),
+                architecture_policy: None,
                 score_breakdown: vec![ScoreComponent::single(
                     "impact_fixture",
                     0.1,
@@ -605,6 +606,7 @@ mod tests {
             tool_calls: Vec::new(),
             memory_facts: Vec::new(),
             runtime_signals: Vec::new(),
+            architecture_policy: None,
             evidence: vec![Evidence {
                 id: EvidenceId::new("ev"),
                 source: "test".into(),
