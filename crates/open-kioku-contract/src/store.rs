@@ -1,4 +1,4 @@
-use crate::{ChangeContractV1, ContractId};
+use crate::{ChangeContractV1, ContractId, ValidationAttestationSummary, ValidationLedger};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ pub struct ContractVerificationRecord {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_attestations: Vec<ValidationAttestationSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<serde_json::Value>,
 }
@@ -52,6 +54,7 @@ pub trait ContractStore {
         id: &ContractId,
         record: &ContractVerificationRecord,
     ) -> Result<(), StoreError>;
+    fn save_validation_ledger(&self, ledger: &ValidationLedger) -> Result<PathBuf, StoreError>;
 }
 
 pub struct FsContractStore {
@@ -71,6 +74,12 @@ impl FsContractStore {
 
     fn verification_path(&self, id: &ContractId) -> PathBuf {
         self.base_dir.join(format!("{}.verify.jsonl", id.0))
+    }
+
+    fn validation_ledger_path(&self, run_id: &str) -> PathBuf {
+        self.base_dir
+            .join("validation")
+            .join(format!("{run_id}.json"))
     }
 }
 
@@ -161,6 +170,16 @@ impl ContractStore for FsContractStore {
 
         Ok(())
     }
+
+    fn save_validation_ledger(&self, ledger: &ValidationLedger) -> Result<PathBuf, StoreError> {
+        let path = self.validation_ledger_path(&ledger.run_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(ledger)?;
+        fs::write(&path, json)?;
+        Ok(path)
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +221,7 @@ mod tests {
                 command: "cargo test".into(),
                 reason: "validate".into(),
             }],
+            validation_requirements: Vec::new(),
             risk: RiskAssessment {
                 level: RiskLevel::Low,
                 score: 0.1,
@@ -280,6 +300,7 @@ mod tests {
             success: true,
             stdout: "passed".into(),
             stderr: "".into(),
+            validation_attestations: Vec::new(),
             report: None,
         };
 
@@ -290,6 +311,45 @@ mod tests {
         let verify_path = store.verification_path(&contract.id);
         let content = fs::read_to_string(&verify_path).expect("verify file exists");
         assert!(content.contains("passed"));
+    }
+
+    #[test]
+    fn test_save_validation_ledger() {
+        let dir = tempdir().unwrap();
+        let store = FsContractStore::new(dir.path());
+        let id = ContractId::new("c-123");
+        let now = Utc::now();
+        let ledger = ValidationLedger {
+            run_id: "run-123".into(),
+            contract_id: id.clone(),
+            contract_digest: "digest".into(),
+            generated_at: now,
+            attestations: vec![crate::ValidationAttestation {
+                id: "att-123".into(),
+                contract_id: id,
+                verification_run_id: "run-123".into(),
+                contract_digest: "digest".into(),
+                requirement_digest: "req-digest".into(),
+                created_at: now,
+                result: crate::AttestedCommandResult {
+                    command: "cargo test".into(),
+                    cwd: ".".into(),
+                    started_at: now,
+                    finished_at: now,
+                    exit_code: Some(0),
+                    allowlist_status: crate::CommandAllowlistStatus::Allowed,
+                    outcome: crate::ValidationOutcome::Passed,
+                    stdout_summary: "ok".into(),
+                    stderr_summary: String::new(),
+                },
+            }],
+        };
+
+        let path = store.save_validation_ledger(&ledger).unwrap();
+        assert_eq!(path, dir.path().join("validation/run-123.json"));
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"run_id\": \"run-123\""));
+        assert!(content.contains("\"command\": \"cargo test\""));
     }
 
     #[test]

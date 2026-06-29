@@ -9,6 +9,7 @@ use open_kioku_config::{
 };
 use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
+use open_kioku_contract::{ContractStore, FsContractStore};
 use open_kioku_core::{
     Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
@@ -204,6 +205,8 @@ enum Command {
         check_deps: bool,
         #[arg(long, default_value_t = false)]
         run_commands: bool,
+        #[arg(long = "write-attestation", default_value_t = false)]
+        write_attestation: bool,
     },
     Bench(BenchArgs),
     WorkflowBench(WorkflowBenchArgs),
@@ -2098,6 +2101,7 @@ async fn main() -> anyhow::Result<()> {
             check_api_surface,
             check_deps,
             run_commands,
+            write_attestation,
         } => {
             let store = open_store(&repo)?;
             let report = load_saved_plan(&plan)?;
@@ -2123,8 +2127,15 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            let contract_store =
+                write_attestation.then(|| FsContractStore::new(repo.join(".ok/contracts")));
             let verification = ChangeVerifier::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_contract_store(
+                    contract_store
+                        .as_ref()
+                        .map(|store| store as &dyn ContractStore),
+                )
                 .verify(
                     &repo,
                     &report,
@@ -2133,6 +2144,8 @@ async fn main() -> anyhow::Result<()> {
                         unified_diff,
                         evidence_refs,
                         run_commands,
+                        write_attestation,
+                        validation_attestations: Vec::new(),
                         traceability_strict,
                         check_api_surface,
                         check_dependency_delta: check_deps,
@@ -5028,6 +5041,8 @@ fn score_workflow_case(
                 unified_diff: case.unified_diff.clone(),
                 evidence_refs: Vec::new(),
                 run_commands: false,
+                write_attestation: false,
+                validation_attestations: Vec::new(),
                 traceability_strict: false,
                 check_api_surface: false,
                 check_dependency_delta: false,
@@ -5886,11 +5901,19 @@ fn print_verify_report(report: &ChangeVerificationReport) {
     if !report.command_results.is_empty() {
         println!("Command results:");
         for result in &report.command_results {
+            let attestation = result
+                .attestation_id
+                .as_deref()
+                .map(|id| format!(" attestation={id}"))
+                .unwrap_or_default();
             println!(
-                "  - {}: {} ({:?})",
-                result.command, result.status, result.exit_code
+                "  - {}: {} ({:?}){}",
+                result.command, result.status, result.exit_code, attestation
             );
         }
+    }
+    if let Some(path) = &report.validation_ledger_path {
+        println!("Validation ledger: {}", path.display());
     }
 }
 

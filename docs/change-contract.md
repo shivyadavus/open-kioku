@@ -2,8 +2,8 @@
 
 `open-kioku-contract` owns the authoritative, versioned artifact that connects a
 task to its indexed evidence, edit boundary, impacted symbols, required tests,
-architecture constraints, validation commands, risk, confidence, and source
-plan.
+architecture constraints, validation commands, validation requirements, risk,
+confidence, and source plan.
 
 The crate is intentionally low-level. It contains schema and validation
 primitives only and does not depend on CLI, MCP, patch, plan, or persistence
@@ -26,6 +26,16 @@ Deserialization rejects:
 `secondary_files` and `forbidden_files` may be empty because a valid narrow
 change does not always have supporting or prohibited files. Unknown additive
 top-level fields are retained in `extensions` and survive a v1 round trip.
+
+Validation commands are the human-readable compatibility surface. Newer
+contracts may also carry `validation_requirements`, which bind a command,
+optional repository-relative working directory, rationale, and evidence refs to
+the attestation system. Verification records can attach
+`ValidationAttestation` entries that include command, cwd, timestamps, exit
+code, allowlist status, normalized outcome, and stdout/stderr summaries.
+Detailed validation ledgers are persisted under
+`.ok/contracts/validation/{run_id}.json`; contract verification JSONL records
+store the corresponding attestation summaries.
 
 Use `open_kioku_contract::schema()` to obtain the JSON Schema root. The
 canonical JSON example is
