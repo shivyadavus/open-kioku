@@ -15,10 +15,16 @@ chrono.workspace = true
 open-kioku-actions = { version = "2.0.0", path = "../open-kioku-actions" }
 open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
 open-kioku-context = { version = "2.0.0", path = "../open-kioku-context" }
+open-kioku-contract = { version = "2.0.0", path = "../open-kioku-contract" }
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 open-kioku-impact = { version = "2.0.0", path = "../open-kioku-impact" }
+open-kioku-plan = { version = "2.0.0", path = "../open-kioku-plan" }
 open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
 open-kioku-tests = { version = "2.0.0", path = "../open-kioku-tests" }
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

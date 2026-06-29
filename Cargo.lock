@@ -1444,13 +1444,17 @@ dependencies = [
  "open-kioku-actions",
  "open-kioku-config",
  "open-kioku-context",
+ "open-kioku-contract",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-impact",
+ "open-kioku-plan",
  "open-kioku-storage",
  "open-kioku-tests",
  "serde",
+ "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

@@ -5809,6 +5809,17 @@ fn print_verify_report(report: &ChangeVerificationReport) {
             println!("  - {symbol}");
         }
     }
+    if !report.traceability.is_empty() {
+        println!("Traceability:");
+        for trace in &report.traceability {
+            let evidence = if trace.evidence_refs.is_empty() {
+                "no direct evidence refs".into()
+            } else {
+                trace.evidence_refs.join(", ")
+            };
+            println!("  - {}: {} ({})", trace.field, trace.rationale, evidence);
+        }
+    }
     print_findings("Boundary failures", &report.boundary_violations);
     print_findings("Warnings", &report.warnings);
     print_findings("Missing tests", &report.missing_tests);
