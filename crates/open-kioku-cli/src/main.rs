@@ -198,6 +198,10 @@ enum Command {
         evidence_refs: Vec<String>,
         #[arg(long, default_value_t = false)]
         traceability_strict: bool,
+        #[arg(long = "check-api-surface", default_value_t = false)]
+        check_api_surface: bool,
+        #[arg(long = "check-deps", default_value_t = false)]
+        check_deps: bool,
         #[arg(long, default_value_t = false)]
         run_commands: bool,
     },
@@ -2091,6 +2095,8 @@ async fn main() -> anyhow::Result<()> {
             changed,
             evidence_refs,
             traceability_strict,
+            check_api_surface,
+            check_deps,
             run_commands,
         } => {
             let store = open_store(&repo)?;
@@ -2112,6 +2118,11 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            let architecture_policy = if check_deps {
+                load_architecture_policy(&repo)?
+            } else {
+                None
+            };
             let verification = ChangeVerifier::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .verify(
@@ -2123,6 +2134,9 @@ async fn main() -> anyhow::Result<()> {
                         evidence_refs,
                         run_commands,
                         traceability_strict,
+                        check_api_surface,
+                        check_dependency_delta: check_deps,
+                        architecture_policy,
                     },
                 )?;
             if cli.json {
@@ -5015,6 +5029,9 @@ fn score_workflow_case(
                 evidence_refs: Vec::new(),
                 run_commands: false,
                 traceability_strict: false,
+                check_api_surface: false,
+                check_dependency_delta: false,
+                architecture_policy: None,
             },
         )?)
     } else {
@@ -5824,6 +5841,41 @@ fn print_verify_report(report: &ChangeVerificationReport) {
     print_findings("Warnings", &report.warnings);
     print_findings("Missing tests", &report.missing_tests);
     print_findings("Changed impact", &report.changed_impact);
+    print_findings("API surface deltas", &report.api_surface_deltas);
+    if !report.dependency_deltas.is_empty() {
+        println!("Dependency deltas:");
+        for finding in &report.dependency_deltas {
+            let source_path = finding
+                .source_path
+                .as_ref()
+                .map(|path| path.as_str())
+                .unwrap_or("<unknown>");
+            let target_path = finding
+                .target_path
+                .as_ref()
+                .map(|path| path.as_str())
+                .unwrap_or(&finding.target);
+            let evidence = if finding.evidence_refs.is_empty() {
+                "no direct evidence refs".into()
+            } else {
+                finding
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| reference.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!(
+                "  - {:?}: {} -> {} via {} ({}) [{}]",
+                finding.classification,
+                source_path,
+                target_path,
+                finding.edge_type,
+                finding.reason,
+                evidence
+            );
+        }
+    }
     if !report.recommended_tests.is_empty() {
         println!("Recommended tests:");
         for test in &report.recommended_tests {

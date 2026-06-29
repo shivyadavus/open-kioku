@@ -194,6 +194,8 @@ mod tests {
                 reason: "some reason".into(),
                 evidence_refs: vec![crate::EvidenceRef::new("ev-1")],
             }],
+            api_surface_constraints: Vec::new(),
+            dependency_delta_constraints: Vec::new(),
             traceability: vec![],
             expansion_approval_requirements: vec![],
             validation_commands: vec![crate::ValidationCommand {
