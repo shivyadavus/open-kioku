@@ -21,27 +21,31 @@ ok demo --force
 ok --repo ./open-kioku-demo plan token --format markdown --limit 6
 ok --repo ./open-kioku-demo --json plan token > /tmp/open-kioku-plan.json
 ok --repo ./open-kioku-demo --json verify --plan /tmp/open-kioku-plan.json --changed src/auth.rs
+ok --repo ./open-kioku-demo --json contract create token --limit 6
 ```
 
 This creates a local demo repo, indexes it, asks for an evidence-backed plan,
-and verifies a bounded edit against that saved plan. The recording is
+verifies a bounded edit against that saved plan, and creates a stored change
+contract for the same task. The recording is
 reproducible with `scripts/quickstart-demo.sh`; regenerate the GIF with
 `scripts/render-quickstart-demo.py assets/open-kioku-quickstart.gif`.
 
 When a repository defines `.open-kioku/architecture.toml`, context, plan, and
-impact outputs include the active architecture policy report. `ok verify` and
-MCP `verify_change` enforce dependency deltas against that configured policy by
-default.
+impact outputs include the active architecture policy report. `ok verify`,
+`ok contract verify`, MCP `verify_change`, and MCP `verify_change_contract`
+enforce dependency deltas against that configured policy by default.
 
 ## The 60-Second Pitch
 
 Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:
 
 ```text
-search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change -> verify_change
+search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change -> create_change_contract -> verify_change_contract
 ```
 
-The output is an evidence-backed pre-edit plan: primary files, relevant symbols, likely blast radius, exact validation commands, confidence, and the next MCP calls to make.
+The output is an evidence-backed pre-edit plan and optional stored change
+contract: primary files, relevant symbols, likely blast radius, exact validation
+commands, confidence, and the next MCP calls to make.
 
 Tested across several large public repositories under permissive open-source
 licenses. These metrics are from one representative Open Kioku 2.1.0 run:
@@ -375,6 +379,10 @@ ok --repo /path/to/repo memory remember "release workflow uses scripts/publish-c
 ok --repo /path/to/repo memory search "release workflow"
 ok --repo /path/to/repo plan "update MCP docs" --format markdown
 ok --repo /path/to/repo plan "update MCP docs" --format toon
+ok --repo /path/to/repo --json contract create "update MCP docs" --limit 12
+ok --repo /path/to/repo contract show <contract-id> --format markdown
+ok --repo /path/to/repo contract export <contract-id> --format toon
+ok --repo /path/to/repo --json contract verify --id <contract-id> --changed src/auth.rs
 ok status /path/to/repo --markdown --write ok-status.md
 ok setup audit /path/to/repo --markdown --write ok-setup.md
 ok --repo /path/to/repo snapshot export --quality fast
@@ -405,9 +413,9 @@ These reports include indexed counts, evidence scores, validation commands, and
 path shapes — but intentionally omit source code, so they are safe to share
 from private repos.
 
-Current top-level commands (31): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `bench`, `workflow-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands (32): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool reference (50 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool reference (54 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
@@ -451,8 +459,8 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 This is a 44-crate Cargo workspace. Important crates:
 
-- `open-kioku-cli`: the `ok` binary (31 subcommands).
-- `open-kioku-mcp`: JSON-RPC MCP server over stdio (50 tools).
+- `open-kioku-cli`: the `ok` binary (32 subcommands).
+- `open-kioku-mcp`: JSON-RPC MCP server over stdio (54 tools).
 - `open-kioku-core`: shared types, evidence data model, and report schemas.
 - `open-kioku-ingest`: repository indexing pipeline with static analysis and runtime evidence ingestion.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.

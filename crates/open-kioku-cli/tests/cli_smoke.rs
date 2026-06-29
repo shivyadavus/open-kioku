@@ -1800,6 +1800,214 @@ fn demo_creates_indexed_sample_repo() {
 }
 
 #[test]
+fn contract_cli_and_mcp_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    let _ = run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    let create_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("contract")
+            .arg("create")
+            .arg("token")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    let create: serde_json::Value = serde_json::from_str(&create_json).unwrap();
+    let contract_id = create["contract_id"].as_str().unwrap().to_string();
+    assert_eq!(create["stored"], true);
+    assert!(repo
+        .join(".ok/contracts")
+        .join(format!("{contract_id}.json"))
+        .exists());
+
+    let show_markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("contract")
+            .arg("show")
+            .arg(&contract_id)
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(show_markdown.contains("# Change Contract"));
+
+    let export_toon = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("contract")
+            .arg("export")
+            .arg(&contract_id)
+            .arg("--format")
+            .arg("toon");
+        command
+    });
+    assert!(export_toon.contains("type: change_contract"));
+
+    let explain_markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("contract")
+            .arg("explain")
+            .arg("--id")
+            .arg(&contract_id)
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(explain_markdown.contains("# Contract Explanation"));
+
+    let verify_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("contract")
+            .arg("verify")
+            .arg("--id")
+            .arg(&contract_id)
+            .arg("--changed")
+            .arg("src/auth.rs");
+        command
+    });
+    let verification: serde_json::Value = serde_json::from_str(&verify_json).unwrap();
+    assert_eq!(verification["contract_id"], contract_id);
+    assert!(verification["decision"].as_str().is_some());
+    assert!(repo
+        .join(".ok/contracts")
+        .join(format!("{contract_id}.verify.jsonl"))
+        .exists());
+
+    let inline_contract = serde_json::to_string(&create["contract"]).unwrap();
+    let inline_verify_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("contract")
+            .arg("verify")
+            .arg("--contract-json")
+            .arg(&inline_contract)
+            .arg("--changed")
+            .arg("src/auth.rs");
+        command
+    });
+    let inline_verification: serde_json::Value = serde_json::from_str(&inline_verify_json).unwrap();
+    assert_eq!(inline_verification["contract_id"], contract_id);
+
+    let mcp_create = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_change_contract","arguments":{"task":"token","limit":5}}}"#,
+    );
+    let mcp_create: serde_json::Value = serde_json::from_str(mcp_create.trim()).unwrap();
+    let mcp_contract_id = mcp_create["result"]["structuredContent"]["contract_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mcp_get_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "get_change_contract",
+            "arguments": {
+                "contract_id": mcp_contract_id,
+                "format": "markdown"
+            }
+        }
+    })
+    .to_string();
+    let mcp_get = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_get_req + "\n"),
+    );
+    let mcp_get: serde_json::Value = serde_json::from_str(mcp_get.trim()).unwrap();
+    assert!(mcp_get["result"]["structuredContent"]
+        .as_str()
+        .unwrap()
+        .contains("# Change Contract"));
+
+    let mcp_verify_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "verify_change_contract",
+            "arguments": {
+                "contract_id": mcp_contract_id,
+                "changed_files": ["src/auth.rs"]
+            }
+        }
+    })
+    .to_string();
+    let mcp_verify = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_verify_req + "\n"),
+    );
+    let mcp_verify: serde_json::Value = serde_json::from_str(mcp_verify.trim()).unwrap();
+    let mcp_report = mcp_verify["result"]["structuredContent"].clone();
+    assert!(mcp_report["decision"].as_str().is_some());
+
+    let mcp_explain_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "explain_verification",
+            "arguments": {
+                "verification": mcp_report,
+                "format": "markdown"
+            }
+        }
+    })
+    .to_string();
+    let mcp_explain = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
+            command
+        },
+        &(mcp_explain_req + "\n"),
+    );
+    let mcp_explain: serde_json::Value = serde_json::from_str(mcp_explain.trim()).unwrap();
+    assert!(mcp_explain["result"]["structuredContent"]
+        .as_str()
+        .unwrap()
+        .contains("# Verification Explanation"));
+}
+
+#[test]
 fn memory_and_compressed_context_are_available() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("demo");

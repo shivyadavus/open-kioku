@@ -67,7 +67,9 @@ A good default tool sequence is:
 5. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
 6. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
 7. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing. Use `format: "toon"` when the result is going straight into an LLM prompt and `format: "json"` when another tool needs structured data.
-8. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
+8. `create_change_contract`: turn the plan into a stored, versioned contract when the workflow needs a durable pre-edit artifact.
+9. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
+10. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
 
 By default these tools are source-tree read-only. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
 
@@ -78,6 +80,10 @@ The source-read tools allow language-agnostic code exploration and AI-ready cont
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
 - `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
 - `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `create_change_contract`: Builds a `ChangeContractV1` from a task, inline `PlanReport`, or `plan_json`. It stores the contract in `.ok/contracts` by default and supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `get_change_contract`: Retrieves a stored contract by `contract_id` and can export JSON, Markdown, or TOON.
+- `verify_change_contract`: Verifies changed files, a diff, or a git range against a stored contract id, inline contract object, or `contract_json`. Stored contract ids append verification records under `.ok/contracts`.
+- `explain_verification`: Summarizes a `ContractVerificationReport` decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.
 - `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
 - `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files, active architecture policy when configured, and an overall risk score.
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
@@ -105,6 +111,9 @@ Each tool returned by `tools/list` includes a `maturity` field. Stable tools are
 policy is configured. `verify_change` loads configured policy automatically and
 checks dependency deltas against it by default; `check_dependency_delta` remains
 available for explicit dependency-delta checks in repositories without policy.
+`create_change_contract` preserves policy evidence from the source plan, and
+`verify_change_contract` applies the same configured-policy dependency-delta
+default.
 
 Stable source-read tools:
 
@@ -113,10 +122,10 @@ Stable source-read tools:
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
 - `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `explain_file`, `explain_symbol`
+- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
 - `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
-- `propose_patch`, `review_patch`, `validate_patch`, `verify_change`
+- `propose_patch`, `review_patch`, `validate_patch`, `verify_change`, `verify_change_contract`, `explain_verification`
 
 Experimental tools:
 
