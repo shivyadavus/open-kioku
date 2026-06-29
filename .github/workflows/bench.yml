@@ -47,3 +47,11 @@ jobs:
           --cases-file benchmarks/architecture-policy-cases.json \
           --min-precision 0.95 \
           --min-recall 0.90
+        ./target/release/ok contract-bench benchmarks/contract-fixture \
+          --cases-file benchmarks/contract-cases.json \
+          --min-cases 7 \
+          --min-verdict-accuracy 0.95 \
+          --min-verification-precision 0.95 \
+          --min-boundary-precision 0.97 \
+          --min-boundary-recall 0.90 \
+          --min-toon-reduction 0.35

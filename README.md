@@ -340,6 +340,17 @@ ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
 See [`docs/workflow-benchmarks.md`](docs/workflow-benchmarks.md) for the case
 format and rollup metrics.
 
+Use `ok contract-bench` for contract generation and verification benchmark
+cases:
+
+```sh
+ok contract-bench benchmarks/contract-fixture \
+  --cases-file benchmarks/contract-cases.json
+```
+
+See [`docs/contract-benchmarks.md`](docs/contract-benchmarks.md) for the case
+schema, Epic #53 rule-family coverage, and threshold metrics.
+
 ## Try The Demo
 
 ```sh
@@ -413,7 +424,7 @@ These reports include indexed counts, evidence scores, validation commands, and
 path shapes — but intentionally omit source code, so they are safe to share
 from private repos.
 
-Current top-level commands (32): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
 History provenance: [`docs/storage-model.md#provenance-lookup`](docs/storage-model.md#provenance-lookup). Full MCP tool reference (54 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
