@@ -982,6 +982,10 @@
             "traceability_strict": {
               "description": "Set true to reject supplied evidence references that are not present in the saved plan.",
               "type": "boolean"
+            },
+            "write_attestation": {
+              "description": "Set true with run_commands to persist validation attestations under .ok/contracts/validation.",
+              "type": "boolean"
             }
           },
           "type": "object"
