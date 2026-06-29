@@ -944,6 +944,14 @@
               },
               "type": "array"
             },
+            "check_api_surface": {
+              "description": "Set true to detect public API additions, removals, and signature changes during verification.",
+              "type": "boolean"
+            },
+            "check_dependency_delta": {
+              "description": "Set true to detect dependency graph deltas and flag forbidden dependency additions.",
+              "type": "boolean"
+            },
             "diff": {
               "description": "The unified diff showing the actual changes.",
               "type": "string"
