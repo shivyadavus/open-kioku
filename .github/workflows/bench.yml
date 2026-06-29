@@ -43,3 +43,7 @@ jobs:
           --min-context-recall 1.0 \
           --min-verification-accuracy 1.0 \
           --no-index
+        ./target/release/ok architecture bench benchmarks/architecture-policy-fixture \
+          --cases-file benchmarks/architecture-policy-cases.json \
+          --min-precision 0.95 \
+          --min-recall 0.90

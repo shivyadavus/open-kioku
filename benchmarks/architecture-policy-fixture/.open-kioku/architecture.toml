@@ -1,0 +1,50 @@
+version = "v1"
+
+[[layers]]
+id = "api"
+paths = ["src/api/**"]
+
+[[layers]]
+id = "domain"
+paths = ["src/domain/**"]
+
+[[layers]]
+id = "storage"
+paths = ["src/storage/**"]
+
+[[dependency_rules]]
+id = "domain-can-use-api"
+from = "domain"
+to = "api"
+action = "allow"
+severity = "info"
+reason = "domain code may use the public api facade"
+
+[[dependency_rules]]
+id = "domain-no-storage"
+from = "domain"
+to = "storage"
+action = "forbid"
+severity = "error"
+reason = "domain code must not depend directly on storage"
+
+[[public_api_rules]]
+id = "api-public-boundary"
+component = "api"
+public_globs = ["src/api/mod.rs"]
+internal_globs = ["src/api/internal/**"]
+severity = "error"
+reason = "cross-component callers must use the api facade"
+
+[[internal_only_rules]]
+id = "storage-internal-only"
+component = "storage"
+globs = ["src/storage/internal/**"]
+severity = "error"
+reason = "storage internals are not cross-component API"
+
+[[exemptions]]
+id = "test-internal-api"
+rules = ["api-public-boundary"]
+scopes = ["tests"]
+reason = "tests may exercise api internals directly"

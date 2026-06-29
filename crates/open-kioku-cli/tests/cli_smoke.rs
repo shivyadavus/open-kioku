@@ -340,6 +340,51 @@ reason = "domain code must use the api facade"
 }
 
 #[test]
+fn architecture_policy_bench_scores_checked_in_corpus() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = root.join("benchmarks/architecture-policy-fixture");
+    let cases = root.join("benchmarks/architecture-policy-cases.json");
+    let _ = fs::remove_dir_all(fixture.join(".ok"));
+
+    let report = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("architecture")
+            .arg("bench")
+            .arg(&fixture)
+            .arg("--cases-file")
+            .arg(&cases)
+            .arg("--min-precision")
+            .arg("0.95")
+            .arg("--min-recall")
+            .arg("0.90");
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["case_count"], 8);
+    assert_eq!(report["summary"]["precision"], 1.0);
+    assert_eq!(report["summary"]["recall"], 1.0);
+    assert!(report["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|case| case["id"] == "dependency-forbidden-call" && case["passed"] == true));
+    assert!(report["rule_families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|family| family["rule_family"] == "public_api_rule" && family["recall"] == 1.0));
+    assert!(report["rule_families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|family| family["rule_family"] == "internal_only_rule" && family["recall"] == 1.0));
+
+    let _ = fs::remove_dir_all(fixture.join(".ok"));
+}
+
+#[test]
 fn init_index_search_and_doctor_work_together() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
