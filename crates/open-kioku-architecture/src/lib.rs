@@ -2,10 +2,15 @@ pub mod resolver;
 
 pub use resolver::PolicyResolver;
 
-use open_kioku_config::{ArchitecturePolicy, DependencyAction, DependencyRule};
+use globset::{Glob, GlobMatcher};
+use open_kioku_config::{
+    ArchitecturePolicy, DependencyAction, DependencyRule, ExemptionRule, ExemptionScope,
+    PublicApiRule, Severity,
+};
 use open_kioku_core::{
-    ArchitectureComponent, EnforcedEdgeType, GraphEdge, GraphNode, PolicyCheckReport,
-    PolicyMatchEvidence, PolicyViolation, UnknownPolicyEdge, UnmappedPolicyTarget,
+    ArchitectureComponent, EnforcedEdgeType, File, GraphEdge, GraphNode, PolicyCheckReport,
+    PolicyComponentMatch, PolicyExemptionEvidence, PolicyMatchEvidence, PolicyViolation,
+    PublicApiBoundaryReport, UnknownPolicyEdge, UnmappedPolicyTarget,
 };
 use open_kioku_errors::Result;
 use open_kioku_storage::{GraphStore, MetadataStore};
@@ -34,6 +39,10 @@ where
     let file_paths = files
         .iter()
         .map(|file| (file.id.0.clone(), file.path.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let file_metadata = files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
         .collect::<BTreeMap<_, _>>();
     let symbols = store.list_symbols(None, usize::MAX, 0)?;
     let symbol_paths = symbols
@@ -74,6 +83,17 @@ where
                     &file_paths,
                     &symbol_paths,
                 )?;
+                if let Some(evidence) =
+                    edge_evidence(store, edge, edge_type, &file_paths, &symbol_paths)?
+                {
+                    evaluate_public_api_evidence(
+                        &mut report,
+                        resolver,
+                        policy,
+                        evidence,
+                        &file_metadata,
+                    )?;
+                }
             }
             offset += batch.len();
             if batch.len() < 1_000 {
@@ -82,9 +102,40 @@ where
         }
     }
 
-    report.violation_count = report.violations.len();
     report.unknown_sample_count = report.unknown_edges.len();
     report.unknown_edges_truncated = report.unknown_edge_count > report.unknown_edges.len();
+    report.violations.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+    });
+    report.violations.dedup();
+    report.exemptions.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.exemption_id.cmp(&right.exemption_id))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    report.exemptions.dedup();
+    report.violation_count = report.violations.len();
+    report.public_api_violation_count = report
+        .violations
+        .iter()
+        .filter(|violation| {
+            policy
+                .public_api_rules
+                .iter()
+                .any(|rule| rule.id == violation.rule_id)
+                || policy
+                    .internal_only_rules
+                    .iter()
+                    .any(|rule| rule.id == violation.rule_id)
+        })
+        .count();
+    report.exempted_violation_count = report.exemptions.len();
     if report.evaluated_edge_count == 0 {
         report
             .uncertainty
@@ -96,6 +147,86 @@ where
             report.unknown_edge_count
         ));
     }
+    if report.public_api_violation_count > 0 {
+        report.uncertainty.push(format!(
+            "{} public API boundary violation(s) were found",
+            report.public_api_violation_count
+        ));
+    }
+    if report.exempted_violation_count > 0 {
+        report.uncertainty.push(format!(
+            "{} public API boundary finding(s) were exempted with explicit evidence",
+            report.exempted_violation_count
+        ));
+    }
+    Ok(report)
+}
+
+pub fn evaluate_public_api_boundary<S>(
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+) -> Result<PublicApiBoundaryReport>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    let files = store.list_files(usize::MAX, 0)?;
+    let file_paths = files
+        .iter()
+        .map(|file| (file.id.0.clone(), file.path.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let file_metadata = files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let symbols = store.list_symbols(None, usize::MAX, 0)?;
+    let symbol_paths = symbols
+        .iter()
+        .filter_map(|symbol| {
+            file_paths
+                .get(&symbol.file_id.0)
+                .map(|path| (symbol.id.0.clone(), path.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut report = PolicyCheckReport {
+        configured: true,
+        ..PolicyCheckReport::default()
+    };
+
+    for edge_type in [
+        EnforcedEdgeType::Imports,
+        EnforcedEdgeType::References,
+        EnforcedEdgeType::Calls,
+    ] {
+        let graph_edge_type = edge_type.graph_edge_type();
+        let mut offset = 0;
+        loop {
+            let batch = store.edges_by_type(graph_edge_type.clone(), 1_000, offset)?;
+            if batch.is_empty() {
+                break;
+            }
+            for edge in &batch {
+                if let Some(evidence) =
+                    edge_evidence(store, edge, edge_type, &file_paths, &symbol_paths)?
+                {
+                    report.evaluated_edge_count += 1;
+                    evaluate_public_api_evidence(
+                        &mut report,
+                        resolver,
+                        policy,
+                        evidence,
+                        &file_metadata,
+                    )?;
+                }
+            }
+            offset += batch.len();
+            if batch.len() < 1_000 {
+                break;
+            }
+        }
+    }
+
     report.violations.sort_by(|left, right| {
         left.rule_id
             .cmp(&right.rule_id)
@@ -104,7 +235,28 @@ where
             .then_with(|| left.edge_type.cmp(&right.edge_type))
     });
     report.violations.dedup();
-    Ok(report)
+    report.exemptions.sort_by(|left, right| {
+        left.rule_id
+            .cmp(&right.rule_id)
+            .then_with(|| left.exemption_id.cmp(&right.exemption_id))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    report.exemptions.dedup();
+    if report.evaluated_edge_count == 0 {
+        report
+            .uncertainty
+            .push("no import, reference, or call graph edges were available to evaluate".into());
+    }
+    Ok(PublicApiBoundaryReport {
+        configured: true,
+        evaluated_edge_count: report.evaluated_edge_count,
+        violation_count: report.violations.len(),
+        exempted_violation_count: report.exemptions.len(),
+        violations: report.violations,
+        exemptions: report.exemptions,
+        uncertainty: report.uncertainty,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +362,236 @@ fn add_unknown(report: &mut PolicyCheckReport, reason: &str, evidence: PolicyMat
 
 fn rule_matches(rule: &DependencyRule, from_component: &str, to_component: &str) -> bool {
     (rule.from == "*" || rule.from == from_component) && (rule.to == "*" || rule.to == to_component)
+}
+
+fn evaluate_public_api_evidence(
+    report: &mut PolicyCheckReport,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+    evidence: PolicyMatchEvidence,
+    file_metadata: &BTreeMap<PathBuf, File>,
+) -> Result<()> {
+    if evidence.source_path == evidence.target_path {
+        return Ok(());
+    }
+    let Ok(target) = resolver.resolve_node(&evidence.target_path, None) else {
+        return Ok(());
+    };
+    let source_components = resolver
+        .resolve_node(&evidence.source_path, None)
+        .map(|source| source.components)
+        .unwrap_or_else(|_| {
+            vec![PolicyComponentMatch {
+                component_id: "unmapped".into(),
+                matched_glob: "<unmapped>".into(),
+            }]
+        });
+
+    for target_component in &target.components {
+        for source_component in &source_components {
+            if source_component.component_id == target_component.component_id {
+                continue;
+            }
+            for rule in policy
+                .public_api_rules
+                .iter()
+                .filter(|rule| rule.component == target_component.component_id)
+            {
+                if let Some(message) = public_api_boundary_message(rule, &evidence.target_path)? {
+                    add_boundary_finding(
+                        report,
+                        policy,
+                        file_metadata,
+                        BoundaryFindingInput {
+                            rule_id: &rule.id,
+                            severity: rule.severity,
+                            source_component: &source_component.component_id,
+                            target_component: &target_component.component_id,
+                            evidence: &evidence,
+                            message: &message,
+                        },
+                    )?;
+                }
+            }
+            for rule in policy
+                .internal_only_rules
+                .iter()
+                .filter(|rule| rule.component == target_component.component_id)
+            {
+                if path_matches_any(&evidence.target_path, &rule.globs)? {
+                    add_boundary_finding(
+                        report,
+                        policy,
+                        file_metadata,
+                        BoundaryFindingInput {
+                            rule_id: &rule.id,
+                            severity: rule.severity,
+                            source_component: &source_component.component_id,
+                            target_component: &target_component.component_id,
+                            evidence: &evidence,
+                            message: &rule.reason,
+                        },
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn public_api_boundary_message(rule: &PublicApiRule, target_path: &Path) -> Result<Option<String>> {
+    if !rule.internal_globs.is_empty() && path_matches_any(target_path, &rule.internal_globs)? {
+        return Ok(Some(rule.reason.clone()));
+    }
+    if !path_matches_any(target_path, &rule.public_globs)? {
+        return Ok(Some(format!(
+            "{}; target is outside configured public API globs",
+            rule.reason
+        )));
+    }
+    Ok(None)
+}
+
+struct BoundaryFindingInput<'a> {
+    rule_id: &'a str,
+    severity: Severity,
+    source_component: &'a str,
+    target_component: &'a str,
+    evidence: &'a PolicyMatchEvidence,
+    message: &'a str,
+}
+
+fn add_boundary_finding(
+    report: &mut PolicyCheckReport,
+    policy: &ArchitecturePolicy,
+    file_metadata: &BTreeMap<PathBuf, File>,
+    input: BoundaryFindingInput<'_>,
+) -> Result<()> {
+    if let Some(exemption) =
+        matching_exemption(policy, input.rule_id, input.evidence, file_metadata)?
+    {
+        report.exemptions.push(exemption);
+        return Ok(());
+    }
+    report.violations.push(PolicyViolation {
+        rule_id: input.rule_id.into(),
+        severity: format!("{:?}", input.severity).to_ascii_lowercase(),
+        source_component: input.source_component.into(),
+        target_component: input.target_component.into(),
+        source_path: input.evidence.source_path.clone(),
+        target_path: input.evidence.target_path.clone(),
+        edge_type: input.evidence.edge_type,
+        evidence: input.evidence.clone(),
+        message: input.message.into(),
+    });
+    Ok(())
+}
+
+fn matching_exemption(
+    policy: &ArchitecturePolicy,
+    rule_id: &str,
+    evidence: &PolicyMatchEvidence,
+    file_metadata: &BTreeMap<PathBuf, File>,
+) -> Result<Option<PolicyExemptionEvidence>> {
+    for exemption in policy
+        .exemptions
+        .iter()
+        .filter(|exemption| exemption.rules.iter().any(|rule| rule == rule_id))
+    {
+        if let Some(scope) = exemption_scope(exemption, evidence, file_metadata)? {
+            return Ok(Some(PolicyExemptionEvidence {
+                exemption_id: exemption.id.clone(),
+                rule_id: rule_id.into(),
+                scope,
+                source_path: evidence.source_path.clone(),
+                target_path: evidence.target_path.clone(),
+                evidence: evidence.clone(),
+                reason: exemption.reason.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn exemption_scope(
+    exemption: &ExemptionRule,
+    evidence: &PolicyMatchEvidence,
+    file_metadata: &BTreeMap<PathBuf, File>,
+) -> Result<Option<String>> {
+    if !exemption.paths.is_empty()
+        && (path_matches_any(&evidence.source_path, &exemption.paths)?
+            || path_matches_any(&evidence.target_path, &exemption.paths)?)
+    {
+        return Ok(Some("configured_path".into()));
+    }
+    for scope in &exemption.scopes {
+        let matched = match scope {
+            ExemptionScope::Tests => {
+                is_test_path(&evidence.source_path) || is_test_path(&evidence.target_path)
+            }
+            ExemptionScope::Vendor => {
+                file_has_vendor_flag(&evidence.source_path, file_metadata)
+                    || file_has_vendor_flag(&evidence.target_path, file_metadata)
+                    || path_has_segment(&evidence.source_path, "vendor")
+                    || path_has_segment(&evidence.target_path, "vendor")
+            }
+            ExemptionScope::Generated => {
+                file_has_generated_flag(&evidence.source_path, file_metadata)
+                    || file_has_generated_flag(&evidence.target_path, file_metadata)
+                    || path_has_segment(&evidence.source_path, "generated")
+                    || path_has_segment(&evidence.target_path, "generated")
+            }
+            ExemptionScope::Configured => false,
+        };
+        if matched {
+            return Ok(Some(format!("{:?}", scope).to_ascii_lowercase()));
+        }
+    }
+    Ok(None)
+}
+
+fn path_matches_any(path: &Path, globs: &[String]) -> Result<bool> {
+    for pattern in globs {
+        let matcher = path_matcher(pattern)?;
+        if matcher.is_match(path) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn path_matcher(pattern: &str) -> Result<GlobMatcher> {
+    Ok(Glob::new(pattern)
+        .map_err(|error| open_kioku_errors::OkError::Config(error.to_string()))?
+        .compile_matcher())
+}
+
+fn is_test_path(path: &Path) -> bool {
+    let rendered = path.to_string_lossy().replace('\\', "/");
+    rendered.starts_with("tests/")
+        || rendered.contains("/tests/")
+        || rendered.contains("/test/")
+        || rendered.contains("_test.")
+        || rendered.contains(".test.")
+}
+
+fn path_has_segment(path: &Path, segment: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_string_lossy() == segment)
+}
+
+fn file_has_vendor_flag(path: &Path, file_metadata: &BTreeMap<PathBuf, File>) -> bool {
+    file_metadata
+        .get(path)
+        .map(|file| file.is_vendor)
+        .unwrap_or(false)
+}
+
+fn file_has_generated_flag(path: &Path, file_metadata: &BTreeMap<PathBuf, File>) -> bool {
+    file_metadata
+        .get(path)
+        .map(|file| file.is_generated)
+        .unwrap_or(false)
 }
 
 fn edge_evidence(
@@ -365,7 +747,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use open_kioku_config::{
-        DependencyAction, DependencyRule, PolicyLayer, PolicyVersion, Severity,
+        DependencyAction, DependencyRule, ExemptionRule, ExemptionScope, InternalOnlyRule,
+        PolicyLayer, PolicyVersion, PublicApiRule, Severity,
     };
     use open_kioku_core::{
         Confidence, EdgeId, Evidence, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest,
@@ -470,8 +853,22 @@ mod tests {
             contexts: Vec::new(),
             dependency_rules: rules,
             public_api_rules: Vec::new(),
+            internal_only_rules: Vec::new(),
             exemptions: Vec::new(),
             source: Default::default(),
+        }
+    }
+
+    fn boundary_policy(
+        public_api_rules: Vec<PublicApiRule>,
+        internal_only_rules: Vec<InternalOnlyRule>,
+        exemptions: Vec<ExemptionRule>,
+    ) -> ArchitecturePolicy {
+        ArchitecturePolicy {
+            public_api_rules,
+            internal_only_rules,
+            exemptions,
+            ..policy(Vec::new())
         }
     }
 
@@ -637,5 +1034,126 @@ mod tests {
             report.unknown_edges[0].evidence.target_path,
             PathBuf::from("vendor/client.rs")
         );
+    }
+
+    #[test]
+    fn public_api_boundary_reports_internal_import_leak() {
+        let domain = file("domain", "src/domain/order.rs");
+        let internal_api = file("api-internal", "src/api/internal/session.rs");
+        let domain_node = file_node(&domain);
+        let internal_api_node = file_node(&internal_api);
+        let policy = boundary_policy(
+            vec![PublicApiRule {
+                id: "api-public-boundary".into(),
+                component: "api".into(),
+                public_globs: vec!["src/api/public/**".into(), "src/api/lib.rs".into()],
+                internal_globs: vec!["src/api/internal/**".into()],
+                severity: Severity::Error,
+                reason: "api internals are not public".into(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let report = evaluate(
+            &[domain.clone(), internal_api.clone()],
+            &[domain_node.clone(), internal_api_node.clone()],
+            &[edge(
+                "import-domain-api-internal",
+                &domain_node,
+                &internal_api_node,
+                GraphEdgeType::Imports,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.public_api_violation_count, 1);
+        assert_eq!(report.violation_count, 1);
+        let violation = &report.violations[0];
+        assert_eq!(violation.rule_id, "api-public-boundary");
+        assert_eq!(violation.source_component, "domain");
+        assert_eq!(violation.target_component, "api");
+        assert_eq!(
+            violation.target_path,
+            PathBuf::from("src/api/internal/session.rs")
+        );
+    }
+
+    #[test]
+    fn public_api_boundary_allows_configured_public_facade() {
+        let domain = file("domain", "src/domain/order.rs");
+        let public_api = file("api-public", "src/api/public/session.rs");
+        let domain_node = file_node(&domain);
+        let public_api_node = file_node(&public_api);
+        let policy = boundary_policy(
+            vec![PublicApiRule {
+                id: "api-public-boundary".into(),
+                component: "api".into(),
+                public_globs: vec!["src/api/public/**".into(), "src/api/lib.rs".into()],
+                internal_globs: vec!["src/api/internal/**".into()],
+                severity: Severity::Error,
+                reason: "api internals are not public".into(),
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let report = evaluate(
+            &[domain.clone(), public_api.clone()],
+            &[domain_node.clone(), public_api_node.clone()],
+            &[edge(
+                "import-domain-api-public",
+                &domain_node,
+                &public_api_node,
+                GraphEdgeType::Imports,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.public_api_violation_count, 0);
+        assert_eq!(report.violation_count, 0);
+    }
+
+    #[test]
+    fn internal_only_rules_and_exemptions_are_explainable() {
+        let test_file = file("test", "tests/api_contract.rs");
+        let internal_api = file("api-internal", "src/api/internal/session.rs");
+        let test_node = file_node(&test_file);
+        let internal_api_node = file_node(&internal_api);
+        let policy = boundary_policy(
+            Vec::new(),
+            vec![InternalOnlyRule {
+                id: "api-internals-are-private".into(),
+                component: "api".into(),
+                globs: vec!["src/api/internal/**".into()],
+                severity: Severity::Error,
+                reason: "api internals must stay inside api".into(),
+            }],
+            vec![ExemptionRule {
+                id: "contract-tests".into(),
+                rules: vec!["api-internals-are-private".into()],
+                scopes: vec![ExemptionScope::Tests],
+                paths: Vec::new(),
+                reason: "contract tests may inspect private implementation details".into(),
+            }],
+        );
+
+        let report = evaluate(
+            &[test_file.clone(), internal_api.clone()],
+            &[test_node.clone(), internal_api_node.clone()],
+            &[edge(
+                "import-test-api-internal",
+                &test_node,
+                &internal_api_node,
+                GraphEdgeType::Imports,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.public_api_violation_count, 0);
+        assert_eq!(report.exempted_violation_count, 1);
+        assert_eq!(report.exemptions[0].exemption_id, "contract-tests");
+        assert_eq!(report.exemptions[0].rule_id, "api-internals-are-private");
+        assert_eq!(report.exemptions[0].scope, "tests");
     }
 }

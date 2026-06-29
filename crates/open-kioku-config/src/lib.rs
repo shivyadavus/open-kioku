@@ -2,9 +2,9 @@ mod architecture_policy;
 
 pub use architecture_policy::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy,
-    DependencyAction, DependencyRule, ExemptionRule, PolicyContext, PolicyLayer, PolicySource,
-    PolicyVersion, PublicApiRule, Severity, CANONICAL_ARCHITECTURE_POLICY_PATH,
-    COMPATIBILITY_ARCHITECTURE_POLICY_PATH,
+    DependencyAction, DependencyRule, ExemptionRule, ExemptionScope, InternalOnlyRule,
+    PolicyContext, PolicyLayer, PolicySource, PolicyVersion, PublicApiBoundaryRule, PublicApiRule,
+    Severity, CANONICAL_ARCHITECTURE_POLICY_PATH, COMPATIBILITY_ARCHITECTURE_POLICY_PATH,
 };
 
 use open_kioku_errors::{OkError, Result};

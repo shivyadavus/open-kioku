@@ -1,5 +1,8 @@
+use anyhow::Context;
 use open_kioku_actions::{ActionKind, PolicyGate};
-use open_kioku_architecture::{evaluate_policy, ArchitectureDetector, PolicyResolver};
+use open_kioku_architecture::{
+    evaluate_policy, evaluate_public_api_boundary, ArchitectureDetector, PolicyResolver,
+};
 use open_kioku_config::{load_architecture_policy, OkConfig};
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_context_compress::ContextHandleStore;
@@ -271,6 +274,18 @@ async fn dispatch(
             };
             let resolver = PolicyResolver::new(&policy)?;
             Ok(json!(evaluate_policy(store, &resolver, &policy)?))
+        }
+        "architecture_policy_explain" => {
+            let Some(policy) = load_architecture_policy(repo)? else {
+                return Ok(json!({
+                    "configured": false,
+                    "violations": [],
+                    "exemptions": [],
+                    "uncertainty": ["no architecture policy configured; public API boundaries were not evaluated"]
+                }));
+            };
+            let resolver = PolicyResolver::new(&policy)?;
+            architecture_policy_explain_tool(repo, store, &resolver, &policy, &params)
         }
         "get_definition" | "get_symbol_context" | "explain_symbol" => {
             let query = required_str(&params, "query")?;
@@ -716,6 +731,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("architecture_boundaries", "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Report any import or boundary violations that deviate from the defined codebase architecture rules.", json!({"type":"object","properties":{}})),
         ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
+        ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file or symbol.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."}},"oneOf":[{"required":["file"]},{"required":["symbol"]}]})),
         ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
         ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
         ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
@@ -832,6 +848,109 @@ fn limit(params: &Value) -> usize {
         .and_then(Value::as_u64)
         .unwrap_or(20)
         .min(100) as usize
+}
+
+fn architecture_policy_explain_tool(
+    repo: &Path,
+    store: &SqliteStore,
+    resolver: &PolicyResolver,
+    policy: &open_kioku_config::ArchitecturePolicy,
+    params: &Value,
+) -> anyhow::Result<Value> {
+    let file = params.get("file").and_then(Value::as_str);
+    let symbol = params.get("symbol").and_then(Value::as_str);
+    let (query_kind, query, file_path, symbol_value) = match (file, symbol) {
+        (Some(path), None) => {
+            let path = repo_relative_path(repo, Path::new(path));
+            ("file", path.display().to_string(), path, Value::Null)
+        }
+        (None, Some(query)) => {
+            let symbol = SymbolEngine::new(store).definition(query)?;
+            let file_path = file_path_for_symbol(store, &symbol)?;
+            (
+                "symbol",
+                query.to_string(),
+                file_path,
+                serde_json::to_value(symbol)?,
+            )
+        }
+        (Some(_), Some(_)) => anyhow::bail!("provide exactly one of `file` or `symbol`"),
+        (None, None) => anyhow::bail!("missing required `file` or `symbol` argument"),
+    };
+    let mut uncertainty = Vec::new();
+    let components = match resolver.resolve_node(&file_path, None) {
+        Ok(resolved) => resolved.components,
+        Err(unmapped) => {
+            uncertainty.push(format!(
+                "{} did not match any architecture policy component",
+                unmapped.file_path.display()
+            ));
+            Vec::new()
+        }
+    };
+    let boundary = evaluate_public_api_boundary(store, resolver, policy)?;
+    let violations = boundary
+        .violations
+        .into_iter()
+        .filter(|violation| {
+            violation.source_path == file_path || violation.target_path == file_path
+        })
+        .collect::<Vec<_>>();
+    let exemptions = boundary
+        .exemptions
+        .into_iter()
+        .filter(|exemption| {
+            exemption.source_path == file_path || exemption.target_path == file_path
+        })
+        .collect::<Vec<_>>();
+    uncertainty.extend(boundary.uncertainty);
+    if violations.is_empty() && exemptions.is_empty() {
+        uncertainty.push("no public API boundary findings matched this query".into());
+    }
+    uncertainty.sort();
+    uncertainty.dedup();
+    Ok(json!({
+        "configured": true,
+        "query_kind": query_kind,
+        "query": query,
+        "file_path": file_path,
+        "symbol": symbol_value,
+        "components": components,
+        "violations": violations,
+        "exemptions": exemptions,
+        "uncertainty": uncertainty,
+        "message": format!(
+            "Architecture policy explanation for {query_kind} `{query}`: {} component match(es), {} violation(s), {} exemption(s).",
+            components.len(),
+            violations.len(),
+            exemptions.len()
+        )
+    }))
+}
+
+fn file_path_for_symbol(
+    store: &dyn MetadataStore,
+    symbol: &open_kioku_core::Symbol,
+) -> anyhow::Result<PathBuf> {
+    let files = store.list_files(usize::MAX, 0)?;
+    files
+        .into_iter()
+        .find(|file| file.id == symbol.file_id)
+        .map(|file| file.path)
+        .with_context(|| {
+            format!(
+                "indexed symbol `{}` references missing file id `{}`",
+                symbol.qualified_name, symbol.file_id.0
+            )
+        })
+}
+
+fn repo_relative_path(repo: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.strip_prefix(repo).unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {

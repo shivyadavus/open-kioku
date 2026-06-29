@@ -83,13 +83,14 @@ The source-read tools allow language-agnostic code exploration and AI-ready cont
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
 - `architecture_violations`: Detects and reports architecture boundary violations based on package and module heuristics.
 - `architecture_policy_check`: Evaluates repository-owned architecture policy dependency rules against indexed imports, references, and calls.
+- `architecture_policy_explain`: Explains component matches, public API boundary findings, and exemptions for one indexed file or symbol.
 
 Each tool returned by `tools/list` includes a `maturity` field. Stable tools are intended for default agent use. Experimental tools are exposed for early workflows but may rely on heuristic or fallback behavior.
 
 Stable source-read tools:
 
 - `repo_status`, `list_files`, `list_languages`, `list_symbols`
-- `detect_architecture`, `architecture_boundaries`, `architecture_violations`, `architecture_policy_check`, `summarize_architecture`
+- `detect_architecture`, `architecture_boundaries`, `architecture_violations`, `architecture_policy_check`, `architecture_policy_explain`, `summarize_architecture`
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
 - `dependency_path`, `impact_analysis`, `module_dependencies`

@@ -132,6 +132,37 @@
         "name": "architecture_policy_check"
       },
       {
+        "description": "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file or symbol.",
+        "experimental": false,
+        "inputSchema": {
+          "oneOf": [
+            {
+              "required": [
+                "file"
+              ]
+            },
+            {
+              "required": [
+                "symbol"
+              ]
+            }
+          ],
+          "properties": {
+            "file": {
+              "description": "Repository-relative file path to explain.",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "Indexed symbol name or qualified name to explain.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "architecture_policy_explain"
+      },
+      {
         "description": "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.",
         "experimental": false,
         "inputSchema": {

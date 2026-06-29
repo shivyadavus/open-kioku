@@ -1,6 +1,8 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use open_kioku_architecture::{evaluate_policy, ArchitectureDetector, PolicyResolver};
+use open_kioku_architecture::{
+    evaluate_policy, evaluate_public_api_boundary, ArchitectureDetector, PolicyResolver,
+};
 use open_kioku_config::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
     PolicySource, RankingConfig, ScipMode,
@@ -10,7 +12,8 @@ use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_core::{
     Confidence, ContextHandleId, EdgeId, Evidence, EvidenceId, EvidenceSourceType, FileProvenance,
     GraphEdge, GraphEdgeType, GraphNode, IndexManifest, IndexMode, NodeId, PlanReport,
-    ProvenanceTouch, ScoreComponent, Symbol, SymbolId, SymbolProvenance,
+    PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch,
+    ScoreComponent, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -682,6 +685,12 @@ enum ArchitecturePolicyCommand {
     },
     Print,
     Check,
+    Explain {
+        #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
+        file: Option<PathBuf>,
+        #[arg(long, required_unless_present = "file", conflicts_with = "file")]
+        symbol: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1130,6 +1139,20 @@ struct ArchitecturePolicyOutput {
     source: Option<PolicySource>,
     paths: Vec<PathBuf>,
     policy: Option<ArchitecturePolicy>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct ArchitecturePolicyExplainOutput {
+    configured: bool,
+    query_kind: String,
+    query: String,
+    file_path: Option<PathBuf>,
+    symbol: Option<Symbol>,
+    components: Vec<PolicyComponentMatch>,
+    violations: Vec<PolicyViolation>,
+    exemptions: Vec<PolicyExemptionEvidence>,
+    uncertainty: Vec<String>,
     message: String,
 }
 
@@ -2343,6 +2366,76 @@ fn handle_architecture_policy_command(
                 }
             }
         }
+        ArchitecturePolicyCommand::Explain { file, symbol } => {
+            let Some(policy) = load_architecture_policy(repo)? else {
+                let output = ArchitecturePolicyExplainOutput {
+                    configured: false,
+                    query_kind: if symbol.is_some() {
+                        "symbol".into()
+                    } else {
+                        "file".into()
+                    },
+                    query: symbol
+                        .clone()
+                        .unwrap_or_else(|| file.unwrap_or_default().display().to_string()),
+                    file_path: None,
+                    symbol: None,
+                    components: Vec::new(),
+                    violations: Vec::new(),
+                    exemptions: Vec::new(),
+                    uncertainty: vec![
+                        "no architecture policy configured; public API boundaries were not evaluated"
+                            .into(),
+                    ],
+                    message: "No architecture policy configured; public API boundaries were not evaluated."
+                        .into(),
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!("{}", output.message);
+                }
+                return Ok(());
+            };
+            let store = open_store(repo)?;
+            let resolver = PolicyResolver::new(&policy)?;
+            let output =
+                architecture_policy_explain_output(repo, &store, &resolver, &policy, file, symbol)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("{}", output.message);
+                for component in &output.components {
+                    println!(
+                        "component: {} via {}",
+                        component.component_id, component.matched_glob
+                    );
+                }
+                for violation in &output.violations {
+                    println!(
+                        "{} {} -> {} via {:?}: {}",
+                        violation.severity,
+                        violation.source_path.display(),
+                        violation.target_path.display(),
+                        violation.edge_type,
+                        violation.rule_id
+                    );
+                }
+                for exemption in &output.exemptions {
+                    println!(
+                        "exempted {} by {} ({}): {} -> {}",
+                        exemption.rule_id,
+                        exemption.exemption_id,
+                        exemption.scope,
+                        exemption.source_path.display(),
+                        exemption.target_path.display()
+                    );
+                }
+                for note in &output.uncertainty {
+                    println!("uncertainty: {note}");
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2365,6 +2458,102 @@ fn architecture_policy_output(
         paths,
         policy,
         message,
+    }
+}
+
+fn architecture_policy_explain_output<S>(
+    repo: &Path,
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+    file: Option<PathBuf>,
+    symbol: Option<String>,
+) -> anyhow::Result<ArchitecturePolicyExplainOutput>
+where
+    S: MetadataStore + GraphStore,
+{
+    let (query_kind, query, file_path, symbol) = if let Some(symbol_query) = symbol {
+        let symbol = SymbolEngine::new(store).definition(&symbol_query)?;
+        let file_path = file_path_for_symbol(store, &symbol)?;
+        ("symbol".into(), symbol_query, file_path, Some(symbol))
+    } else {
+        let path = file.unwrap_or_default();
+        let path = repo_relative_path(repo, &path);
+        ("file".into(), path.display().to_string(), path, None)
+    };
+
+    let mut uncertainty = Vec::new();
+    let components =
+        match resolver.resolve_node(&file_path, symbol.as_ref().map(|symbol| symbol.id.clone())) {
+            Ok(resolved) => resolved.components,
+            Err(unmapped) => {
+                uncertainty.push(format!(
+                    "{} did not match any architecture policy component",
+                    unmapped.file_path.display()
+                ));
+                Vec::new()
+            }
+        };
+    let boundary = evaluate_public_api_boundary(store, resolver, policy)?;
+    let violations = boundary
+        .violations
+        .into_iter()
+        .filter(|violation| {
+            violation.source_path == file_path || violation.target_path == file_path
+        })
+        .collect::<Vec<_>>();
+    let exemptions = boundary
+        .exemptions
+        .into_iter()
+        .filter(|exemption| {
+            exemption.source_path == file_path || exemption.target_path == file_path
+        })
+        .collect::<Vec<_>>();
+    uncertainty.extend(boundary.uncertainty);
+    if violations.is_empty() && exemptions.is_empty() {
+        uncertainty.push("no public API boundary findings matched this query".into());
+    }
+    uncertainty.sort();
+    uncertainty.dedup();
+    let message = format!(
+        "Architecture policy explanation for {query_kind} `{query}`: {} component match(es), {} violation(s), {} exemption(s).",
+        components.len(),
+        violations.len(),
+        exemptions.len()
+    );
+    Ok(ArchitecturePolicyExplainOutput {
+        configured: true,
+        query_kind,
+        query,
+        file_path: Some(file_path),
+        symbol,
+        components,
+        violations,
+        exemptions,
+        uncertainty,
+        message,
+    })
+}
+
+fn file_path_for_symbol(store: &dyn MetadataStore, symbol: &Symbol) -> anyhow::Result<PathBuf> {
+    let files = store.list_files(usize::MAX, 0)?;
+    files
+        .into_iter()
+        .find(|file| file.id == symbol.file_id)
+        .map(|file| file.path)
+        .with_context(|| {
+            format!(
+                "indexed symbol `{}` references missing file id `{}`",
+                symbol.qualified_name, symbol.file_id.0
+            )
+        })
+}
+
+fn repo_relative_path(repo: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.strip_prefix(repo).unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
     }
 }
 
