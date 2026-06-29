@@ -47,6 +47,33 @@ stable `architecture-policy:*` evidence refs that are also present in the
 contract's top-level `evidence_refs`. Verification uses configured repository
 policy to classify dependency deltas as allowed, violating, or unknown.
 
+## CLI and MCP Workflow
+
+The CLI exposes first-class contract commands without removing the legacy
+`plan` and `verify` flow:
+
+```bash
+ok --repo /path/to/repo --json contract create "update auth token" --limit 12
+ok --repo /path/to/repo contract show <contract-id> --format markdown
+ok --repo /path/to/repo contract export <contract-id> --format toon
+ok --repo /path/to/repo --json contract verify --id <contract-id> --changed src/auth.rs
+ok --repo /path/to/repo contract explain --id <contract-id> --format markdown
+```
+
+`contract create` accepts exactly one of a task, `--plan`, or `--plan-json`.
+Contracts are stored under `.ok/contracts` by default; pass `--no-store` to
+print an inline contract only. `contract verify` accepts exactly one of
+`--id`, `--contract`, or `--contract-json`, so callers can use either stored
+contract IDs or inline JSON artifacts.
+
+The MCP server exposes the same workflow through `create_change_contract`,
+`get_change_contract`, `verify_change_contract`, and `explain_verification`.
+`create_change_contract` accepts a task, inline `plan`, or `plan_json`;
+`verify_change_contract` accepts `contract_id`, inline `contract`, or
+`contract_json`; `get_change_contract` can export JSON, Markdown, or TOON.
+Stored contract verification appends JSONL verification records next to the
+contract, while inline verification leaves the store untouched.
+
 Use `open_kioku_contract::schema()` to obtain the JSON Schema root. The
 canonical JSON example is
 [`crates/open-kioku-contract/tests/fixtures/change_contract_v1.json`](../crates/open-kioku-contract/tests/fixtures/change_contract_v1.json).
