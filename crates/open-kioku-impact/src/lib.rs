@@ -256,6 +256,7 @@ impl<'a> ImpactEngine<'a> {
                 .chain(service_evidence)
                 .chain(complexity_evidence)
                 .collect(),
+            architecture_policy: None,
             score_breakdown: vec![ScoreComponent::single(
                 "direct_reference_density",
                 direct_reference_score,

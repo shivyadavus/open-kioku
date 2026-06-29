@@ -6,7 +6,7 @@ use open_kioku_contract::{
     RequiredTest, RiskAssessment, RiskLevel, SourcePlanRef, ValidationCommand,
     ValidationRequirement,
 };
-use open_kioku_core::PlanReport;
+use open_kioku_core::{PlanReport, PolicyCheckReport, PolicyViolation};
 use open_kioku_errors::{OkError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -113,6 +113,9 @@ impl ContractBuilder {
                 evidence_refs: refs_or_fallback(&rule.evidence_refs, &boundary_refs),
             });
         }
+        let policy_refs = architecture_policy_evidence_refs(plan);
+        architecture_constraints.extend(architecture_policy_constraints(plan, &policy_refs));
+        let architecture_refs = merged_evidence_refs(&boundary_refs, &policy_refs);
 
         let mut validation_commands = Vec::new();
         let mut seen_commands = BTreeSet::new();
@@ -186,7 +189,7 @@ impl ContractBuilder {
         let traceability = traceability_entries(
             &primary_refs,
             &test_refs,
-            &boundary_refs,
+            &architecture_refs,
             &risk_refs,
             &confidence_refs,
             !secondary_files.is_empty(),
@@ -264,6 +267,7 @@ fn stable_evidence_refs(plan: &PlanReport) -> Vec<EvidenceRef> {
     for test in &plan.validation {
         push_refs(&mut refs, &test.evidence_refs);
     }
+    push_refs(&mut refs, &architecture_policy_evidence_ref_strings(plan));
     refs.into_iter().map(EvidenceRef::new).collect()
 }
 
@@ -282,6 +286,14 @@ fn push_refs(refs: &mut BTreeSet<String>, values: &[String]) {
 
 fn limited_refs(refs: &[EvidenceRef], limit: usize) -> Vec<EvidenceRef> {
     refs.iter().take(limit).cloned().collect()
+}
+
+fn merged_evidence_refs(left: &[EvidenceRef], right: &[EvidenceRef]) -> Vec<EvidenceRef> {
+    let mut refs = BTreeSet::new();
+    for evidence_ref in left.iter().chain(right.iter()) {
+        push_ref(&mut refs, &evidence_ref.0);
+    }
+    refs.into_iter().map(EvidenceRef::new).collect()
 }
 
 fn refs_or_fallback(values: &[String], fallback: &[EvidenceRef]) -> Vec<EvidenceRef> {
@@ -363,6 +375,134 @@ fn boundary_evidence_refs(plan: &PlanReport, fallback: &[EvidenceRef]) -> Vec<Ev
     }
 }
 
+fn architecture_policy_report(plan: &PlanReport) -> Option<&PolicyCheckReport> {
+    plan.architecture_policy
+        .as_ref()
+        .or(plan.impact.architecture_policy.as_ref())
+        .filter(|report| report.configured)
+}
+
+fn architecture_policy_evidence_ref_strings(plan: &PlanReport) -> Vec<String> {
+    let Some(report) = architecture_policy_report(plan) else {
+        return Vec::new();
+    };
+    let mut refs = vec!["architecture-policy:summary".into()];
+    refs.extend(
+        report
+            .violations
+            .iter()
+            .take(25)
+            .enumerate()
+            .map(|(index, violation)| architecture_policy_violation_ref(index, violation)),
+    );
+    refs
+}
+
+fn architecture_policy_evidence_refs(plan: &PlanReport) -> Vec<EvidenceRef> {
+    architecture_policy_evidence_ref_strings(plan)
+        .into_iter()
+        .map(EvidenceRef::new)
+        .collect()
+}
+
+fn architecture_policy_constraints(
+    plan: &PlanReport,
+    policy_refs: &[EvidenceRef],
+) -> Vec<ArchitectureConstraint> {
+    let Some(report) = architecture_policy_report(plan) else {
+        return Vec::new();
+    };
+    let summary_refs = policy_refs
+        .iter()
+        .filter(|evidence_ref| evidence_ref.0 == "architecture-policy:summary")
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary_refs = if summary_refs.is_empty() {
+        policy_refs.to_vec()
+    } else {
+        summary_refs
+    };
+    let mut constraints = vec![ArchitectureConstraint {
+        rule: "architecture-policy-summary".into(),
+        severity: if report.violation_count > 0 {
+            ConstraintSeverity::Forbidden
+        } else if report.unknown_edge_count > 0 {
+            ConstraintSeverity::Required
+        } else {
+            ConstraintSeverity::Advisory
+        },
+        reason: format!(
+            "Architecture policy evaluated {} edge(s): {} allowed, {} violation(s), {} unknown.",
+            report.evaluated_edge_count,
+            report.allowed_edges,
+            report.violation_count,
+            report.unknown_edge_count
+        ),
+        evidence_refs: summary_refs,
+    }];
+    constraints.extend(
+        report
+            .violations
+            .iter()
+            .take(25)
+            .enumerate()
+            .map(|(index, violation)| ArchitectureConstraint {
+                rule: format!(
+                    "architecture-policy-violation:{}",
+                    stable_constraint_slug(&violation.rule_id, index)
+                ),
+                severity: policy_constraint_severity(&violation.severity),
+                reason: format!(
+                    "{}: {} -> {} via {:?}: {}",
+                    violation.rule_id,
+                    violation.source_path.display(),
+                    violation.target_path.display(),
+                    violation.edge_type,
+                    violation.message
+                ),
+                evidence_refs: vec![EvidenceRef::new(architecture_policy_violation_ref(
+                    index, violation,
+                ))],
+            }),
+    );
+    constraints
+}
+
+fn architecture_policy_violation_ref(index: usize, violation: &PolicyViolation) -> String {
+    format!(
+        "architecture-policy:violation:{index}:{}",
+        stable_constraint_slug(&violation.rule_id, index)
+    )
+}
+
+fn stable_constraint_slug(value: &str, fallback_index: usize) -> String {
+    let slug = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if slug.is_empty() {
+        format!("rule-{fallback_index}")
+    } else {
+        slug
+    }
+}
+
+fn policy_constraint_severity(severity: &str) -> ConstraintSeverity {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "error" | "deny" | "forbidden" | "block" | "blocked" => ConstraintSeverity::Forbidden,
+        "warning" | "warn" | "required" => ConstraintSeverity::Required,
+        _ => ConstraintSeverity::Advisory,
+    }
+}
+
 fn traceability_entries(
     primary_refs: &[EvidenceRef],
     test_refs: &[EvidenceRef],
@@ -395,7 +535,7 @@ fn traceability_entries(
         ),
         trace(
             "architecture_constraints",
-            "Architecture constraints come from the recommended change boundary",
+            "Architecture constraints come from the recommended change boundary and architecture policy report",
             boundary_refs,
         ),
         trace(
@@ -499,8 +639,9 @@ fn push_contract_file(
 mod tests {
     use super::*;
     use open_kioku_core::{
-        Confidence, ConfidenceBreakdown, FileId, Language, RiskReport, SearchResult, Symbol,
-        SymbolId, SymbolKind, TestTarget,
+        Confidence, ConfidenceBreakdown, EnforcedEdgeType, FileId, Language, PolicyCheckReport,
+        PolicyMatchEvidence, PolicyViolation, RiskReport, SearchResult, Symbol, SymbolId,
+        SymbolKind, TestTarget,
     };
     use std::path::PathBuf;
 
@@ -521,6 +662,7 @@ mod tests {
                     reasons: vec![],
                 },
                 evidence: vec![],
+                architecture_policy: None,
                 score_breakdown: vec![],
             },
             validation: vec![],
@@ -534,6 +676,7 @@ mod tests {
             tool_calls: vec![],
             memory_facts: vec![],
             runtime_signals: vec![],
+            architecture_policy: None,
             evidence: vec![],
             evidence_by_section: BTreeMap::new(),
             negative_evidence: vec![],
@@ -590,6 +733,7 @@ mod tests {
                     reasons: vec!["low impact".into()],
                 },
                 evidence: vec![],
+                architecture_policy: None,
                 score_breakdown: vec![],
             },
             validation: vec![TestTarget {
@@ -623,6 +767,7 @@ mod tests {
             tool_calls: vec![],
             memory_facts: vec![],
             runtime_signals: vec![],
+            architecture_policy: Some(policy_report_with_violation()),
             evidence: vec![],
             evidence_by_section,
             negative_evidence: vec![],
@@ -650,5 +795,51 @@ mod tests {
             contract.expansion_approval_requirements[0].required_evidence_refs,
             vec![EvidenceRef::new("boundary:allowed")]
         );
+        assert!(contract
+            .evidence_refs
+            .iter()
+            .any(|evidence_ref| evidence_ref.0 == "architecture-policy:violation:0:domain-api"));
+        let policy_constraint = contract
+            .architecture_constraints
+            .iter()
+            .find(|constraint| constraint.rule == "architecture-policy-violation:domain-api")
+            .expect("policy violation constraint");
+        assert_eq!(policy_constraint.severity, ConstraintSeverity::Forbidden);
+        assert_eq!(
+            policy_constraint.evidence_refs,
+            vec![EvidenceRef::new(
+                "architecture-policy:violation:0:domain-api"
+            )]
+        );
+    }
+
+    fn policy_report_with_violation() -> PolicyCheckReport {
+        PolicyCheckReport {
+            configured: true,
+            evaluated_edge_count: 1,
+            allowed_edges: 0,
+            violation_count: 1,
+            violations: vec![PolicyViolation {
+                rule_id: "domain-api".into(),
+                severity: "error".into(),
+                source_component: "domain".into(),
+                target_component: "api".into(),
+                source_path: PathBuf::from("src/domain.rs"),
+                target_path: PathBuf::from("src/api.rs"),
+                edge_type: EnforcedEdgeType::Imports,
+                evidence: PolicyMatchEvidence {
+                    edge_id: "edge-domain-api".into(),
+                    edge_type: EnforcedEdgeType::Imports,
+                    source_node: "src/domain.rs".into(),
+                    target_node: "src/api.rs".into(),
+                    source_path: PathBuf::from("src/domain.rs"),
+                    target_path: PathBuf::from("src/api.rs"),
+                    confidence: Confidence::High,
+                    message: "domain imported api".into(),
+                },
+                message: "domain must not import api".into(),
+            }],
+            ..PolicyCheckReport::default()
+        }
     }
 }

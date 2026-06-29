@@ -323,6 +323,7 @@ impl<'a> ContextPackBuilder<'a> {
             },
             evidence,
             negative_evidence,
+            architecture_policy: None,
             confidence_summary,
             confidence_breakdown,
         })
@@ -1264,6 +1265,7 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
             indexed_at: Utc::now(),
             ..Default::default()
         }],
+        architecture_policy: None,
         score_breakdown: vec![ScoreComponent::single(
             "no_context_found",
             0.0,
@@ -1296,6 +1298,7 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
             indexed_at: Utc::now(),
             ..Default::default()
         }],
+        architecture_policy: None,
         score_breakdown: vec![ScoreComponent::single(
             "bounded_context_risk",
             0.1,

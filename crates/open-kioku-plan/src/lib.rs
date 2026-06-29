@@ -89,6 +89,9 @@ impl<'a> PlanEngine<'a> {
         }
         let impact_target = impact_target(&primary_context);
         let mut impact = self.impact_for_primary_context(task, impact_target, &context)?;
+        if impact.architecture_policy.is_none() {
+            impact.architecture_policy = context.architecture_policy.clone();
+        }
         impact.reconcile_score_breakdown();
         let mut validation = self.validation_for_context(&primary_context, &context)?;
         for test in &mut validation {
@@ -173,6 +176,7 @@ impl<'a> PlanEngine<'a> {
             tool_calls,
             memory_facts: self.memory_facts.clone(),
             runtime_signals: context.runtime_signals.clone(),
+            architecture_policy: context.architecture_policy.clone(),
             evidence,
             evidence_by_section,
             negative_evidence,
@@ -205,6 +209,7 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts: Vec::new(),
                 risk_report: context.risk_report.clone(),
                 evidence,
+                architecture_policy: context.architecture_policy.clone(),
                 score_breakdown: vec![ScoreComponent::single(
                     "bounded_context_impact",
                     context.risk_report.score,
@@ -224,6 +229,7 @@ impl<'a> PlanEngine<'a> {
                 indirect_impacts: Vec::new(),
                 risk_report: context.risk_report.clone(),
                 evidence: context.evidence.clone(),
+                architecture_policy: context.architecture_policy.clone(),
                 score_breakdown: vec![ScoreComponent::single(
                     "context_risk_fallback",
                     context.risk_report.score,
@@ -2067,6 +2073,7 @@ mod tests {
             },
             evidence: Vec::new(),
             negative_evidence: Vec::new(),
+            architecture_policy: None,
             confidence_summary: "fixture".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
         };
@@ -2076,6 +2083,7 @@ mod tests {
             indirect_impacts: Vec::new(),
             risk_report: risk.clone(),
             evidence: Vec::new(),
+            architecture_policy: None,
             score_breakdown: Vec::new(),
         };
 
@@ -2252,6 +2260,7 @@ mod tests {
                 reasons: Vec::new(),
             },
             evidence: Vec::new(),
+            architecture_policy: None,
             score_breakdown: Vec::new(),
         };
 
@@ -2341,6 +2350,7 @@ mod tests {
             },
             evidence: vec![evidence],
             negative_evidence: Vec::new(),
+            architecture_policy: None,
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
         };
@@ -2437,6 +2447,7 @@ mod tests {
             },
             evidence: vec![evidence],
             negative_evidence: Vec::new(),
+            architecture_policy: None,
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
         };

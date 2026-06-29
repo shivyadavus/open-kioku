@@ -1527,6 +1527,8 @@ pub struct ImpactReport {
     pub indirect_impacts: Vec<SearchResult>,
     pub risk_report: RiskReport,
     pub evidence: Vec<Evidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture_policy: Option<PolicyCheckReport>,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
 }
@@ -1568,6 +1570,8 @@ pub struct ContextPack {
     pub evidence: Vec<Evidence>,
     #[serde(default)]
     pub negative_evidence: Vec<NegativeEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture_policy: Option<PolicyCheckReport>,
     pub confidence_summary: String,
     #[serde(default)]
     pub confidence_breakdown: ConfidenceBreakdown,
@@ -1595,6 +1599,8 @@ pub struct PlanReport {
     pub memory_facts: Vec<MemorySearchResult>,
     #[serde(default)]
     pub runtime_signals: Vec<RuntimeSignal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture_policy: Option<PolicyCheckReport>,
     pub evidence: Vec<Evidence>,
     #[serde(default)]
     pub evidence_by_section: BTreeMap<String, Vec<String>>,

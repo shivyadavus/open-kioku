@@ -75,11 +75,11 @@ By default these tools are source-tree read-only. Memory and compressed-context 
 
 The source-read tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
 
-- `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, and patch boundaries for an AI task into a single compressed `ContextPack`.
+- `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
 - `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
-- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
 - `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
-- `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files and an overall risk score.
+- `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files, active architecture policy when configured, and an overall risk score.
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
 - `architecture_violations`: Detects and reports architecture boundary violations based on package and module heuristics.
 - `architecture_policy_validate`: Validates the resolved repository architecture policy or an explicit policy TOML path.
@@ -99,6 +99,12 @@ Architecture policy tool schemas:
   - Response: `{configured, query_kind, query, file_path, symbol, components, violations, exemptions, uncertainty, message}`.
 
 Each tool returned by `tools/list` includes a `maturity` field. Stable tools are intended for default agent use. Experimental tools are exposed for early workflows but may rely on heuristic or fallback behavior.
+
+`build_context_pack`, `build_compressed_context`, `plan_change`, and
+`impact_analysis` include an `architecture_policy` report when a repository
+policy is configured. `verify_change` loads configured policy automatically and
+checks dependency deltas against it by default; `check_dependency_delta` remains
+available for explicit dependency-delta checks in repositories without policy.
 
 Stable source-read tools:
 
