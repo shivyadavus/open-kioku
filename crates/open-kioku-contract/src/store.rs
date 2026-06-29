@@ -32,6 +32,8 @@ pub struct ContractVerificationRecord {
     pub success: bool,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -276,6 +278,7 @@ mod tests {
             success: true,
             stdout: "passed".into(),
             stderr: "".into(),
+            report: None,
         };
 
         store

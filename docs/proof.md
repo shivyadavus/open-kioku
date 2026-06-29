@@ -52,7 +52,7 @@ target/debug/ok status /tmp/open-kioku-proof --markdown
 | SCIP exact references | 0 |
 | Static analysis facts | 34 |
 
-Indexed at `2026-06-29 05:05:30.271220 UTC`.
+Indexed at `2026-06-29 05:26:37.128163 UTC`.
 
 Build systems: `cargo`.
 
@@ -246,7 +246,7 @@ Quality notes:
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
 | `pass` | `repo` | found .ok directory at /private/tmp/open-kioku-proof/.ok |
-| `pass` | `index` | 6 files, 8 symbols, indexed at 2026-06-29 05:05:30.271220 UTC |
+| `pass` | `index` | 6 files, 8 symbols, indexed at 2026-06-29 05:26:37.128163 UTC |
 | `warn` | `quality` | SCIP exact references unavailable; 5 tests, 5 imports indexed |
 | `pass` | `config` | loaded /private/tmp/open-kioku-proof/ok.toml |
 | `pass` | `grammars` | parsers available for Rust |
