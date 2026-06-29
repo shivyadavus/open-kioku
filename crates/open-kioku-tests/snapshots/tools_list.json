@@ -122,6 +122,21 @@
         "name": "architecture_violations"
       },
       {
+        "description": "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Optional repository-relative or absolute path to a standalone architecture policy TOML file.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "architecture_policy_validate"
+      },
+      {
         "description": "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.",
         "experimental": false,
         "inputSchema": {
@@ -132,7 +147,7 @@
         "name": "architecture_policy_check"
       },
       {
-        "description": "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file or symbol.",
+        "description": "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.",
         "experimental": false,
         "inputSchema": {
           "oneOf": [
@@ -145,11 +160,23 @@
               "required": [
                 "symbol"
               ]
+            },
+            {
+              "required": [
+                "scope"
+              ]
             }
           ],
           "properties": {
             "file": {
               "description": "Repository-relative file path to explain.",
+              "type": "string"
+            },
+            "scope": {
+              "description": "Use `repo` to return repository-wide public API boundary findings.",
+              "enum": [
+                "repo"
+              ],
               "type": "string"
             },
             "symbol": {
