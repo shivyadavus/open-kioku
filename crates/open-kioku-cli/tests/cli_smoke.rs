@@ -2328,6 +2328,43 @@ fn index_captures_git_history() {
     assert!(owner_sources.iter().any(|source| source == "repo_memory"));
     assert_eq!(ownership["owners"][0]["confidence"], "exact");
 
+    let reviewers = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("reviewers")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let reviewers: serde_json::Value = serde_json::from_str(&reviewers).unwrap();
+    assert_eq!(
+        reviewers["availability"],
+        "inferred_from_ownership_and_authors"
+    );
+    assert_eq!(
+        reviewers["suggestions"][0]["reviewer"]["email"],
+        "dev@example.com"
+    );
+    assert_eq!(reviewers["suggestions"][0]["actual_review_evidence"], false);
+    assert_eq!(reviewers["suggestions"][0]["inferred_from_authors"], true);
+    let reviewer_sources = reviewers["suggestions"][0]["source_types"]
+        .as_array()
+        .unwrap();
+    assert!(reviewer_sources.iter().any(|source| source == "ownership"));
+    assert!(reviewer_sources.iter().any(|source| source == "git_author"));
+    assert!(reviewers["uncertainty"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note
+            .as_str()
+            .unwrap()
+            .contains("actual PR-review evidence is unavailable")));
+
     let symbol_provenance = run({
         let mut command = ok();
         command
@@ -2432,6 +2469,32 @@ fn index_captures_git_history() {
             .any(|source| source == "repo_memory")
     );
 
+    let mcp_reviewers = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"reviewer_suggestions","arguments":{"path":"src/a.rs"}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_reviewers.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["availability"],
+        "inferred_from_ownership_and_authors"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["suggestions"][0]["reviewer"]["email"],
+        "dev@example.com"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["suggestions"][0]["actual_review_evidence"],
+        false
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["suggestions"][0]["inferred_from_authors"],
+        true
+    );
+
     let mcp_symbol = run_with_stdin(
         {
             let mut command = ok();
@@ -2448,4 +2511,33 @@ fn index_captures_git_history() {
         response["result"]["structuredContent"]["symbol_id"],
         symbol_id.0
     );
+}
+
+#[test]
+fn reviewer_benchmark_corpus_passes() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("history")
+            .arg("reviewers-bench")
+            .arg("--min-accuracy")
+            .arg("0.80");
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(report["case_count"], 5);
+    assert!(
+        report["accuracy"].as_f64().unwrap() >= 0.80,
+        "reviewer benchmark report: {report}"
+    );
+    assert!(report["failures"].as_array().unwrap().is_empty());
 }
