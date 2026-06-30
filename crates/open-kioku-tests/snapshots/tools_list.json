@@ -14,6 +14,7 @@
       "history_provenance_lookup",
       "churn_analysis",
       "ownership_lookup",
+      "reviewer_suggestions",
       "explain_flow",
       "map_stacktrace_to_code",
       "find_errors_for_symbol",
@@ -628,6 +629,24 @@
         },
         "maturity": "experimental",
         "name": "ownership_lookup"
+      },
+      {
+        "description": "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields.",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Repository-relative path to inspect.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "reviewer_suggestions"
       },
       {
         "description": "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.",

@@ -1,0 +1,123 @@
+[
+  {
+    "id": "actual-approval-outranks-author",
+    "path": "src/payments/checkout.rs",
+    "review_evidence": [
+      {
+        "reviewer": "reviewer@example.com",
+        "role": "approver",
+        "days_ago": 7,
+        "source": "synthetic-pr-review"
+      }
+    ],
+    "author_touches": [
+      {
+        "author": "author@example.com",
+        "count": 3,
+        "days_ago": 2
+      }
+    ],
+    "expected_top_reviewer": "reviewer@example.com",
+    "expected_availability": "actual_review_evidence",
+    "expected_actual_review_evidence": true,
+    "expected_inferred_from_authors": false
+  },
+  {
+    "id": "author-only-inference",
+    "path": "src/catalog/search.rs",
+    "author_touches": [
+      {
+        "author": "alice@example.com",
+        "count": 3,
+        "days_ago": 4
+      },
+      {
+        "author": "bob@example.com",
+        "count": 1,
+        "days_ago": 1
+      }
+    ],
+    "expected_top_reviewer": "alice@example.com",
+    "expected_availability": "inferred_from_authors",
+    "expected_actual_review_evidence": false,
+    "expected_inferred_from_authors": true
+  },
+  {
+    "id": "ownership-only-inference",
+    "path": "src/auth/session.rs",
+    "ownership": [
+      {
+        "owner": "auth-owner@example.com",
+        "source_types": ["codeowners"],
+        "score": 0.92,
+        "days_ago": 15,
+        "source": ".github/CODEOWNERS:3"
+      }
+    ],
+    "expected_top_reviewer": "auth-owner@example.com",
+    "expected_availability": "inferred_from_ownership",
+    "expected_actual_review_evidence": false,
+    "expected_inferred_from_authors": false
+  },
+  {
+    "id": "ownership-and-author-inference",
+    "path": "src/platform/runtime.rs",
+    "ownership": [
+      {
+        "owner": "platform-lead@example.com",
+        "source_types": ["codeowners"],
+        "score": 0.88,
+        "days_ago": 12,
+        "source": ".github/CODEOWNERS:8"
+      }
+    ],
+    "author_touches": [
+      {
+        "author": "platform-lead@example.com",
+        "count": 2,
+        "days_ago": 3
+      },
+      {
+        "author": "runtime-helper@example.com",
+        "count": 1,
+        "days_ago": 2
+      }
+    ],
+    "expected_top_reviewer": "platform-lead@example.com",
+    "expected_availability": "inferred_from_ownership_and_authors",
+    "expected_actual_review_evidence": false,
+    "expected_inferred_from_authors": true
+  },
+  {
+    "id": "reviewer-evidence-beats-owner",
+    "path": "src/billing/invoices.rs",
+    "review_evidence": [
+      {
+        "reviewer": "billing-reviewer@example.com",
+        "role": "reviewer",
+        "days_ago": 10,
+        "source": "synthetic-review-thread"
+      }
+    ],
+    "ownership": [
+      {
+        "owner": "billing-owner@example.com",
+        "source_types": ["codeowners"],
+        "score": 0.95,
+        "days_ago": 8,
+        "source": ".github/CODEOWNERS:12"
+      }
+    ],
+    "author_touches": [
+      {
+        "author": "billing-owner@example.com",
+        "count": 2,
+        "days_ago": 5
+      }
+    ],
+    "expected_top_reviewer": "billing-reviewer@example.com",
+    "expected_availability": "actual_review_evidence",
+    "expected_actual_review_evidence": true,
+    "expected_inferred_from_authors": false
+  }
+]

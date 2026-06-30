@@ -1,4 +1,5 @@
 mod ownership;
+mod reviewers;
 
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
@@ -16,6 +17,7 @@ const GIT_COMMIT_FORMAT: &str =
     "--format=%x1e%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%B%x00";
 
 pub use ownership::{ownership_for_path, OwnershipInput};
+pub use reviewers::{suggest_reviewers, ReviewerSuggestionInput};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitHistory {
