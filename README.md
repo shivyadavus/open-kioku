@@ -382,6 +382,7 @@ ok --repo /path/to/repo symbol refs PolicyGate
 ok --repo /path/to/repo history provenance --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo history provenance --symbol PolicyGate
 ok --repo /path/to/repo history churn --path crates/open-kioku-core/src/lib.rs
+ok --repo /path/to/repo history similar --task "fix token expiration" --path src/auth.rs
 ok --repo /path/to/repo history ownership --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo history reviewers --path crates/open-kioku-core/src/lib.rs
 ok --repo /path/to/repo impact --file crates/open-kioku-mcp/src/lib.rs
@@ -404,6 +405,7 @@ ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
+ok --repo /path/to/repo history similar-bench --min-recall-at-5 0.75
 ok --repo /path/to/repo history reviewers-bench --min-accuracy 0.80
 ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed src/auth.rs
 ok --repo /path/to/repo architecture detect
@@ -430,7 +432,7 @@ from private repos.
 
 Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
-History provenance, churn hotspots, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (58 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance, churn hotspots, similar changes, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (59 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
