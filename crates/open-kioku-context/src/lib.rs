@@ -134,6 +134,10 @@ pub struct ContextPackBuilder<'a> {
     ranking_options: RankingOptions,
 }
 
+pub fn expanded_task_search_terms(task: &str) -> Vec<String> {
+    TaskSearchIntent::parse(task).search_terms(task)
+}
+
 impl<'a> ContextPackBuilder<'a> {
     pub fn new(store: &'a dyn OkStore) -> Self {
         Self {
@@ -977,12 +981,14 @@ impl TaskSearchIntent {
 
     fn search_terms(&self, task: &str) -> Vec<String> {
         let mut terms = vec![task.to_string()];
+        let alias_terms = task_alias_terms(task);
         for term in self
             .ticket_anchors
             .iter()
             .chain(self.path_anchors.iter())
             .chain(self.primary_anchors.iter())
             .chain(self.reference_anchors.iter())
+            .chain(alias_terms.iter())
         {
             if term.len() >= 3 && !terms.iter().any(|existing| existing == term) {
                 terms.push(term.clone());
@@ -1211,6 +1217,46 @@ fn is_path_like(value: &str) -> bool {
         || value.ends_with(".md")
 }
 
+fn task_alias_terms(task: &str) -> Vec<String> {
+    let tokens = task
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() >= 3)
+        .collect::<Vec<_>>();
+    let aliased_tokens = tokens
+        .iter()
+        .map(|token| task_token_alias(token))
+        .collect::<Vec<_>>();
+    let mut aliases = Vec::new();
+    for (token, alias) in tokens.iter().zip(aliased_tokens.iter()) {
+        if token != alias {
+            push_unique_alias(&mut aliases, alias);
+        }
+    }
+    for pair in tokens.windows(2).zip(aliased_tokens.windows(2)) {
+        let (original, aliased) = pair;
+        if original != aliased {
+            push_unique_alias(&mut aliases, &aliased.join(" "));
+        }
+    }
+    aliases
+}
+
+fn task_token_alias(token: &str) -> String {
+    match token {
+        "configuration" | "configurations" | "configured" | "configuring" => "config".into(),
+        "defaults" => "default".into(),
+        "histories" => "history".into(),
+        _ => token.into(),
+    }
+}
+
+fn push_unique_alias(aliases: &mut Vec<String>, alias: &str) {
+    if alias.len() >= 3 && !aliases.iter().any(|existing| existing == alias) {
+        aliases.push(alias.to_string());
+    }
+}
+
 fn normalize_identifier(value: &str) -> String {
     let mut out = String::new();
     let mut previous_lower_or_digit = false;
@@ -1397,5 +1443,98 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("primary task anchor")));
+    }
+
+    #[test]
+    fn expanded_task_search_terms_include_config_aliases() {
+        let terms = expanded_task_search_terms("add history configuration defaults");
+
+        assert!(terms.iter().any(|term| term == "config"));
+        assert!(terms.iter().any(|term| term == "default"));
+        assert!(terms.iter().any(|term| term == "history config"));
+        assert!(terms.iter().any(|term| term == "config default"));
+    }
+
+    #[test]
+    fn configuration_alias_keeps_config_crate_in_context_candidates() {
+        let repo_id = RepositoryId::new("repo");
+        let config_file = File {
+            id: FileId::new("config"),
+            repository_id: repo_id.clone(),
+            path: "crates/open-kioku-config/src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "config".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let history_file = File {
+            id: FileId::new("history"),
+            repository_id: repo_id,
+            path: "crates/open-kioku-git/benches/history.rs".into(),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "history".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let config_symbol = Symbol {
+            id: SymbolId::new("default-history-max-commits"),
+            name: "default_history_max_commits".into(),
+            qualified_name: "open_kioku_config::default_history_max_commits".into(),
+            kind: SymbolKind::Function,
+            file_id: config_file.id.clone(),
+            range: Some(LineRange { start: 1, end: 4 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let history_symbol = Symbol {
+            id: SymbolId::new("benchmark-history-ingest"),
+            name: "benchmark_history_ingest".into(),
+            qualified_name: "open_kioku_git::benchmark_history_ingest".into(),
+            kind: SymbolKind::Function,
+            file_id: history_file.id.clone(),
+            range: Some(LineRange { start: 1, end: 4 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "config-chunk".into(),
+                file_id: config_file.id.clone(),
+                range: LineRange { start: 1, end: 4 },
+                language: Language::Rust,
+                text: "fn default_history_max_commits() -> usize { 100 }".into(),
+                symbol_id: Some(config_symbol.id.clone()),
+            },
+            CodeChunk {
+                id: "history-chunk".into(),
+                file_id: history_file.id.clone(),
+                range: LineRange { start: 1, end: 4 },
+                language: Language::Rust,
+                text: "fn benchmark_history_ingest() { /* add history configuration defaults */ }"
+                    .into(),
+                symbol_id: Some(history_symbol.id.clone()),
+            },
+        ];
+        let files = vec![config_file, history_file];
+        let symbols = vec![config_symbol, history_symbol];
+        let task = "add history configuration defaults";
+        let intent = TaskSearchIntent::parse(task);
+        let results = rerank_for_task(
+            search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
+            &intent,
+            &RankingOptions::default(),
+        );
+
+        assert!(
+            results
+                .iter()
+                .take(8)
+                .any(|result| result.path == Path::new("crates/open-kioku-config/src/lib.rs")),
+            "config crate should stay in the planner-visible context: {results:#?}"
+        );
     }
 }

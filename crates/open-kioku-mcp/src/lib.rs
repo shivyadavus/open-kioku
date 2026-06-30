@@ -9,7 +9,9 @@ use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
     ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
 };
-use open_kioku_core::{Confidence, ContextHandleId, PlanReport, PolicyCheckReport, SymbolId};
+use open_kioku_core::{
+    Confidence, ContextHandleId, PlanReport, PolicyCheckReport, PolicyComponentMatch, SymbolId,
+};
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
@@ -309,6 +311,20 @@ async fn dispatch(
             } else {
                 unreachable!("exactly one churn target was checked above");
             }
+        }
+        "ownership_lookup" => {
+            let path = Path::new(required_str(&params, "path")?);
+            let components = ownership_components(repo, store, path)?;
+            let memory_facts = ownership_memory_facts(repo, path, &components)?;
+            Ok(json!(open_kioku_git::ownership_for_path(
+                open_kioku_git::OwnershipInput {
+                    repo,
+                    path,
+                    history: store,
+                    memory_facts: &memory_facts,
+                    components,
+                }
+            )?))
         }
         "find_tests_for_change" | "recommend_validation_plan" => {
             let path = required_str(&params, "path")?;
@@ -859,6 +875,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("impact_analysis", "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze."}}})),
         ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
         ("churn_analysis", "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path to inspect."},"module":{"type":"string","description":"Repository-relative module or directory path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."}},"oneOf":[{"required":["path"]},{"required":["module"]},{"required":["symbol"]}]})),
+        ("ownership_lookup", "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
         ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for."},"limit":{"type":"integer","description":"Maximum number of context results to include. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The output format of the context pack."}}})),
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
@@ -948,6 +965,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "get_callees"
         | "history_provenance_lookup"
         | "churn_analysis"
+        | "ownership_lookup"
         | "explain_flow"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
@@ -977,6 +995,54 @@ where
     };
     let resolver = PolicyResolver::new(&policy)?;
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
+}
+
+fn ownership_components(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    path: &Path,
+) -> anyhow::Result<Vec<PolicyComponentMatch>> {
+    if let Some(policy) = load_architecture_policy(repo)? {
+        let resolver = PolicyResolver::new(&policy)?;
+        return Ok(resolver.resolve_file(path));
+    }
+
+    let path_text = path.display().to_string();
+    let summary = ArchitectureDetector::new(store, None).detect()?;
+    Ok(summary
+        .components
+        .into_iter()
+        .filter(|component| {
+            component
+                .paths
+                .iter()
+                .any(|candidate| candidate == &path_text)
+        })
+        .map(|component| PolicyComponentMatch {
+            component_id: component.id,
+            matched_glob: "inferred_component_path".into(),
+        })
+        .collect())
+}
+
+fn ownership_memory_facts(
+    repo: &Path,
+    path: &Path,
+    components: &[PolicyComponentMatch],
+) -> anyhow::Result<Vec<open_kioku_core::MemorySearchResult>> {
+    let mut query_terms = vec![
+        "ownership".to_string(),
+        "owner".to_string(),
+        "owners".to_string(),
+        "maintainer".to_string(),
+        path.display().to_string(),
+    ];
+    query_terms.extend(
+        components
+            .iter()
+            .map(|component| component.component_id.clone()),
+    );
+    Ok(RepoMemoryStore::open_repo(repo)?.search(&query_terms.join(" "), 20)?)
 }
 
 fn architecture_policy_validate_tool(repo: &Path, params: &Value) -> anyhow::Result<Value> {
@@ -1932,6 +1998,11 @@ mod tests {
             .find(|tool| tool["name"] == "churn_analysis")
             .unwrap();
         assert_eq!(churn["maturity"], "experimental");
+        let ownership = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "ownership_lookup")
+            .unwrap();
+        assert_eq!(ownership["maturity"], "experimental");
 
         let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;

@@ -2210,11 +2210,13 @@ fn index_captures_git_history() {
     };
 
     git(&["init", "--quiet"]);
-    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.email", "dev@example.com"]);
     git(&["config", "user.name", "Test User"]);
     git(&["config", "commit.gpgsign", "false"]);
 
+    fs::create_dir_all(repo.join(".github")).unwrap();
     fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join(".github/CODEOWNERS"), "src/** dev@example.com\n").unwrap();
     fs::write(repo.join("src/a.rs"), "pub fn a() {}\n").unwrap();
     git(&["add", "."]);
     git(&["commit", "--quiet", "-m", "first commit"]);
@@ -2228,6 +2230,21 @@ fn index_captures_git_history() {
     run({
         let mut command = ok();
         command.arg("init").arg(repo);
+        command
+    });
+
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("memory")
+            .arg("remember")
+            .arg("src/a.rs maintainer dev@example.com")
+            .arg("--source")
+            .arg("cli-smoke")
+            .arg("--confidence")
+            .arg("high");
         command
     });
 
@@ -2290,6 +2307,26 @@ fn index_captures_git_history() {
     assert_eq!(file_churn["stats"]["all_time"], 1);
     assert_eq!(file_churn["stats"]["last_90d"], 1);
     assert_eq!(file_churn["confidence"], "exact");
+
+    let ownership = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("ownership")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let ownership: serde_json::Value = serde_json::from_str(&ownership).unwrap();
+    assert_eq!(ownership["owners"][0]["owner"]["email"], "dev@example.com");
+    let owner_sources = ownership["owners"][0]["source_types"].as_array().unwrap();
+    assert!(owner_sources.iter().any(|source| source == "codeowners"));
+    assert!(owner_sources.iter().any(|source| source == "git_history"));
+    assert!(owner_sources.iter().any(|source| source == "repo_memory"));
+    assert_eq!(ownership["owners"][0]["confidence"], "exact");
 
     let symbol_provenance = run({
         let mut command = ok();
@@ -2372,6 +2409,27 @@ fn index_captures_git_history() {
     assert_eq!(
         response["result"]["structuredContent"]["confidence"],
         "exact"
+    );
+
+    let mcp_ownership = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ownership_lookup","arguments":{"path":"src/a.rs"}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_ownership.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["owners"][0]["owner"]["email"],
+        "dev@example.com"
+    );
+    assert!(
+        response["result"]["structuredContent"]["owners"][0]["source_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source == "repo_memory")
     );
 
     let mcp_symbol = run_with_stdin(

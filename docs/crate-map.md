@@ -98,6 +98,7 @@ graph TD
     Graph --> Symbols
     Arch --> Graph
     Git --> Core
+    Git --> StorageTrait
 
     StorageTrait --> Core
     SQLite --> StorageTrait
@@ -160,7 +161,7 @@ graph TD
 | `open-kioku-symbols` | Symbol table: definitions, references, and occurrence tracking. |
 | `open-kioku-graph` | Builds and queries the code dependency / call graph. |
 | `open-kioku-architecture` | High-level architectural analysis (module boundaries, layering). |
-| `open-kioku-git` | Bounded local Git commit/file-touch ingest, zero-context patch ranges, rename parsing, and co-change derivation. |
+| `open-kioku-git` | Bounded local Git commit/file-touch ingest, zero-context patch ranges, rename parsing, co-change derivation, and ownership resolution. |
 | `open-kioku-watch` | File-system watcher for incremental re-indexing. |
 
 ### Storage Layer

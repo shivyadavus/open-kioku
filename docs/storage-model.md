@@ -67,8 +67,7 @@ explicit uncertainty. Zero-context Git patch hunks are mapped to the most
 specific overlapping current symbol ranges and stored in `git_symbol_touches`.
 Historical coordinate drift, equally specific overlaps, missing symbol ranges,
 rename mapping, and bounded-window first-seen results remain explicit in typed
-provenance confidence and uncertainty fields. Reviewer evidence is supplied by
-later ownership work.
+provenance confidence and uncertainty fields.
 
 ## Historical Churn And Hotspots
 
@@ -186,6 +185,46 @@ selected instead of its enclosing class. It lowers confidence when:
 These signals never outrank exact indexed code evidence. `first_seen` means the
 earliest persisted or line-mapped touch inside the configured local history
 window unless the result explicitly proves an added file.
+
+## Ownership Lookup
+
+Ownership lookup is an experimental local trust-layer surface computed from
+three sources:
+
+- CODEOWNERS or equivalent owner config files in `.open-kioku/CODEOWNERS`,
+  `.github/CODEOWNERS`, repository root `CODEOWNERS`, `docs/CODEOWNERS`, or
+  `OWNERS`;
+- persisted local git provenance from `provenance_for_path`;
+- repo memory search results that contain owner handles or email tokens.
+
+Query a repository-relative path:
+
+```sh
+ok --repo /path/to/repo history ownership \
+  --path crates/open-kioku-core/src/lib.rs
+```
+
+The experimental MCP tool `ownership_lookup` accepts:
+
+```json
+{"path":"crates/open-kioku-core/src/lib.rs"}
+```
+
+The typed `OwnershipReport` returns ranked `OwnerSuggestion` values with:
+
+- `OwnershipEvidence` entries for each source;
+- `OwnershipConfidenceBreakdown` contributions for CODEOWNERS, git history,
+  repo memory, freshness, and ambiguity;
+- explicit `stale` flags on evidence and suggestions;
+- component matches when architecture policy or inferred architecture mapping is
+  available;
+- uncertainty notes for missing, stale, ambiguous, truncated, or invalid source
+  evidence.
+
+CODEOWNERS evidence is intentionally weighted above weak memory-only evidence.
+Repo memory is secondary context: memory-only owner suggestions are capped at
+low confidence and include uncertainty explaining that they are uncorroborated
+by CODEOWNERS or git history.
 
 ## Search
 
