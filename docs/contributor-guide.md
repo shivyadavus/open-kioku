@@ -101,6 +101,24 @@ ok --json workflow-bench . \
 
 CI runs the same suite and enforces the committed case count.
 
+Public history API benchmark cases live in `benchmarks/history-cases.json`.
+Use this corpus when a change affects `ok history similar`, `ownership`,
+`reviewers`, `churn`, or `provenance`, or the matching MCP tools.
+
+Each top-level history case should include a persisted `HistorySnapshot`, any
+fixture CODEOWNERS lines needed for deterministic ownership, and expectations
+for at least one public API family. Prefer adding related API expectations to
+the same snapshot so similar-change recall, reviewer accuracy, churn, and
+provenance stay aligned.
+
+Run:
+
+```sh
+ok --repo . history bench \
+  --min-similar-recall-at-5 0.75 \
+  --min-reviewer-accuracy 0.80
+```
+
 ## Adding A New Signal
 
 Signals must be persisted or traceable; LLM narration is not a source of truth.
