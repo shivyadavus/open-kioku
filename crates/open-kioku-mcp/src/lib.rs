@@ -162,8 +162,9 @@ async fn dispatch(
         "regex_search" => search_tool(repo, store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
-            let mut pack =
-                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            let mut pack = ContextPackBuilder::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
+                .build(task, limit(&params))?;
             pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let format_arg = params
                 .get("format")
@@ -179,8 +180,9 @@ async fn dispatch(
         }
         "build_compressed_context" => {
             let task = required_str(&params, "task")?;
-            let mut pack =
-                ContextPackBuilder::new(store as &dyn OkStore).build(task, limit(&params))?;
+            let mut pack = ContextPackBuilder::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
+                .build(task, limit(&params))?;
             pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
             let format_arg = params
@@ -210,7 +212,9 @@ async fn dispatch(
             };
             let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
             let limit = limit(&params);
-            let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
+            let mut context = ContextPackBuilder::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
+                .build(&task, limit)?;
             context.architecture_policy = configured_architecture_policy_report(repo, store)?;
             let report = PlanEngine::new(store as &dyn OkStore)
                 .with_history_store(Some(store))
@@ -1394,7 +1398,9 @@ fn contract_plan_from_params(
     }
     let limit = limit(params);
     let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
-    let mut context = ContextPackBuilder::new(store as &dyn OkStore).build(&task, limit)?;
+    let mut context = ContextPackBuilder::new(store as &dyn OkStore)
+        .with_history_store(Some(store))
+        .build(&task, limit)?;
     context.architecture_policy = configured_architecture_policy_report(repo, store)?;
     Ok(PlanEngine::new(store as &dyn OkStore)
         .with_history_store(Some(store))

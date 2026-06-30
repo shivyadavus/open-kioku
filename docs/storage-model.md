@@ -40,6 +40,7 @@ them in:
 - `provenance_for_path`
 - `provenance_for_symbol`
 - `similar_changes`
+- `history_score_components`
 - `cochange_neighbors`
 - `recent_commits`
 
@@ -126,10 +127,13 @@ The experimental MCP tool `churn_analysis` accepts exactly one of:
 {"symbol":"PolicyGate"}
 ```
 
-Impact and planning reports can surface materialized file hotspot signals as
-risk evidence when a history store is available. These signals are labeled as
-local-history risk evidence and do not replace exact references, ranking, or
-contract verification.
+Impact, ranking, test selection, planning, and contract generation can request
+`history_score_components` when a history store is available. The API returns
+bounded `ScoreComponent` entries named `history_churn`, `ownership_risk`,
+`similar_change_overlap`, and `reviewer_affinity`, plus evidence refs and
+explicit uncertainty. These local-history heuristics are advisory: they do not
+replace exact references, exact symbol/file evidence, direct test coverage,
+architecture policy, or contract verification.
 
 ## Provenance Lookup
 

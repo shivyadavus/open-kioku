@@ -981,6 +981,48 @@ pub struct HistorySummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySignalQuery {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySignalSummary {
+    pub path: PathBuf,
+    pub generated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub components: Vec<ScoreComponent>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    pub similar_change_count: usize,
+    pub distinct_author_count: usize,
+    pub reviewer_count: usize,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
+impl HistorySignalSummary {
+    pub fn empty(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            generated_at: Utc::now(),
+            components: Vec::new(),
+            evidence_refs: Vec::new(),
+            reasons: Vec::new(),
+            similar_change_count: 0,
+            distinct_author_count: 0,
+            reviewer_count: 0,
+            uncertainty: vec!["no bounded history signals were available for this path".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SimilarChangeQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,

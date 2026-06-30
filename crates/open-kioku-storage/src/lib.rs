@@ -1,11 +1,12 @@
 use open_kioku_core::{
     AnalysisFact, ChurnSummary, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance,
     GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-    HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest, SearchResult,
-    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
-    TestTarget,
+    HistorySignalQuery, HistorySignalSummary, HistorySnapshot, HistorySummary, ImpactReport,
+    Import, IndexManifest, ScoreComponent, SearchResult, SimilarChangeQuery, SimilarChangeReport,
+    Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub trait MetadataStore: Send + Sync {
@@ -478,8 +479,232 @@ pub trait HistoryStore: Send + Sync {
             "similar historical change lookup is not implemented by this history store".into(),
         ))
     }
+    fn history_score_components(
+        &self,
+        query: &HistorySignalQuery,
+        limit: usize,
+    ) -> Result<HistorySignalSummary> {
+        Ok(history_signal_summary(self, query, limit))
+    }
     fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>>;
     fn recent_commits(&self, limit: usize) -> Result<Vec<GitCommitRecord>>;
+}
+
+fn history_signal_summary<T: HistoryStore + ?Sized>(
+    store: &T,
+    query: &HistorySignalQuery,
+    limit: usize,
+) -> HistorySignalSummary {
+    let limit = limit.clamp(1, 25);
+    let mut summary = HistorySignalSummary::empty(query.path.clone());
+    summary.uncertainty.clear();
+
+    match store.churn_for_file(&query.path) {
+        Ok(churn) => add_churn_signal(&mut summary, &churn),
+        Err(err) => summary
+            .uncertainty
+            .push(format!("history_churn unavailable: {err}")),
+    }
+
+    match store.history_for_file(&query.path, limit) {
+        Ok(history) => add_history_summary_signals(&mut summary, &history),
+        Err(err) => summary
+            .uncertainty
+            .push(format!("history summary unavailable: {err}")),
+    }
+
+    let similar_query = SimilarChangeQuery {
+        task: query.task.clone(),
+        paths: vec![query.path.clone()],
+        symbols: query.symbols.clone(),
+    };
+    match store.similar_changes(&similar_query, 5.min(limit)) {
+        Ok(report) => add_similar_change_signal(&mut summary, &report),
+        Err(err) => summary
+            .uncertainty
+            .push(format!("similar_change_overlap unavailable: {err}")),
+    }
+
+    summary.evidence_refs.sort();
+    summary.evidence_refs.dedup();
+    summary.reasons.sort();
+    summary.reasons.dedup();
+    summary.uncertainty.sort();
+    summary.uncertainty.dedup();
+    if summary.components.is_empty() && summary.uncertainty.is_empty() {
+        summary
+            .uncertainty
+            .push("no bounded history signals were available for this path".into());
+    }
+    summary
+}
+
+fn add_churn_signal(summary: &mut HistorySignalSummary, churn: &ChurnSummary) {
+    if churn.stats.touch_count == 0 {
+        summary.uncertainty.extend(churn.uncertainty.clone());
+        return;
+    }
+    let contribution = if churn.stats.hotspot_score >= 3.0 {
+        0.12
+    } else if churn.stats.hotspot_score >= 1.5 {
+        0.07
+    } else {
+        0.03
+    };
+    let evidence_id = format!("history-churn:{}", churn.key);
+    summary.evidence_refs.push(evidence_id.clone());
+    summary.reasons.push(format!(
+        "history churn: hotspot {:.2} from {} touch(es)",
+        churn.stats.hotspot_score, churn.stats.touch_count
+    ));
+    summary.components.push(ScoreComponent::adjustment(
+        "history_churn",
+        contribution,
+        vec![evidence_id],
+        "bounded churn/hotspot signal from persisted local git history",
+    ));
+    summary.uncertainty.extend(churn.uncertainty.clone());
+}
+
+fn add_history_summary_signals(summary: &mut HistorySignalSummary, history: &HistorySummary) {
+    let author_count = history
+        .recent_commits
+        .iter()
+        .map(|commit| owner_identity(&commit.author))
+        .filter(|identity| !identity.is_empty())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let reviewer_count = history
+        .reviewer_evidence
+        .iter()
+        .map(|reviewer| owner_identity(&reviewer.reviewer))
+        .filter(|identity| !identity.is_empty())
+        .collect::<BTreeSet<_>>()
+        .len();
+    summary.distinct_author_count = author_count;
+    summary.reviewer_count = reviewer_count;
+
+    if author_count > 0 {
+        let contribution = if author_count >= 4 {
+            0.12
+        } else if author_count >= 2 {
+            0.07
+        } else if reviewer_count == 0 && !history.file_touches.is_empty() {
+            0.04
+        } else {
+            0.0
+        };
+        if contribution > 0.0 {
+            let evidence_ids = history
+                .recent_commits
+                .iter()
+                .take(5)
+                .map(|commit| format!("history-author:{}", commit.id.0))
+                .collect::<Vec<_>>();
+            summary.evidence_refs.extend(evidence_ids.clone());
+            summary.reasons.push(format!(
+                "ownership risk: {} distinct historical author(s), {} reviewer(s)",
+                author_count, reviewer_count
+            ));
+            summary.components.push(ScoreComponent::adjustment(
+                "ownership_risk",
+                contribution,
+                evidence_ids,
+                "bounded ownership risk from dispersed local author history",
+            ));
+        }
+    }
+
+    if reviewer_count > 0 {
+        let contribution = (0.04 + reviewer_count.min(3) as f32 * 0.02).min(0.10);
+        let evidence_ids = history
+            .reviewer_evidence
+            .iter()
+            .take(5)
+            .map(|review| format!("history-reviewer:{}", review.id.0))
+            .collect::<Vec<_>>();
+        summary.evidence_refs.extend(evidence_ids.clone());
+        summary.reasons.push(format!(
+            "reviewer affinity: {} historical reviewer signal(s)",
+            reviewer_count
+        ));
+        summary.components.push(ScoreComponent::adjustment(
+            "reviewer_affinity",
+            contribution,
+            evidence_ids,
+            "bounded reviewer affinity from local review and owner history",
+        ));
+    }
+
+    if !history.cochange_neighbors.is_empty() {
+        let contribution =
+            (history.cochange_neighbors.iter().take(3).count() as f32 * 0.04).min(0.12);
+        let evidence_ids = history
+            .cochange_neighbors
+            .iter()
+            .take(5)
+            .map(|edge| format!("history-cochange:{}", edge.id.0))
+            .collect::<Vec<_>>();
+        summary.evidence_refs.extend(evidence_ids.clone());
+        summary.reasons.push(format!(
+            "similar change overlap: {} persisted co-change neighbor(s)",
+            history.cochange_neighbors.len()
+        ));
+        summary.components.push(ScoreComponent::adjustment(
+            "similar_change_overlap",
+            contribution,
+            evidence_ids,
+            "bounded co-change overlap from persisted local history",
+        ));
+    }
+
+    summary.uncertainty.extend(history.uncertainty.clone());
+    if history.truncated {
+        summary
+            .uncertainty
+            .push("history signal inputs were truncated".into());
+    }
+}
+
+fn add_similar_change_signal(summary: &mut HistorySignalSummary, report: &SimilarChangeReport) {
+    summary.similar_change_count = report.hits.len();
+    if let Some(top_hit) = report.hits.first() {
+        let contribution = (top_hit.score.clamp(0.0, 1.0) * 0.18).max(0.05);
+        let evidence_ids = report
+            .hits
+            .iter()
+            .take(5)
+            .map(|hit| format!("history-similar:{}", hit.change.commit.id.0))
+            .collect::<Vec<_>>();
+        summary.evidence_refs.extend(evidence_ids.clone());
+        summary.reasons.push(format!(
+            "similar change overlap: {} similar historical change(s), top `{}`",
+            report.hits.len(),
+            top_hit.change.commit.summary
+        ));
+        summary.components.push(ScoreComponent::adjustment(
+            "similar_change_overlap",
+            contribution.min(0.18),
+            evidence_ids,
+            "bounded similar-change overlap from persisted local history",
+        ));
+    }
+    summary.uncertainty.extend(report.uncertainty.clone());
+    if report.truncated {
+        summary
+            .uncertainty
+            .push("similar change signal inputs were truncated".into());
+    }
+}
+
+fn owner_identity(owner: &open_kioku_core::Owner) -> String {
+    owner
+        .email
+        .as_deref()
+        .filter(|email| !email.trim().is_empty())
+        .unwrap_or(&owner.name)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 pub trait SearchIndex: Send + Sync {

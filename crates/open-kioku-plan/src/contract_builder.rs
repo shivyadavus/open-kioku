@@ -10,6 +10,7 @@ use open_kioku_core::{
     PlanReport, PolicyCheckReport, PolicySignalSummary, PolicyViolation, PolicyViolationEvidenceRef,
 };
 use open_kioku_errors::{OkError, Result};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use uuid::Uuid;
@@ -41,6 +42,7 @@ impl ContractBuilder {
         let test_refs = validation_evidence_refs(plan, &fallback_refs);
         let risk_refs = section_evidence_refs(plan, "risk", &fallback_refs);
         let confidence_refs = section_evidence_refs(plan, "confidence", &fallback_refs);
+        let history_refs = section_evidence_refs(plan, "history", &[]);
 
         let mut primary_files = Vec::new();
         let mut seen_files = BTreeSet::new();
@@ -194,15 +196,22 @@ impl ContractBuilder {
         };
 
         let traceability = traceability_entries(
-            &primary_refs,
-            &test_refs,
-            &architecture_refs,
-            &risk_refs,
-            &confidence_refs,
+            TraceabilityRefs {
+                primary: &primary_refs,
+                tests: &test_refs,
+                boundary: &architecture_refs,
+                risk: &risk_refs,
+                confidence: &confidence_refs,
+                history: &history_refs,
+            },
             !secondary_files.is_empty(),
             !forbidden_files.is_empty(),
         );
         let expansion_approval_requirements = expansion_approval_requirements(plan, &boundary_refs);
+        let mut extensions = BTreeMap::new();
+        if let Some(history_summary) = contract_history_signal_summary(plan, &history_refs) {
+            extensions.insert("history_signal_summary".into(), history_summary);
+        }
 
         let contract = ChangeContractV1 {
             id: ContractId::new(Uuid::new_v4().to_string()),
@@ -228,7 +237,7 @@ impl ContractBuilder {
                 id: "derived-from-plan".into(),
                 digest: "derived-from-plan".into(),
             },
-            extensions: BTreeMap::new(),
+            extensions,
         };
         contract.validate().map_err(|err| {
             OkError::Config(format!("generated change contract is invalid: {err}"))
@@ -254,9 +263,15 @@ fn stable_evidence_refs(plan: &PlanReport) -> Vec<EvidenceRef> {
         for evidence_ref in ctx.derived_evidence_ids() {
             push_ref(&mut refs, &evidence_ref);
         }
+        for component in &ctx.score_breakdown {
+            push_refs(&mut refs, &component.evidence_ids);
+        }
     }
     for evidence in &plan.impact.evidence {
         push_ref(&mut refs, &evidence.id.0);
+    }
+    for component in &plan.impact.score_breakdown {
+        push_refs(&mut refs, &component.evidence_ids);
     }
     push_refs(&mut refs, &plan.recommended_change_boundary.evidence_refs);
     for rule in &plan.recommended_change_boundary.allowed_rules {
@@ -273,6 +288,12 @@ fn stable_evidence_refs(plan: &PlanReport) -> Vec<EvidenceRef> {
     }
     for test in &plan.validation {
         push_refs(&mut refs, &test.evidence_refs);
+        for component in &test.score_breakdown {
+            push_refs(&mut refs, &component.evidence_ids);
+        }
+    }
+    for component in &plan.score_breakdown {
+        push_refs(&mut refs, &component.evidence_ids);
     }
     push_refs(&mut refs, &architecture_policy_evidence_ref_strings(plan));
     refs.into_iter().map(EvidenceRef::new).collect()
@@ -536,12 +557,17 @@ fn policy_constraint_severity(severity: &str) -> ConstraintSeverity {
     }
 }
 
+struct TraceabilityRefs<'a> {
+    primary: &'a [EvidenceRef],
+    tests: &'a [EvidenceRef],
+    boundary: &'a [EvidenceRef],
+    risk: &'a [EvidenceRef],
+    confidence: &'a [EvidenceRef],
+    history: &'a [EvidenceRef],
+}
+
 fn traceability_entries(
-    primary_refs: &[EvidenceRef],
-    test_refs: &[EvidenceRef],
-    boundary_refs: &[EvidenceRef],
-    risk_refs: &[EvidenceRef],
-    confidence_refs: &[EvidenceRef],
+    refs: TraceabilityRefs<'_>,
     has_secondary_files: bool,
     has_forbidden_files: bool,
 ) -> Vec<ContractEvidenceTrace> {
@@ -549,64 +575,99 @@ fn traceability_entries(
         trace(
             "task",
             "Task text is constrained by the source plan and its evidence set",
-            primary_refs,
+            refs.primary,
         ),
         trace(
             "primary_files",
             "Primary files come from matched plan context and allowed boundary files",
-            primary_refs,
+            refs.primary,
         ),
         trace(
             "impacted_symbols",
             "Impacted symbols come from plan symbol evidence or file-level fallback scope",
-            primary_refs,
+            refs.primary,
         ),
         trace(
             "required_tests",
             "Required tests come from the plan validation section",
-            test_refs,
+            refs.tests,
         ),
         trace(
             "architecture_constraints",
             "Architecture constraints come from the recommended change boundary and architecture policy report",
-            boundary_refs,
+            refs.boundary,
         ),
         trace(
             "validation_commands",
             "Validation commands come from test commands or explicit manual validation targets",
-            test_refs,
+            refs.tests,
         ),
         trace(
             "validation_requirements",
             "Validation requirements bind commands to attestation evidence for post-edit verification",
-            test_refs,
+            refs.tests,
         ),
         trace(
             "risk",
             "Risk assessment is constrained by the plan risk section",
-            risk_refs,
+            refs.risk,
         ),
         trace(
             "confidence",
             "Confidence assessment is constrained by the plan confidence section",
-            confidence_refs,
+            refs.confidence,
         ),
     ];
     if has_secondary_files {
         entries.push(trace(
             "secondary_files",
             "Secondary files come from caution boundary files",
-            boundary_refs,
+            refs.boundary,
         ));
     }
     if has_forbidden_files {
         entries.push(trace(
             "forbidden_files",
             "Forbidden files come from explicit plan boundary exclusions",
-            boundary_refs,
+            refs.boundary,
+        ));
+    }
+    if !refs.history.is_empty() {
+        entries.push(trace(
+            "history_signals",
+            "History signals come from bounded churn, ownership, similar-change, and reviewer evidence in the source plan",
+            refs.history,
         ));
     }
     entries
+}
+
+fn contract_history_signal_summary(
+    plan: &PlanReport,
+    history_refs: &[EvidenceRef],
+) -> Option<serde_json::Value> {
+    let mut signals = BTreeSet::new();
+    for component in &plan.score_breakdown {
+        if is_history_signal(&component.signal) {
+            signals.insert(component.signal.clone());
+        }
+    }
+    if signals.is_empty() && history_refs.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "signals": signals.into_iter().collect::<Vec<_>>(),
+        "evidence_refs": history_refs.iter().map(|value| value.0.clone()).collect::<Vec<_>>(),
+        "bounded": true,
+        "dominance_rule": "exact code references, direct symbol coverage, and explicit boundary evidence remain authoritative over historical heuristics"
+    }))
+}
+
+fn is_history_signal(signal: &str) -> bool {
+    matches!(
+        signal,
+        "history_churn" | "ownership_risk" | "similar_change_overlap" | "reviewer_affinity"
+    )
 }
 
 fn trace(field: &str, rationale: &str, evidence_refs: &[EvidenceRef]) -> ContractEvidenceTrace {
@@ -673,8 +734,8 @@ mod tests {
     use super::*;
     use open_kioku_core::{
         Confidence, ConfidenceBreakdown, EnforcedEdgeType, FileId, Language, PolicyCheckReport,
-        PolicyMatchEvidence, PolicyViolation, RiskReport, SearchResult, Symbol, SymbolId,
-        SymbolKind, TestTarget,
+        PolicyMatchEvidence, PolicyViolation, RiskReport, ScoreComponent, SearchResult, Symbol,
+        SymbolId, SymbolKind, TestTarget,
     };
     use std::path::PathBuf;
 
@@ -729,6 +790,7 @@ mod tests {
         let mut evidence_by_section = BTreeMap::new();
         evidence_by_section.insert("risk".into(), vec!["risk:surface".into()]);
         evidence_by_section.insert("confidence".into(), vec!["ctx:lib".into()]);
+        evidence_by_section.insert("history".into(), vec!["history-similar:abc".into()]);
 
         let plan = PlanReport {
             task: "change handler".into(),
@@ -812,7 +874,12 @@ mod tests {
                 blockers: vec![],
                 caveats: vec!["runtime corroboration is absent".into()],
             },
-            score_breakdown: vec![],
+            score_breakdown: vec![ScoreComponent::adjustment(
+                "similar_change_overlap",
+                0.12,
+                vec!["history-similar:abc".into()],
+                "bounded similar-change overlap from persisted local history",
+            )],
         };
 
         let contract = ContractBuilder::from_plan(&plan).expect("builds contract");
@@ -851,6 +918,18 @@ mod tests {
                 "architecture-policy:violation:0:domain-api"
             )]
         );
+        assert!(contract
+            .traceability
+            .iter()
+            .any(|trace| trace.field == "history_signals"));
+        assert!(contract
+            .extensions
+            .get("history_signal_summary")
+            .and_then(|value| value.get("signals"))
+            .and_then(|value| value.as_array())
+            .is_some_and(|signals| signals
+                .iter()
+                .any(|signal| signal == "similar_change_overlap")));
     }
 
     fn policy_report_with_violation() -> PolicyCheckReport {

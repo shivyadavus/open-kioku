@@ -3300,10 +3300,10 @@ mod tests {
         AnalysisFact, ChurnEntityKind, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId,
         EvidenceSourceType, File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
-        GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, IndexQuality, Language,
-        LineRange, NodeId, Owner, Repository, RepositoryId, ReviewerEvidence, ReviewerRole,
-        SimilarChangeQuery, SimilarityEvidenceSource, Symbol, SymbolId, SymbolKind,
-        SymbolOccurrence, HISTORY_SCHEMA_VERSION,
+        GraphNodeType, HistoryRecordId, HistorySignalQuery, HistorySnapshot, IndexManifest,
+        IndexQuality, Language, LineRange, NodeId, Owner, Repository, RepositoryId,
+        ReviewerEvidence, ReviewerRole, SimilarChangeQuery, SimilarityEvidenceSource, Symbol,
+        SymbolId, SymbolKind, SymbolOccurrence, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
@@ -3814,6 +3814,40 @@ mod tests {
             .uncertainty
             .iter()
             .any(|note| note.contains("low-confidence")));
+    }
+
+    #[test]
+    fn history_score_components_are_bounded_and_named() {
+        let store = make_store();
+        store.put_history_snapshot(&history_snapshot()).unwrap();
+
+        let summary = store
+            .history_score_components(
+                &HistorySignalQuery {
+                    path: "src/lib.rs".into(),
+                    task: Some("update lib history behavior".into()),
+                    symbols: vec!["crate::history_for_file".into()],
+                },
+                10,
+            )
+            .unwrap();
+
+        let signals = summary
+            .components
+            .iter()
+            .map(|component| component.signal.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(signals.contains("history_churn"), "{summary:#?}");
+        assert!(signals.contains("similar_change_overlap"), "{summary:#?}");
+        assert!(signals.contains("reviewer_affinity"), "{summary:#?}");
+        assert!(summary
+            .components
+            .iter()
+            .all(|component| component.contribution <= 0.18));
+        assert!(!summary.evidence_refs.is_empty());
+        assert!(summary.reasons.iter().any(|reason| {
+            reason.contains("history churn") || reason.contains("similar change")
+        }));
     }
 
     #[test]
