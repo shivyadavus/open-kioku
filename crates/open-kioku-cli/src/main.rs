@@ -7,7 +7,7 @@ use open_kioku_config::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
     PolicySource, RankingConfig, ScipMode,
 };
-use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
+use open_kioku_context::{expanded_task_search_terms, ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
     ApiSurfaceConstraint, ChangeContractV1, ContractFile, ContractId, ContractStore,
@@ -17,8 +17,8 @@ use open_kioku_core::{
     ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
     IndexMode, NodeId, OwnershipReport, PlanReport, PolicyCheckReport, PolicyComponentMatch,
-    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, Symbol, SymbolId,
-    SymbolProvenance,
+    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, SearchResult,
+    Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -8145,13 +8145,95 @@ fn build_context_pack(
         ContextPackBuilder::new(store as &dyn OkStore).with_ranking_options(ranking_options);
     let mut pack = if TantivySearchIndex::exists(&search_dir) {
         let index = TantivySearchIndex::open_or_create(&search_dir)?;
-        let primary = index.search(task, ranking_candidate_limit(limit))?;
+        let primary = search_context_candidates(&index, task, ranking_candidate_limit(limit))?;
         builder.build_from_primary(task, limit, primary)?
     } else {
         builder.build(task, limit)?
     };
     pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
     Ok(pack)
+}
+
+fn search_context_candidates(
+    index: &TantivySearchIndex,
+    task: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let mut merged = std::collections::BTreeMap::<String, SearchResult>::new();
+    for term in expanded_task_search_terms(task) {
+        let mut results = index.search(&term, limit)?;
+        for result in &mut results {
+            if term != task {
+                let evidence = format!("expanded task query `{term}` matched");
+                if !result.evidence.contains(&evidence) {
+                    result.evidence.push(evidence);
+                }
+                if !result.match_reason.contains(&term) {
+                    result.match_reason =
+                        format!("{}; expanded task query `{term}`", result.match_reason);
+                }
+            }
+        }
+        for result in results {
+            merge_context_candidate(&mut merged, result);
+        }
+    }
+    Ok(merged.into_values().collect())
+}
+
+fn merge_context_candidate(
+    merged: &mut std::collections::BTreeMap<String, SearchResult>,
+    result: SearchResult,
+) {
+    let key = search_result_key(&result);
+    match merged.get_mut(&key) {
+        Some(existing) => {
+            if result.score > existing.score {
+                existing.score = result.score;
+                existing.snippet = result.snippet.clone();
+                existing.line_range = result.line_range.clone();
+                existing.symbol = result.symbol.clone();
+            }
+            for evidence in result.evidence {
+                if !existing.evidence.contains(&evidence) {
+                    existing.evidence.push(evidence);
+                }
+            }
+            for evidence_ref in result.evidence_refs {
+                if !existing.evidence_refs.contains(&evidence_ref) {
+                    existing.evidence_refs.push(evidence_ref);
+                }
+            }
+            if !existing.match_reason.contains(&result.match_reason) {
+                existing.match_reason =
+                    format!("{}; {}", existing.match_reason, result.match_reason);
+            }
+            for component in result.score_breakdown {
+                existing.score_breakdown.push(component);
+            }
+            existing.reconcile_score_breakdown();
+        }
+        None => {
+            merged.insert(key, result);
+        }
+    }
+}
+
+fn search_result_key(result: &SearchResult) -> String {
+    format!(
+        "{}:{}-{}",
+        normalize_path_fragment(&result.path.to_string_lossy()),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.start)
+            .unwrap_or_default(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    )
 }
 
 fn configured_architecture_policy_report<S>(
