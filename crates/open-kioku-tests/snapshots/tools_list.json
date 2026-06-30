@@ -13,6 +13,7 @@
       "get_callees",
       "history_provenance_lookup",
       "churn_analysis",
+      "ownership_lookup",
       "explain_flow",
       "map_stacktrace_to_code",
       "find_errors_for_symbol",
@@ -609,6 +610,24 @@
         },
         "maturity": "experimental",
         "name": "churn_analysis"
+      },
+      {
+        "description": "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "path": {
+              "description": "Repository-relative path to inspect.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "ownership_lookup"
       },
       {
         "description": "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.",

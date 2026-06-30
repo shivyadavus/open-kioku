@@ -7,7 +7,7 @@ use open_kioku_config::{
     load_architecture_policy, load_architecture_policy_from_path, ArchitecturePolicy, OkConfig,
     PolicySource, RankingConfig, ScipMode,
 };
-use open_kioku_context::{ContextPackBuilder, ContextPackFormat};
+use open_kioku_context::{expanded_task_search_terms, ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
     ApiSurfaceConstraint, ChangeContractV1, ContractFile, ContractId, ContractStore,
@@ -16,9 +16,9 @@ use open_kioku_contract::{
 use open_kioku_core::{
     ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
     EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
-    IndexMode, NodeId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
-    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, Symbol, SymbolId,
-    SymbolProvenance,
+    IndexMode, NodeId, OwnershipReport, PlanReport, PolicyCheckReport, PolicyComponentMatch,
+    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, SearchResult,
+    Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -892,6 +892,11 @@ enum HistoryCommand {
         /// Exact symbol name, qualified name, or symbol ID.
         #[arg(long, conflicts_with_all = ["path", "module"])]
         symbol: Option<String>,
+    },
+    /// Resolve path ownership from CODEOWNERS, local git history, and repo memory.
+    Ownership {
+        #[arg(long)]
+        path: PathBuf,
     },
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
@@ -2698,6 +2703,23 @@ async fn main() -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&summary)?);
                     } else {
                         print_churn_summary(&summary);
+                    }
+                }
+                HistoryCommand::Ownership { path } => {
+                    let components = ownership_components(&repo, &store, &path)?;
+                    let memory_facts = ownership_memory_facts(&repo, &path, &components)?;
+                    let report =
+                        open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+                            repo: &repo,
+                            path: &path,
+                            history: &store,
+                            memory_facts: &memory_facts,
+                            components,
+                        })?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_ownership_report(&report);
                     }
                 }
                 HistoryCommand::Provenance {
@@ -8123,13 +8145,95 @@ fn build_context_pack(
         ContextPackBuilder::new(store as &dyn OkStore).with_ranking_options(ranking_options);
     let mut pack = if TantivySearchIndex::exists(&search_dir) {
         let index = TantivySearchIndex::open_or_create(&search_dir)?;
-        let primary = index.search(task, ranking_candidate_limit(limit))?;
+        let primary = search_context_candidates(&index, task, ranking_candidate_limit(limit))?;
         builder.build_from_primary(task, limit, primary)?
     } else {
         builder.build(task, limit)?
     };
     pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
     Ok(pack)
+}
+
+fn search_context_candidates(
+    index: &TantivySearchIndex,
+    task: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let mut merged = std::collections::BTreeMap::<String, SearchResult>::new();
+    for term in expanded_task_search_terms(task) {
+        let mut results = index.search(&term, limit)?;
+        for result in &mut results {
+            if term != task {
+                let evidence = format!("expanded task query `{term}` matched");
+                if !result.evidence.contains(&evidence) {
+                    result.evidence.push(evidence);
+                }
+                if !result.match_reason.contains(&term) {
+                    result.match_reason =
+                        format!("{}; expanded task query `{term}`", result.match_reason);
+                }
+            }
+        }
+        for result in results {
+            merge_context_candidate(&mut merged, result);
+        }
+    }
+    Ok(merged.into_values().collect())
+}
+
+fn merge_context_candidate(
+    merged: &mut std::collections::BTreeMap<String, SearchResult>,
+    result: SearchResult,
+) {
+    let key = search_result_key(&result);
+    match merged.get_mut(&key) {
+        Some(existing) => {
+            if result.score > existing.score {
+                existing.score = result.score;
+                existing.snippet = result.snippet.clone();
+                existing.line_range = result.line_range.clone();
+                existing.symbol = result.symbol.clone();
+            }
+            for evidence in result.evidence {
+                if !existing.evidence.contains(&evidence) {
+                    existing.evidence.push(evidence);
+                }
+            }
+            for evidence_ref in result.evidence_refs {
+                if !existing.evidence_refs.contains(&evidence_ref) {
+                    existing.evidence_refs.push(evidence_ref);
+                }
+            }
+            if !existing.match_reason.contains(&result.match_reason) {
+                existing.match_reason =
+                    format!("{}; {}", existing.match_reason, result.match_reason);
+            }
+            for component in result.score_breakdown {
+                existing.score_breakdown.push(component);
+            }
+            existing.reconcile_score_breakdown();
+        }
+        None => {
+            merged.insert(key, result);
+        }
+    }
+}
+
+fn search_result_key(result: &SearchResult) -> String {
+    format!(
+        "{}:{}-{}",
+        normalize_path_fragment(&result.path.to_string_lossy()),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.start)
+            .unwrap_or_default(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    )
 }
 
 fn configured_architecture_policy_report<S>(
@@ -8144,6 +8248,57 @@ where
     };
     let resolver = PolicyResolver::new(&policy)?;
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
+}
+
+fn ownership_components<S>(
+    repo: &Path,
+    store: &S,
+    path: &Path,
+) -> anyhow::Result<Vec<PolicyComponentMatch>>
+where
+    S: MetadataStore,
+{
+    if let Some(policy) = load_architecture_policy(repo)? {
+        let resolver = PolicyResolver::new(&policy)?;
+        return Ok(resolver.resolve_file(path));
+    }
+
+    let path_text = path.display().to_string();
+    let summary = ArchitectureDetector::new(store, None).detect()?;
+    Ok(summary
+        .components
+        .into_iter()
+        .filter(|component| {
+            component
+                .paths
+                .iter()
+                .any(|candidate| candidate == &path_text)
+        })
+        .map(|component| PolicyComponentMatch {
+            component_id: component.id,
+            matched_glob: "inferred_component_path".into(),
+        })
+        .collect())
+}
+
+fn ownership_memory_facts(
+    repo: &Path,
+    path: &Path,
+    components: &[PolicyComponentMatch],
+) -> anyhow::Result<Vec<open_kioku_core::MemorySearchResult>> {
+    let mut query_terms = vec![
+        "ownership".to_string(),
+        "owner".to_string(),
+        "owners".to_string(),
+        "maintainer".to_string(),
+        path.display().to_string(),
+    ];
+    query_terms.extend(
+        components
+            .iter()
+            .map(|component| component.component_id.clone()),
+    );
+    Ok(RepoMemoryStore::open_repo(repo)?.search(&query_terms.join(" "), 20)?)
 }
 
 fn index_repo(repo: &Path) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
@@ -10139,6 +10294,61 @@ fn print_churn_summary(summary: &ChurnSummary) {
     if !summary.uncertainty.is_empty() {
         println!("Uncertainty:");
         for note in &summary.uncertainty {
+            println!("- {note}");
+        }
+    }
+}
+
+fn print_ownership_report(report: &OwnershipReport) {
+    println!("Ownership target: {}", report.path.display());
+    if !report.components.is_empty() {
+        println!("Components:");
+        for component in &report.components {
+            println!(
+                "- {} via {}",
+                component.component_id, component.matched_glob
+            );
+        }
+    }
+    println!("Generated at: {}", report.generated_at);
+    if report.owners.is_empty() {
+        println!("Owners: none");
+    } else {
+        println!("Owners:");
+        for suggestion in &report.owners {
+            let email = suggestion
+                .owner
+                .email
+                .as_deref()
+                .map(|email| format!(" <{email}>"))
+                .unwrap_or_default();
+            let sources = suggestion
+                .source_types
+                .iter()
+                .map(|source| format!("{source:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "- {}{} confidence={:?} score={:.3} stale={} sources=[{}]",
+                suggestion.owner.name,
+                email,
+                suggestion.confidence,
+                suggestion.score,
+                suggestion.stale,
+                sources
+            );
+            println!("  rationale: {}", suggestion.rationale);
+            for evidence in &suggestion.evidence {
+                println!(
+                    "  - {:?} {} confidence={:?} stale={}",
+                    evidence.source_type, evidence.source, evidence.confidence, evidence.stale
+                );
+            }
+        }
+    }
+    if !report.uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in &report.uncertainty {
             println!("- {note}");
         }
     }
