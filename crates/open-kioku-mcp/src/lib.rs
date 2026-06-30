@@ -326,6 +326,25 @@ async fn dispatch(
                 }
             )?))
         }
+        "reviewer_suggestions" => {
+            let path = Path::new(required_str(&params, "path")?);
+            let components = ownership_components(repo, store, path)?;
+            let memory_facts = ownership_memory_facts(repo, path, &components)?;
+            let ownership = open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+                repo,
+                path,
+                history: store,
+                memory_facts: &memory_facts,
+                components,
+            })?;
+            Ok(json!(open_kioku_git::suggest_reviewers(
+                open_kioku_git::ReviewerSuggestionInput {
+                    path,
+                    history: store,
+                    ownership: Some(&ownership),
+                }
+            )?))
+        }
         "find_tests_for_change" | "recommend_validation_plan" => {
             let path = required_str(&params, "path")?;
             Ok(json!(
@@ -876,6 +895,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
         ("churn_analysis", "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path to inspect."},"module":{"type":"string","description":"Repository-relative module or directory path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."}},"oneOf":[{"required":["path"]},{"required":["module"]},{"required":["symbol"]}]})),
         ("ownership_lookup", "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
+        ("reviewer_suggestions", "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
         ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
         ("build_context_pack", "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for."},"limit":{"type":"integer","description":"Maximum number of context results to include. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The output format of the context pack."}}})),
         ("build_compressed_context", "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task."},"limit":{"type":"integer","description":"Maximum number of context items. Defaults to 20."},"format":{"type":"string","enum":["json","toon"],"description":"The output format."}}})),
@@ -966,6 +986,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "history_provenance_lookup"
         | "churn_analysis"
         | "ownership_lookup"
+        | "reviewer_suggestions"
         | "explain_flow"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
@@ -2003,6 +2024,11 @@ mod tests {
             .find(|tool| tool["name"] == "ownership_lookup")
             .unwrap();
         assert_eq!(ownership["maturity"], "experimental");
+        let reviewer_suggestions = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "reviewer_suggestions")
+            .unwrap();
+        assert_eq!(reviewer_suggestions["maturity"], "experimental");
 
         let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;

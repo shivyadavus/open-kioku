@@ -226,6 +226,52 @@ Repo memory is secondary context: memory-only owner suggestions are capped at
 low confidence and include uncertainty explaining that they are uncorroborated
 by CODEOWNERS or git history.
 
+## Reviewer Suggestions
+
+Reviewer suggestions are an experimental local trust-layer surface built on top
+of stored `ReviewerEvidence`, ownership lookup, and persisted git author/touch
+history.
+
+Query a repository-relative path:
+
+```sh
+ok --repo /path/to/repo history reviewers \
+  --path crates/open-kioku-core/src/lib.rs
+```
+
+The experimental MCP tool `reviewer_suggestions` accepts:
+
+```json
+{"path":"crates/open-kioku-core/src/lib.rs"}
+```
+
+The typed `ReviewerSuggestionReport` returns ranked `ReviewerSuggestion`
+values with:
+
+- `ReviewerSignal` entries for stored review evidence, ownership inference, and
+  git-author inference;
+- `source_types`, rationale, confidence, staleness, and confidence-breakdown
+  fields for each suggestion;
+- top-level and per-suggestion `availability` values such as
+  `actual_review_evidence`, `inferred_from_ownership_and_authors`,
+  `inferred_from_ownership`, `inferred_from_authors`, or `unavailable`;
+- explicit booleans for `actual_review_evidence` and `inferred_from_authors`;
+- uncertainty notes when true PR-review evidence is unavailable in the local
+  index.
+
+Actual review certainty is used only for stored `ReviewerEvidence` with
+reviewer or approver roles. Standard local clones do not contain remote GitHub
+PR review state, so reviewer suggestions commonly fall back to ownership and
+author-history inference. Those fallback suggestions are intentionally capped
+below actual review evidence and do not imply PR-review certainty.
+
+The deterministic benchmark corpus for this ranking path lives at
+`benchmarks/reviewer-cases.json` and can be checked with:
+
+```sh
+ok --repo /path/to/repo history reviewers-bench --min-accuracy 0.80
+```
+
 ## Search
 
 Lexical search is exposed behind `open-kioku-storage::SearchIndex`. `open-kioku-search-tantivy` builds a disk-backed Tantivy BM25 index under `.ok/search/tantivy` with stored chunk, file, and symbol payloads so search responses can return evidence without rereading source files. `open-kioku-search-regex` remains a deterministic fallback and regex utility.

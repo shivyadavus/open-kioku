@@ -15,10 +15,13 @@ use open_kioku_contract::{
 };
 use open_kioku_core::{
     ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
-    EvidenceSourceType, FileProvenance, GraphEdge, GraphEdgeType, GraphNode, IndexManifest,
-    IndexMode, NodeId, OwnershipReport, PlanReport, PolicyCheckReport, PolicyComponentMatch,
-    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ScoreComponent, SearchResult,
-    Symbol, SymbolId, SymbolProvenance,
+    EvidenceSourceType, FileProvenance, GitChangeKind, GitCochangeEdge, GitCommitId,
+    GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, HistoryRecordId, HistorySnapshot,
+    HistorySummary, IndexManifest, IndexMode, NodeId, Owner, OwnerSuggestion, OwnershipEvidence,
+    OwnershipReport, OwnershipSourceType, PlanReport, PolicyCheckReport, PolicyComponentMatch,
+    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ReviewerAvailability,
+    ReviewerEvidence, ReviewerRole, ReviewerSuggestionReport, ScoreComponent, SearchResult, Symbol,
+    SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -666,6 +669,17 @@ struct ArchitectureBenchArgs {
 }
 
 #[derive(Args)]
+struct ReviewerBenchArgs {
+    /// JSON file containing reviewer suggestion benchmark cases.
+    #[arg(long, default_value = "benchmarks/reviewer-cases.json")]
+    cases_file: PathBuf,
+
+    /// Fail when benchmark accuracy is below this threshold.
+    #[arg(long, default_value_t = 0.80)]
+    min_accuracy: f64,
+}
+
+#[derive(Args)]
 struct ProveArgs {
     /// Repository to index and evaluate.
     #[arg(default_value = ".")]
@@ -898,6 +912,13 @@ enum HistoryCommand {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Suggest reviewers from stored review evidence, ownership, and author history.
+    Reviewers {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Run the deterministic reviewer suggestion benchmark corpus.
+    ReviewersBench(ReviewerBenchArgs),
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
         path: Option<PathBuf>,
@@ -1130,6 +1151,88 @@ struct WorkflowBenchCaseReport {
     top_context_paths: Vec<PathBuf>,
     top_impact_paths: Vec<PathBuf>,
     top_tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewerBenchCase {
+    id: String,
+    path: PathBuf,
+    #[serde(default)]
+    review_evidence: Vec<ReviewerBenchReviewEvidence>,
+    #[serde(default)]
+    ownership: Vec<ReviewerBenchOwnershipEvidence>,
+    #[serde(default)]
+    author_touches: Vec<ReviewerBenchAuthorTouch>,
+    expected_top_reviewer: String,
+    expected_availability: ReviewerAvailability,
+    #[serde(default)]
+    expected_actual_review_evidence: Option<bool>,
+    #[serde(default)]
+    expected_inferred_from_authors: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewerBenchReviewEvidence {
+    reviewer: String,
+    role: ReviewerRole,
+    #[serde(default = "default_reviewer_bench_confidence")]
+    confidence: Confidence,
+    #[serde(default)]
+    days_ago: i64,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewerBenchOwnershipEvidence {
+    owner: String,
+    #[serde(default = "default_reviewer_bench_source_types")]
+    source_types: Vec<OwnershipSourceType>,
+    #[serde(default = "default_reviewer_bench_owner_score")]
+    score: f32,
+    #[serde(default)]
+    days_ago: i64,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewerBenchAuthorTouch {
+    author: String,
+    #[serde(default = "default_reviewer_bench_touch_count")]
+    count: usize,
+    #[serde(default)]
+    days_ago: i64,
+}
+
+#[derive(Serialize)]
+struct ReviewerBenchReport {
+    cases_file: PathBuf,
+    case_count: usize,
+    min_accuracy: f64,
+    accuracy: f64,
+    failures: Vec<String>,
+    cases: Vec<ReviewerBenchCaseReport>,
+}
+
+#[derive(Serialize)]
+struct ReviewerBenchCaseReport {
+    id: String,
+    path: PathBuf,
+    expected_top_reviewer: String,
+    actual_top_reviewer: Option<String>,
+    rank: Option<usize>,
+    expected_availability: ReviewerAvailability,
+    availability: ReviewerAvailability,
+    availability_correct: bool,
+    expected_actual_review_evidence: Option<bool>,
+    actual_review_evidence: Option<bool>,
+    actual_review_evidence_correct: bool,
+    expected_inferred_from_authors: Option<bool>,
+    inferred_from_authors: Option<bool>,
+    inferred_from_authors_correct: bool,
+    top_score: Option<f32>,
+    passed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2720,6 +2823,46 @@ async fn main() -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
                         print_ownership_report(&report);
+                    }
+                }
+                HistoryCommand::Reviewers { path } => {
+                    let components = ownership_components(&repo, &store, &path)?;
+                    let memory_facts = ownership_memory_facts(&repo, &path, &components)?;
+                    let ownership =
+                        open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+                            repo: &repo,
+                            path: &path,
+                            history: &store,
+                            memory_facts: &memory_facts,
+                            components,
+                        })?;
+                    let report = open_kioku_git::suggest_reviewers(
+                        open_kioku_git::ReviewerSuggestionInput {
+                            path: &path,
+                            history: &store,
+                            ownership: Some(&ownership),
+                        },
+                    )?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_reviewer_suggestion_report(&report);
+                    }
+                }
+                HistoryCommand::ReviewersBench(args) => {
+                    let min_accuracy = args.min_accuracy;
+                    let report = run_reviewer_bench(&repo, args)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_reviewer_bench_report(&report);
+                    }
+                    if report.accuracy < min_accuracy {
+                        anyhow::bail!(
+                            "reviewer benchmark accuracy {:.3} is below required {:.3}",
+                            report.accuracy,
+                            min_accuracy
+                        );
                     }
                 }
                 HistoryCommand::Provenance {
@@ -5245,6 +5388,458 @@ fn print_architecture_policy_bench_report(report: &ArchitecturePolicyBenchReport
         );
         for note in &case.notes {
             println!("    note: {note}");
+        }
+    }
+}
+
+fn run_reviewer_bench(repo: &Path, args: ReviewerBenchArgs) -> anyhow::Result<ReviewerBenchReport> {
+    let cases_file = if args.cases_file.is_absolute() {
+        args.cases_file.clone()
+    } else {
+        repo.join(&args.cases_file)
+    };
+    let cases = load_reviewer_bench_cases(&cases_file)?;
+    if cases.is_empty() {
+        anyhow::bail!(
+            "reviewer benchmark cases file is empty: {}",
+            cases_file.display()
+        );
+    }
+
+    let mut reports = Vec::with_capacity(cases.len());
+    let mut failures = Vec::new();
+    for case in &cases {
+        let report = score_reviewer_bench_case(case)?;
+        if !report.passed {
+            failures.push(format!(
+                "{} expected top reviewer `{}` at rank 1, got {:?} at rank {:?}",
+                case.id, case.expected_top_reviewer, report.actual_top_reviewer, report.rank
+            ));
+        }
+        reports.push(report);
+    }
+
+    let passed = reports.iter().filter(|case| case.passed).count();
+    Ok(ReviewerBenchReport {
+        cases_file,
+        case_count: reports.len(),
+        min_accuracy: args.min_accuracy,
+        accuracy: ratio(passed, reports.len()),
+        failures,
+        cases: reports,
+    })
+}
+
+fn load_reviewer_bench_cases(path: &Path) -> anyhow::Result<Vec<ReviewerBenchCase>> {
+    let raw = fs::read_to_string(path)?;
+    let cases: Vec<ReviewerBenchCase> = serde_json::from_str(&raw)?;
+    let mut ids = BTreeSet::new();
+    for case in &cases {
+        if case.id.trim().is_empty() || case.expected_top_reviewer.trim().is_empty() {
+            anyhow::bail!(
+                "reviewer benchmark cases require non-empty id and expected_top_reviewer"
+            );
+        }
+        if case.path.as_os_str().is_empty() {
+            anyhow::bail!("reviewer benchmark case `{}` requires a path", case.id);
+        }
+        if !ids.insert(case.id.clone()) {
+            anyhow::bail!("duplicate reviewer benchmark case id `{}`", case.id);
+        }
+    }
+    Ok(cases)
+}
+
+fn score_reviewer_bench_case(case: &ReviewerBenchCase) -> anyhow::Result<ReviewerBenchCaseReport> {
+    let history = ReviewerBenchHistoryStore::from_case(case);
+    let ownership = reviewer_bench_ownership_report(case);
+    let report = open_kioku_git::suggest_reviewers(open_kioku_git::ReviewerSuggestionInput {
+        path: &case.path,
+        history: &history,
+        ownership: Some(&ownership),
+    })?;
+
+    let rank = report
+        .suggestions
+        .iter()
+        .position(|suggestion| {
+            owner_matches_expected(&suggestion.reviewer, &case.expected_top_reviewer)
+        })
+        .map(|index| index + 1);
+    let top = report.suggestions.first();
+    let actual_top_reviewer = top.map(|suggestion| owner_display(&suggestion.reviewer));
+    let actual_review_evidence = top.map(|suggestion| suggestion.actual_review_evidence);
+    let inferred_from_authors = top.map(|suggestion| suggestion.inferred_from_authors);
+    let top_score = top.map(|suggestion| suggestion.score);
+
+    let availability_correct = report.availability == case.expected_availability;
+    let actual_review_evidence_correct = case
+        .expected_actual_review_evidence
+        .zip(actual_review_evidence)
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(true);
+    let inferred_from_authors_correct = case
+        .expected_inferred_from_authors
+        .zip(inferred_from_authors)
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(true);
+    let passed = rank == Some(1)
+        && availability_correct
+        && actual_review_evidence_correct
+        && inferred_from_authors_correct;
+
+    Ok(ReviewerBenchCaseReport {
+        id: case.id.clone(),
+        path: case.path.clone(),
+        expected_top_reviewer: case.expected_top_reviewer.clone(),
+        actual_top_reviewer,
+        rank,
+        expected_availability: case.expected_availability,
+        availability: report.availability,
+        availability_correct,
+        expected_actual_review_evidence: case.expected_actual_review_evidence,
+        actual_review_evidence,
+        actual_review_evidence_correct,
+        expected_inferred_from_authors: case.expected_inferred_from_authors,
+        inferred_from_authors,
+        inferred_from_authors_correct,
+        top_score,
+        passed,
+    })
+}
+
+#[derive(Clone)]
+struct ReviewerBenchHistoryStore {
+    history: HistorySummary,
+    provenance: FileProvenance,
+}
+
+impl ReviewerBenchHistoryStore {
+    fn from_case(case: &ReviewerBenchCase) -> Self {
+        let mut reviewer_evidence = Vec::with_capacity(case.review_evidence.len());
+        for (index, evidence) in case.review_evidence.iter().enumerate() {
+            reviewer_evidence.push(ReviewerEvidence {
+                id: HistoryRecordId::new(format!("reviewer-bench:{}:{index}", case.id)),
+                commit_id: Some(GitCommitId::new(format!(
+                    "reviewer-bench-{}-{index}",
+                    case.id
+                ))),
+                path: Some(case.path.clone()),
+                reviewer: owner_from_token(&evidence.reviewer),
+                role: evidence.role,
+                observed_at: reviewer_bench_time(evidence.days_ago),
+                source: evidence
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| format!("reviewer-bench:{}", case.id)),
+                confidence: evidence.confidence,
+            });
+        }
+
+        let mut touches = Vec::new();
+        let mut touch_index = 0usize;
+        for touch in &case.author_touches {
+            for offset in 0..touch.count.max(1) {
+                touches.push(reviewer_bench_touch(case, touch, touch_index, offset));
+                touch_index += 1;
+            }
+        }
+        touches.sort_by(|left, right| {
+            right
+                .commit
+                .committed_at
+                .cmp(&left.commit.committed_at)
+                .then_with(|| left.commit.id.0.cmp(&right.commit.id.0))
+        });
+
+        Self {
+            history: HistorySummary {
+                path: case.path.clone(),
+                recent_commits: Vec::new(),
+                file_touches: Vec::new(),
+                symbol_touches: Vec::new(),
+                cochange_neighbors: Vec::new(),
+                reviewer_evidence,
+                truncated: false,
+                uncertainty: Vec::new(),
+            },
+            provenance: FileProvenance {
+                path: case.path.clone(),
+                first_seen: touches.last().cloned(),
+                last_touched: touches.first().cloned(),
+                recent_touches: touches,
+                confidence: Confidence::High,
+                truncated: false,
+                uncertainty: Vec::new(),
+            },
+        }
+    }
+}
+
+impl HistoryStore for ReviewerBenchHistoryStore {
+    fn put_history_snapshot(&self, _snapshot: &HistorySnapshot) -> open_kioku_errors::Result<()> {
+        Ok(())
+    }
+
+    fn history_for_file(
+        &self,
+        path: &Path,
+        _limit: usize,
+    ) -> open_kioku_errors::Result<HistorySummary> {
+        if path == self.history.path {
+            Ok(self.history.clone())
+        } else {
+            Ok(HistorySummary::empty(path))
+        }
+    }
+
+    fn provenance_for_path(
+        &self,
+        path: &Path,
+        _limit: usize,
+    ) -> open_kioku_errors::Result<FileProvenance> {
+        if path == self.provenance.path {
+            Ok(self.provenance.clone())
+        } else {
+            Ok(FileProvenance {
+                path: path.to_path_buf(),
+                first_seen: None,
+                last_touched: None,
+                recent_touches: Vec::new(),
+                confidence: Confidence::Low,
+                truncated: false,
+                uncertainty: vec!["reviewer benchmark provenance unavailable for this path".into()],
+            })
+        }
+    }
+
+    fn provenance_for_symbol(
+        &self,
+        symbol_id: &SymbolId,
+        _limit: usize,
+    ) -> open_kioku_errors::Result<SymbolProvenance> {
+        Ok(SymbolProvenance {
+            symbol_id: symbol_id.clone(),
+            qualified_name: "reviewer_bench::unknown".into(),
+            file_path: self.provenance.path.clone(),
+            range: None,
+            first_seen: None,
+            last_touched: None,
+            recent_touches: Vec::new(),
+            confidence: Confidence::Low,
+            truncated: false,
+            uncertainty: vec!["reviewer benchmark symbol provenance unavailable".into()],
+        })
+    }
+
+    fn cochange_neighbors(
+        &self,
+        _path: &Path,
+        _limit: usize,
+    ) -> open_kioku_errors::Result<Vec<GitCochangeEdge>> {
+        Ok(Vec::new())
+    }
+
+    fn recent_commits(&self, _limit: usize) -> open_kioku_errors::Result<Vec<GitCommitRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+fn reviewer_bench_ownership_report(case: &ReviewerBenchCase) -> OwnershipReport {
+    let generated_at = chrono::Utc::now();
+    let owners = case
+        .ownership
+        .iter()
+        .enumerate()
+        .map(|(index, evidence)| {
+            let owner = owner_from_token(&evidence.owner);
+            let source_types = if evidence.source_types.is_empty() {
+                default_reviewer_bench_source_types()
+            } else {
+                evidence.source_types.clone()
+            };
+            let observed_at = reviewer_bench_time(evidence.days_ago);
+            let stale = reviewer_bench_is_stale(evidence.days_ago);
+            let confidence = Confidence::from_score(evidence.score);
+            let source = evidence
+                .source
+                .clone()
+                .unwrap_or_else(|| format!("reviewer-bench:{}:{index}", case.id));
+            let ownership_evidence = source_types
+                .iter()
+                .map(|source_type| OwnershipEvidence {
+                    source_type: *source_type,
+                    owner: owner.clone(),
+                    source: source.clone(),
+                    message: "reviewer benchmark ownership signal".into(),
+                    confidence,
+                    observed_at: Some(observed_at),
+                    stale,
+                })
+                .collect::<Vec<_>>();
+            OwnerSuggestion {
+                owner,
+                rationale: "reviewer benchmark ownership signal".into(),
+                confidence,
+                score: evidence.score,
+                source_types: source_types.clone(),
+                stale,
+                evidence: ownership_evidence,
+                confidence_breakdown: open_kioku_core::OwnershipConfidenceBreakdown {
+                    codeowners: if source_types.contains(&OwnershipSourceType::Codeowners) {
+                        evidence.score
+                    } else {
+                        0.0
+                    },
+                    git_history: if source_types.contains(&OwnershipSourceType::GitHistory) {
+                        evidence.score
+                    } else {
+                        0.0
+                    },
+                    memory: if source_types.contains(&OwnershipSourceType::RepoMemory) {
+                        evidence.score
+                    } else {
+                        0.0
+                    },
+                    freshness: if stale { 0.0 } else { 0.05 },
+                    ambiguity_penalty: 0.0,
+                    final_score: evidence.score,
+                },
+            }
+        })
+        .collect();
+
+    OwnershipReport {
+        path: case.path.clone(),
+        components: Vec::new(),
+        generated_at,
+        owners,
+        uncertainty: Vec::new(),
+    }
+}
+
+fn reviewer_bench_touch(
+    case: &ReviewerBenchCase,
+    touch: &ReviewerBenchAuthorTouch,
+    index: usize,
+    offset: usize,
+) -> ProvenanceTouch {
+    let author = owner_from_token(&touch.author);
+    let observed_at = reviewer_bench_time(touch.days_ago + offset as i64);
+    let commit_id = GitCommitId::new(format!("reviewer-bench-{}-touch-{index}", case.id));
+    ProvenanceTouch {
+        commit: GitCommitRecord {
+            id: commit_id,
+            parent_ids: Vec::new(),
+            author: author.clone(),
+            committer: None,
+            authored_at: observed_at,
+            committed_at: observed_at,
+            summary: format!("reviewer benchmark touch by {}", owner_display(&author)),
+            message: format!("reviewer benchmark touch by {}", owner_display(&author)),
+            file_count: 1,
+        },
+        path: case.path.clone(),
+        previous_path: None,
+        symbol_id: None,
+        qualified_name: None,
+        change_kind: GitChangeKind::Modified,
+        line_ranges: Vec::new(),
+        confidence: Confidence::High,
+        uncertainty: Vec::new(),
+    }
+}
+
+fn default_reviewer_bench_confidence() -> Confidence {
+    Confidence::High
+}
+
+fn default_reviewer_bench_source_types() -> Vec<OwnershipSourceType> {
+    vec![OwnershipSourceType::Codeowners]
+}
+
+fn default_reviewer_bench_owner_score() -> f32 {
+    0.90
+}
+
+fn default_reviewer_bench_touch_count() -> usize {
+    1
+}
+
+fn reviewer_bench_time(days_ago: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() - chrono::Duration::days(days_ago.max(0))
+}
+
+fn reviewer_bench_is_stale(days_ago: i64) -> bool {
+    days_ago > 365
+}
+
+fn owner_from_token(value: &str) -> Owner {
+    let trimmed = value.trim();
+    if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
+        if start < end {
+            let name = trimmed[..start].trim();
+            let email = trimmed[start + 1..end].trim();
+            return Owner {
+                name: if name.is_empty() {
+                    owner_name_from_email(email)
+                } else {
+                    name.to_string()
+                },
+                email: (!email.is_empty()).then(|| email.to_string()),
+            };
+        }
+    }
+    if trimmed.contains('@') {
+        Owner {
+            name: owner_name_from_email(trimmed),
+            email: Some(trimmed.to_string()),
+        }
+    } else {
+        Owner {
+            name: trimmed.to_string(),
+            email: None,
+        }
+    }
+}
+
+fn owner_name_from_email(email: &str) -> String {
+    email.split('@').next().unwrap_or(email).to_string()
+}
+
+fn owner_matches_expected(owner: &Owner, expected: &str) -> bool {
+    let expected = expected.trim().to_ascii_lowercase();
+    owner
+        .email
+        .as_deref()
+        .is_some_and(|email| email.eq_ignore_ascii_case(&expected))
+        || owner.name.eq_ignore_ascii_case(&expected)
+}
+
+fn owner_display(owner: &Owner) -> String {
+    owner.email.clone().unwrap_or_else(|| owner.name.clone())
+}
+
+fn print_reviewer_bench_report(report: &ReviewerBenchReport) {
+    println!(
+        "Reviewer benchmark: {} case(s), accuracy {:.3}, min {:.3}",
+        report.case_count, report.accuracy, report.min_accuracy
+    );
+    for case in &report.cases {
+        println!(
+            "  {}: rank={:?} top={:?} availability={:?} score={:?} passed={}",
+            case.id,
+            case.rank,
+            case.actual_top_reviewer,
+            case.availability,
+            case.top_score,
+            case.passed
+        );
+    }
+    if !report.failures.is_empty() {
+        println!("Failures:");
+        for failure in &report.failures {
+            println!("- {failure}");
         }
     }
 }
@@ -10342,6 +10937,60 @@ fn print_ownership_report(report: &OwnershipReport) {
                 println!(
                     "  - {:?} {} confidence={:?} stale={}",
                     evidence.source_type, evidence.source, evidence.confidence, evidence.stale
+                );
+            }
+        }
+    }
+    if !report.uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in &report.uncertainty {
+            println!("- {note}");
+        }
+    }
+}
+
+fn print_reviewer_suggestion_report(report: &ReviewerSuggestionReport) {
+    println!("Reviewer target: {}", report.path.display());
+    println!("Generated at: {}", report.generated_at);
+    println!("Availability: {:?}", report.availability);
+    if report.suggestions.is_empty() {
+        println!("Reviewer suggestions: none");
+    } else {
+        println!("Reviewer suggestions:");
+        for suggestion in &report.suggestions {
+            let email = suggestion
+                .reviewer
+                .email
+                .as_deref()
+                .map(|email| format!(" <{email}>"))
+                .unwrap_or_default();
+            let sources = suggestion
+                .source_types
+                .iter()
+                .map(|source| format!("{source:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "- {}{} confidence={:?} score={:.3} availability={:?} actual_review={} inferred_from_authors={} stale={} sources=[{}]",
+                suggestion.reviewer.name,
+                email,
+                suggestion.confidence,
+                suggestion.score,
+                suggestion.availability,
+                suggestion.actual_review_evidence,
+                suggestion.inferred_from_authors,
+                suggestion.stale,
+                sources
+            );
+            println!("  rationale: {}", suggestion.rationale);
+            for signal in &suggestion.signals {
+                println!(
+                    "  - {:?} {} confidence={:?} actual_review={} stale={}",
+                    signal.source_type,
+                    signal.source,
+                    signal.confidence,
+                    signal.actual_review_evidence,
+                    signal.stale
                 );
             }
         }
