@@ -55,3 +55,6 @@ jobs:
           --min-boundary-precision 0.97 \
           --min-boundary-recall 0.90 \
           --min-toon-reduction 0.35
+        ./target/release/ok --json history similar-bench \
+          --cases-file benchmarks/similar-history-cases.json \
+          --min-recall-at-5 0.75

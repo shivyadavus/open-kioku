@@ -20,8 +20,8 @@ use open_kioku_core::{
     HistorySummary, IndexManifest, IndexMode, NodeId, Owner, OwnerSuggestion, OwnershipEvidence,
     OwnershipReport, OwnershipSourceType, PlanReport, PolicyCheckReport, PolicyComponentMatch,
     PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ReviewerAvailability,
-    ReviewerEvidence, ReviewerRole, ReviewerSuggestionReport, ScoreComponent, SearchResult, Symbol,
-    SymbolId, SymbolProvenance,
+    ReviewerEvidence, ReviewerRole, ReviewerSuggestionReport, ScoreComponent, SearchResult,
+    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolProvenance,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -680,6 +680,17 @@ struct ReviewerBenchArgs {
 }
 
 #[derive(Args)]
+struct SimilarHistoryBenchArgs {
+    /// JSON file containing similar historical change benchmark cases.
+    #[arg(long, default_value = "benchmarks/similar-history-cases.json")]
+    cases_file: PathBuf,
+
+    /// Fail when Top-5 recall is below this threshold.
+    #[arg(long, default_value_t = 0.75)]
+    min_recall_at_5: f64,
+}
+
+#[derive(Args)]
 struct ProveArgs {
     /// Repository to index and evaluate.
     #[arg(default_value = ".")]
@@ -897,6 +908,20 @@ enum ArchitecturePolicyFormat {
 
 #[derive(Subcommand)]
 enum HistoryCommand {
+    /// Retrieve similar historical commits or change groups.
+    Similar {
+        /// Natural-language task or change description.
+        #[arg(long)]
+        task: Option<String>,
+        /// Repository-relative path to match. Repeat for multiple paths.
+        #[arg(long = "path")]
+        paths: Vec<PathBuf>,
+        /// Symbol name, qualified name, or symbol ID to match. Repeat for multiple symbols.
+        #[arg(long = "symbol")]
+        symbols: Vec<String>,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
     /// Show materialized churn and hotspot stats for a file, module, or symbol.
     Churn {
         #[arg(long, conflicts_with_all = ["module", "symbol"])]
@@ -919,6 +944,8 @@ enum HistoryCommand {
     },
     /// Run the deterministic reviewer suggestion benchmark corpus.
     ReviewersBench(ReviewerBenchArgs),
+    /// Run the deterministic similar historical change benchmark corpus.
+    SimilarBench(SimilarHistoryBenchArgs),
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
         path: Option<PathBuf>,
@@ -1203,6 +1230,34 @@ struct ReviewerBenchAuthorTouch {
     count: usize,
     #[serde(default)]
     days_ago: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SimilarHistoryBenchCase {
+    id: String,
+    query: SimilarChangeQuery,
+    snapshot: HistorySnapshot,
+    expected_top_5: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SimilarHistoryBenchReport {
+    cases_file: PathBuf,
+    case_count: usize,
+    min_recall_at_5: f64,
+    recall_at_5: f64,
+    failures: Vec<String>,
+    cases: Vec<SimilarHistoryBenchCaseReport>,
+}
+
+#[derive(Serialize)]
+struct SimilarHistoryBenchCaseReport {
+    id: String,
+    expected_top_5: Vec<String>,
+    actual_top_5: Vec<String>,
+    matched: Vec<String>,
+    recall_at_5: f64,
+    passed: bool,
 }
 
 #[derive(Serialize)]
@@ -2781,6 +2836,24 @@ async fn main() -> anyhow::Result<()> {
         Command::History { command } => {
             let store = open_store(&repo)?;
             match command {
+                HistoryCommand::Similar {
+                    task,
+                    paths,
+                    symbols,
+                    limit,
+                } => {
+                    let query = SimilarChangeQuery {
+                        task,
+                        paths,
+                        symbols,
+                    };
+                    let report = store.similar_changes(&query, limit)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_similar_change_report(&report);
+                    }
+                }
                 HistoryCommand::Churn {
                     path,
                     module,
@@ -2862,6 +2935,22 @@ async fn main() -> anyhow::Result<()> {
                             "reviewer benchmark accuracy {:.3} is below required {:.3}",
                             report.accuracy,
                             min_accuracy
+                        );
+                    }
+                }
+                HistoryCommand::SimilarBench(args) => {
+                    let min_recall_at_5 = args.min_recall_at_5;
+                    let report = run_similar_history_bench(&repo, args)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_similar_history_bench_report(&report);
+                    }
+                    if report.recall_at_5 < min_recall_at_5 {
+                        anyhow::bail!(
+                            "similar-history benchmark Top-5 recall {:.3} is below required {:.3}",
+                            report.recall_at_5,
+                            min_recall_at_5
                         );
                     }
                 }
@@ -5430,6 +5519,50 @@ fn run_reviewer_bench(repo: &Path, args: ReviewerBenchArgs) -> anyhow::Result<Re
     })
 }
 
+fn run_similar_history_bench(
+    repo: &Path,
+    args: SimilarHistoryBenchArgs,
+) -> anyhow::Result<SimilarHistoryBenchReport> {
+    let cases_file = if args.cases_file.is_absolute() {
+        args.cases_file.clone()
+    } else {
+        repo.join(&args.cases_file)
+    };
+    let cases = load_similar_history_bench_cases(&cases_file)?;
+    if cases.is_empty() {
+        anyhow::bail!(
+            "similar history benchmark cases file is empty: {}",
+            cases_file.display()
+        );
+    }
+
+    let mut reports = Vec::with_capacity(cases.len());
+    let mut failures = Vec::new();
+    let mut expected_total = 0_usize;
+    let mut matched_total = 0_usize;
+    for case in &cases {
+        let report = score_similar_history_bench_case(case)?;
+        expected_total += report.expected_top_5.len();
+        matched_total += report.matched.len();
+        if !report.passed {
+            failures.push(format!(
+                "{} expected Top-5 commit(s) {:?}, got {:?}",
+                case.id, report.expected_top_5, report.actual_top_5
+            ));
+        }
+        reports.push(report);
+    }
+
+    Ok(SimilarHistoryBenchReport {
+        cases_file,
+        case_count: reports.len(),
+        min_recall_at_5: args.min_recall_at_5,
+        recall_at_5: ratio(matched_total, expected_total),
+        failures,
+        cases: reports,
+    })
+}
+
 fn load_reviewer_bench_cases(path: &Path) -> anyhow::Result<Vec<ReviewerBenchCase>> {
     let raw = fs::read_to_string(path)?;
     let cases: Vec<ReviewerBenchCase> = serde_json::from_str(&raw)?;
@@ -5448,6 +5581,49 @@ fn load_reviewer_bench_cases(path: &Path) -> anyhow::Result<Vec<ReviewerBenchCas
         }
     }
     Ok(cases)
+}
+
+fn load_similar_history_bench_cases(path: &Path) -> anyhow::Result<Vec<SimilarHistoryBenchCase>> {
+    let raw = fs::read_to_string(path)?;
+    let cases: Vec<SimilarHistoryBenchCase> = serde_json::from_str(&raw)?;
+    let mut ids = BTreeSet::new();
+    for case in &cases {
+        if case.id.trim().is_empty() || case.expected_top_5.is_empty() {
+            anyhow::bail!(
+                "similar history benchmark cases require non-empty id and expected_top_5"
+            );
+        }
+        if !ids.insert(case.id.clone()) {
+            anyhow::bail!("duplicate similar history benchmark case id `{}`", case.id);
+        }
+    }
+    Ok(cases)
+}
+
+fn score_similar_history_bench_case(
+    case: &SimilarHistoryBenchCase,
+) -> anyhow::Result<SimilarHistoryBenchCaseReport> {
+    let store = SqliteStore::open(":memory:")?;
+    store.put_history_snapshot(&case.snapshot)?;
+    let report = store.similar_changes(&case.query, 5)?;
+    let actual_top_5 = report
+        .hits
+        .iter()
+        .map(|hit| hit.change.commit.id.0.clone())
+        .collect::<Vec<_>>();
+    let expected = case.expected_top_5.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = actual_top_5.iter().cloned().collect::<BTreeSet<_>>();
+    let matched = expected.intersection(&actual).cloned().collect::<Vec<_>>();
+    let recall_at_5 = ratio(matched.len(), expected.len());
+
+    Ok(SimilarHistoryBenchCaseReport {
+        id: case.id.clone(),
+        expected_top_5: case.expected_top_5.clone(),
+        actual_top_5,
+        matched,
+        recall_at_5,
+        passed: recall_at_5 >= 1.0,
+    })
 }
 
 fn score_reviewer_bench_case(case: &ReviewerBenchCase) -> anyhow::Result<ReviewerBenchCaseReport> {
@@ -5834,6 +6010,25 @@ fn print_reviewer_bench_report(report: &ReviewerBenchReport) {
             case.availability,
             case.top_score,
             case.passed
+        );
+    }
+    if !report.failures.is_empty() {
+        println!("Failures:");
+        for failure in &report.failures {
+            println!("- {failure}");
+        }
+    }
+}
+
+fn print_similar_history_bench_report(report: &SimilarHistoryBenchReport) {
+    println!(
+        "Similar history benchmark: {} case(s), Top-5 recall {:.3}, min {:.3}",
+        report.case_count, report.recall_at_5, report.min_recall_at_5
+    );
+    for case in &report.cases {
+        println!(
+            "  {}: recall_at_5={:.3} expected={:?} actual={:?} passed={}",
+            case.id, case.recall_at_5, case.expected_top_5, case.actual_top_5, case.passed
         );
     }
     if !report.failures.is_empty() {
@@ -10865,6 +11060,69 @@ fn print_symbol_provenance(provenance: &SymbolProvenance) {
         provenance.truncated,
         &provenance.uncertainty,
     );
+}
+
+fn print_similar_change_report(report: &SimilarChangeReport) {
+    println!("Similar historical changes");
+    println!("Generated at: {}", report.generated_at);
+    if let Some(task) = &report.query.task {
+        println!("Task: {task}");
+    }
+    if !report.query.paths.is_empty() {
+        println!(
+            "Paths: {}",
+            report
+                .query
+                .paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if !report.query.symbols.is_empty() {
+        println!("Symbols: {}", report.query.symbols.join(", "));
+    }
+    if report.hits.is_empty() {
+        println!("Hits: none");
+    } else {
+        println!("Hits:");
+        for hit in &report.hits {
+            println!(
+                "- {} score={:.3} confidence={:?} {}",
+                hit.change.commit.id, hit.score, hit.confidence, hit.change.commit.summary
+            );
+            if !hit.change.touched_paths.is_empty() {
+                println!(
+                    "  paths: {}",
+                    hit.change
+                        .touched_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if !hit.change.touched_symbols.is_empty() {
+                println!("  symbols: {}", hit.change.touched_symbols.join(", "));
+            }
+            for evidence in &hit.evidence {
+                println!(
+                    "  - {:?} +{:.3}: {}",
+                    evidence.source_type, evidence.score, evidence.message
+                );
+            }
+            for note in &hit.uncertainty {
+                println!("  ! {note}");
+            }
+        }
+    }
+    if !report.uncertainty.is_empty() {
+        println!("Uncertainty:");
+        for note in &report.uncertainty {
+            println!("- {note}");
+        }
+    }
 }
 
 fn print_churn_summary(summary: &ChurnSummary) {

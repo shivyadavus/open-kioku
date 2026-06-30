@@ -136,6 +136,7 @@ Experimental tools:
 
 - `history_provenance_lookup`: returns bounded first-seen, last-touched, and recent commit provenance for exactly one `path` or `symbol`, including confidence and uncertainty. `symbol` accepts an exact name, qualified name, or symbol ID.
 - `churn_analysis`: returns materialized all-time, 30-day, 90-day, recency-weighted, and hotspot stats for exactly one `path`, `module`, or `symbol`, including confidence and uncertainty. Lookups read persisted summaries instead of scanning raw commit history.
+- `history_similar_changes`: returns ranked similar historical commits from task text, paths, symbols, co-change neighborhoods, churn, and commit metadata, with evidence and confidence on every hit.
 - `ownership_lookup`: returns ranked owner suggestions for one `path` from CODEOWNERS, local git author/touch history, and secondary repo memory facts. Memory-only suggestions are marked low-confidence and uncorroborated.
 - `reviewer_suggestions`: returns ranked reviewer suggestions for one `path` with source type, rationale, confidence, availability, `actual_review_evidence`, and `inferred_from_authors`. It does not call remote PR APIs; absent stored review evidence is reported as inferred or unavailable.
 - `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.

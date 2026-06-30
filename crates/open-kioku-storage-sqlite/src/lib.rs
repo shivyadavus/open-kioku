@@ -3,9 +3,10 @@ use open_kioku_core::{
     AnalysisFact, ChurnEntityKind, ChurnStats, ChurnSummary, CodeChunk, Confidence,
     EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge, GitCommitId,
     GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
-    GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, Import, IndexManifest,
-    ProvenanceTouch, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
-    HISTORY_SCHEMA_VERSION,
+    GraphNodeType, HistoricalChangeSummary, HistoryRecordId, HistorySnapshot, HistorySummary,
+    Import, IndexManifest, ProvenanceTouch, SimilarChangeHit, SimilarChangeQuery,
+    SimilarChangeReport, SimilarityEvidence, SimilarityEvidenceSource, Symbol, SymbolId,
+    SymbolOccurrence, SymbolProvenance, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{
@@ -1330,6 +1331,190 @@ impl HistoryStore for SqliteStore {
         })
     }
 
+    fn similar_changes(
+        &self,
+        query: &SimilarChangeQuery,
+        limit: usize,
+    ) -> Result<SimilarChangeReport> {
+        let normalized_query = normalize_similar_change_query(query)?;
+        if limit == 0 {
+            return Ok(SimilarChangeReport {
+                query: normalized_query,
+                generated_at: Utc::now(),
+                hits: Vec::new(),
+                truncated: false,
+                uncertainty: vec!["similar-change query limit is zero".into()],
+            });
+        }
+
+        let task_tokens = normalized_query
+            .task
+            .as_deref()
+            .map(tokenize_similarity_text)
+            .unwrap_or_default();
+        let query_paths = normalized_query
+            .paths
+            .iter()
+            .map(|path| history_path(path))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let symbol_queries = normalized_query
+            .symbols
+            .iter()
+            .map(|symbol| symbol.to_lowercase())
+            .collect::<BTreeSet<_>>();
+
+        if task_tokens.is_empty() && query_paths.is_empty() && symbol_queries.is_empty() {
+            return Ok(SimilarChangeReport {
+                query: normalized_query,
+                generated_at: Utc::now(),
+                hits: Vec::new(),
+                truncated: false,
+                uncertainty: vec![
+                    "provide at least one task, path, or symbol similarity signal".into(),
+                ],
+            });
+        }
+
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let scan_limit = similar_history_scan_limit(limit);
+
+        let commits = load_similarity_commits(&conn, scan_limit)?;
+        if commits.is_empty() {
+            return Ok(SimilarChangeReport {
+                query: normalized_query,
+                generated_at: Utc::now(),
+                hits: Vec::new(),
+                truncated: false,
+                uncertainty: vec!["no persisted commit history is available".into()],
+            });
+        }
+        let file_touches = load_similarity_file_touches(&conn, scan_limit)?;
+        let symbol_touches = load_similarity_symbol_touches(&conn, scan_limit)?;
+        let cochange_edges = load_similarity_cochange_edges(&conn)?;
+        let hotspots = load_similarity_file_hotspots(&conn)?;
+
+        let mut file_touches_by_commit: BTreeMap<String, Vec<GitFileTouch>> = BTreeMap::new();
+        for touch in file_touches {
+            file_touches_by_commit
+                .entry(touch.commit_id.0.clone())
+                .or_default()
+                .push(touch);
+        }
+
+        let mut symbol_touches_by_commit: BTreeMap<String, Vec<GitSymbolTouch>> = BTreeMap::new();
+        for touch in symbol_touches {
+            symbol_touches_by_commit
+                .entry(touch.commit_id.0.clone())
+                .or_default()
+                .push(touch);
+        }
+
+        let mut query_neighbors: BTreeMap<String, Vec<GitCochangeEdge>> = BTreeMap::new();
+        let mut sample_edges_by_commit: BTreeMap<String, Vec<GitCochangeEdge>> = BTreeMap::new();
+        for edge in cochange_edges {
+            let path = history_path(&edge.path)?;
+            let cochanged_path = history_path(&edge.cochanged_path)?;
+            let touches_query_path =
+                query_paths.contains(&path) || query_paths.contains(&cochanged_path);
+            if query_paths.contains(&path) {
+                query_neighbors
+                    .entry(cochanged_path.clone())
+                    .or_default()
+                    .push(edge.clone());
+            }
+            if query_paths.contains(&cochanged_path) {
+                query_neighbors
+                    .entry(path.clone())
+                    .or_default()
+                    .push(edge.clone());
+            }
+            if touches_query_path {
+                for commit_id in &edge.sample_commits {
+                    sample_edges_by_commit
+                        .entry(commit_id.0.clone())
+                        .or_default()
+                        .push(edge.clone());
+                }
+            }
+        }
+
+        let query_related_paths = query_paths
+            .iter()
+            .cloned()
+            .chain(query_neighbors.keys().cloned())
+            .collect::<BTreeSet<_>>();
+
+        let mut hits = Vec::new();
+        for commit in commits {
+            let file_touches = file_touches_by_commit
+                .get(&commit.id.0)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let symbol_touches = symbol_touches_by_commit
+                .get(&commit.id.0)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            let candidate = score_similar_commit(
+                &normalized_query,
+                &task_tokens,
+                &query_paths,
+                &symbol_queries,
+                &query_neighbors,
+                &query_related_paths,
+                &sample_edges_by_commit,
+                &hotspots,
+                &commit,
+                file_touches,
+                symbol_touches,
+            )?;
+            if candidate.score > 0.0 {
+                hits.push(candidate);
+            }
+        }
+
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| {
+                    history_confidence_rank(right.confidence)
+                        .cmp(&history_confidence_rank(left.confidence))
+                })
+                .then_with(|| {
+                    right
+                        .change
+                        .commit
+                        .committed_at
+                        .cmp(&left.change.commit.committed_at)
+                })
+                .then_with(|| left.change.commit.id.0.cmp(&right.change.commit.id.0))
+        });
+        let truncated = hits.len() > limit;
+        hits.truncate(limit);
+
+        let mut uncertainty = Vec::new();
+        if hits.is_empty() {
+            uncertainty.push("no similar historical changes matched the query signals".into());
+        }
+        if truncated {
+            uncertainty.push(format!(
+                "similar-change results are truncated to {limit} hits"
+            ));
+        }
+
+        Ok(SimilarChangeReport {
+            query: normalized_query,
+            generated_at: Utc::now(),
+            hits,
+            truncated,
+            uncertainty,
+        })
+    }
+
     fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1421,6 +1606,440 @@ fn symbol_provenance_touch(touch: &str, commit: &str) -> Result<ProvenanceTouch>
         confidence: touch.confidence,
         uncertainty: touch.uncertainty,
     })
+}
+
+fn normalize_similar_change_query(query: &SimilarChangeQuery) -> Result<SimilarChangeQuery> {
+    let task = query
+        .task
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let mut paths = BTreeSet::new();
+    for path in &query.paths {
+        paths.insert(PathBuf::from(history_path(path)?));
+    }
+
+    let mut symbols = BTreeSet::new();
+    for symbol in &query.symbols {
+        let symbol = symbol.trim();
+        if !symbol.is_empty() {
+            symbols.insert(symbol.to_string());
+        }
+    }
+
+    Ok(SimilarChangeQuery {
+        task,
+        paths: paths.into_iter().collect(),
+        symbols: symbols.into_iter().collect(),
+    })
+}
+
+fn similar_history_scan_limit(limit: usize) -> i64 {
+    limit
+        .saturating_mul(80)
+        .clamp(500, 5_000)
+        .min(i64::MAX as usize) as i64
+}
+
+fn load_similarity_commits(conn: &Connection, scan_limit: i64) -> Result<Vec<GitCommitRecord>> {
+    let mut stmt = conn
+        .prepare("SELECT json FROM git_commits ORDER BY committed_at DESC, id LIMIT ?1")
+        .map_err(storage_err)?;
+    let rows = stmt
+        .query_map(params![scan_limit], |row| row.get::<_, String>(0))
+        .map_err(storage_err)?;
+    collect_json(rows)
+}
+
+fn load_similarity_file_touches(conn: &Connection, scan_limit: i64) -> Result<Vec<GitFileTouch>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.json
+             FROM git_file_touches t
+             JOIN (
+               SELECT id FROM git_commits ORDER BY committed_at DESC, id LIMIT ?1
+             ) recent ON recent.id = t.commit_id
+             ORDER BY t.touched_at DESC, t.id",
+        )
+        .map_err(storage_err)?;
+    let rows = stmt
+        .query_map(params![scan_limit], |row| row.get::<_, String>(0))
+        .map_err(storage_err)?;
+    collect_json(rows)
+}
+
+fn load_similarity_symbol_touches(
+    conn: &Connection,
+    scan_limit: i64,
+) -> Result<Vec<GitSymbolTouch>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.json
+             FROM git_symbol_touches t
+             JOIN (
+               SELECT id FROM git_commits ORDER BY committed_at DESC, id LIMIT ?1
+             ) recent ON recent.id = t.commit_id
+             ORDER BY t.touched_at DESC, t.id",
+        )
+        .map_err(storage_err)?;
+    let rows = stmt
+        .query_map(params![scan_limit], |row| row.get::<_, String>(0))
+        .map_err(storage_err)?;
+    collect_json(rows)
+}
+
+fn load_similarity_cochange_edges(conn: &Connection) -> Result<Vec<GitCochangeEdge>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT json FROM git_cochange_edges
+             ORDER BY recency_weight DESC, commit_count DESC, path, cochanged_path
+             LIMIT 5000",
+        )
+        .map_err(storage_err)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(storage_err)?;
+    collect_json(rows)
+}
+
+fn load_similarity_file_hotspots(conn: &Connection) -> Result<BTreeMap<String, ChurnSummary>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_key, json FROM history_hotspots
+             WHERE entity_kind = 'file'
+             ORDER BY hotspot_score DESC, touch_count DESC, entity_key
+             LIMIT 5000",
+        )
+        .map_err(storage_err)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage_err)?;
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let (key, json) = row.map_err(storage_err)?;
+        out.insert(key, serde_json::from_str(&json)?);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_similar_commit(
+    query: &SimilarChangeQuery,
+    task_tokens: &BTreeSet<String>,
+    query_paths: &BTreeSet<String>,
+    symbol_queries: &BTreeSet<String>,
+    query_neighbors: &BTreeMap<String, Vec<GitCochangeEdge>>,
+    query_related_paths: &BTreeSet<String>,
+    sample_edges_by_commit: &BTreeMap<String, Vec<GitCochangeEdge>>,
+    hotspots: &BTreeMap<String, ChurnSummary>,
+    commit: &GitCommitRecord,
+    file_touches: &[GitFileTouch],
+    symbol_touches: &[GitSymbolTouch],
+) -> Result<SimilarChangeHit> {
+    let mut score = 0.0_f32;
+    let mut evidence = Vec::new();
+    let mut source_types = BTreeSet::new();
+    let mut touched_paths = BTreeSet::new();
+    let mut touched_symbols = BTreeSet::new();
+    let mut cochange_paths = BTreeSet::new();
+    let mut max_hotspot_score = 0.0_f32;
+
+    for touch in file_touches {
+        touched_paths.insert(touch.path.clone());
+        if let Some(previous_path) = &touch.previous_path {
+            touched_paths.insert(previous_path.clone());
+        }
+    }
+    for touch in symbol_touches {
+        touched_symbols.insert(touch.qualified_name.clone());
+    }
+
+    if let Some(task) = &query.task {
+        let commit_tokens =
+            tokenize_similarity_text(&format!("{} {}", commit.summary, commit.message));
+        let overlaps = task_tokens
+            .intersection(&commit_tokens)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !overlaps.is_empty() {
+            let contribution = (overlaps.len() as f32 * 0.08).min(0.32);
+            let task_score = round_similarity_score(contribution * 0.75);
+            let metadata_score = round_similarity_score(contribution * 0.25);
+            evidence.push(SimilarityEvidence {
+                source_type: SimilarityEvidenceSource::TaskText,
+                score: task_score,
+                message: format!(
+                    "task text matched commit summary/message token(s): {}",
+                    overlaps.join(", ")
+                ),
+                query: Some(task.clone()),
+                path: None,
+                symbol: None,
+                commit_id: Some(commit.id.clone()),
+            });
+            evidence.push(SimilarityEvidence {
+                source_type: SimilarityEvidenceSource::CommitMetadata,
+                score: metadata_score,
+                message: "commit summary and message metadata overlap the requested task".into(),
+                query: Some(task.clone()),
+                path: None,
+                symbol: None,
+                commit_id: Some(commit.id.clone()),
+            });
+            score += contribution;
+            source_types.insert(SimilarityEvidenceSource::TaskText);
+            source_types.insert(SimilarityEvidenceSource::CommitMetadata);
+        }
+    }
+
+    let mut path_score = 0.0_f32;
+    let mut matched_paths = BTreeSet::new();
+    for touch in file_touches {
+        let path = history_path(&touch.path)?;
+        if query_paths.contains(&path) && matched_paths.insert(path.clone()) {
+            path_score += 0.42;
+            evidence.push(SimilarityEvidence {
+                source_type: SimilarityEvidenceSource::Path,
+                score: 0.42,
+                message: "commit touched an exact query path".into(),
+                query: Some(path.clone()),
+                path: Some(PathBuf::from(path)),
+                symbol: None,
+                commit_id: Some(commit.id.clone()),
+            });
+        }
+        if let Some(previous_path) = &touch.previous_path {
+            let previous_path = history_path(previous_path)?;
+            if query_paths.contains(&previous_path) && matched_paths.insert(previous_path.clone()) {
+                path_score += 0.32;
+                evidence.push(SimilarityEvidence {
+                    source_type: SimilarityEvidenceSource::Path,
+                    score: 0.32,
+                    message: "commit touched a previous name for a query path".into(),
+                    query: Some(previous_path.clone()),
+                    path: Some(PathBuf::from(previous_path)),
+                    symbol: None,
+                    commit_id: Some(commit.id.clone()),
+                });
+            }
+        }
+    }
+    if path_score > 0.0 {
+        score += path_score.min(0.50);
+        source_types.insert(SimilarityEvidenceSource::Path);
+    }
+
+    let mut symbol_score = 0.0_f32;
+    let mut matched_symbols = BTreeSet::new();
+    for touch in symbol_touches {
+        for query_symbol in symbol_queries {
+            let Some((matched_symbol, contribution)) = similarity_symbol_match(query_symbol, touch)
+            else {
+                continue;
+            };
+            if matched_symbols.insert((query_symbol.clone(), matched_symbol.clone())) {
+                symbol_score += contribution;
+                evidence.push(SimilarityEvidence {
+                    source_type: SimilarityEvidenceSource::Symbol,
+                    score: contribution,
+                    message: "commit touched a symbol matching the query".into(),
+                    query: Some(query_symbol.clone()),
+                    path: Some(touch.file_path.clone()),
+                    symbol: Some(matched_symbol),
+                    commit_id: Some(commit.id.clone()),
+                });
+            }
+        }
+    }
+    if symbol_score > 0.0 {
+        score += symbol_score.min(0.45);
+        source_types.insert(SimilarityEvidenceSource::Symbol);
+    }
+
+    let mut cochange_score = 0.0_f32;
+    let mut matched_cochanges = BTreeSet::new();
+    for touch in file_touches {
+        let path = history_path(&touch.path)?;
+        if let Some(edges) = query_neighbors.get(&path) {
+            for edge in edges {
+                let edge_path = history_path(&edge.path)?;
+                let edge_cochanged = history_path(&edge.cochanged_path)?;
+                let neighbor = if query_paths.contains(&edge_path) {
+                    edge_cochanged
+                } else {
+                    edge_path
+                };
+                if matched_cochanges.insert(neighbor.clone()) {
+                    let contribution = (0.16 + edge.recency_weight.min(2.5) * 0.03).min(0.26);
+                    cochange_score += contribution;
+                    cochange_paths.insert(PathBuf::from(neighbor.clone()));
+                    evidence.push(SimilarityEvidence {
+                        source_type: SimilarityEvidenceSource::Cochange,
+                        score: round_similarity_score(contribution),
+                        message: "commit touched a co-change neighbor of a query path".into(),
+                        query: query_paths.iter().next().cloned(),
+                        path: Some(PathBuf::from(neighbor)),
+                        symbol: None,
+                        commit_id: Some(commit.id.clone()),
+                    });
+                }
+            }
+        }
+    }
+    if let Some(edges) = sample_edges_by_commit.get(&commit.id.0) {
+        for edge in edges {
+            let sample_key = format!(
+                "sample:{}:{}",
+                edge.path.display(),
+                edge.cochanged_path.display()
+            );
+            if matched_cochanges.insert(sample_key) {
+                let contribution = 0.10_f32;
+                cochange_score += contribution;
+                cochange_paths.insert(edge.path.clone());
+                cochange_paths.insert(edge.cochanged_path.clone());
+                evidence.push(SimilarityEvidence {
+                    source_type: SimilarityEvidenceSource::Cochange,
+                    score: contribution,
+                    message: "commit is a persisted sample for a query path co-change edge".into(),
+                    query: query_paths.iter().next().cloned(),
+                    path: Some(edge.cochanged_path.clone()),
+                    symbol: None,
+                    commit_id: Some(commit.id.clone()),
+                });
+            }
+        }
+    }
+    if cochange_score > 0.0 {
+        score += cochange_score.min(0.35);
+        source_types.insert(SimilarityEvidenceSource::Cochange);
+    }
+
+    let mut churn_score = 0.0_f32;
+    let mut matched_hotspots = BTreeSet::new();
+    for touch in file_touches {
+        let path = history_path(&touch.path)?;
+        if !query_related_paths.contains(&path) {
+            continue;
+        }
+        let Some(summary) = hotspots.get(&path) else {
+            continue;
+        };
+        if summary.stats.hotspot_score <= 0.0 || !matched_hotspots.insert(path.clone()) {
+            continue;
+        }
+        let contribution = (summary.stats.hotspot_score.ln_1p() * 0.08).min(0.14);
+        churn_score += contribution;
+        max_hotspot_score = max_hotspot_score.max(summary.stats.hotspot_score);
+        evidence.push(SimilarityEvidence {
+            source_type: SimilarityEvidenceSource::Churn,
+            score: round_similarity_score(contribution),
+            message: "commit touched a query-related historical churn hotspot".into(),
+            query: Some(path.clone()),
+            path: Some(PathBuf::from(path)),
+            symbol: None,
+            commit_id: Some(commit.id.clone()),
+        });
+    }
+    if churn_score > 0.0 {
+        score += churn_score.min(0.18);
+        source_types.insert(SimilarityEvidenceSource::Churn);
+    }
+
+    let rounded_score = round_similarity_score(score.min(1.0));
+    let confidence = similar_change_confidence(rounded_score, &source_types);
+    let mut uncertainty = Vec::new();
+    if source_types == BTreeSet::from([SimilarityEvidenceSource::Path]) {
+        uncertainty.push("similarity is based only on exact path overlap".into());
+    }
+    if confidence == Confidence::Low {
+        uncertainty
+            .push("low-confidence historical similarity; inspect the commit before reuse".into());
+    }
+    if query.task.is_some() && !source_types.contains(&SimilarityEvidenceSource::TaskText) {
+        uncertainty.push("task text did not match this commit's summary or message".into());
+    }
+    uncertainty.sort();
+    uncertainty.dedup();
+
+    Ok(SimilarChangeHit {
+        change: HistoricalChangeSummary {
+            commit: commit.clone(),
+            touched_paths: touched_paths.into_iter().collect(),
+            touched_symbols: touched_symbols.into_iter().collect(),
+            cochange_paths: cochange_paths.into_iter().collect(),
+            churn_hotspot_score: round_similarity_score(max_hotspot_score),
+        },
+        score: rounded_score,
+        confidence,
+        evidence,
+        uncertainty,
+    })
+}
+
+fn tokenize_similarity_text(text: &str) -> BTreeSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "and", "are", "but", "for", "from", "into", "the", "this", "that", "with", "your", "you",
+        "fix", "add", "use", "using",
+    ];
+    let stop_words = STOP_WORDS.iter().copied().collect::<BTreeSet<_>>();
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if current.len() >= 3 && !stop_words.contains(current.as_str()) {
+                tokens.insert(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+    if current.len() >= 3 && !stop_words.contains(current.as_str()) {
+        tokens.insert(current);
+    }
+    tokens
+}
+
+fn similarity_symbol_match(query_symbol: &str, touch: &GitSymbolTouch) -> Option<(String, f32)> {
+    let qualified = touch.qualified_name.to_lowercase();
+    let symbol_id = touch
+        .symbol_id
+        .as_ref()
+        .map(|id| id.0.to_lowercase())
+        .unwrap_or_default();
+    let namespace_tail = qualified.rsplit("::").next().unwrap_or(&qualified);
+    let short_name = namespace_tail.rsplit('.').next().unwrap_or(namespace_tail);
+    if query_symbol == qualified || query_symbol == symbol_id || query_symbol == short_name {
+        Some((touch.qualified_name.clone(), 0.35))
+    } else if qualified.contains(query_symbol) {
+        Some((touch.qualified_name.clone(), 0.18))
+    } else {
+        None
+    }
+}
+
+fn similar_change_confidence(
+    score: f32,
+    source_types: &BTreeSet<SimilarityEvidenceSource>,
+) -> Confidence {
+    let source_count = source_types.len();
+    if (source_count >= 4 && score >= 0.75) || (source_count >= 3 && score >= 0.55) {
+        Confidence::High
+    } else if source_count >= 2 && score >= 0.35 {
+        Confidence::Medium
+    } else {
+        Confidence::Low
+    }
+}
+
+fn round_similarity_score(score: f32) -> f32 {
+    (score * 1000.0).round() / 1000.0
 }
 
 fn lower_history_confidence(left: Confidence, right: Confidence) -> Confidence {
@@ -2682,14 +3301,15 @@ mod tests {
         EvidenceSourceType, File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
         GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, IndexQuality, Language,
-        LineRange, NodeId, Owner, Repository, RepositoryId, ReviewerEvidence, ReviewerRole, Symbol,
-        SymbolId, SymbolKind, SymbolOccurrence, HISTORY_SCHEMA_VERSION,
+        LineRange, NodeId, Owner, Repository, RepositoryId, ReviewerEvidence, ReviewerRole,
+        SimilarChangeQuery, SimilarityEvidenceSource, Symbol, SymbolId, SymbolKind,
+        SymbolOccurrence, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_storage::{
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
     };
     use rusqlite::{params, Connection};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
 
     fn make_store() -> SqliteStore {
@@ -2867,6 +3487,156 @@ mod tests {
         }
     }
 
+    fn similar_history_snapshot() -> HistorySnapshot {
+        let intro_at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let target_at = Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap();
+        let move_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
+        let docs_at = Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap();
+        let intro_id = GitCommitId::new("auth-intro");
+        let target_id = GitCommitId::new("auth-expiry-fix");
+        let move_id = GitCommitId::new("auth-module-move");
+        let docs_id = GitCommitId::new("token-docs");
+
+        HistorySnapshot {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: vec![
+                GitCommitRecord {
+                    id: intro_id.clone(),
+                    parent_ids: Vec::new(),
+                    author: Owner {
+                        name: "Auth Dev".into(),
+                        email: Some("auth@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: intro_at,
+                    committed_at: intro_at,
+                    summary: "Add login token validation".into(),
+                    message: "Add token validation for login requests".into(),
+                    file_count: 1,
+                },
+                GitCommitRecord {
+                    id: target_id.clone(),
+                    parent_ids: vec![intro_id.clone()],
+                    author: Owner {
+                        name: "Auth Dev".into(),
+                        email: Some("auth@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: target_at,
+                    committed_at: target_at,
+                    summary: "Fix token expiration in login flow".into(),
+                    message:
+                        "Fix login token expiration by updating auth validation and auth tests"
+                            .into(),
+                    file_count: 2,
+                },
+                GitCommitRecord {
+                    id: move_id.clone(),
+                    parent_ids: vec![target_id.clone()],
+                    author: Owner {
+                        name: "Platform Dev".into(),
+                        email: Some("platform@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: move_at,
+                    committed_at: move_at,
+                    summary: "Move auth module".into(),
+                    message: "Move auth module without behavior changes".into(),
+                    file_count: 1,
+                },
+                GitCommitRecord {
+                    id: docs_id.clone(),
+                    parent_ids: vec![move_id.clone()],
+                    author: Owner {
+                        name: "Docs Dev".into(),
+                        email: Some("docs@example.com".into()),
+                    },
+                    committer: None,
+                    authored_at: docs_at,
+                    committed_at: docs_at,
+                    summary: "Update token glossary".into(),
+                    message: "Refresh token wording in docs".into(),
+                    file_count: 1,
+                },
+            ],
+            file_touches: vec![
+                GitFileTouch {
+                    id: HistoryRecordId::new("intro-auth"),
+                    commit_id: intro_id.clone(),
+                    path: "src/auth.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Added,
+                    additions: Some(40),
+                    deletions: Some(0),
+                    touched_at: intro_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("target-auth"),
+                    commit_id: target_id.clone(),
+                    path: "src/auth.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: Some(12),
+                    deletions: Some(3),
+                    touched_at: target_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("target-tests"),
+                    commit_id: target_id.clone(),
+                    path: "tests/auth_flow.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: Some(18),
+                    deletions: Some(1),
+                    touched_at: target_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("move-auth"),
+                    commit_id: move_id.clone(),
+                    path: "src/auth.rs".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: Some(3),
+                    deletions: Some(3),
+                    touched_at: move_at,
+                },
+                GitFileTouch {
+                    id: HistoryRecordId::new("docs-token"),
+                    commit_id: docs_id.clone(),
+                    path: "docs/tokens.md".into(),
+                    previous_path: None,
+                    change_kind: GitChangeKind::Modified,
+                    additions: Some(5),
+                    deletions: Some(1),
+                    touched_at: docs_at,
+                },
+            ],
+            symbol_touches: vec![GitSymbolTouch {
+                id: HistoryRecordId::new("target-symbol"),
+                commit_id: target_id.clone(),
+                symbol_id: Some(SymbolId::new("auth-validate-token")),
+                qualified_name: "crate::auth::validate_token".into(),
+                file_path: "src/auth.rs".into(),
+                change_kind: GitChangeKind::Modified,
+                line_ranges: vec![LineRange { start: 10, end: 18 }],
+                confidence: Confidence::Medium,
+                uncertainty: Vec::new(),
+                touched_at: target_at,
+            }],
+            cochange_edges: vec![GitCochangeEdge {
+                id: HistoryRecordId::new("auth-tests-cochange"),
+                path: "src/auth.rs".into(),
+                cochanged_path: "tests/auth_flow.rs".into(),
+                commit_count: 2,
+                recency_weight: 1.9,
+                last_changed_at: Some(target_at),
+                sample_commits: vec![target_id],
+                test_corun: true,
+            }],
+            reviewer_evidence: Vec::new(),
+        }
+    }
+
     #[test]
     fn history_migration_upgrades_legacy_database_idempotently() {
         let dir = tempfile::tempdir().unwrap();
@@ -2998,6 +3768,79 @@ mod tests {
             .uncertainty
             .iter()
             .any(|note| note.contains("truncated")));
+    }
+
+    #[test]
+    fn similar_changes_rank_and_explain_multi_signal_history() {
+        let store = make_store();
+        store
+            .put_history_snapshot(&similar_history_snapshot())
+            .unwrap();
+
+        let report = store
+            .similar_changes(
+                &SimilarChangeQuery {
+                    task: Some("fix token expiration".into()),
+                    paths: vec!["src/auth.rs".into()],
+                    symbols: vec!["validate_token".into()],
+                },
+                5,
+            )
+            .unwrap();
+
+        assert!(!report.truncated);
+        assert_eq!(report.hits[0].change.commit.id.0, "auth-expiry-fix");
+        assert!(report.hits[0].score > 0.90, "{:#?}", report.hits[0]);
+        assert_eq!(report.hits[0].confidence, Confidence::High);
+        let source_types = report.hits[0]
+            .evidence
+            .iter()
+            .map(|evidence| evidence.source_type)
+            .collect::<BTreeSet<_>>();
+        assert!(source_types.contains(&SimilarityEvidenceSource::TaskText));
+        assert!(source_types.contains(&SimilarityEvidenceSource::CommitMetadata));
+        assert!(source_types.contains(&SimilarityEvidenceSource::Path));
+        assert!(source_types.contains(&SimilarityEvidenceSource::Symbol));
+        assert!(source_types.contains(&SimilarityEvidenceSource::Cochange));
+        assert!(source_types.contains(&SimilarityEvidenceSource::Churn));
+
+        let weak = report
+            .hits
+            .iter()
+            .find(|hit| hit.change.commit.id.0 == "token-docs")
+            .expect("weak task-text hit should still be visible");
+        assert_eq!(weak.confidence, Confidence::Low);
+        assert!(weak
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("low-confidence")));
+    }
+
+    #[test]
+    fn similar_changes_limit_is_deterministic_and_reports_truncation() {
+        let store = make_store();
+        store
+            .put_history_snapshot(&similar_history_snapshot())
+            .unwrap();
+
+        let report = store
+            .similar_changes(
+                &SimilarChangeQuery {
+                    task: Some("fix token expiration".into()),
+                    paths: vec!["src/auth.rs".into()],
+                    symbols: vec!["validate_token".into()],
+                },
+                1,
+            )
+            .unwrap();
+
+        assert!(report.truncated);
+        assert_eq!(report.hits.len(), 1);
+        assert_eq!(report.hits[0].change.commit.id.0, "auth-expiry-fix");
+        assert!(report
+            .uncertainty
+            .iter()
+            .any(|note| note.contains("truncated to 1")));
     }
 
     #[test]

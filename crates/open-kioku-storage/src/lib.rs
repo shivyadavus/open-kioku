@@ -1,8 +1,9 @@
 use open_kioku_core::{
     AnalysisFact, ChurnSummary, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance,
     GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-    HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest, SearchResult, Symbol,
-    SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    HistorySnapshot, HistorySummary, ImpactReport, Import, IndexManifest, SearchResult,
+    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
+    TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use std::path::Path;
@@ -466,6 +467,15 @@ pub trait HistoryStore: Send + Sync {
     ) -> Result<SymbolProvenance> {
         Err(OkError::Unsupported(
             "symbol provenance lookup is not implemented by this history store".into(),
+        ))
+    }
+    fn similar_changes(
+        &self,
+        _query: &SimilarChangeQuery,
+        _limit: usize,
+    ) -> Result<SimilarChangeReport> {
+        Err(OkError::Unsupported(
+            "similar historical change lookup is not implemented by this history store".into(),
         ))
     }
     fn cochange_neighbors(&self, path: &Path, limit: usize) -> Result<Vec<GitCochangeEdge>>;

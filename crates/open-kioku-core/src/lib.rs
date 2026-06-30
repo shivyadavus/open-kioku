@@ -980,6 +980,76 @@ pub struct HistorySummary {
     pub uncertainty: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SimilarChangeQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SimilarityEvidenceSource {
+    TaskText,
+    Path,
+    Symbol,
+    Churn,
+    Cochange,
+    CommitMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SimilarityEvidence {
+    pub source_type: SimilarityEvidenceSource,
+    pub score: f32,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<GitCommitId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HistoricalChangeSummary {
+    pub commit: GitCommitRecord,
+    #[serde(default)]
+    pub touched_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub touched_symbols: Vec<String>,
+    #[serde(default)]
+    pub cochange_paths: Vec<PathBuf>,
+    pub churn_hotspot_score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SimilarChangeHit {
+    pub change: HistoricalChangeSummary,
+    pub score: f32,
+    pub confidence: Confidence,
+    pub evidence: Vec<SimilarityEvidence>,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SimilarChangeReport {
+    pub query: SimilarChangeQuery,
+    pub generated_at: DateTime<Utc>,
+    pub hits: Vec<SimilarChangeHit>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
