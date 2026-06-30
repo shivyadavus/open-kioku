@@ -47,6 +47,13 @@ stable `architecture-policy:*` evidence refs that are also present in the
 contract's top-level `evidence_refs`. Verification uses configured repository
 policy to classify dependency deltas as allowed, violating, or unknown.
 
+Generated contracts also preserve bounded history intelligence when the source
+plan carries it. The builder writes a `history_signal_summary` extension and a
+`history_signals` traceability entry for `history_churn`, `ownership_risk`,
+`similar_change_overlap`, and `reviewer_affinity` evidence refs. This extension
+is advisory and does not alter the v1 schema or the rule that exact code,
+boundary, and validation evidence remain authoritative.
+
 ## CLI and MCP Workflow
 
 The CLI exposes first-class contract commands without removing the legacy

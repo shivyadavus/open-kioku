@@ -698,12 +698,15 @@ fn apply_git_history_test_signal_with_searchable(
         .map(|fact| fact.target.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    test.reason = format!("{}; git co-change test co-run ({})", test.reason, labels);
+    test.reason = format!(
+        "{}; history similar-change/test co-run ({})",
+        test.reason, labels
+    );
     test.score_breakdown.push(ScoreComponent::adjustment(
-        "git_cochange",
+        "similar_change_overlap",
         contribution,
         evidence_ids,
-        "test selected or boosted by historical git co-change or test co-run evidence",
+        "test selected or boosted by bounded historical similar-change or test co-run evidence",
     ));
     contribution
 }
@@ -1266,7 +1269,7 @@ mod tests {
         assert!(selected[0]
             .score_breakdown
             .iter()
-            .any(|component| component.signal == "git_cochange"));
+            .any(|component| component.signal == "similar_change_overlap"));
     }
 
     #[test]

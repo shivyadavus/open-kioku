@@ -77,6 +77,10 @@ pub struct RankingFeatures {
     pub boundary_fit: f32,
     pub runtime_corroboration: f32,
     pub git_cochange: f32,
+    pub history_churn: f32,
+    pub ownership_risk: f32,
+    pub similar_change_overlap: f32,
+    pub reviewer_affinity: f32,
     pub validation_proximity: f32,
     pub memory_signal: f32,
     pub path_quality_penalty: f32,
@@ -131,6 +135,34 @@ impl RankingFeatures {
         } else {
             0.0
         };
+        let history_churn = component_signal_value(result, &["history_churn"])
+            .or_else(|| {
+                (evidence.contains("history churn")
+                    || evidence.contains("history hotspot")
+                    || evidence.contains("hotspot"))
+                .then_some(0.08)
+            })
+            .unwrap_or(0.0);
+        let ownership_risk = component_signal_value(result, &["ownership_risk"])
+            .or_else(|| {
+                (evidence.contains("ownership risk") || evidence.contains("historical author"))
+                    .then_some(0.06)
+            })
+            .unwrap_or(0.0);
+        let similar_change_overlap = component_signal_value(result, &["similar_change_overlap"])
+            .or_else(|| {
+                (evidence.contains("similar change")
+                    || evidence.contains("co-change")
+                    || evidence.contains("cochange"))
+                .then_some(0.12)
+            })
+            .unwrap_or(0.0);
+        let reviewer_affinity = component_signal_value(result, &["reviewer_affinity"])
+            .or_else(|| {
+                (evidence.contains("reviewer affinity") || evidence.contains("reviewer"))
+                    .then_some(0.06)
+            })
+            .unwrap_or(0.0);
         let validation_proximity = if is_test_path(&path) { 0.05 } else { 0.0 };
         let memory_signal = if evidence.contains("memory") || reason.contains("memory") {
             0.08
@@ -175,6 +207,10 @@ impl RankingFeatures {
             boundary_fit,
             runtime_corroboration,
             git_cochange,
+            history_churn,
+            ownership_risk,
+            similar_change_overlap,
+            reviewer_affinity,
             validation_proximity,
             memory_signal,
             path_quality_penalty,
@@ -312,6 +348,38 @@ fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
             rationale: "historical co-change signal when available",
         },
         SignalSpec {
+            signal: RankingSignal::GitCochange,
+            name: "history_churn",
+            raw_value: features.history_churn,
+            weight: weights.git_cochange,
+            evidence_ids: evidence_ids.clone(),
+            rationale: "bounded churn and hotspot history signal",
+        },
+        SignalSpec {
+            signal: RankingSignal::GitCochange,
+            name: "ownership_risk",
+            raw_value: features.ownership_risk,
+            weight: weights.git_cochange,
+            evidence_ids: evidence_ids.clone(),
+            rationale: "bounded ownership dispersion risk from local history",
+        },
+        SignalSpec {
+            signal: RankingSignal::GitCochange,
+            name: "similar_change_overlap",
+            raw_value: features.similar_change_overlap,
+            weight: weights.git_cochange,
+            evidence_ids: evidence_ids.clone(),
+            rationale: "bounded similar-change and co-change overlap signal",
+        },
+        SignalSpec {
+            signal: RankingSignal::GitCochange,
+            name: "reviewer_affinity",
+            raw_value: features.reviewer_affinity,
+            weight: weights.git_cochange,
+            evidence_ids: evidence_ids.clone(),
+            rationale: "bounded reviewer affinity from local history",
+        },
+        SignalSpec {
             signal: RankingSignal::ValidationProximity,
             name: "validation_proximity",
             raw_value: features.validation_proximity,
@@ -398,6 +466,15 @@ fn searchable_result_text(result: &SearchResult) -> String {
             .unwrap_or_default()
     )
     .to_ascii_lowercase()
+}
+
+fn component_signal_value(result: &SearchResult, names: &[&str]) -> Option<f32> {
+    result
+        .score_breakdown
+        .iter()
+        .filter(|component| names.iter().any(|name| component.signal == *name))
+        .map(|component| component.raw_value.abs().max(component.contribution.abs()))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -610,6 +687,35 @@ mod tests {
         assert!(signals
             .iter()
             .any(|signal| signal.contains("exact_reference")));
+    }
+
+    #[test]
+    fn exact_reference_dominates_bounded_history_signal() {
+        let mut exact = make_result("src/exact.rs", 0.1);
+        exact.match_reason = "exact symbol reference via SCIP".into();
+        exact.evidence = vec!["exact reference from scip".into()];
+
+        let mut historical = make_result("src/history.rs", 0.1);
+        historical.evidence =
+            vec!["history signal for `src/history.rs`: similar change overlap".into()];
+        historical.score_breakdown = vec![ScoreComponent::adjustment(
+            "similar_change_overlap",
+            0.18,
+            vec!["history-similar:abc".into()],
+            "bounded similar-change overlap from persisted local history",
+        )];
+
+        let results = rerank(vec![historical, exact]);
+
+        assert_eq!(results[0].path, Path::new("src/exact.rs"));
+        let history = results
+            .iter()
+            .find(|result| result.path == Path::new("src/history.rs"))
+            .unwrap();
+        assert!(history
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "similar_change_overlap"));
     }
 
     #[test]
