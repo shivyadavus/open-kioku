@@ -54,7 +54,8 @@ Open Kioku is intended to give Claude Code, Cursor, and other MCP clients a repe
 
 ```text
 Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, ownership_lookup, search_memory, and find_tests_for_change.
+get_references, impact_analysis, ownership_lookup, reviewer_suggestions,
+search_memory, and find_tests_for_change.
 Build a plan first, then edit only after the indexed evidence is clear.
 ```
 
@@ -65,12 +66,13 @@ A good default tool sequence is:
 3. `get_definition`, `get_references`, and `get_symbol_context`: resolve the important code facts.
 4. `impact_analysis`: identify direct and indirect dependents.
 5. `ownership_lookup`: resolve CODEOWNERS, local git-history, and secondary repo-memory ownership signals for files where edit responsibility matters.
-6. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
-7. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
-8. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing. Use `format: "toon"` when the result is going straight into an LLM prompt and `format: "json"` when another tool needs structured data.
-9. `create_change_contract`: turn the plan into a stored, versioned contract when the workflow needs a durable pre-edit artifact.
-10. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
-11. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
+6. `reviewer_suggestions`: rank reviewer candidates from stored review evidence when present, otherwise explicit ownership and author-history inference.
+7. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
+8. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
+9. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing. Use `format: "toon"` when the result is going straight into an LLM prompt and `format: "json"` when another tool needs structured data.
+10. `create_change_contract`: turn the plan into a stored, versioned contract when the workflow needs a durable pre-edit artifact.
+11. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
+12. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
 
 By default these tools are source-tree read-only. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
 
@@ -88,6 +90,7 @@ The source-read tools allow language-agnostic code exploration and AI-ready cont
 - `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
 - `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files, active architecture policy when configured, and an overall risk score.
 - `ownership_lookup`: Resolves ranked owner suggestions for a path from CODEOWNERS, persisted local git author/touch history, and secondary repo memory facts. The result includes source breakdown, confidence, staleness, component matches, and uncertainty.
+- `reviewer_suggestions`: Suggests ranked reviewer candidates for a path. Actual PR-review certainty is used only when stored review/approval evidence exists; normal local clones return explicit inferred or unavailable availability from ownership and git-author signals.
 - `search_code`: Searches exact code text or symbols efficiently using an in-memory or persisted index.
 - `architecture_violations`: Detects and reports architecture boundary violations based on package and module heuristics.
 - `architecture_policy_validate`: Validates the resolved repository architecture policy or an explicit policy TOML path.
@@ -134,6 +137,7 @@ Experimental tools:
 - `history_provenance_lookup`: returns bounded first-seen, last-touched, and recent commit provenance for exactly one `path` or `symbol`, including confidence and uncertainty. `symbol` accepts an exact name, qualified name, or symbol ID.
 - `churn_analysis`: returns materialized all-time, 30-day, 90-day, recency-weighted, and hotspot stats for exactly one `path`, `module`, or `symbol`, including confidence and uncertainty. Lookups read persisted summaries instead of scanning raw commit history.
 - `ownership_lookup`: returns ranked owner suggestions for one `path` from CODEOWNERS, local git author/touch history, and secondary repo memory facts. Memory-only suggestions are marked low-confidence and uncorroborated.
+- `reviewer_suggestions`: returns ranked reviewer suggestions for one `path` with source type, rationale, confidence, availability, `actual_review_evidence`, and `inferred_from_authors`. It does not call remote PR APIs; absent stored review evidence is reported as inferred or unavailable.
 - `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
 - `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
 - `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.

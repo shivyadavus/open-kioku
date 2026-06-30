@@ -834,6 +834,72 @@ pub struct OwnershipReport {
     pub uncertainty: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewerSignalSourceType {
+    ReviewEvidence,
+    Ownership,
+    GitAuthor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewerAvailability {
+    ActualReviewEvidence,
+    InferredFromOwnershipAndAuthors,
+    InferredFromOwnership,
+    InferredFromAuthors,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerSignal {
+    pub source_type: ReviewerSignalSourceType,
+    pub reviewer: Owner,
+    pub source: String,
+    pub role: Option<ReviewerRole>,
+    pub message: String,
+    pub confidence: Confidence,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub stale: bool,
+    pub actual_review_evidence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerConfidenceBreakdown {
+    pub review_evidence: f32,
+    pub ownership: f32,
+    pub author_history: f32,
+    pub freshness: f32,
+    pub ambiguity_penalty: f32,
+    pub final_score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerSuggestion {
+    pub reviewer: Owner,
+    pub rationale: String,
+    pub confidence: Confidence,
+    pub score: f32,
+    pub availability: ReviewerAvailability,
+    pub source_types: Vec<ReviewerSignalSourceType>,
+    pub inferred_from_authors: bool,
+    pub actual_review_evidence: bool,
+    pub stale: bool,
+    pub signals: Vec<ReviewerSignal>,
+    pub confidence_breakdown: ReviewerConfidenceBreakdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewerSuggestionReport {
+    pub path: PathBuf,
+    pub generated_at: DateTime<Utc>,
+    pub availability: ReviewerAvailability,
+    pub suggestions: Vec<ReviewerSuggestion>,
+    #[serde(default)]
+    pub uncertainty: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolProvenance {
     pub symbol_id: SymbolId,
