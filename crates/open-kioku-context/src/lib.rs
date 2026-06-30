@@ -2,14 +2,14 @@ use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
     ConfidenceSignalInput, ContextPack, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNodeType, NegativeEvidence, RiskReport, RuntimeSignal,
-    ScoreComponent, SearchResult, Symbol, ValidationPlan,
+    GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence, RiskReport,
+    RuntimeSignal, ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ranking::{rerank_with_options, RankingOptions};
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::OkStore;
+use open_kioku_storage::{HistoryStore, OkStore};
 use open_kioku_tests::TestSelector;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -131,6 +131,7 @@ fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceB
 
 pub struct ContextPackBuilder<'a> {
     store: &'a dyn OkStore,
+    history_store: Option<&'a dyn HistoryStore>,
     ranking_options: RankingOptions,
 }
 
@@ -142,8 +143,14 @@ impl<'a> ContextPackBuilder<'a> {
     pub fn new(store: &'a dyn OkStore) -> Self {
         Self {
             store,
+            history_store: None,
             ranking_options: RankingOptions::default(),
         }
+    }
+
+    pub fn with_history_store(mut self, history_store: Option<&'a dyn HistoryStore>) -> Self {
+        self.history_store = history_store;
+        self
     }
 
     pub fn with_ranking_options(mut self, ranking_options: RankingOptions) -> Self {
@@ -201,6 +208,7 @@ impl<'a> ContextPackBuilder<'a> {
         let impact = if expand_impact {
             if let Some(first) = primary.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
+                    .with_history_store(self.history_store)
                     .for_file(&first.path)?
             } else {
                 empty_impact(task)
@@ -233,8 +241,18 @@ impl<'a> ContextPackBuilder<'a> {
             runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
         annotate_results_with_runtime(&mut primary_files, &runtime_signals);
         annotate_results_with_runtime(&mut supporting_files, &runtime_signals);
-        annotate_results_with_git_history(self.store, &mut primary_files)?;
-        annotate_results_with_git_history(self.store, &mut supporting_files)?;
+        annotate_results_with_git_history(
+            self.store,
+            self.history_store,
+            task,
+            &mut primary_files,
+        )?;
+        annotate_results_with_git_history(
+            self.store,
+            self.history_store,
+            task,
+            &mut supporting_files,
+        )?;
         let runtime_evidence = runtime_signals
             .iter()
             .map(runtime_signal_evidence)
@@ -747,11 +765,54 @@ fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
 
 fn annotate_results_with_git_history(
     store: &dyn OkStore,
+    history_store: Option<&dyn HistoryStore>,
+    task: &str,
     results: &mut [SearchResult],
 ) -> Result<()> {
     if results.is_empty() {
         return Ok(());
     }
+    if let Some(history_store) = history_store {
+        for result in &mut *results {
+            let symbols = result
+                .symbol
+                .as_ref()
+                .map(|symbol| vec![symbol.qualified_name.clone(), symbol.name.clone()])
+                .unwrap_or_default();
+            let summary = history_store.history_score_components(
+                &HistorySignalQuery {
+                    path: result.path.clone(),
+                    task: Some(task.to_string()),
+                    symbols,
+                },
+                8,
+            )?;
+            if summary.components.is_empty() {
+                continue;
+            }
+            for reason in &summary.reasons {
+                let evidence = format!("history signal for `{}`: {reason}", result.path.display());
+                if !result.evidence.contains(&evidence) {
+                    result.evidence.push(evidence);
+                }
+            }
+            for evidence_ref in &summary.evidence_refs {
+                if !result.evidence_refs.contains(evidence_ref) {
+                    result.evidence_refs.push(evidence_ref.clone());
+                }
+            }
+            let contribution = summary
+                .components
+                .iter()
+                .map(|component| component.contribution)
+                .sum::<f32>()
+                .min(0.30);
+            result.score += contribution;
+            result.confidence = result.confidence.max(0.70);
+            result.score_breakdown.extend(summary.components);
+        }
+    }
+
     let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
     if facts.is_empty() {
         return Ok(());
@@ -796,13 +857,13 @@ fn annotate_results_with_git_history(
                 result.evidence_refs.push(id.clone());
             }
         }
-        result.score += 0.12 * matched.len() as f32;
+        result.score += (0.12 * matched.len() as f32).min(0.18);
         result.confidence = result.confidence.max(0.70);
         result.score_breakdown.push(ScoreComponent::adjustment(
-            "git_cochange",
-            0.12 * matched.len() as f32,
+            "similar_change_overlap",
+            (0.12 * matched.len() as f32).min(0.18),
             evidence_ids,
-            format!("local git history says this file co-changed with: {labels}"),
+            format!("bounded local git history says this file co-changed with: {labels}"),
         ));
     }
     Ok(())

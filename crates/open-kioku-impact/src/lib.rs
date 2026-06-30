@@ -2,7 +2,8 @@ use chrono::Utc;
 use open_kioku_core::{
     search_result_evidence_ids, AnalysisFact, ChurnSummary, CodeChunk, Confidence, Evidence,
     EvidenceId, EvidenceSourceType, File, FileId, FileRange, GraphEdgeType, GraphNodeType,
-    ImpactReport, RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
+    HistorySignalQuery, HistorySignalSummary, ImpactReport, RiskReport, ScoreComponent,
+    SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use open_kioku_search_regex::search_chunks;
@@ -65,6 +66,27 @@ impl<'a> ImpactEngine<'a> {
         let churn_summary = if file.is_some() {
             self.history_store
                 .map(|store| store.churn_for_file(path))
+                .transpose()?
+        } else {
+            None
+        };
+        let history_signals = if file.is_some() {
+            self.history_store
+                .map(|store| {
+                    store.history_score_components(
+                        &HistorySignalQuery {
+                            path: path.to_path_buf(),
+                            task: None,
+                            symbols: target_symbols
+                                .iter()
+                                .flat_map(|symbol| {
+                                    [symbol.qualified_name.clone(), symbol.name.clone()]
+                                })
+                                .collect(),
+                        },
+                        8,
+                    )
+                })
                 .transpose()?
         } else {
             None
@@ -196,6 +218,9 @@ impl<'a> ImpactEngine<'a> {
                 churn.stats.hotspot_score, churn.stats.touch_count, churn.confidence
             ));
         }
+        if let Some(history) = &history_signals {
+            reasons.extend(history.reasons.iter().take(4).cloned());
+        }
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
@@ -203,17 +228,20 @@ impl<'a> ImpactEngine<'a> {
             reasons.push("limited indexed downstream references found".into());
         }
         let runtime_score = (runtime_facts.len() as f32 / 12.0).min(0.25);
-        let git_score = (git_facts.len() as f32 / 12.0).min(0.20);
+        let git_score = (git_facts.len() as f32 / 12.0).min(0.18);
         let service_score = (service_facts.len() as f32 / 12.0).min(0.25);
         let complexity_score = complexity_risk_score(&complexity_facts);
         let churn_score = churn_risk_score(churn_summary.as_ref());
+        let history_signal_score = history_signal_risk_score(history_signals.as_ref())
+            .unwrap_or(churn_score)
+            .min(0.25);
         let direct_reference_score = (direct.len() as f32 / 20.0).min(1.0);
         let score = (direct_reference_score
             + runtime_score
             + git_score
             + service_score
             + complexity_score
-            + churn_score)
+            + history_signal_score)
             .min(1.0);
         let evidence = Evidence {
             id: EvidenceId::new(format!("impact:{}", path.display())),
@@ -266,6 +294,10 @@ impl<'a> ImpactEngine<'a> {
             .as_ref()
             .filter(|churn| churn.stats.touch_count > 0)
             .map(|churn| churn_summary_evidence(churn, path));
+        let history_signal_evidence = history_signals
+            .as_ref()
+            .map(|signals| history_signal_evidence(signals, path))
+            .unwrap_or_default();
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
@@ -288,6 +320,7 @@ impl<'a> ImpactEngine<'a> {
                 .chain(service_evidence)
                 .chain(complexity_evidence)
                 .chain(churn_evidence)
+                .chain(history_signal_evidence)
                 .collect(),
             architecture_policy: None,
             score_breakdown: vec![ScoreComponent::single(
@@ -307,7 +340,7 @@ impl<'a> ImpactEngine<'a> {
         }
         if git_score > 0.0 {
             report.score_breakdown.push(ScoreComponent::adjustment(
-                "git_cochange",
+                "similar_change_overlap",
                 git_score,
                 git_facts.iter().map(|fact| fact.id.clone()).collect(),
                 "impact risk adjusted by git co-change and historical validation facts",
@@ -329,13 +362,18 @@ impl<'a> ImpactEngine<'a> {
                 "impact risk adjusted by complexity, nested-loop, recursion, and hot-path static signals",
             ));
         }
-        if let Some(churn) = churn_summary
+        if let Some(history) = history_signals
             .as_ref()
-            .filter(|churn| churn_score > 0.0 && churn.stats.touch_count > 0)
+            .filter(|history| history_signal_score > 0.0 && !history.components.is_empty())
+        {
+            report.score_breakdown.extend(history.components.clone());
+        } else if let Some(churn) = churn_summary
+            .as_ref()
+            .filter(|churn| history_signal_score > 0.0 && churn.stats.touch_count > 0)
         {
             report.score_breakdown.push(ScoreComponent::adjustment(
-                "history_hotspot",
-                churn_score,
+                "history_churn",
+                history_signal_score,
                 vec![format!("history-churn:{}", churn.key)],
                 "impact risk adjusted by materialized churn and hotspot history",
             ));
@@ -429,6 +467,23 @@ fn churn_risk_score(summary: Option<&ChurnSummary>) -> f32 {
     }
 }
 
+fn history_signal_risk_score(summary: Option<&HistorySignalSummary>) -> Option<f32> {
+    let summary = summary?;
+    let score = summary
+        .components
+        .iter()
+        .filter(|component| {
+            matches!(
+                component.signal.as_str(),
+                "history_churn" | "ownership_risk" | "similar_change_overlap"
+            )
+        })
+        .map(|component| component.contribution.max(0.0))
+        .sum::<f32>()
+        .min(0.25);
+    (score > 0.0).then_some(score)
+}
+
 fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
     Evidence {
         id: EvidenceId::new(format!("history-churn:{}", summary.key)),
@@ -441,7 +496,7 @@ fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
         symbol_id: summary.symbol_id.clone(),
         confidence: summary.confidence,
         message: format!(
-            "history_hotspot_score={:.3}; touch_count={}; last_30d={}; last_90d={}; confidence={:?}",
+            "history_churn_hotspot_score={:.3}; touch_count={}; last_30d={}; last_90d={}; confidence={:?}",
             summary.stats.hotspot_score,
             summary.stats.touch_count,
             summary.stats.last_30d,
@@ -451,6 +506,36 @@ fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
         indexed_at: summary.generated_at,
         ..Default::default()
     }
+}
+
+fn history_signal_evidence(summary: &HistorySignalSummary, path: &Path) -> Vec<Evidence> {
+    summary
+        .evidence_refs
+        .iter()
+        .take(12)
+        .map(|id| Evidence {
+            id: EvidenceId::new(id.clone()),
+            source: "open-kioku-history-signals".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            file_range: Some(FileRange {
+                path: path.to_path_buf(),
+                line_range: None,
+            }),
+            symbol_id: None,
+            confidence: if summary.components.is_empty() {
+                Confidence::Low
+            } else {
+                Confidence::Medium
+            },
+            message: if summary.reasons.is_empty() {
+                "bounded history signal evidence".into()
+            } else {
+                summary.reasons.join("; ")
+            },
+            indexed_at: summary.generated_at,
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn is_service_boundary_fact(fact: &AnalysisFact) -> bool {
@@ -507,14 +592,14 @@ fn git_cochange_impacts(
             line_range: None,
             snippet,
             symbol: None,
-            score: 1.15 + fact.confidence.score(),
+            score: 0.18 + (fact.confidence.score() * 0.05).min(0.05),
             match_reason: "historical git co-change with target file".into(),
             evidence,
             evidence_refs: vec![fact.id.clone()],
             confidence: fact.confidence.score(),
             score_breakdown: vec![ScoreComponent::single(
-                "git_cochange",
-                0.20,
+                "similar_change_overlap",
+                0.18,
                 vec![fact.id.clone()],
                 "impact candidate historically changed with the target file",
             )],
@@ -1179,6 +1264,92 @@ mod tests {
     }
 
     #[test]
+    fn history_only_impacts_are_bounded_below_exact_evidence() {
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let source = File {
+            id: FileId::new("source"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/source.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "source".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let historical_neighbor = File {
+            id: FileId::new("neighbor"),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from("src/neighbor.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "neighbor".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id,
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 2,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        let history_fact = AnalysisFact {
+            id: "history:source-neighbor".into(),
+            file_id: source.id.clone(),
+            symbol_id: None,
+            target: historical_neighbor.path.display().to_string(),
+            target_kind: GraphNodeType::File,
+            edge_type: GraphEdgeType::SimilarTo,
+            range: None,
+            confidence: Confidence::High,
+            source: "open-kioku-git-history".into(),
+            source_type: EvidenceSourceType::GitHistory,
+            message: "git co-change observed in 3 commit(s), recency weight 0.90".into(),
+        };
+
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source, historical_neighbor],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[history_fact],
+            })
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/source.rs"))
+            .unwrap();
+        let result = report
+            .direct_impacts
+            .iter()
+            .find(|result| result.path == Path::new("src/neighbor.rs"))
+            .expect("history co-change impact candidate");
+
+        assert!(result.score <= 0.23, "{result:#?}");
+        assert!(result
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "similar_change_overlap"
+                && component.contribution <= 0.18));
+    }
+
+    #[test]
     fn service_boundary_facts_surface_cross_service_impacts() {
         let store = make_store();
         let repo_id = RepositoryId::new("repo");
@@ -1472,6 +1643,6 @@ mod tests {
         assert!(report
             .score_breakdown
             .iter()
-            .any(|component| component.signal == "history_hotspot"));
+            .any(|component| component.signal == "history_churn"));
     }
 }
