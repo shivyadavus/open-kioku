@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -67,6 +68,34 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("stdout should be utf-8")
+}
+
+#[test]
+fn history_bench_covers_public_api_families() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cases = repo.join("benchmarks/history-cases.json");
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("history")
+            .arg("bench")
+            .arg("--cases-file")
+            .arg(cases);
+        command
+    });
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["reviewer_accuracy"], 1.0);
+    assert_eq!(report["similar_recall_at_5"], 1.0);
+    assert_eq!(report["family_counts"]["similar"], 2);
+    assert_eq!(report["family_counts"]["ownership"], 1);
+    assert_eq!(report["family_counts"]["reviewers"], 1);
+    assert_eq!(report["family_counts"]["churn"], 3);
+    assert_eq!(report["family_counts"]["provenance"], 1);
+    assert!(report["failures"].as_array().unwrap().is_empty());
 }
 
 #[test]

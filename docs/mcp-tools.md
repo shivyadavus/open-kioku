@@ -139,6 +139,140 @@ Experimental tools:
 - `history_similar_changes`: returns ranked similar historical commits from task text, paths, symbols, co-change neighborhoods, churn, and commit metadata, with evidence and confidence on every hit.
 - `ownership_lookup`: returns ranked owner suggestions for one `path` from CODEOWNERS, local git author/touch history, and secondary repo memory facts. Memory-only suggestions are marked low-confidence and uncorroborated.
 - `reviewer_suggestions`: returns ranked reviewer suggestions for one `path` with source type, rationale, confidence, availability, `actual_review_evidence`, and `inferred_from_authors`. It does not call remote PR APIs; absent stored review evidence is reported as inferred or unavailable.
+
+History API examples:
+
+`history_similar_changes` request:
+
+```json
+{"task":"fix token expiration","paths":["src/auth/session.rs"],"symbols":["validate_session"],"limit":5}
+```
+
+Response shape:
+
+```json
+{
+  "query": {"task": "fix token expiration", "paths": ["src/auth/session.rs"], "symbols": ["validate_session"]},
+  "hits": [
+    {
+      "change": {
+        "commit": {"id": "auth-expiry-fix", "summary": "Fix token expiration in login flow"},
+        "touched_paths": ["src/auth/session.rs", "tests/auth_session.rs"],
+        "touched_symbols": ["crate::auth::validate_session"],
+        "cochange_paths": ["tests/auth_session.rs"],
+        "churn_hotspot_score": 0.42
+      },
+      "score": 1.0,
+      "confidence": "high",
+      "evidence": [{"source_type": "path", "score": 0.35, "message": "query path matched historical touch"}],
+      "uncertainty": []
+    }
+  ],
+  "truncated": false,
+  "uncertainty": []
+}
+```
+
+`ownership_lookup` request:
+
+```json
+{"path":"src/auth/session.rs"}
+```
+
+Response shape:
+
+```json
+{
+  "path": "src/auth/session.rs",
+  "owners": [
+    {
+      "owner": {"name": "auth-owner@example.com", "email": "auth-owner@example.com"},
+      "source_types": ["codeowners", "git_history"],
+      "confidence": "high",
+      "score": 0.91,
+      "stale": false,
+      "evidence": [{"source_type": "codeowners", "source": ".github/CODEOWNERS:1 `src/auth/*`"}]
+    }
+  ],
+  "uncertainty": []
+}
+```
+
+`reviewer_suggestions` request:
+
+```json
+{"path":"src/auth/session.rs"}
+```
+
+Response shape:
+
+```json
+{
+  "path": "src/auth/session.rs",
+  "availability": "actual_review_evidence",
+  "suggestions": [
+    {
+      "reviewer": {"name": "reviewer@example.com", "email": "reviewer@example.com"},
+      "availability": "actual_review_evidence",
+      "source_types": ["review_evidence"],
+      "actual_review_evidence": true,
+      "inferred_from_authors": false,
+      "confidence": "high",
+      "score": 0.92
+    }
+  ],
+  "uncertainty": []
+}
+```
+
+`churn_analysis` request:
+
+```json
+{"path":"src/auth/session.rs"}
+```
+
+Response shape:
+
+```json
+{
+  "entity_kind": "file",
+  "key": "src/auth/session.rs",
+  "path": "src/auth/session.rs",
+  "stats": {
+    "all_time": 3,
+    "last_30d": 3,
+    "last_90d": 3,
+    "recency_weighted": 2.8,
+    "touch_count": 3,
+    "hotspot_score": 0.42
+  },
+  "confidence": "high",
+  "uncertainty": []
+}
+```
+
+`history_provenance_lookup` request:
+
+```json
+{"path":"src/auth/session.rs","limit":5}
+```
+
+Response shape:
+
+```json
+{
+  "path": "src/auth/session.rs",
+  "first_seen": {"commit": {"id": "auth-intro"}, "change_kind": "added"},
+  "last_touched": {"commit": {"id": "auth-hardening"}, "change_kind": "modified"},
+  "recent_touches": [
+    {"commit": {"id": "auth-hardening"}, "path": "src/auth/session.rs"},
+    {"commit": {"id": "auth-expiry-fix"}, "path": "src/auth/session.rs"}
+  ],
+  "confidence": "exact",
+  "truncated": false,
+  "uncertainty": []
+}
+```
 - `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
 - `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
 - `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.

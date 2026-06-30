@@ -405,6 +405,7 @@ ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
+ok --repo /path/to/repo history bench
 ok --repo /path/to/repo history similar-bench --min-recall-at-5 0.75
 ok --repo /path/to/repo history reviewers-bench --min-accuracy 0.80
 ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed src/auth.rs

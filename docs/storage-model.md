@@ -232,6 +232,18 @@ The deterministic benchmark corpus for this retrieval path lives at
 ok --repo /path/to/repo history similar-bench --min-recall-at-5 0.75
 ```
 
+The public history API regression corpus lives at `benchmarks/history-cases.json`
+and exercises similar changes, ownership lookup, reviewer suggestions, churn
+analysis, and provenance lookup against the same persisted history snapshot:
+
+```sh
+ok --repo /path/to/repo history bench \
+  --min-similar-recall-at-5 0.75 \
+  --min-reviewer-accuracy 0.80 \
+  --max-similar-p95-ms 700 \
+  --max-lookup-p95-ms 200
+```
+
 ## Ownership Lookup
 
 Ownership lookup is an experimental local trust-layer surface computed from
@@ -317,6 +329,10 @@ The deterministic benchmark corpus for this ranking path lives at
 ```sh
 ok --repo /path/to/repo history reviewers-bench --min-accuracy 0.80
 ```
+
+The unified `history bench` corpus also reports reviewer suggestion accuracy and
+per-family p95 latency so the public CLI/MCP history APIs stay regression-proof
+as a group.
 
 ## Search
 
