@@ -8931,8 +8931,9 @@ fn build_context_pack(
     let search_dir = default_index_dir(repo);
     let mut ranking_options = ranking_options_for_repo(repo)?;
     ranking_options.query = Some(task.into());
-    let builder =
-        ContextPackBuilder::new(store as &dyn OkStore).with_ranking_options(ranking_options);
+    let builder = ContextPackBuilder::new(store as &dyn OkStore)
+        .with_history_store(Some(store))
+        .with_ranking_options(ranking_options);
     let mut pack = if TantivySearchIndex::exists(&search_dir) {
         let index = TantivySearchIndex::open_or_create(&search_dir)?;
         let primary = search_context_candidates(&index, task, ranking_candidate_limit(limit))?;
@@ -10812,10 +10813,10 @@ fn annotate_candidates_with_git_history(
             }
         }
         result.score_breakdown.push(ScoreComponent::adjustment(
-            "git_cochange",
-            0.12 * matched.len() as f32,
+            "similar_change_overlap",
+            (0.12 * matched.len() as f32).min(0.18),
             evidence_ids,
-            format!("local git history says this result co-changed with: {labels}"),
+            format!("bounded local git history says this result co-changed with: {labels}"),
         ));
         for fact in matched {
             let target_path = normalize_path_fragment(&fact.target);
@@ -10835,7 +10836,7 @@ fn annotate_candidates_with_git_history(
                 line_range: None,
                 snippet,
                 symbol: None,
-                score: 0.95 + fact.confidence.score(),
+                score: 0.18 + (fact.confidence.score() * 0.05).min(0.05),
                 match_reason: "historical git co-change candidate".into(),
                 evidence: vec![format!(
                     "git co-change from local history: `{}` ({})",
@@ -10844,10 +10845,10 @@ fn annotate_candidates_with_git_history(
                 evidence_refs: vec![fact.id.clone()],
                 confidence: fact.confidence.score(),
                 score_breakdown: vec![ScoreComponent::single(
-                    "git_cochange",
-                    0.35,
+                    "similar_change_overlap",
+                    0.18,
                     vec![fact.id.clone()],
-                    "candidate added from historical git co-change evidence",
+                    "candidate added from bounded historical similar-change evidence",
                 )],
             });
         }

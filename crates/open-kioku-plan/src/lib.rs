@@ -74,7 +74,9 @@ impl<'a> PlanEngine<'a> {
 
     pub fn plan(&self, task: &str, limit: usize) -> Result<PlanReport> {
         let context_limit = limit.clamp(1, 100);
-        let context = ContextPackBuilder::new(self.store).build(task, context_limit)?;
+        let context = ContextPackBuilder::new(self.store)
+            .with_history_store(self.history_store)
+            .build(task, context_limit)?;
         self.plan_from_context(task, context_limit, context)
     }
 
@@ -143,6 +145,8 @@ impl<'a> PlanEngine<'a> {
             &validation,
             &risk,
         );
+        let history_components =
+            history_score_components_for_plan(&primary_context, &impact, &validation);
         let summary = summary(
             task,
             &primary_context,
@@ -150,8 +154,9 @@ impl<'a> PlanEngine<'a> {
             &validation,
             &risk,
             &self.memory_facts,
+            history_components.len(),
         );
-        let score_breakdown = plan_score_breakdown(&risk);
+        let score_breakdown = plan_score_breakdown(&risk, &history_components);
         let confidence_breakdown = confidence_for_plan(
             &primary_context,
             &impact,
@@ -168,6 +173,7 @@ impl<'a> PlanEngine<'a> {
             &validation,
             &recommended_change_boundary,
             &negative_evidence,
+            &history_components,
         );
 
         let mut report = PlanReport {
@@ -422,7 +428,10 @@ fn merge_risk(
     }
 }
 
-fn plan_score_breakdown(risk: &RiskReport) -> Vec<ScoreComponent> {
+fn plan_score_breakdown(
+    risk: &RiskReport,
+    history_components: &[ScoreComponent],
+) -> Vec<ScoreComponent> {
     let mut components = Vec::new();
     let reason_ids = risk
         .reasons
@@ -430,15 +439,21 @@ fn plan_score_breakdown(risk: &RiskReport) -> Vec<ScoreComponent> {
         .enumerate()
         .map(|(index, _)| format!("risk:reason:{index}"))
         .collect::<Vec<_>>();
+    let history_total = history_components
+        .iter()
+        .map(|component| component.contribution.max(0.0))
+        .sum::<f32>()
+        .min(risk.score);
     components.push(ScoreComponent::single(
         "plan_risk_score",
-        risk.score,
+        (risk.score - history_total).max(0.0),
         reason_ids,
         format!(
             "plan risk is `{}` from merged context and impact risk",
             risk.level
         ),
     ));
+    components.extend(history_components.iter().cloned());
     components
 }
 
@@ -482,16 +497,17 @@ fn negative_evidence_for_plan(
     risk: &RiskReport,
 ) -> Vec<NegativeEvidence> {
     let mut items = context.negative_evidence.clone();
-    if git_signal_count(primary_context)
-        + git_signal_count(&impact.direct_impacts)
-        + git_signal_count(&impact.indirect_impacts)
+    if history_signal_count(primary_context)
+        + history_signal_count(&impact.direct_impacts)
+        + history_signal_count(&impact.indirect_impacts)
         + validation
             .iter()
             .filter(|test| {
                 test.score_breakdown
                     .iter()
-                    .any(|component| component.signal == "git_cochange")
+                    .any(|component| is_history_signal(&component.signal))
                     || test.reason.to_ascii_lowercase().contains("git co-change")
+                    || test.reason.to_ascii_lowercase().contains("similar-change")
             })
             .count()
         + impact
@@ -505,13 +521,14 @@ fn negative_evidence_for_plan(
             &mut items,
             NegativeEvidence {
                 query: task.into(),
-                scope: "git_history".into(),
+                scope: "history".into(),
                 inspected_sources: vec!["plan.evidence".into(), "search_result.evidence".into()],
-                reason: "no git co-change or historical validation evidence was available".into(),
+                reason: "no churn, ownership, similar-change, reviewer, or historical validation evidence was available".into(),
                 confidence: 0.70,
                 suggested_next_probe: primary_context.first().map(|result| {
                     format!(
-                        "Run `git log --name-only -- {}` to inspect historical co-change manually.",
+                        "Run `ok history similar --path {}` or `git log --name-only -- {}` to inspect history manually.",
+                        result.path.display(),
                         result.path.display()
                     )
                 }),
@@ -678,20 +695,82 @@ fn runtime_signal_count(results: &[SearchResult]) -> usize {
         .count()
 }
 
-fn git_signal_count(results: &[SearchResult]) -> usize {
+fn history_score_components_for_plan(
+    primary_context: &[SearchResult],
+    impact: &ImpactReport,
+    validation: &[TestTarget],
+) -> Vec<ScoreComponent> {
+    let mut by_signal = BTreeMap::<String, (f32, BTreeSet<String>, BTreeSet<String>)>::new();
+    for component in primary_context
+        .iter()
+        .chain(impact.direct_impacts.iter())
+        .chain(impact.indirect_impacts.iter())
+        .flat_map(|result| result.score_breakdown.iter())
+        .chain(impact.score_breakdown.iter())
+        .chain(
+            validation
+                .iter()
+                .flat_map(|test| test.score_breakdown.iter()),
+        )
+        .filter(|component| is_history_signal(&component.signal))
+    {
+        let entry = by_signal.entry(component.signal.clone()).or_insert((
+            0.0,
+            BTreeSet::new(),
+            BTreeSet::new(),
+        ));
+        entry.0 += component.contribution.max(0.0);
+        entry.1.extend(component.evidence_ids.iter().cloned());
+        entry.2.insert(component.rationale.clone());
+    }
+
+    by_signal
+        .into_iter()
+        .map(|(signal, (contribution, evidence_ids, rationales))| {
+            let capped = contribution.min(history_signal_cap(&signal));
+            ScoreComponent::adjustment(
+                signal,
+                capped,
+                evidence_ids.into_iter().collect(),
+                rationales
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| "bounded history signal from plan evidence".into()),
+            )
+        })
+        .collect()
+}
+
+fn history_signal_count(results: &[SearchResult]) -> usize {
     results
         .iter()
         .filter(|result| {
-            result
-                .score_breakdown
-                .iter()
-                .any(|component| component.signal == "git_cochange" && component.contribution > 0.0)
-                || result
-                    .evidence
-                    .iter()
-                    .any(|evidence| evidence.to_ascii_lowercase().contains("git co-change"))
+            result.score_breakdown.iter().any(|component| {
+                is_history_signal(&component.signal) && component.contribution > 0.0
+            }) || result.evidence.iter().any(|evidence| {
+                let evidence = evidence.to_ascii_lowercase();
+                evidence.contains("git co-change")
+                    || evidence.contains("history signal")
+                    || evidence.contains("similar-change")
+            })
         })
         .count()
+}
+
+fn is_history_signal(signal: &str) -> bool {
+    matches!(
+        signal,
+        "history_churn" | "ownership_risk" | "similar_change_overlap" | "reviewer_affinity"
+    )
+}
+
+fn history_signal_cap(signal: &str) -> f32 {
+    match signal {
+        "similar_change_overlap" => 0.18,
+        "history_churn" | "ownership_risk" => 0.12,
+        "reviewer_affinity" => 0.10,
+        _ => 0.0,
+    }
 }
 
 fn negative_evidence_count(risk: &RiskReport) -> usize {
@@ -890,7 +969,7 @@ fn change_boundary(
         caution_rules,
         forbidden_rules,
         expansion_requirements: vec![BoundaryExpansionRequirement {
-            reason: "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or co-change analysis.".into(),
+            reason: "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.".into(),
             required_evidence_refs: evidence_refs,
         }],
         signal_hooks: BoundarySignalHooks {
@@ -900,7 +979,7 @@ fn change_boundary(
                 "architecture_policy_check".into(),
             ],
             ownership_sources: vec!["CODEOWNERS".into(), "git_history".into()],
-            cochange_sources: vec!["git_cochange".into(), "historical_prs".into()],
+            cochange_sources: vec!["similar_change_overlap".into(), "historical_prs".into()],
         },
     }
 }
@@ -1071,6 +1150,7 @@ fn evidence_by_section(
     validation: &[TestTarget],
     boundary: &ChangeBoundary,
     negative_evidence: &[NegativeEvidence],
+    history_components: &[ScoreComponent],
 ) -> BTreeMap<String, Vec<String>> {
     let mut sections = BTreeMap::new();
     sections.insert(
@@ -1115,6 +1195,14 @@ fn evidence_by_section(
                 stable_slug(&format!("{}:{}", item.query, item.reason))
             )
         })),
+    );
+    sections.insert(
+        "history".into(),
+        stable_refs(
+            history_components
+                .iter()
+                .flat_map(|component| component.evidence_ids.clone()),
+        ),
     );
     sections
 }
@@ -1259,6 +1347,7 @@ fn summary(
     validation: &[TestTarget],
     risk: &RiskReport,
     memory_facts: &[MemorySearchResult],
+    history_signal_count: usize,
 ) -> String {
     if primary_context.is_empty() {
         return format!(
@@ -1266,10 +1355,11 @@ fn summary(
         );
     }
     format!(
-        "Found {} primary context item(s), {} direct impact candidate(s), {} validation candidate(s), {} repo memory fact(s); risk is {}.",
+        "Found {} primary context item(s), {} direct impact candidate(s), {} validation candidate(s), {} history signal(s), {} repo memory fact(s); risk is {}.",
         primary_context.len(),
         impact.direct_impacts.len(),
         validation.len(),
+        history_signal_count,
         memory_facts.len(),
         risk.level
     )
@@ -2105,7 +2195,7 @@ mod tests {
         for expected in [
             "boundary",
             "exact_references",
-            "git_history",
+            "history",
             "risk",
             "runtime",
             "validation",
