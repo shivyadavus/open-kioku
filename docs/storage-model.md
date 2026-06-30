@@ -39,6 +39,7 @@ them in:
 - `churn_for_symbol`
 - `provenance_for_path`
 - `provenance_for_symbol`
+- `similar_changes`
 - `cochange_neighbors`
 - `recent_commits`
 
@@ -185,6 +186,47 @@ selected instead of its enclosing class. It lowers confidence when:
 These signals never outrank exact indexed code evidence. `first_seen` means the
 earliest persisted or line-mapped touch inside the configured local history
 window unless the result explicitly proves an added file.
+
+## Similar Historical Changes
+
+Similar-change retrieval is an experimental local trust-layer surface over the
+persisted history tables. It does not call Git during lookup. The query can
+combine task text, repository-relative paths, and symbol names or IDs:
+
+```sh
+ok --repo /path/to/repo history similar \
+  --task "fix token expiration" \
+  --path src/auth.rs \
+  --symbol validate_token
+```
+
+The experimental MCP tool `history_similar_changes` accepts the same signals:
+
+```json
+{"task":"fix token expiration","path":"src/auth.rs","symbol":"validate_token","limit":5}
+```
+
+Results are ranked deterministically by combined evidence rather than path-only
+matching. Each `SimilarChangeHit` includes:
+
+- the historical commit summary and touched paths/symbols;
+- a bounded score and confidence;
+- `SimilarityEvidence` entries for task text, path, symbol, churn, co-change,
+  and commit metadata matches;
+- explicit uncertainty when the result is low-confidence or only weakly
+  grounded.
+
+Weak historical similarity is advisory. It does not outrank exact indexed code,
+symbol, test, architecture, or verification evidence. Low-confidence hits are
+kept visible so agents can inspect them, but they are marked with explicit
+uncertainty before any downstream H8 ranking integration.
+
+The deterministic benchmark corpus for this retrieval path lives at
+`benchmarks/similar-history-cases.json` and can be checked with:
+
+```sh
+ok --repo /path/to/repo history similar-bench --min-recall-at-5 0.75
+```
 
 ## Ownership Lookup
 

@@ -2308,6 +2308,36 @@ fn index_captures_git_history() {
     assert_eq!(file_churn["stats"]["last_90d"], 1);
     assert_eq!(file_churn["confidence"], "exact");
 
+    let similar = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("similar")
+            .arg("--task")
+            .arg("first commit")
+            .arg("--path")
+            .arg("src/a.rs")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    let similar: serde_json::Value = serde_json::from_str(&similar).unwrap();
+    assert_eq!(
+        similar["hits"][0]["change"]["commit"]["summary"],
+        "first commit"
+    );
+    let similar_sources = similar["hits"][0]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|evidence| evidence["source_type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(similar_sources.contains(&"task_text"));
+    assert!(similar_sources.contains(&"path"));
+
     let ownership = run({
         let mut command = ok();
         command
@@ -2446,6 +2476,20 @@ fn index_captures_git_history() {
     assert_eq!(
         response["result"]["structuredContent"]["confidence"],
         "exact"
+    );
+
+    let mcp_similar = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"history_similar_changes","arguments":{"task":"first commit","path":"src/a.rs","limit":5}}}"#,
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp_similar.trim()).unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["hits"][0]["change"]["commit"]["summary"],
+        "first commit"
     );
 
     let mcp_ownership = run_with_stdin(

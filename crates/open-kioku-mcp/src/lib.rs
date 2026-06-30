@@ -10,7 +10,8 @@ use open_kioku_contract::{
     ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
-    Confidence, ContextHandleId, PlanReport, PolicyCheckReport, PolicyComponentMatch, SymbolId,
+    Confidence, ContextHandleId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
+    SimilarChangeQuery, SymbolId,
 };
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
@@ -311,6 +312,10 @@ async fn dispatch(
             } else {
                 unreachable!("exactly one churn target was checked above");
             }
+        }
+        "history_similar_changes" => {
+            let query = similar_change_query_from_params(&params)?;
+            Ok(json!(store.similar_changes(&query, limit(&params))?))
         }
         "ownership_lookup" => {
             let path = Path::new(required_str(&params, "path")?);
@@ -894,6 +899,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("impact_analysis", "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze."}}})),
         ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
         ("churn_analysis", "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path to inspect."},"module":{"type":"string","description":"Repository-relative module or directory path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."}},"oneOf":[{"required":["path"]},{"required":["module"]},{"required":["symbol"]}]})),
+        ("history_similar_changes", "Retrieve ranked similar historical commits using task text, paths, symbols, co-change neighborhoods, churn, and commit metadata. Returns evidence and confidence for each hit.", json!({"type":"object","properties":{"task":{"type":"string","description":"Natural-language task or change description."},"path":{"type":"string","description":"Single repository-relative path to match."},"paths":{"type":"array","items":{"type":"string"},"description":"Repository-relative paths to match."},"symbol":{"type":"string","description":"Single symbol name, qualified name, or symbol ID to match."},"symbols":{"type":"array","items":{"type":"string"},"description":"Symbol names, qualified names, or symbol IDs to match."},"limit":{"type":"integer","description":"Maximum similar changes to return. Defaults to 20, capped at 100."}}})),
         ("ownership_lookup", "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
         ("reviewer_suggestions", "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
         ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
@@ -985,6 +991,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "get_callees"
         | "history_provenance_lookup"
         | "churn_analysis"
+        | "history_similar_changes"
         | "ownership_lookup"
         | "reviewer_suggestions"
         | "explain_flow"
@@ -1225,6 +1232,47 @@ fn repo_relative_path(repo: &Path, path: &Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+fn similar_change_query_from_params(params: &Value) -> anyhow::Result<SimilarChangeQuery> {
+    let task = params
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut paths = Vec::new();
+    if let Some(path) = params.get("path").and_then(Value::as_str) {
+        paths.push(PathBuf::from(path));
+    }
+    if let Some(values) = params.get("paths").and_then(Value::as_array) {
+        for value in values {
+            let Some(path) = value.as_str() else {
+                anyhow::bail!("`paths` must contain only strings");
+            };
+            paths.push(PathBuf::from(path));
+        }
+    }
+    let mut symbols = Vec::new();
+    if let Some(symbol) = params.get("symbol").and_then(Value::as_str) {
+        symbols.push(symbol.to_string());
+    }
+    if let Some(values) = params.get("symbols").and_then(Value::as_array) {
+        for value in values {
+            let Some(symbol) = value.as_str() else {
+                anyhow::bail!("`symbols` must contain only strings");
+            };
+            symbols.push(symbol.to_string());
+        }
+    }
+    if task.is_none() && paths.is_empty() && symbols.is_empty() {
+        anyhow::bail!("provide at least one of `task`, `path`/`paths`, or `symbol`/`symbols`");
+    }
+    Ok(SimilarChangeQuery {
+        task,
+        paths,
+        symbols,
+    })
 }
 
 fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
@@ -2019,6 +2067,11 @@ mod tests {
             .find(|tool| tool["name"] == "churn_analysis")
             .unwrap();
         assert_eq!(churn["maturity"], "experimental");
+        let similar = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "history_similar_changes")
+            .unwrap();
+        assert_eq!(similar["maturity"], "experimental");
         let ownership = tools_ro
             .iter()
             .find(|tool| tool["name"] == "ownership_lookup")

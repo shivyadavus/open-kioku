@@ -13,6 +13,7 @@
       "get_callees",
       "history_provenance_lookup",
       "churn_analysis",
+      "history_similar_changes",
       "ownership_lookup",
       "reviewer_suggestions",
       "explain_flow",
@@ -611,6 +612,47 @@
         },
         "maturity": "experimental",
         "name": "churn_analysis"
+      },
+      {
+        "description": "Retrieve ranked similar historical commits using task text, paths, symbols, co-change neighborhoods, churn, and commit metadata. Returns evidence and confidence for each hit.",
+        "experimental": true,
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "description": "Maximum similar changes to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            },
+            "path": {
+              "description": "Single repository-relative path to match.",
+              "type": "string"
+            },
+            "paths": {
+              "description": "Repository-relative paths to match.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "symbol": {
+              "description": "Single symbol name, qualified name, or symbol ID to match.",
+              "type": "string"
+            },
+            "symbols": {
+              "description": "Symbol names, qualified names, or symbol IDs to match.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "task": {
+              "description": "Natural-language task or change description.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "maturity": "experimental",
+        "name": "history_similar_changes"
       },
       {
         "description": "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.",

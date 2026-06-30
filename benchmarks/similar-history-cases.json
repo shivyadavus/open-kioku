@@ -1,0 +1,213 @@
+[
+  {
+    "id": "auth-token-expiry-multi-signal",
+    "query": {
+      "task": "fix token expiration",
+      "paths": ["src/auth.rs"],
+      "symbols": ["validate_token"]
+    },
+    "snapshot": {
+      "schema_version": 1,
+      "commits": [
+        {
+          "id": "auth-intro",
+          "parent_ids": [],
+          "author": { "name": "Auth Dev", "email": "auth@example.com" },
+          "committer": null,
+          "authored_at": "2026-06-01T12:00:00Z",
+          "committed_at": "2026-06-01T12:00:00Z",
+          "summary": "Add login token validation",
+          "message": "Add token validation for login requests",
+          "file_count": 1
+        },
+        {
+          "id": "auth-expiry-fix",
+          "parent_ids": ["auth-intro"],
+          "author": { "name": "Auth Dev", "email": "auth@example.com" },
+          "committer": null,
+          "authored_at": "2026-06-02T12:00:00Z",
+          "committed_at": "2026-06-02T12:00:00Z",
+          "summary": "Fix token expiration in login flow",
+          "message": "Fix login token expiration by updating auth validation and auth tests",
+          "file_count": 2
+        },
+        {
+          "id": "auth-module-move",
+          "parent_ids": ["auth-expiry-fix"],
+          "author": { "name": "Platform Dev", "email": "platform@example.com" },
+          "committer": null,
+          "authored_at": "2026-06-03T12:00:00Z",
+          "committed_at": "2026-06-03T12:00:00Z",
+          "summary": "Move auth module",
+          "message": "Move auth module without behavior changes",
+          "file_count": 1
+        }
+      ],
+      "file_touches": [
+        {
+          "id": "intro-auth",
+          "commit_id": "auth-intro",
+          "path": "src/auth.rs",
+          "previous_path": null,
+          "change_kind": "added",
+          "additions": 40,
+          "deletions": 0,
+          "touched_at": "2026-06-01T12:00:00Z"
+        },
+        {
+          "id": "target-auth",
+          "commit_id": "auth-expiry-fix",
+          "path": "src/auth.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 12,
+          "deletions": 3,
+          "touched_at": "2026-06-02T12:00:00Z"
+        },
+        {
+          "id": "target-tests",
+          "commit_id": "auth-expiry-fix",
+          "path": "tests/auth_flow.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 18,
+          "deletions": 1,
+          "touched_at": "2026-06-02T12:00:00Z"
+        },
+        {
+          "id": "move-auth",
+          "commit_id": "auth-module-move",
+          "path": "src/auth.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 3,
+          "deletions": 3,
+          "touched_at": "2026-06-03T12:00:00Z"
+        }
+      ],
+      "symbol_touches": [
+        {
+          "id": "target-symbol",
+          "commit_id": "auth-expiry-fix",
+          "symbol_id": "auth-validate-token",
+          "qualified_name": "crate::auth::validate_token",
+          "file_path": "src/auth.rs",
+          "change_kind": "modified",
+          "line_ranges": [{ "start": 10, "end": 18 }],
+          "confidence": "medium",
+          "uncertainty": [],
+          "touched_at": "2026-06-02T12:00:00Z"
+        }
+      ],
+      "cochange_edges": [
+        {
+          "id": "auth-tests-cochange",
+          "path": "src/auth.rs",
+          "cochanged_path": "tests/auth_flow.rs",
+          "commit_count": 2,
+          "recency_weight": 1.9,
+          "last_changed_at": "2026-06-02T12:00:00Z",
+          "sample_commits": ["auth-expiry-fix"],
+          "test_corun": true
+        }
+      ],
+      "reviewer_evidence": []
+    },
+    "expected_top_5": ["auth-expiry-fix"]
+  },
+  {
+    "id": "payment-retry-cochange",
+    "query": {
+      "task": "retry failed payment capture",
+      "paths": ["src/payments/capture.rs"],
+      "symbols": ["capture_payment"]
+    },
+    "snapshot": {
+      "schema_version": 1,
+      "commits": [
+        {
+          "id": "payment-capture-fix",
+          "parent_ids": [],
+          "author": { "name": "Payments Dev", "email": "payments@example.com" },
+          "committer": null,
+          "authored_at": "2026-06-05T12:00:00Z",
+          "committed_at": "2026-06-05T12:00:00Z",
+          "summary": "Retry failed payment capture",
+          "message": "Retry transient capture failures and extend payment tests",
+          "file_count": 2
+        },
+        {
+          "id": "payment-format-cleanup",
+          "parent_ids": ["payment-capture-fix"],
+          "author": { "name": "Payments Dev", "email": "payments@example.com" },
+          "committer": null,
+          "authored_at": "2026-06-06T12:00:00Z",
+          "committed_at": "2026-06-06T12:00:00Z",
+          "summary": "Format payment capture module",
+          "message": "Apply formatter to payment capture code",
+          "file_count": 1
+        }
+      ],
+      "file_touches": [
+        {
+          "id": "payment-fix-source",
+          "commit_id": "payment-capture-fix",
+          "path": "src/payments/capture.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 20,
+          "deletions": 4,
+          "touched_at": "2026-06-05T12:00:00Z"
+        },
+        {
+          "id": "payment-fix-test",
+          "commit_id": "payment-capture-fix",
+          "path": "tests/payment_capture.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 30,
+          "deletions": 2,
+          "touched_at": "2026-06-05T12:00:00Z"
+        },
+        {
+          "id": "payment-format-source",
+          "commit_id": "payment-format-cleanup",
+          "path": "src/payments/capture.rs",
+          "previous_path": null,
+          "change_kind": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "touched_at": "2026-06-06T12:00:00Z"
+        }
+      ],
+      "symbol_touches": [
+        {
+          "id": "payment-symbol",
+          "commit_id": "payment-capture-fix",
+          "symbol_id": "payments-capture-payment",
+          "qualified_name": "crate::payments::capture_payment",
+          "file_path": "src/payments/capture.rs",
+          "change_kind": "modified",
+          "line_ranges": [{ "start": 20, "end": 44 }],
+          "confidence": "medium",
+          "uncertainty": [],
+          "touched_at": "2026-06-05T12:00:00Z"
+        }
+      ],
+      "cochange_edges": [
+        {
+          "id": "payment-tests-cochange",
+          "path": "src/payments/capture.rs",
+          "cochanged_path": "tests/payment_capture.rs",
+          "commit_count": 2,
+          "recency_weight": 1.7,
+          "last_changed_at": "2026-06-05T12:00:00Z",
+          "sample_commits": ["payment-capture-fix"],
+          "test_corun": true
+        }
+      ],
+      "reviewer_evidence": []
+    },
+    "expected_top_5": ["payment-capture-fix"]
+  }
+]
