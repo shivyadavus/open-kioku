@@ -691,6 +691,29 @@ struct SimilarHistoryBenchArgs {
 }
 
 #[derive(Args)]
+struct HistoryBenchArgs {
+    /// JSON file containing the unified public history API benchmark corpus.
+    #[arg(long, default_value = "benchmarks/history-cases.json")]
+    cases_file: PathBuf,
+
+    /// Fail when reviewer suggestion accuracy is below this threshold.
+    #[arg(long, default_value_t = 0.80)]
+    min_reviewer_accuracy: f64,
+
+    /// Fail when similar-change Top-5 recall is below this threshold.
+    #[arg(long, default_value_t = 0.75)]
+    min_similar_recall_at_5: f64,
+
+    /// Fail when p95 similar-change latency exceeds this value.
+    #[arg(long, default_value_t = 700.0)]
+    max_similar_p95_ms: f64,
+
+    /// Fail when p95 ownership/churn lookup latency exceeds this value.
+    #[arg(long, default_value_t = 200.0)]
+    max_lookup_p95_ms: f64,
+}
+
+#[derive(Args)]
 struct ProveArgs {
     /// Repository to index and evaluate.
     #[arg(default_value = ".")]
@@ -946,6 +969,8 @@ enum HistoryCommand {
     ReviewersBench(ReviewerBenchArgs),
     /// Run the deterministic similar historical change benchmark corpus.
     SimilarBench(SimilarHistoryBenchArgs),
+    /// Run the unified public history API benchmark corpus.
+    Bench(HistoryBenchArgs),
     Provenance {
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
         path: Option<PathBuf>,
@@ -1287,6 +1312,196 @@ struct ReviewerBenchCaseReport {
     inferred_from_authors: Option<bool>,
     inferred_from_authors_correct: bool,
     top_score: Option<f32>,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchCorpus {
+    schema_version: u32,
+    cases: Vec<HistoryBenchCase>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchCase {
+    id: String,
+    #[serde(default)]
+    codeowners: Vec<String>,
+    snapshot: HistorySnapshot,
+    #[serde(default)]
+    similar: Vec<HistoryBenchSimilarCase>,
+    #[serde(default)]
+    ownership: Vec<HistoryBenchOwnershipCase>,
+    #[serde(default)]
+    reviewers: Vec<HistoryBenchReviewerCase>,
+    #[serde(default)]
+    churn: Vec<HistoryBenchChurnCase>,
+    #[serde(default)]
+    provenance: Vec<HistoryBenchProvenanceCase>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchSimilarCase {
+    id: String,
+    query: SimilarChangeQuery,
+    expected_top_5: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchOwnershipCase {
+    id: String,
+    path: PathBuf,
+    expected_owner: String,
+    #[serde(default)]
+    expected_source_types: Vec<OwnershipSourceType>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchReviewerCase {
+    id: String,
+    path: PathBuf,
+    expected_top_reviewer: String,
+    expected_availability: ReviewerAvailability,
+    #[serde(default)]
+    expected_actual_review_evidence: Option<bool>,
+    #[serde(default)]
+    expected_inferred_from_authors: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchChurnCase {
+    id: String,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    module: Option<PathBuf>,
+    #[serde(default)]
+    symbol_id: Option<SymbolId>,
+    #[serde(default)]
+    min_touch_count: usize,
+    #[serde(default)]
+    min_hotspot_score: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistoryBenchProvenanceCase {
+    id: String,
+    path: PathBuf,
+    #[serde(default)]
+    limit: Option<usize>,
+    expected_first_seen: String,
+    expected_last_touched: String,
+    #[serde(default = "default_history_bench_min_recent_touches")]
+    min_recent_touches: usize,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchReport {
+    cases_file: PathBuf,
+    schema_version: u32,
+    case_count: usize,
+    family_counts: HistoryBenchFamilyCounts,
+    min_reviewer_accuracy: f64,
+    reviewer_accuracy: f64,
+    min_similar_recall_at_5: f64,
+    similar_recall_at_5: f64,
+    max_similar_p95_ms: f64,
+    similar_p95_ms: f64,
+    max_lookup_p95_ms: f64,
+    ownership_churn_p95_ms: f64,
+    family_p95_ms: BTreeMap<String, f64>,
+    failures: Vec<String>,
+    cases: Vec<HistoryBenchCaseReport>,
+}
+
+#[derive(Default, Serialize)]
+struct HistoryBenchFamilyCounts {
+    similar: usize,
+    ownership: usize,
+    reviewers: usize,
+    churn: usize,
+    provenance: usize,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchCaseReport {
+    id: String,
+    similar: Vec<HistoryBenchSimilarCaseReport>,
+    ownership: Vec<HistoryBenchOwnershipCaseReport>,
+    reviewers: Vec<HistoryBenchReviewerCaseReport>,
+    churn: Vec<HistoryBenchChurnCaseReport>,
+    provenance: Vec<HistoryBenchProvenanceCaseReport>,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchSimilarCaseReport {
+    id: String,
+    expected_top_5: Vec<String>,
+    actual_top_5: Vec<String>,
+    matched: Vec<String>,
+    recall_at_5: f64,
+    latency_ms: f64,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchOwnershipCaseReport {
+    id: String,
+    path: PathBuf,
+    expected_owner: String,
+    actual_owner: Option<String>,
+    rank: Option<usize>,
+    expected_source_types: Vec<OwnershipSourceType>,
+    actual_source_types: Vec<OwnershipSourceType>,
+    latency_ms: f64,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchReviewerCaseReport {
+    id: String,
+    path: PathBuf,
+    expected_top_reviewer: String,
+    actual_top_reviewer: Option<String>,
+    rank: Option<usize>,
+    expected_availability: ReviewerAvailability,
+    availability: ReviewerAvailability,
+    availability_correct: bool,
+    expected_actual_review_evidence: Option<bool>,
+    actual_review_evidence: Option<bool>,
+    actual_review_evidence_correct: bool,
+    expected_inferred_from_authors: Option<bool>,
+    inferred_from_authors: Option<bool>,
+    inferred_from_authors_correct: bool,
+    latency_ms: f64,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchChurnCaseReport {
+    id: String,
+    target: String,
+    touch_count: usize,
+    hotspot_score: f32,
+    min_touch_count: usize,
+    min_hotspot_score: f32,
+    confidence: Confidence,
+    latency_ms: f64,
+    passed: bool,
+}
+
+#[derive(Serialize)]
+struct HistoryBenchProvenanceCaseReport {
+    id: String,
+    path: PathBuf,
+    expected_first_seen: String,
+    actual_first_seen: Option<String>,
+    expected_last_touched: String,
+    actual_last_touched: Option<String>,
+    min_recent_touches: usize,
+    recent_touch_count: usize,
+    confidence: Confidence,
+    latency_ms: f64,
     passed: bool,
 }
 
@@ -2951,6 +3166,52 @@ async fn main() -> anyhow::Result<()> {
                             "similar-history benchmark Top-5 recall {:.3} is below required {:.3}",
                             report.recall_at_5,
                             min_recall_at_5
+                        );
+                    }
+                }
+                HistoryCommand::Bench(args) => {
+                    let min_reviewer_accuracy = args.min_reviewer_accuracy;
+                    let min_similar_recall_at_5 = args.min_similar_recall_at_5;
+                    let max_similar_p95_ms = args.max_similar_p95_ms;
+                    let max_lookup_p95_ms = args.max_lookup_p95_ms;
+                    let report = run_history_bench(&repo, args)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        print_history_bench_report(&report);
+                    }
+                    if report.reviewer_accuracy < min_reviewer_accuracy {
+                        anyhow::bail!(
+                            "history benchmark reviewer accuracy {:.3} is below required {:.3}",
+                            report.reviewer_accuracy,
+                            min_reviewer_accuracy
+                        );
+                    }
+                    if report.similar_recall_at_5 < min_similar_recall_at_5 {
+                        anyhow::bail!(
+                            "history benchmark similar-change Top-5 recall {:.3} is below required {:.3}",
+                            report.similar_recall_at_5,
+                            min_similar_recall_at_5
+                        );
+                    }
+                    if report.similar_p95_ms > max_similar_p95_ms {
+                        anyhow::bail!(
+                            "history benchmark similar-change p95 latency {:.3} ms exceeds {:.3} ms",
+                            report.similar_p95_ms,
+                            max_similar_p95_ms
+                        );
+                    }
+                    if report.ownership_churn_p95_ms > max_lookup_p95_ms {
+                        anyhow::bail!(
+                            "history benchmark ownership/churn p95 latency {:.3} ms exceeds {:.3} ms",
+                            report.ownership_churn_p95_ms,
+                            max_lookup_p95_ms
+                        );
+                    }
+                    if !report.failures.is_empty() {
+                        anyhow::bail!(
+                            "history benchmark had {} failing public API case(s)",
+                            report.failures.len()
                         );
                     }
                 }
@@ -5477,6 +5738,626 @@ fn print_architecture_policy_bench_report(report: &ArchitecturePolicyBenchReport
         );
         for note in &case.notes {
             println!("    note: {note}");
+        }
+    }
+}
+
+fn run_history_bench(repo: &Path, args: HistoryBenchArgs) -> anyhow::Result<HistoryBenchReport> {
+    let cases_file = if args.cases_file.is_absolute() {
+        args.cases_file.clone()
+    } else {
+        repo.join(&args.cases_file)
+    };
+    let corpus = load_history_bench_corpus(&cases_file)?;
+    if corpus.cases.is_empty() {
+        anyhow::bail!(
+            "history benchmark cases file is empty: {}",
+            cases_file.display()
+        );
+    }
+
+    let mut scores = HistoryBenchScoring::default();
+    let mut cases = Vec::with_capacity(corpus.cases.len());
+    let mut failures = Vec::new();
+    for case in &corpus.cases {
+        let report = score_history_bench_case(case, &mut scores)?;
+        failures.extend(history_bench_failures(&report));
+        cases.push(report);
+    }
+
+    let family_p95_ms = scores
+        .family_latencies_ms
+        .iter()
+        .map(|(family, values)| (family.clone(), p95_ms(values)))
+        .collect::<BTreeMap<_, _>>();
+
+    Ok(HistoryBenchReport {
+        cases_file,
+        schema_version: corpus.schema_version,
+        case_count: cases.len(),
+        family_counts: scores.family_counts,
+        min_reviewer_accuracy: args.min_reviewer_accuracy,
+        reviewer_accuracy: ratio(scores.reviewer_passed, scores.reviewer_total),
+        min_similar_recall_at_5: args.min_similar_recall_at_5,
+        similar_recall_at_5: ratio(scores.similar_matched_total, scores.similar_expected_total),
+        max_similar_p95_ms: args.max_similar_p95_ms,
+        similar_p95_ms: p95_ms(&scores.similar_latencies_ms),
+        max_lookup_p95_ms: args.max_lookup_p95_ms,
+        ownership_churn_p95_ms: p95_ms(&scores.ownership_churn_latencies_ms),
+        family_p95_ms,
+        failures,
+        cases,
+    })
+}
+
+#[derive(Default)]
+struct HistoryBenchScoring {
+    family_counts: HistoryBenchFamilyCounts,
+    similar_expected_total: usize,
+    similar_matched_total: usize,
+    reviewer_total: usize,
+    reviewer_passed: usize,
+    similar_latencies_ms: Vec<f64>,
+    ownership_churn_latencies_ms: Vec<f64>,
+    family_latencies_ms: BTreeMap<String, Vec<f64>>,
+}
+
+fn load_history_bench_corpus(path: &Path) -> anyhow::Result<HistoryBenchCorpus> {
+    let raw = fs::read_to_string(path)?;
+    let corpus: HistoryBenchCorpus = serde_json::from_str(&raw)?;
+    if corpus.schema_version != 1 {
+        anyhow::bail!(
+            "unsupported history benchmark schema_version {}; expected 1",
+            corpus.schema_version
+        );
+    }
+
+    let mut top_ids = BTreeSet::new();
+    let mut child_ids = BTreeSet::new();
+    for case in &corpus.cases {
+        if case.id.trim().is_empty() {
+            anyhow::bail!("history benchmark cases require non-empty id");
+        }
+        if !top_ids.insert(case.id.clone()) {
+            anyhow::bail!("duplicate history benchmark case id `{}`", case.id);
+        }
+        if case.similar.is_empty()
+            && case.ownership.is_empty()
+            && case.reviewers.is_empty()
+            && case.churn.is_empty()
+            && case.provenance.is_empty()
+        {
+            anyhow::bail!(
+                "history benchmark case `{}` must include at least one public API family",
+                case.id
+            );
+        }
+        for child in &case.similar {
+            validate_history_bench_child_id(&case.id, "similar", &child.id, &mut child_ids)?;
+            if child.expected_top_5.is_empty() {
+                anyhow::bail!(
+                    "history benchmark similar case `{}::{}` requires expected_top_5",
+                    case.id,
+                    child.id
+                );
+            }
+        }
+        for child in &case.ownership {
+            validate_history_bench_child_id(&case.id, "ownership", &child.id, &mut child_ids)?;
+            if child.path.as_os_str().is_empty() || child.expected_owner.trim().is_empty() {
+                anyhow::bail!(
+                    "history benchmark ownership case `{}::{}` requires path and expected_owner",
+                    case.id,
+                    child.id
+                );
+            }
+        }
+        for child in &case.reviewers {
+            validate_history_bench_child_id(&case.id, "reviewers", &child.id, &mut child_ids)?;
+            if child.path.as_os_str().is_empty() || child.expected_top_reviewer.trim().is_empty() {
+                anyhow::bail!(
+                    "history benchmark reviewer case `{}::{}` requires path and expected_top_reviewer",
+                    case.id,
+                    child.id
+                );
+            }
+        }
+        for child in &case.churn {
+            validate_history_bench_child_id(&case.id, "churn", &child.id, &mut child_ids)?;
+            let provided = usize::from(child.path.is_some())
+                + usize::from(child.module.is_some())
+                + usize::from(child.symbol_id.is_some());
+            if provided != 1 {
+                anyhow::bail!(
+                    "history benchmark churn case `{}::{}` must provide exactly one of path, module, or symbol_id",
+                    case.id,
+                    child.id
+                );
+            }
+        }
+        for child in &case.provenance {
+            validate_history_bench_child_id(&case.id, "provenance", &child.id, &mut child_ids)?;
+            if child.path.as_os_str().is_empty()
+                || child.expected_first_seen.trim().is_empty()
+                || child.expected_last_touched.trim().is_empty()
+            {
+                anyhow::bail!(
+                    "history benchmark provenance case `{}::{}` requires path, expected_first_seen, and expected_last_touched",
+                    case.id,
+                    child.id
+                );
+            }
+        }
+    }
+    Ok(corpus)
+}
+
+fn validate_history_bench_child_id(
+    case_id: &str,
+    family: &str,
+    child_id: &str,
+    seen: &mut BTreeSet<String>,
+) -> anyhow::Result<()> {
+    if child_id.trim().is_empty() {
+        anyhow::bail!("history benchmark {family} cases require non-empty id");
+    }
+    let key = format!("{case_id}::{family}::{child_id}");
+    if !seen.insert(key.clone()) {
+        anyhow::bail!("duplicate history benchmark child case id `{key}`");
+    }
+    Ok(())
+}
+
+fn score_history_bench_case(
+    case: &HistoryBenchCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchCaseReport> {
+    let store = SqliteStore::open(":memory:")?;
+    store.put_history_snapshot(&case.snapshot)?;
+    let fixture_repo = prepare_history_bench_repo(&case.id, &case.codeowners)?;
+
+    let similar = case
+        .similar
+        .iter()
+        .map(|child| score_history_bench_similar(&store, child, scores))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let ownership = case
+        .ownership
+        .iter()
+        .map(|child| score_history_bench_ownership(&fixture_repo.path, &store, child, scores))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let reviewers = case
+        .reviewers
+        .iter()
+        .map(|child| score_history_bench_reviewer(&fixture_repo.path, &store, child, scores))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let churn = case
+        .churn
+        .iter()
+        .map(|child| score_history_bench_churn(&store, child, scores))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let provenance = case
+        .provenance
+        .iter()
+        .map(|child| score_history_bench_provenance(&store, child, scores))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let passed = similar.iter().all(|report| report.passed)
+        && ownership.iter().all(|report| report.passed)
+        && reviewers.iter().all(|report| report.passed)
+        && churn.iter().all(|report| report.passed)
+        && provenance.iter().all(|report| report.passed);
+
+    Ok(HistoryBenchCaseReport {
+        id: case.id.clone(),
+        similar,
+        ownership,
+        reviewers,
+        churn,
+        provenance,
+        passed,
+    })
+}
+
+struct HistoryBenchTempRepo {
+    path: PathBuf,
+}
+
+impl Drop for HistoryBenchTempRepo {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn prepare_history_bench_repo(
+    case_id: &str,
+    codeowners: &[String],
+) -> anyhow::Result<HistoryBenchTempRepo> {
+    let stamp = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
+    let path = std::env::temp_dir().join(format!(
+        "open-kioku-history-bench-{}-{}-{}",
+        std::process::id(),
+        stamp,
+        sanitize_temp_path_fragment(case_id)
+    ));
+    fs::create_dir_all(&path)?;
+    if !codeowners.is_empty() {
+        let codeowners_dir = path.join(".github");
+        fs::create_dir_all(&codeowners_dir)?;
+        fs::write(codeowners_dir.join("CODEOWNERS"), codeowners.join("\n"))?;
+    }
+    Ok(HistoryBenchTempRepo { path })
+}
+
+fn score_history_bench_similar(
+    store: &SqliteStore,
+    case: &HistoryBenchSimilarCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchSimilarCaseReport> {
+    let started_at = Instant::now();
+    let report = store.similar_changes(&case.query, 5)?;
+    let latency_ms = elapsed_ms(started_at);
+    record_history_bench_latency(scores, "similar", latency_ms);
+    scores.family_counts.similar += 1;
+
+    let actual_top_5 = report
+        .hits
+        .iter()
+        .map(|hit| hit.change.commit.id.0.clone())
+        .collect::<Vec<_>>();
+    let expected = case.expected_top_5.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = actual_top_5.iter().cloned().collect::<BTreeSet<_>>();
+    let matched = expected.intersection(&actual).cloned().collect::<Vec<_>>();
+    scores.similar_expected_total += expected.len();
+    scores.similar_matched_total += matched.len();
+    let recall_at_5 = ratio(matched.len(), expected.len());
+
+    Ok(HistoryBenchSimilarCaseReport {
+        id: case.id.clone(),
+        expected_top_5: case.expected_top_5.clone(),
+        actual_top_5,
+        matched,
+        recall_at_5,
+        latency_ms,
+        passed: recall_at_5 >= 1.0,
+    })
+}
+
+fn score_history_bench_ownership(
+    repo: &Path,
+    store: &SqliteStore,
+    case: &HistoryBenchOwnershipCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchOwnershipCaseReport> {
+    let started_at = Instant::now();
+    let report = open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+        repo,
+        path: &case.path,
+        history: store,
+        memory_facts: &[],
+        components: Vec::new(),
+    })?;
+    let latency_ms = elapsed_ms(started_at);
+    record_history_bench_latency(scores, "ownership", latency_ms);
+    scores.family_counts.ownership += 1;
+
+    let rank = report
+        .owners
+        .iter()
+        .position(|suggestion| owner_matches_expected(&suggestion.owner, &case.expected_owner))
+        .map(|index| index + 1);
+    let top = report.owners.first();
+    let actual_owner = top.map(|suggestion| owner_display(&suggestion.owner));
+    let actual_source_types = top
+        .map(|suggestion| suggestion.source_types.clone())
+        .unwrap_or_default();
+    let source_types_match = case
+        .expected_source_types
+        .iter()
+        .all(|expected| actual_source_types.contains(expected));
+
+    Ok(HistoryBenchOwnershipCaseReport {
+        id: case.id.clone(),
+        path: case.path.clone(),
+        expected_owner: case.expected_owner.clone(),
+        actual_owner,
+        rank,
+        expected_source_types: case.expected_source_types.clone(),
+        actual_source_types,
+        latency_ms,
+        passed: rank == Some(1) && source_types_match,
+    })
+}
+
+fn score_history_bench_reviewer(
+    repo: &Path,
+    store: &SqliteStore,
+    case: &HistoryBenchReviewerCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchReviewerCaseReport> {
+    let started_at = Instant::now();
+    let ownership = open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
+        repo,
+        path: &case.path,
+        history: store,
+        memory_facts: &[],
+        components: Vec::new(),
+    })?;
+    let report = open_kioku_git::suggest_reviewers(open_kioku_git::ReviewerSuggestionInput {
+        path: &case.path,
+        history: store,
+        ownership: Some(&ownership),
+    })?;
+    let latency_ms = elapsed_ms(started_at);
+    record_history_bench_latency(scores, "reviewers", latency_ms);
+    scores.family_counts.reviewers += 1;
+    scores.reviewer_total += 1;
+
+    let rank = report
+        .suggestions
+        .iter()
+        .position(|suggestion| {
+            owner_matches_expected(&suggestion.reviewer, &case.expected_top_reviewer)
+        })
+        .map(|index| index + 1);
+    let top = report.suggestions.first();
+    let actual_top_reviewer = top.map(|suggestion| owner_display(&suggestion.reviewer));
+    let actual_review_evidence = top.map(|suggestion| suggestion.actual_review_evidence);
+    let inferred_from_authors = top.map(|suggestion| suggestion.inferred_from_authors);
+    let availability_correct = report.availability == case.expected_availability;
+    let actual_review_evidence_correct = case
+        .expected_actual_review_evidence
+        .zip(actual_review_evidence)
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(true);
+    let inferred_from_authors_correct = case
+        .expected_inferred_from_authors
+        .zip(inferred_from_authors)
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(true);
+    let passed = rank == Some(1)
+        && availability_correct
+        && actual_review_evidence_correct
+        && inferred_from_authors_correct;
+    if passed {
+        scores.reviewer_passed += 1;
+    }
+
+    Ok(HistoryBenchReviewerCaseReport {
+        id: case.id.clone(),
+        path: case.path.clone(),
+        expected_top_reviewer: case.expected_top_reviewer.clone(),
+        actual_top_reviewer,
+        rank,
+        expected_availability: case.expected_availability,
+        availability: report.availability,
+        availability_correct,
+        expected_actual_review_evidence: case.expected_actual_review_evidence,
+        actual_review_evidence,
+        actual_review_evidence_correct,
+        expected_inferred_from_authors: case.expected_inferred_from_authors,
+        inferred_from_authors,
+        inferred_from_authors_correct,
+        latency_ms,
+        passed,
+    })
+}
+
+fn score_history_bench_churn(
+    store: &SqliteStore,
+    case: &HistoryBenchChurnCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchChurnCaseReport> {
+    let target = history_bench_churn_target(case);
+    let started_at = Instant::now();
+    let summary = if let Some(path) = &case.path {
+        store.churn_for_file(path)?
+    } else if let Some(module) = &case.module {
+        store.churn_for_module(module)?
+    } else if let Some(symbol_id) = &case.symbol_id {
+        store.churn_for_symbol(symbol_id)?
+    } else {
+        unreachable!("history benchmark churn targets are validated before scoring");
+    };
+    let latency_ms = elapsed_ms(started_at);
+    record_history_bench_latency(scores, "churn", latency_ms);
+    scores.family_counts.churn += 1;
+
+    let passed = summary.stats.touch_count >= case.min_touch_count
+        && summary.stats.hotspot_score >= case.min_hotspot_score;
+    Ok(HistoryBenchChurnCaseReport {
+        id: case.id.clone(),
+        target,
+        touch_count: summary.stats.touch_count,
+        hotspot_score: summary.stats.hotspot_score,
+        min_touch_count: case.min_touch_count,
+        min_hotspot_score: case.min_hotspot_score,
+        confidence: summary.confidence,
+        latency_ms,
+        passed,
+    })
+}
+
+fn score_history_bench_provenance(
+    store: &SqliteStore,
+    case: &HistoryBenchProvenanceCase,
+    scores: &mut HistoryBenchScoring,
+) -> anyhow::Result<HistoryBenchProvenanceCaseReport> {
+    let started_at = Instant::now();
+    let report = store.provenance_for_path(&case.path, case.limit.unwrap_or(20))?;
+    let latency_ms = elapsed_ms(started_at);
+    record_history_bench_latency(scores, "provenance", latency_ms);
+    scores.family_counts.provenance += 1;
+
+    let actual_first_seen = report
+        .first_seen
+        .as_ref()
+        .map(|touch| touch.commit.id.0.clone());
+    let actual_last_touched = report
+        .last_touched
+        .as_ref()
+        .map(|touch| touch.commit.id.0.clone());
+    let passed = actual_first_seen.as_deref() == Some(case.expected_first_seen.as_str())
+        && actual_last_touched.as_deref() == Some(case.expected_last_touched.as_str())
+        && report.recent_touches.len() >= case.min_recent_touches;
+
+    Ok(HistoryBenchProvenanceCaseReport {
+        id: case.id.clone(),
+        path: case.path.clone(),
+        expected_first_seen: case.expected_first_seen.clone(),
+        actual_first_seen,
+        expected_last_touched: case.expected_last_touched.clone(),
+        actual_last_touched,
+        min_recent_touches: case.min_recent_touches,
+        recent_touch_count: report.recent_touches.len(),
+        confidence: report.confidence,
+        latency_ms,
+        passed,
+    })
+}
+
+fn history_bench_churn_target(case: &HistoryBenchChurnCase) -> String {
+    if let Some(path) = &case.path {
+        format!("file:{}", path.display())
+    } else if let Some(module) = &case.module {
+        format!("module:{}", module.display())
+    } else if let Some(symbol_id) = &case.symbol_id {
+        format!("symbol:{}", symbol_id.0)
+    } else {
+        "unknown".into()
+    }
+}
+
+fn history_bench_failures(report: &HistoryBenchCaseReport) -> Vec<String> {
+    let mut failures = Vec::new();
+    for case in &report.similar {
+        if !case.passed {
+            failures.push(format!(
+                "{}::similar::{} expected Top-5 {:?}, got {:?}",
+                report.id, case.id, case.expected_top_5, case.actual_top_5
+            ));
+        }
+    }
+    for case in &report.ownership {
+        if !case.passed {
+            failures.push(format!(
+                "{}::ownership::{} expected owner `{}` at rank 1, got {:?} at rank {:?}",
+                report.id, case.id, case.expected_owner, case.actual_owner, case.rank
+            ));
+        }
+    }
+    for case in &report.reviewers {
+        if !case.passed {
+            failures.push(format!(
+                "{}::reviewers::{} expected reviewer `{}` at rank 1 with {:?}, got {:?} at rank {:?} with {:?}",
+                report.id,
+                case.id,
+                case.expected_top_reviewer,
+                case.expected_availability,
+                case.actual_top_reviewer,
+                case.rank,
+                case.availability
+            ));
+        }
+    }
+    for case in &report.churn {
+        if !case.passed {
+            failures.push(format!(
+                "{}::churn::{} expected touch_count >= {} and hotspot_score >= {:.3}, got {} and {:.3}",
+                report.id,
+                case.id,
+                case.min_touch_count,
+                case.min_hotspot_score,
+                case.touch_count,
+                case.hotspot_score
+            ));
+        }
+    }
+    for case in &report.provenance {
+        if !case.passed {
+            failures.push(format!(
+                "{}::provenance::{} expected first/last {}/{}, got {:?}/{:?}",
+                report.id,
+                case.id,
+                case.expected_first_seen,
+                case.expected_last_touched,
+                case.actual_first_seen,
+                case.actual_last_touched
+            ));
+        }
+    }
+    failures
+}
+
+fn record_history_bench_latency(scores: &mut HistoryBenchScoring, family: &str, latency_ms: f64) {
+    if family == "similar" {
+        scores.similar_latencies_ms.push(latency_ms);
+    }
+    if matches!(family, "ownership" | "churn") {
+        scores.ownership_churn_latencies_ms.push(latency_ms);
+    }
+    scores
+        .family_latencies_ms
+        .entry(family.to_string())
+        .or_default()
+        .push(latency_ms);
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn p95_ms(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let index = ((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+    sorted[index.min(sorted.len() - 1)]
+}
+
+fn default_history_bench_min_recent_touches() -> usize {
+    1
+}
+
+fn print_history_bench_report(report: &HistoryBenchReport) {
+    println!(
+        "History API benchmark: {} case set(s); reviewer accuracy {:.3} (min {:.3}); similar Top-5 recall {:.3} (min {:.3})",
+        report.case_count,
+        report.reviewer_accuracy,
+        report.min_reviewer_accuracy,
+        report.similar_recall_at_5,
+        report.min_similar_recall_at_5
+    );
+    println!(
+        "Latency p95: similar {:.2}ms (max {:.2}ms); ownership/churn {:.2}ms (max {:.2}ms)",
+        report.similar_p95_ms,
+        report.max_similar_p95_ms,
+        report.ownership_churn_p95_ms,
+        report.max_lookup_p95_ms
+    );
+    println!(
+        "Families: similar {}, ownership {}, reviewers {}, churn {}, provenance {}",
+        report.family_counts.similar,
+        report.family_counts.ownership,
+        report.family_counts.reviewers,
+        report.family_counts.churn,
+        report.family_counts.provenance
+    );
+    for (family, latency_ms) in &report.family_p95_ms {
+        println!("  {family}: p95 {latency_ms:.2}ms");
+    }
+    for case in &report.cases {
+        let status = if case.passed { "pass" } else { "fail" };
+        println!("  {status}: {}", case.id);
+    }
+    if !report.failures.is_empty() {
+        println!("Failures:");
+        for failure in &report.failures {
+            println!("- {failure}");
         }
     }
 }

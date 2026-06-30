@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "public-history-api-smoke",
+      "codeowners": [
+        "src/auth/* auth-owner@example.com",
+        "src/payments/* payments-owner@example.com"
+      ],
+      "snapshot": {
+        "schema_version": 1,
+        "commits": [
+          {
+            "id": "auth-intro",
+            "parent_ids": [],
+            "author": { "name": "Auth Owner", "email": "auth-owner@example.com" },
+            "committer": null,
+            "authored_at": "2026-06-01T12:00:00Z",
+            "committed_at": "2026-06-01T12:00:00Z",
+            "summary": "Add auth session validation",
+            "message": "Add auth session validation for login requests",
+            "file_count": 1
+          },
+          {
+            "id": "auth-expiry-fix",
+            "parent_ids": ["auth-intro"],
+            "author": { "name": "Auth Owner", "email": "auth-owner@example.com" },
+            "committer": null,
+            "authored_at": "2026-06-02T12:00:00Z",
+            "committed_at": "2026-06-02T12:00:00Z",
+            "summary": "Fix token expiration in login flow",
+            "message": "Fix login token expiration by updating auth session validation and auth tests",
+            "file_count": 2
+          },
+          {
+            "id": "auth-hardening",
+            "parent_ids": ["auth-expiry-fix"],
+            "author": { "name": "Security Reviewer", "email": "reviewer@example.com" },
+            "committer": null,
+            "authored_at": "2026-06-03T12:00:00Z",
+            "committed_at": "2026-06-03T12:00:00Z",
+            "summary": "Harden auth session checks",
+            "message": "Review and harden auth session checks after token expiry fix",
+            "file_count": 1
+          },
+          {
+            "id": "payment-capture-fix",
+            "parent_ids": ["auth-hardening"],
+            "author": { "name": "Payments Owner", "email": "payments-owner@example.com" },
+            "committer": null,
+            "authored_at": "2026-06-04T12:00:00Z",
+            "committed_at": "2026-06-04T12:00:00Z",
+            "summary": "Retry failed payment capture",
+            "message": "Retry transient capture failures and extend payment tests",
+            "file_count": 2
+          },
+          {
+            "id": "payment-format-cleanup",
+            "parent_ids": ["payment-capture-fix"],
+            "author": { "name": "Payments Owner", "email": "payments-owner@example.com" },
+            "committer": null,
+            "authored_at": "2026-06-05T12:00:00Z",
+            "committed_at": "2026-06-05T12:00:00Z",
+            "summary": "Format payment capture module",
+            "message": "Apply formatter to payment capture code",
+            "file_count": 1
+          }
+        ],
+        "file_touches": [
+          {
+            "id": "auth-intro-file",
+            "commit_id": "auth-intro",
+            "path": "src/auth/session.rs",
+            "previous_path": null,
+            "change_kind": "added",
+            "additions": 45,
+            "deletions": 0,
+            "touched_at": "2026-06-01T12:00:00Z"
+          },
+          {
+            "id": "auth-expiry-file",
+            "commit_id": "auth-expiry-fix",
+            "path": "src/auth/session.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 12,
+            "deletions": 3,
+            "touched_at": "2026-06-02T12:00:00Z"
+          },
+          {
+            "id": "auth-expiry-tests",
+            "commit_id": "auth-expiry-fix",
+            "path": "tests/auth_session.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 18,
+            "deletions": 1,
+            "touched_at": "2026-06-02T12:00:00Z"
+          },
+          {
+            "id": "auth-hardening-file",
+            "commit_id": "auth-hardening",
+            "path": "src/auth/session.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 8,
+            "deletions": 2,
+            "touched_at": "2026-06-03T12:00:00Z"
+          },
+          {
+            "id": "payment-fix-source",
+            "commit_id": "payment-capture-fix",
+            "path": "src/payments/capture.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 20,
+            "deletions": 4,
+            "touched_at": "2026-06-04T12:00:00Z"
+          },
+          {
+            "id": "payment-fix-test",
+            "commit_id": "payment-capture-fix",
+            "path": "tests/payment_capture.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 30,
+            "deletions": 2,
+            "touched_at": "2026-06-04T12:00:00Z"
+          },
+          {
+            "id": "payment-format-source",
+            "commit_id": "payment-format-cleanup",
+            "path": "src/payments/capture.rs",
+            "previous_path": null,
+            "change_kind": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "touched_at": "2026-06-05T12:00:00Z"
+          }
+        ],
+        "symbol_touches": [
+          {
+            "id": "auth-session-symbol",
+            "commit_id": "auth-expiry-fix",
+            "symbol_id": "auth-validate-session",
+            "qualified_name": "crate::auth::validate_session",
+            "file_path": "src/auth/session.rs",
+            "change_kind": "modified",
+            "line_ranges": [{ "start": 10, "end": 24 }],
+            "confidence": "medium",
+            "uncertainty": [],
+            "touched_at": "2026-06-02T12:00:00Z"
+          },
+          {
+            "id": "payment-capture-symbol",
+            "commit_id": "payment-capture-fix",
+            "symbol_id": "payments-capture-payment",
+            "qualified_name": "crate::payments::capture_payment",
+            "file_path": "src/payments/capture.rs",
+            "change_kind": "modified",
+            "line_ranges": [{ "start": 20, "end": 44 }],
+            "confidence": "medium",
+            "uncertainty": [],
+            "touched_at": "2026-06-04T12:00:00Z"
+          }
+        ],
+        "cochange_edges": [
+          {
+            "id": "auth-tests-cochange",
+            "path": "src/auth/session.rs",
+            "cochanged_path": "tests/auth_session.rs",
+            "commit_count": 2,
+            "recency_weight": 1.9,
+            "last_changed_at": "2026-06-02T12:00:00Z",
+            "sample_commits": ["auth-expiry-fix"],
+            "test_corun": true
+          },
+          {
+            "id": "payment-tests-cochange",
+            "path": "src/payments/capture.rs",
+            "cochanged_path": "tests/payment_capture.rs",
+            "commit_count": 2,
+            "recency_weight": 1.7,
+            "last_changed_at": "2026-06-04T12:00:00Z",
+            "sample_commits": ["payment-capture-fix"],
+            "test_corun": true
+          }
+        ],
+        "reviewer_evidence": [
+          {
+            "id": "auth-approval-review",
+            "commit_id": "auth-expiry-fix",
+            "path": "src/auth/session.rs",
+            "reviewer": { "name": "Security Reviewer", "email": "reviewer@example.com" },
+            "role": "approver",
+            "observed_at": "2026-06-03T12:00:00Z",
+            "source": "history-bench-pr-review",
+            "confidence": "high"
+          }
+        ]
+      },
+      "similar": [
+        {
+          "id": "auth-token-expiry",
+          "query": {
+            "task": "fix token expiration",
+            "paths": ["src/auth/session.rs"],
+            "symbols": ["validate_session"]
+          },
+          "expected_top_5": ["auth-expiry-fix"]
+        },
+        {
+          "id": "payment-retry",
+          "query": {
+            "task": "retry failed payment capture",
+            "paths": ["src/payments/capture.rs"],
+            "symbols": ["capture_payment"]
+          },
+          "expected_top_5": ["payment-capture-fix"]
+        }
+      ],
+      "ownership": [
+        {
+          "id": "auth-owner-codeowners-and-history",
+          "path": "src/auth/session.rs",
+          "expected_owner": "auth-owner@example.com",
+          "expected_source_types": ["codeowners", "git_history"]
+        }
+      ],
+      "reviewers": [
+        {
+          "id": "auth-approval-outranks-owner",
+          "path": "src/auth/session.rs",
+          "expected_top_reviewer": "reviewer@example.com",
+          "expected_availability": "actual_review_evidence",
+          "expected_actual_review_evidence": true,
+          "expected_inferred_from_authors": false
+        }
+      ],
+      "churn": [
+        {
+          "id": "auth-file-churn",
+          "path": "src/auth/session.rs",
+          "min_touch_count": 3,
+          "min_hotspot_score": 0.01
+        },
+        {
+          "id": "auth-module-churn",
+          "module": "src/auth",
+          "min_touch_count": 3,
+          "min_hotspot_score": 0.01
+        },
+        {
+          "id": "auth-symbol-churn",
+          "symbol_id": "auth-validate-session",
+          "min_touch_count": 1,
+          "min_hotspot_score": 0.01
+        }
+      ],
+      "provenance": [
+        {
+          "id": "auth-file-provenance",
+          "path": "src/auth/session.rs",
+          "limit": 5,
+          "expected_first_seen": "auth-intro",
+          "expected_last_touched": "auth-hardening",
+          "min_recent_touches": 3
+        }
+      ]
+    }
+  ]
+}
