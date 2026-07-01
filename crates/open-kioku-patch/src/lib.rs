@@ -11,8 +11,9 @@ use open_kioku_contract::{
 };
 use open_kioku_core::{
     AnalysisFact, BoundaryExpansionRequirement, BoundaryForbiddenRule, ChangeBoundary, Confidence,
-    ConfidenceBreakdown, EvidenceSourceType, FileId, GraphEdge, GraphEdgeType, GraphNode,
-    ImpactReport, PatchId, PatchPlan, PlanReport, RiskReport, SearchResult, SymbolKind, TestTarget,
+    ConfidenceBreakdown, EvidenceQuality, EvidenceSourceType, FileId, GraphEdge, GraphEdgeType,
+    GraphNode, ImpactReport, PatchId, PatchPlan, PlanReport, RiskReport, SearchResult, SymbolKind,
+    TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_impact::ImpactEngine;
@@ -111,6 +112,8 @@ pub struct VerifyChangeInput {
     pub check_dependency_delta: bool,
     #[serde(skip)]
     pub architecture_policy: Option<ArchitecturePolicy>,
+    #[serde(skip)]
+    pub suppress_plan_validation_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +138,8 @@ pub struct ChangeVerificationReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_ledger_path: Option<PathBuf>,
     pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub evidence_quality: EvidenceQuality,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +185,8 @@ pub struct VerificationPolicySnapshot {
     pub forbidden_files: Vec<PathBuf>,
     pub architecture_constraints: Vec<String>,
     pub expansion_requirements: Vec<String>,
+    #[serde(default)]
+    pub evidence_quality: EvidenceQuality,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +288,11 @@ impl<'a> ChangeVerifier<'a> {
         if input.traceability_strict {
             boundary_violations.extend(unknown_evidence_ref_violations(plan, &input.evidence_refs));
         }
+        let evidence_quality = plan.evidence_quality.clone();
+        boundary_violations.extend(evidence_quality_failures(
+            &evidence_quality,
+            input.traceability_strict,
+        ));
         let changed_symbols = changed_symbols(self.store, &changed_files)?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
         let missing_tests = missing_tests(plan, &recommended_tests);
@@ -311,6 +323,12 @@ impl<'a> ChangeVerifier<'a> {
             &changed_files,
             &input.evidence_refs,
         ));
+        warnings.extend(evidence_quality_warnings(
+            &evidence_quality,
+            input.traceability_strict,
+        ));
+        warnings.extend(plan_caveat_warnings(plan));
+        warnings.extend(pending_plan_validation_warnings(plan, &input));
         warnings.extend(runtime_warnings(self.store, &changed_files)?);
         let traceability = verification_traceability(plan, &input);
 
@@ -341,6 +359,7 @@ impl<'a> ChangeVerifier<'a> {
             validation_attestations: Vec::new(),
             validation_ledger_path: None,
             evidence_refs: input.evidence_refs,
+            evidence_quality,
         })
     }
 }
@@ -411,6 +430,7 @@ impl<'a> ContractVerifier<'a> {
         base_input.run_commands = false;
         base_input.write_attestation = false;
         base_input.validation_attestations.clear();
+        base_input.suppress_plan_validation_pending = true;
         let mut change_report = ChangeVerifier {
             store: self.store,
             search_index: self.search_index,
@@ -498,6 +518,7 @@ struct ValidationRunReport {
     attestations: Vec<ValidationAttestation>,
     ledger_path: Option<PathBuf>,
     findings: Vec<VerificationFinding>,
+    warnings: Vec<VerificationFinding>,
 }
 
 fn verify_contract_validation(
@@ -513,6 +534,7 @@ fn verify_contract_validation(
             attestations: Vec::new(),
             ledger_path: None,
             findings: Vec::new(),
+            warnings: Vec::new(),
         });
     }
 
@@ -538,6 +560,21 @@ fn verify_contract_validation(
                 .collect(),
         )
     };
+
+    let mut warnings = Vec::new();
+    if !input.run_commands && attestations.is_empty() {
+        for requirement in &requirements {
+            warnings.push(VerificationFinding {
+                path: None,
+                kind: "validation_attestation_pending".into(),
+                reason: format!(
+                    "required validation command `{}` has not been run and no attestation was supplied",
+                    requirement.command
+                ),
+                evidence_refs: evidence_ref_strings(&requirement.evidence_refs),
+            });
+        }
+    }
 
     let mut findings =
         validate_attestations(contract, &requirements, &contract_digest, &attestations);
@@ -578,6 +615,7 @@ fn verify_contract_validation(
         attestations,
         ledger_path,
         findings,
+        warnings,
     })
 }
 
@@ -586,6 +624,7 @@ fn apply_validation_report(report: &mut ChangeVerificationReport, validation: Va
     report.validation_attestations = validation.attestations;
     report.validation_ledger_path = validation.ledger_path;
     report.boundary_violations.extend(validation.findings);
+    report.warnings.extend(validation.warnings);
     refresh_verdict(report);
 }
 
@@ -937,6 +976,7 @@ fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
             caveats: contract.confidence.uncertainty.clone(),
         },
         score_breakdown: Vec::new(),
+        evidence_quality: contract_evidence_quality(contract),
     }
 }
 
@@ -1032,6 +1072,7 @@ fn policy_snapshot(
             .iter()
             .map(|requirement| requirement.scope.clone())
             .collect(),
+        evidence_quality: contract_evidence_quality(contract),
     }
 }
 
@@ -1067,6 +1108,15 @@ fn contract_confidence(contract: &ChangeContractV1) -> Confidence {
         open_kioku_contract::ConfidenceLevel::High => Confidence::High,
         open_kioku_contract::ConfidenceLevel::Exact => Confidence::Exact,
     }
+}
+
+fn contract_evidence_quality(contract: &ChangeContractV1) -> EvidenceQuality {
+    contract
+        .extensions
+        .get("evidence_quality")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<EvidenceQuality>(value).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2371,6 +2421,103 @@ fn unknown_evidence_ref_violations(
         .collect()
 }
 
+fn evidence_quality_failures(
+    quality: &EvidenceQuality,
+    traceability_strict: bool,
+) -> Vec<VerificationFinding> {
+    if traceability_strict && quality.is_stale() {
+        return vec![VerificationFinding {
+            path: None,
+            kind: "stale_evidence_quality".into(),
+            reason: "source plan evidence quality is stale under strict verification policy".into(),
+            evidence_refs: Vec::new(),
+        }];
+    }
+    Vec::new()
+}
+
+fn evidence_quality_warnings(
+    quality: &EvidenceQuality,
+    traceability_strict: bool,
+) -> Vec<VerificationFinding> {
+    let mut warnings = Vec::new();
+    if !(traceability_strict && quality.is_stale()) {
+        for caveat in &quality.caveats {
+            warnings.push(VerificationFinding {
+                path: None,
+                kind: if caveat.contains("stale") {
+                    "stale_evidence_quality"
+                } else {
+                    "evidence_quality_caveat"
+                }
+                .into(),
+                reason: caveat.clone(),
+                evidence_refs: Vec::new(),
+            });
+        }
+    }
+    warnings
+}
+
+fn plan_caveat_warnings(plan: &PlanReport) -> Vec<VerificationFinding> {
+    plan.confidence_breakdown
+        .caveats
+        .iter()
+        .filter(|caveat| !plan.evidence_quality.caveats.contains(*caveat))
+        .map(|caveat| VerificationFinding {
+            path: None,
+            kind: "confidence_caveat".into(),
+            reason: caveat.clone(),
+            evidence_refs: evidence_refs_for_caveat(plan, caveat),
+        })
+        .collect()
+}
+
+fn pending_plan_validation_warnings(
+    plan: &PlanReport,
+    input: &VerifyChangeInput,
+) -> Vec<VerificationFinding> {
+    if input.suppress_plan_validation_pending
+        || input.run_commands
+        || !input.validation_attestations.is_empty()
+    {
+        return Vec::new();
+    }
+    plan.validation
+        .iter()
+        .filter_map(|test| {
+            test.command.as_ref().map(|command| VerificationFinding {
+                path: Some(PathBuf::from(test.file_id.0.clone())),
+                kind: "validation_command_pending".into(),
+                reason: format!(
+                    "planned validation command `{command}` has not been run during verification"
+                ),
+                evidence_refs: test.evidence_refs.clone(),
+            })
+        })
+        .collect()
+}
+
+fn evidence_refs_for_caveat(plan: &PlanReport, caveat: &str) -> Vec<String> {
+    if caveat.contains("validation") {
+        return validation_plan_evidence_refs(plan);
+    }
+    if caveat.contains("boundary") {
+        return boundary_plan_evidence_refs(plan);
+    }
+    if caveat.contains("runtime") {
+        return plan
+            .runtime_signals
+            .iter()
+            .map(|signal| signal.id.clone())
+            .collect();
+    }
+    if caveat.contains("exact") || caveat.contains("reference") || caveat.contains("symbol") {
+        return impact_plan_evidence_refs(plan);
+    }
+    Vec::new()
+}
+
 fn verification_traceability(
     plan: &PlanReport,
     input: &VerifyChangeInput,
@@ -2851,6 +2998,11 @@ mod tests {
             self
         }
 
+        fn without_runtime(mut self) -> Self {
+            self.facts.clear();
+            self
+        }
+
         fn with_file_text(mut self, path: &str, text: &str) -> Self {
             let file = self.ensure_file(path);
             self.chunks.push(CodeChunk {
@@ -3145,7 +3297,7 @@ mod tests {
             adapted.boundary_violations.len(),
             direct.boundary_violations.len()
         );
-        assert_eq!(adapted.warnings.len(), direct.warnings.len());
+        assert!(adapted.warnings.len() >= direct.warnings.len());
     }
 
     #[test]
@@ -3205,6 +3357,93 @@ mod tests {
             .boundary_violations
             .iter()
             .any(|finding| finding.kind == "forbidden_boundary"));
+    }
+
+    #[test]
+    fn contract_verifier_fails_stale_quality_under_strict_policy() {
+        let store = RuntimeStore::new().without_runtime();
+        let mut plan = plan_with_boundary_evidence();
+        plan.evidence_quality = stale_evidence_quality();
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    traceability_strict: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        assert!(report
+            .change_report
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "stale_evidence_quality"));
+    }
+
+    #[test]
+    fn contract_verifier_warns_when_validation_evidence_is_missing() {
+        let store = RuntimeStore::new().without_runtime();
+        let mut plan = plan_with_validation_command("cargo test");
+        plan.evidence_quality = complete_evidence_quality();
+        plan.confidence_breakdown.caveats.clear();
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Warn);
+        assert!(report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "validation_attestation_pending"));
+    }
+
+    #[test]
+    fn contract_verifier_passes_when_quality_and_validation_are_complete() {
+        let store = RuntimeStore::new().without_runtime();
+        let mut plan = plan_with_validation_command("cargo test");
+        plan.evidence_quality = complete_evidence_quality();
+        plan.confidence_summary = "exact confidence".into();
+        plan.confidence_breakdown = ConfidenceBreakdown {
+            overall_enum: Confidence::Exact,
+            overall_score: 0.96,
+            components: vec![],
+            blockers: vec![],
+            caveats: vec![],
+        };
+        let contract = ContractBuilder::from_plan(&plan).unwrap();
+        let attestation = passed_attestation_for_contract(&contract);
+
+        let report = ContractVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &contract,
+                VerifyChangeInput {
+                    changed_files: vec![PathBuf::from("src/handler.rs")],
+                    validation_attestations: vec![attestation],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.decision, VerificationDecision::Pass);
+        assert!(report.change_report.warnings.is_empty());
+        assert!(report.change_report.boundary_violations.is_empty());
     }
 
     #[test]
@@ -3651,6 +3890,7 @@ mod tests {
                 caveats: vec!["runtime corroboration is absent".into()],
             },
             score_breakdown: vec![],
+            evidence_quality: Default::default(),
         }
     }
 
@@ -3670,6 +3910,29 @@ mod tests {
         plan.evidence_by_section
             .insert("validation".into(), vec!["boundary:allow".into()]);
         plan
+    }
+
+    fn complete_evidence_quality() -> EvidenceQuality {
+        EvidenceQuality {
+            index_mode: "full".into(),
+            freshness: "fresh".into(),
+            exact_reference_available: true,
+            runtime_available: true,
+            history_available: true,
+            test_coverage_available: true,
+            skipped_path_count: 0,
+            unresolved_import_count: 0,
+            ambiguous_edge_count: 0,
+            failed_optional_passes: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
+
+    fn stale_evidence_quality() -> EvidenceQuality {
+        let mut quality = complete_evidence_quality();
+        quality.freshness = "stale".into();
+        quality.refresh_caveats();
+        quality
     }
 
     fn write_minimal_cargo_project(repo: &Path) {

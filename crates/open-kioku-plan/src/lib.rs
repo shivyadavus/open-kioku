@@ -1,9 +1,10 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
-    ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, FileId, ImpactReport,
-    IndexManifest, MemorySearchResult, NegativeEvidence, PlanReport, RiskReport, RuntimeSignal,
-    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, EvidenceQuality,
+    EvidenceSourceType, FileId, ImpactReport, MemorySearchResult, NegativeEvidence, PlanReport,
+    PolicyCheckReport, RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget,
+    ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -113,9 +114,9 @@ impl<'a> PlanEngine<'a> {
             primary_context.is_empty(),
             &unmatched_anchors,
         );
-        if let Some(manifest) = self.store.manifest()? {
-            apply_discovery_skip_caveat(&mut risk, &manifest);
-        }
+        let evidence_quality =
+            evidence_quality_for_store(self.store, context.architecture_policy.as_ref())?;
+        apply_evidence_quality_caveats(&mut risk, &evidence_quality);
         let relevant_symbols = context
             .primary_symbols
             .iter()
@@ -157,7 +158,7 @@ impl<'a> PlanEngine<'a> {
             history_components.len(),
         );
         let score_breakdown = plan_score_breakdown(&risk, &history_components);
-        let confidence_breakdown = confidence_for_plan(
+        let mut confidence_breakdown = confidence_for_plan(
             &primary_context,
             &impact,
             &validation,
@@ -166,6 +167,7 @@ impl<'a> PlanEngine<'a> {
             &evidence,
             context.runtime_signals.len(),
         );
+        apply_evidence_quality_to_confidence(&mut confidence_breakdown, &evidence_quality);
         let confidence_summary = confidence_summary(&confidence_breakdown);
         let evidence_by_section = evidence_by_section(
             &primary_context,
@@ -196,6 +198,7 @@ impl<'a> PlanEngine<'a> {
             confidence_summary,
             confidence_breakdown,
             score_breakdown,
+            evidence_quality,
         };
         report.reconcile_score_breakdown();
         Ok(report)
@@ -1365,25 +1368,87 @@ fn summary(
     )
 }
 
-fn apply_discovery_skip_caveat(risk: &mut RiskReport, manifest: &IndexManifest) {
-    let skipped = manifest.quality.skipped_paths.len();
-    if skipped == 0 {
+fn evidence_quality_for_store(
+    store: &dyn OkStore,
+    architecture_policy: Option<&PolicyCheckReport>,
+) -> Result<EvidenceQuality> {
+    let manifest = store.manifest()?;
+    let static_facts = store.analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?;
+    let unresolved_import_count = static_facts
+        .iter()
+        .filter(|fact| fact.message.contains("unresolved import"))
+        .count();
+    let ambiguous_edge_count = static_facts
+        .iter()
+        .filter(|fact| {
+            fact.message.contains("ambiguous import") || fact.message.contains("ambiguity:")
+        })
+        .count();
+    let mut quality = EvidenceQuality::from_manifest_with_counts(
+        manifest.as_ref(),
+        unresolved_import_count,
+        ambiguous_edge_count,
+    );
+    if let Some(policy) = architecture_policy {
+        if policy.unknown_edge_count > 0 {
+            quality.ambiguous_edge_count += policy.unknown_edge_count;
+            push_quality_caveat(
+                &mut quality,
+                format!(
+                    "architecture policy reported {} unknown dependency edge(s); cross-component confidence is reduced",
+                    policy.unknown_edge_count
+                ),
+            );
+        }
+        if policy.unknown_edges_truncated {
+            push_quality_caveat(
+                &mut quality,
+                "architecture policy unknown-edge samples were truncated".into(),
+            );
+        }
+    }
+    Ok(quality)
+}
+
+fn apply_evidence_quality_caveats(risk: &mut RiskReport, quality: &EvidenceQuality) {
+    if quality.caveats.is_empty() {
         return;
     }
-    let mut reasons = manifest
-        .quality
-        .skip_counts
-        .iter()
-        .map(|(reason, count)| format!("{reason:?}={count}"))
-        .collect::<Vec<_>>();
-    reasons.sort();
-    risk.reasons.push(format!(
-        "Index discovery skipped {skipped} path(s) ({}); evidence may be incomplete for skipped areas.",
-        reasons.join(", ")
-    ));
-    risk.score = (risk.score + 0.05).min(1.0);
+    for caveat in &quality.caveats {
+        let reason = format!("Evidence quality caveat: {caveat}");
+        if !risk.reasons.contains(&reason) {
+            risk.reasons.push(reason);
+        }
+    }
+    let quality_penalty = if quality.is_stale()
+        || quality.index_mode == "fast"
+        || quality.unresolved_import_count > 0
+        || quality.ambiguous_edge_count > 0
+    {
+        0.10
+    } else {
+        0.05
+    };
+    risk.score = (risk.score + quality_penalty).min(1.0);
     if risk.level == "low" {
         risk.level = "medium".into();
+    }
+}
+
+fn apply_evidence_quality_to_confidence(
+    confidence: &mut ConfidenceBreakdown,
+    quality: &EvidenceQuality,
+) {
+    for caveat in &quality.caveats {
+        if !confidence.caveats.contains(caveat) {
+            confidence.caveats.push(caveat.clone());
+        }
+    }
+}
+
+fn push_quality_caveat(quality: &mut EvidenceQuality, caveat: String) {
+    if !quality.caveats.contains(&caveat) {
+        quality.caveats.push(caveat);
     }
 }
 
@@ -1403,6 +1468,7 @@ fn render_text(report: &PlanReport) -> String {
         out.push_str(&format!("  - {reason}\n"));
     }
     write_confidence_text(&mut out, &report.confidence_breakdown);
+    write_evidence_quality_text(&mut out, &report.evidence_quality);
     write_negative_evidence_text(&mut out, &report.negative_evidence);
     write_evidence_provenance_text(&mut out, report);
 
@@ -1487,6 +1553,9 @@ fn render_markdown(report: &PlanReport) -> String {
         report.confidence_breakdown.overall_enum, report.confidence_breakdown.overall_score
     ));
     write_markdown_confidence_breakdown(&mut out, &report.confidence_breakdown);
+
+    out.push_str("\n## Evidence Quality\n\n");
+    write_markdown_evidence_quality(&mut out, &report.evidence_quality);
 
     out.push_str("\n## Negative Evidence\n\n");
     write_markdown_negative_evidence(&mut out, &report.negative_evidence);
@@ -1720,6 +1789,69 @@ fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceB
             component.contribution,
             one_line(&component.rationale)
         ));
+    }
+}
+
+fn write_evidence_quality_text(out: &mut String, quality: &EvidenceQuality) {
+    out.push_str("Evidence quality:\n");
+    out.push_str(&format!("  - mode: {}\n", quality.index_mode));
+    out.push_str(&format!("  - freshness: {}\n", quality.freshness));
+    out.push_str(&format!(
+        "  - exact references: {}\n",
+        quality.exact_reference_available
+    ));
+    out.push_str(&format!("  - runtime: {}\n", quality.runtime_available));
+    out.push_str(&format!("  - history: {}\n", quality.history_available));
+    out.push_str(&format!(
+        "  - coverage/JUnit: {}\n",
+        quality.test_coverage_available
+    ));
+    out.push_str(&format!(
+        "  - skipped paths: {}, unresolved imports: {}, ambiguous edges: {}\n",
+        quality.skipped_path_count, quality.unresolved_import_count, quality.ambiguous_edge_count
+    ));
+    if !quality.caveats.is_empty() {
+        out.push_str("Evidence quality caveats:\n");
+        for caveat in &quality.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+}
+
+fn write_markdown_evidence_quality(out: &mut String, quality: &EvidenceQuality) {
+    out.push_str(&format!("- Index mode: `{}`\n", quality.index_mode));
+    out.push_str(&format!("- Freshness: `{}`\n", quality.freshness));
+    out.push_str(&format!(
+        "- Exact references: `{}`\n",
+        quality.exact_reference_available
+    ));
+    out.push_str(&format!(
+        "- Runtime evidence: `{}`\n",
+        quality.runtime_available
+    ));
+    out.push_str(&format!(
+        "- History evidence: `{}`\n",
+        quality.history_available
+    ));
+    out.push_str(&format!(
+        "- Coverage or JUnit evidence: `{}`\n",
+        quality.test_coverage_available
+    ));
+    out.push_str(&format!(
+        "- Counts: skipped paths `{}`, unresolved imports `{}`, ambiguous edges `{}`\n",
+        quality.skipped_path_count, quality.unresolved_import_count, quality.ambiguous_edge_count
+    ));
+    if !quality.failed_optional_passes.is_empty() {
+        out.push_str("- Failed optional passes:\n");
+        for pass in &quality.failed_optional_passes {
+            out.push_str(&format!("  - {pass}\n"));
+        }
+    }
+    if !quality.caveats.is_empty() {
+        out.push_str("- Caveats:\n");
+        for caveat in &quality.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
     }
 }
 
@@ -1977,9 +2109,9 @@ mod tests {
     use chrono::Utc;
     use open_kioku_core::{
         AnalysisFact, CodeChunk, Confidence, ConfidenceBreakdown, Evidence, EvidenceId,
-        EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest, Language,
-        LineRange, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId,
-        SymbolKind, TestTarget, ValidationPlan,
+        EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest, IndexMode,
+        Language, LineRange, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol,
+        SymbolId, SymbolKind, TestTarget, ValidationPlan,
     };
     use open_kioku_storage::IndexData;
     use open_kioku_storage_sqlite::SqliteStore;
@@ -1998,6 +2130,14 @@ mod tests {
     fn test_store_with_analysis_facts_and_quality(
         analysis_facts: Vec<AnalysisFact>,
         quality: open_kioku_core::IndexQuality,
+    ) -> SqliteStore {
+        test_store_with_analysis_facts_quality_and_indexed_at(analysis_facts, quality, Utc::now())
+    }
+
+    fn test_store_with_analysis_facts_quality_and_indexed_at(
+        analysis_facts: Vec<AnalysisFact>,
+        quality: open_kioku_core::IndexQuality,
+        indexed_at: chrono::DateTime<Utc>,
     ) -> SqliteStore {
         let store = SqliteStore::open(":memory:").unwrap();
         let repo_id = RepositoryId::new("repo");
@@ -2097,9 +2237,9 @@ mod tests {
             file_count: 3,
             symbol_count: 1,
             chunk_count: chunks.len(),
-            indexed_at: Utc::now(),
+            indexed_at,
             schema_version: 1,
-            index_mode: Default::default(),
+            index_mode: quality.index_mode,
             phase_reports: Vec::new(),
             quality,
         };
@@ -2280,7 +2420,78 @@ mod tests {
             .risk
             .reasons
             .iter()
-            .any(|reason| reason.contains("Index discovery skipped 1 path")));
+            .any(|reason| reason.contains("index skipped 1 path")));
+        assert_eq!(report.evidence_quality.skipped_path_count, 1);
+        assert!(report
+            .evidence_quality
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("skipped 1 path")));
+    }
+
+    #[test]
+    fn plan_surfaces_stale_index_warning() {
+        let store = test_store_with_analysis_facts_quality_and_indexed_at(
+            Vec::new(),
+            open_kioku_core::IndexQuality::default(),
+            Utc::now() - chrono::Duration::days(14),
+        );
+
+        let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+
+        assert_eq!(report.evidence_quality.freshness, "stale");
+        assert!(report
+            .risk
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("index is stale")));
+    }
+
+    #[test]
+    fn plan_surfaces_fast_mode_caveat() {
+        let quality = open_kioku_core::IndexQuality {
+            index_mode: IndexMode::Fast,
+            ..Default::default()
+        };
+        let store = test_store_with_analysis_facts_and_quality(Vec::new(), quality);
+
+        let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+
+        assert_eq!(report.evidence_quality.index_mode, "fast");
+        assert!(report
+            .confidence_breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("fast index mode")));
+    }
+
+    #[test]
+    fn plan_surfaces_ambiguous_edge_caveat() {
+        let fact = AnalysisFact {
+            id: "ambiguous-import".into(),
+            file_id: FileId::new("auth"),
+            symbol_id: None,
+            target: "crate::payment".into(),
+            target_kind: GraphNodeType::Module,
+            edge_type: GraphEdgeType::Imports,
+            range: None,
+            confidence: Confidence::Low,
+            source: "open-kioku-import-resolver/ambiguous".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message:
+                "ambiguous import `crate::payment` matched 2 candidates; no high-confidence edge emitted"
+                    .into(),
+        };
+        let store = test_store_with_analysis_facts(vec![fact]);
+
+        let report = PlanEngine::new(&store).plan("token", 10).unwrap();
+
+        assert_eq!(report.evidence_quality.ambiguous_edge_count, 1);
+        assert!(report
+            .evidence_quality
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("ambiguous edge")));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -92,6 +92,205 @@ pub struct NegativeEvidence {
     pub reason: String,
     pub confidence: f32,
     pub suggested_next_probe: Option<String>,
+}
+
+const DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EvidenceQuality {
+    pub index_mode: String,
+    pub freshness: String,
+    pub exact_reference_available: bool,
+    pub runtime_available: bool,
+    pub history_available: bool,
+    pub test_coverage_available: bool,
+    pub skipped_path_count: usize,
+    pub unresolved_import_count: usize,
+    pub ambiguous_edge_count: usize,
+    pub failed_optional_passes: Vec<String>,
+    pub caveats: Vec<String>,
+}
+
+impl Default for EvidenceQuality {
+    fn default() -> Self {
+        Self {
+            index_mode: "unknown".into(),
+            freshness: "missing".into(),
+            exact_reference_available: false,
+            runtime_available: false,
+            history_available: false,
+            test_coverage_available: false,
+            skipped_path_count: 0,
+            unresolved_import_count: 0,
+            ambiguous_edge_count: 0,
+            failed_optional_passes: Vec::new(),
+            caveats: vec![
+                "no index manifest was available; evidence quality could not be verified".into(),
+            ],
+        }
+    }
+}
+
+impl EvidenceQuality {
+    pub fn from_manifest(manifest: Option<&IndexManifest>) -> Self {
+        Self::from_manifest_with_counts(manifest, 0, 0)
+    }
+
+    pub fn from_manifest_with_counts(
+        manifest: Option<&IndexManifest>,
+        unresolved_import_count: usize,
+        ambiguous_edge_count: usize,
+    ) -> Self {
+        let Some(manifest) = manifest else {
+            return Self::default();
+        };
+        let quality = &manifest.quality;
+        let unresolved_import_count =
+            unresolved_import_count.max(count_quality_mentions(quality, "unresolved"));
+        let ambiguous_edge_count =
+            ambiguous_edge_count.max(count_quality_mentions(quality, "ambiguous"));
+        let failed_optional_passes = failed_optional_passes(quality);
+        let mut value = Self {
+            index_mode: manifest.index_mode.to_string(),
+            freshness: evidence_freshness(manifest.indexed_at),
+            exact_reference_available: quality.scip_exact_references > 0,
+            runtime_available: quality.runtime_analysis_facts > 0,
+            history_available: quality.git_history_facts > 0,
+            test_coverage_available: quality.coverage_reports > 0 || quality.junit_reports > 0,
+            skipped_path_count: quality.skipped_paths.len(),
+            unresolved_import_count,
+            ambiguous_edge_count,
+            failed_optional_passes,
+            caveats: Vec::new(),
+        };
+        value.refresh_caveats();
+        value
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        self.freshness == "fresh"
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.freshness == "stale"
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.freshness == "missing" || self.index_mode == "unknown"
+    }
+
+    pub fn refresh_caveats(&mut self) {
+        let mut caveats = Vec::new();
+        match self.freshness.as_str() {
+            "stale" => caveats.push(
+                "index is stale; re-index before relying on exact impact or verification gates"
+                    .into(),
+            ),
+            "missing" => caveats.push(
+                "no index manifest was available; evidence quality could not be verified".into(),
+            ),
+            _ => {}
+        }
+        match self.index_mode.as_str() {
+            "fast" => caveats.push(
+                "fast index mode may skip docs, examples, testdata, generated, vendor, unsupported, and oversized paths".into(),
+            ),
+            "balanced" => caveats.push(
+                "balanced index mode may skip expensive optional evidence passes".into(),
+            ),
+            "cross_project" => caveats.push(
+                "cross-project index mode links already-indexed projects without full source parsing".into(),
+            ),
+            _ => {}
+        }
+        if !self.exact_reference_available {
+            caveats.push("exact symbol/reference evidence is unavailable".into());
+        }
+        if !self.runtime_available {
+            caveats.push("runtime evidence is unavailable".into());
+        }
+        if !self.history_available {
+            caveats.push("history evidence is unavailable".into());
+        }
+        if !self.test_coverage_available {
+            caveats.push("coverage or JUnit evidence is unavailable".into());
+        }
+        if self.skipped_path_count > 0 {
+            caveats.push(format!(
+                "index skipped {} path(s); evidence may be incomplete for skipped areas",
+                self.skipped_path_count
+            ));
+        }
+        if self.unresolved_import_count > 0 {
+            caveats.push(format!(
+                "{} unresolved import(s) reduce dependency evidence confidence",
+                self.unresolved_import_count
+            ));
+        }
+        if self.ambiguous_edge_count > 0 {
+            caveats.push(format!(
+                "{} ambiguous edge(s) reduce impact and policy confidence",
+                self.ambiguous_edge_count
+            ));
+        }
+        for pass in &self.failed_optional_passes {
+            caveats.push(format!("optional evidence pass did not complete: {pass}"));
+        }
+        self.caveats = dedup_strings(caveats);
+    }
+}
+
+fn evidence_freshness(indexed_at: DateTime<Utc>) -> String {
+    let max_age = chrono::Duration::days(DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS);
+    if Utc::now().signed_duration_since(indexed_at) > max_age {
+        "stale".into()
+    } else {
+        "fresh".into()
+    }
+}
+
+fn count_quality_mentions(quality: &IndexQuality, needle: &str) -> usize {
+    let needle = needle.to_ascii_lowercase();
+    quality
+        .quality_notes
+        .iter()
+        .chain(quality.semantic_provider_notes.iter())
+        .chain(
+            quality
+                .phase_reports
+                .iter()
+                .flat_map(|report| report.warnings.iter()),
+        )
+        .filter(|note| note.to_ascii_lowercase().contains(&needle))
+        .count()
+}
+
+fn failed_optional_passes(quality: &IndexQuality) -> Vec<String> {
+    let mut passes = Vec::new();
+    for note in quality.quality_notes.iter().chain(
+        quality
+            .phase_reports
+            .iter()
+            .flat_map(|report| report.warnings.iter()),
+    ) {
+        let lowered = note.to_ascii_lowercase();
+        if lowered.contains("failed")
+            || lowered.contains("timed out")
+            || lowered.contains("timedout")
+            || lowered.contains("was enabled but no scip index was imported")
+        {
+            passes.push(note.clone());
+        }
+    }
+    dedup_strings(passes)
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }
 
 impl Default for ConfidenceBreakdown {
@@ -1931,6 +2130,8 @@ pub struct PlanReport {
     pub confidence_breakdown: ConfidenceBreakdown,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
+    #[serde(default)]
+    pub evidence_quality: EvidenceQuality,
 }
 
 impl PlanReport {

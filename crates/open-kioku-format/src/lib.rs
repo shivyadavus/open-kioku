@@ -1,7 +1,7 @@
 use open_kioku_core::{
     ChangeBoundary, CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack,
-    Evidence, LineRange, MemorySearchResult, NegativeEvidence, PlanReport, RuntimeSignal,
-    ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    Evidence, EvidenceQuality, LineRange, MemorySearchResult, NegativeEvidence, PlanReport,
+    RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -67,6 +67,7 @@ pub fn render_plan_toon(report: &PlanReport) -> String {
     push_kv(&mut out, 1, "score", format!("{:.2}", report.risk.score));
     push_string_list(&mut out, 1, "reasons", &report.risk.reasons);
     push_confidence_breakdown(&mut out, &report.confidence_breakdown);
+    push_evidence_quality(&mut out, &report.evidence_quality);
     push_search_results(&mut out, "primary_context", &report.primary_context);
     push_symbols(&mut out, &report.relevant_symbols);
     push_search_results(&mut out, "impact_direct", &report.impact.direct_impacts);
@@ -313,6 +314,41 @@ fn push_confidence_breakdown(out: &mut String, breakdown: &ConfidenceBreakdown) 
     push_score_components(out, "confidence_components", &breakdown.components);
     push_string_list(out, 1, "blockers", &breakdown.blockers);
     push_string_list(out, 1, "caveats", &breakdown.caveats);
+}
+
+fn push_evidence_quality(out: &mut String, quality: &EvidenceQuality) {
+    out.push_str("evidence_quality:\n");
+    push_kv(out, 1, "index_mode", &quality.index_mode);
+    push_kv(out, 1, "freshness", &quality.freshness);
+    push_kv(
+        out,
+        1,
+        "exact_reference_available",
+        quality.exact_reference_available,
+    );
+    push_kv(out, 1, "runtime_available", quality.runtime_available);
+    push_kv(out, 1, "history_available", quality.history_available);
+    push_kv(
+        out,
+        1,
+        "test_coverage_available",
+        quality.test_coverage_available,
+    );
+    push_kv(out, 1, "skipped_path_count", quality.skipped_path_count);
+    push_kv(
+        out,
+        1,
+        "unresolved_import_count",
+        quality.unresolved_import_count,
+    );
+    push_kv(out, 1, "ambiguous_edge_count", quality.ambiguous_edge_count);
+    push_string_list(
+        out,
+        1,
+        "failed_optional_passes",
+        &quality.failed_optional_passes,
+    );
+    push_string_list(out, 1, "caveats", &quality.caveats);
 }
 
 fn top_score_signals(components: &[ScoreComponent]) -> String {
@@ -628,6 +664,7 @@ mod tests {
                 vec!["ev".into()],
                 "format fixture",
             )],
+            evidence_quality: Default::default(),
         };
 
         let rendered = render_plan_toon(&report);
