@@ -76,6 +76,44 @@ A good default tool sequence is:
 
 By default these tools are source-tree read-only. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
 
+## Protocol Hardening
+
+Open Kioku preserves string and numeric JSON-RPC request IDs in responses,
+returns parse errors for malformed JSON, and returns an invalid-request error
+when `method` is missing. Tool execution failures return structured JSON-RPC
+errors instead of crashing the stdio server. Each tool dispatch is bounded by a
+server-side timeout, and idle stdio sessions reopen the local SQLite store after
+an inactivity window.
+
+List/search/query responses include standard pagination metadata:
+
+```json
+{
+  "returned": 20,
+  "limit": 20,
+  "offset": 0,
+  "has_more": true,
+  "truncated": false,
+  "warnings": [],
+  "caveats": []
+}
+```
+
+For `list_files`, `list_symbols`, `search_symbols`, `search_code`,
+`search_files`, `regex_search`, `semantic_search`, and `hybrid_search`, the
+items are returned under `files`, `symbols`, or `results` alongside that
+metadata. `query_evidence_graph` returns `columns` and `rows` with the same
+metadata. When graph query results have more rows, the response also includes
+an opaque local `continuation`, an `expires_at` Unix timestamp, and a `next`
+object with the safe follow-up `offset`.
+Search tools use a bounded candidate scan for high offsets and mark the response
+with `truncated` plus a warning when callers should narrow the query.
+
+Large `tools/call` text content is truncated before it is placed into the
+human-readable `content` field. The full structured result remains available in
+`structuredContent`; the response includes a warning when text truncation
+occurs.
+
 ## Source-Read Tools
 
 The source-read tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
