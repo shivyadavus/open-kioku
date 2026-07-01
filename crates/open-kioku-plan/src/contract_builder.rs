@@ -173,6 +173,14 @@ impl ContractBuilder {
 
         let confidence_level =
             ConfidenceLevel::from_score(plan.confidence_breakdown.overall_score as f64);
+        let mut uncertainty = if confidence_level == ConfidenceLevel::Exact
+            || !plan.confidence_breakdown.caveats.is_empty()
+        {
+            plan.confidence_breakdown.caveats.clone()
+        } else {
+            vec!["No explicit confidence caveats were produced by the plan".into()]
+        };
+        merge_unique_strings(&mut uncertainty, plan.evidence_quality.caveats.clone());
         let confidence = ConfidenceAssessment {
             level: confidence_level,
             score: plan.confidence_breakdown.overall_score as f64,
@@ -181,13 +189,7 @@ impl ContractBuilder {
             } else {
                 vec![plan.confidence_summary.clone()]
             },
-            uncertainty: if confidence_level == ConfidenceLevel::Exact
-                || !plan.confidence_breakdown.caveats.is_empty()
-            {
-                plan.confidence_breakdown.caveats.clone()
-            } else {
-                vec!["No explicit confidence caveats were produced by the plan".into()]
-            },
+            uncertainty,
         };
 
         let timestamps = ContractTimestamps {
@@ -209,6 +211,31 @@ impl ContractBuilder {
         );
         let expansion_approval_requirements = expansion_approval_requirements(plan, &boundary_refs);
         let mut extensions = BTreeMap::new();
+        let evidence_quality = &plan.evidence_quality;
+        extensions.insert(
+            "evidence_quality".into(),
+            json!({
+                "index_mode": evidence_quality.index_mode.clone(),
+                "freshness": evidence_quality.freshness.clone(),
+                "exact_reference_available": evidence_quality.exact_reference_available,
+                "runtime_available": evidence_quality.runtime_available,
+                "history_available": evidence_quality.history_available,
+                "test_coverage_available": evidence_quality.test_coverage_available,
+                "skipped_path_count": evidence_quality.skipped_path_count,
+                "unresolved_import_count": evidence_quality.unresolved_import_count,
+                "ambiguous_edge_count": evidence_quality.ambiguous_edge_count,
+                "failed_optional_passes": evidence_quality.failed_optional_passes.clone(),
+                "caveats": evidence_quality.caveats.clone(),
+            }),
+        );
+        extensions.insert(
+            "evidence_freshness_requirement".into(),
+            json!({
+                "required_freshness": "fresh",
+                "strict_verification": "traceability_strict fails stale source-plan evidence",
+                "observed_freshness": evidence_quality.freshness.clone(),
+            }),
+        );
         if let Some(history_summary) = contract_history_signal_summary(plan, &history_refs) {
             extensions.insert("history_signal_summary".into(), history_summary);
         }
@@ -617,6 +644,11 @@ fn traceability_entries(
             "Confidence assessment is constrained by the plan confidence section",
             refs.confidence,
         ),
+        trace(
+            "evidence_quality",
+            "Evidence quality is copied from the source plan index manifest and optional evidence availability",
+            refs.confidence,
+        ),
     ];
     if has_secondary_files {
         entries.push(trace(
@@ -729,6 +761,14 @@ fn push_contract_file(
     }
 }
 
+fn merge_unique_strings(values: &mut Vec<String>, additions: Vec<String>) {
+    for value in additions {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +817,7 @@ mod tests {
             confidence_summary: "confident".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
             score_breakdown: vec![],
+            evidence_quality: Default::default(),
         };
 
         let err = ContractBuilder::from_plan(&plan).expect_err("empty plans are not authoritative");
@@ -880,6 +921,7 @@ mod tests {
                 vec!["history-similar:abc".into()],
                 "bounded similar-change overlap from persisted local history",
             )],
+            evidence_quality: Default::default(),
         };
 
         let contract = ContractBuilder::from_plan(&plan).expect("builds contract");
