@@ -1,0 +1,25 @@
+{
+  "id": "pagination",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [],
+    "files": [
+      {
+        "content_hash": "hash-billing",
+        "id": "file-billing",
+        "is_generated": false,
+        "is_vendor": false,
+        "language": "rust",
+        "path": "src/billing.rs",
+        "repository_id": "repo",
+        "size_bytes": 128
+      }
+    ],
+    "has_more": true,
+    "limit": 1,
+    "offset": 0,
+    "returned": 1,
+    "truncated": false,
+    "warnings": []
+  }
+}

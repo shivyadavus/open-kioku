@@ -28,14 +28,25 @@ use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::SymbolEngine;
 use open_kioku_tests::TestSelector;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const MAX_MCP_LIMIT: usize = 100;
+const MAX_MCP_FETCH: usize = 500;
+const MAX_TOOL_TEXT_BYTES: usize = 120_000;
+const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+const STORE_IDLE_TTL: Duration = Duration::from_secs(300);
+const CONTINUATION_TTL_SECS: u64 = 900;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     id: Option<Value>,
-    method: String,
+    #[serde(default)]
+    method: Option<String>,
     #[serde(default)]
     params: Value,
 }
@@ -51,7 +62,9 @@ struct JsonRpcResponse {
 }
 
 pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> {
-    let store = SqliteStore::open(repo.join(".ok/index.sqlite"))?;
+    let store_path = repo.join(".ok/index.sqlite");
+    let mut store = SqliteStore::open(&store_path)?;
+    let mut last_request = Instant::now();
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = tokio::io::stdout();
@@ -59,15 +72,11 @@ pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> 
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => handle_request(&repo, &store, &config, request).await,
-            Err(err) => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id: None,
-                result: None,
-                error: Some(json!({"code": -32700, "message": err.to_string()})),
-            },
-        };
+        if store_idle_expired(last_request) {
+            store = SqliteStore::open(&store_path)?;
+        }
+        last_request = Instant::now();
+        let response = handle_line(&repo, &store, &config, &line).await;
         stdout
             .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
             .await?;
@@ -76,28 +85,79 @@ pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> 
     Ok(())
 }
 
+async fn handle_line(
+    repo: &Path,
+    store: &SqliteStore,
+    config: &OkConfig,
+    line: &str,
+) -> JsonRpcResponse {
+    match serde_json::from_str::<JsonRpcRequest>(line) {
+        Ok(request) => handle_request(repo, store, config, request).await,
+        Err(err) => JsonRpcResponse {
+            jsonrpc: "2.0",
+            id: None,
+            result: None,
+            error: Some(json!({"code": -32700, "message": err.to_string()})),
+        },
+    }
+}
+
 async fn handle_request(
     repo: &Path,
     store: &SqliteStore,
     config: &OkConfig,
     request: JsonRpcRequest,
 ) -> JsonRpcResponse {
+    handle_request_with_timeout(repo, store, config, request, TOOL_TIMEOUT).await
+}
+
+async fn handle_request_with_timeout(
+    repo: &Path,
+    store: &SqliteStore,
+    config: &OkConfig,
+    request: JsonRpcRequest,
+    timeout: Duration,
+) -> JsonRpcResponse {
     let id = request.id.clone();
-    let result = dispatch(repo, store, config, &request.method, request.params).await;
+    let Some(method) = request.method.as_deref() else {
+        return JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(json!({"code": -32600, "message": "missing required JSON-RPC method"})),
+        };
+    };
+    let result = tokio::time::timeout(
+        timeout,
+        dispatch(repo, store, config, method, request.params),
+    )
+    .await;
     match result {
-        Ok(value) => JsonRpcResponse {
+        Ok(Ok(value)) => JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: Some(value),
             error: None,
         },
-        Err(err) => JsonRpcResponse {
+        Ok(Err(err)) => JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(json!({"code": -32000, "message": err.to_string()})),
         },
+        Err(_) => JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(
+                json!({"code": -32001, "message": format!("MCP method `{method}` timed out after {}s", timeout.as_secs())}),
+            ),
+        },
     }
+}
+
+fn store_idle_expired(last_request: Instant) -> bool {
+    last_request.elapsed() > STORE_IDLE_TTL
 }
 
 async fn dispatch(
@@ -138,6 +198,11 @@ async fn dispatch(
                 .unwrap_or_else(|| json!({}));
             call_tool(repo, store, config, name, args).await
         }
+        #[cfg(test)]
+        "__test_sleep" => {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(json!({"slept": true}))
+        }
         "repo_status" => Ok(json!(store.manifest()?)),
         "list_languages" => {
             let files = store.list_files(usize::MAX, 0)?;
@@ -152,11 +217,24 @@ async fn dispatch(
         "list_files" => {
             gate.ensure_allowed(ActionKind::Read)?;
             let limit = limit(&params);
-            Ok(json!(store.list_files(limit, 0)?))
+            let offset = offset(&params);
+            Ok(paged_overfetch_response(
+                "files",
+                store.list_files(overfetch_limit(limit), offset)?,
+                limit,
+                offset,
+            )?)
         }
         "list_symbols" | "search_symbols" => {
             let query = params.get("query").and_then(Value::as_str);
-            Ok(json!(store.list_symbols(query, limit(&params), 0)?))
+            let limit = limit(&params);
+            let offset = offset(&params);
+            Ok(paged_overfetch_response(
+                "symbols",
+                store.list_symbols(query, overfetch_limit(limit), offset)?,
+                limit,
+                offset,
+            )?)
         }
         "search_code" | "search_files" => search_tool(repo, store, &params),
         "regex_search" => search_tool(repo, store, &params),
@@ -599,6 +677,10 @@ async fn dispatch(
                 .get("limit")
                 .and_then(serde_json::Value::as_u64)
                 .map(|n| n as usize);
+            let offset = params
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize);
 
             let ast = match open_kioku_graph::query::parse_graph_query(query_str) {
                 Ok(ast) => ast,
@@ -653,7 +735,10 @@ async fn dispatch(
 
             let mut options = open_kioku_graph::query::GraphQueryOptions::default();
             if let Some(l) = limit {
-                options.limit = l;
+                options.limit = l.min(MAX_MCP_LIMIT);
+            }
+            if let Some(offset) = offset {
+                options.offset = offset;
             }
 
             match open_kioku_graph::query::execute_graph_query(
@@ -661,7 +746,7 @@ async fn dispatch(
                 &ast,
                 options,
             ) {
-                Ok(result) => Ok(serde_json::to_value(result)?),
+                Ok(result) => graph_query_response(query_str, &params, result),
                 Err(e) => {
                     let (kind, message) = match e {
                         open_kioku_graph::query::GraphQueryError::ParseError(m) => {
@@ -729,17 +814,41 @@ fn call_tool<'a>(
         dispatch(repo, store, config, name, args)
             .await
             .map(|value| {
-                let text = if let Some(s) = value.as_str() {
+                let mut text = if let Some(s) = value.as_str() {
                     s.to_string()
                 } else {
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
                 };
-                json!({"content": [{"type": "text", "text": text}], "structuredContent": value})
+                let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
+                let mut response = json!({
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": value
+                });
+                if text_truncated {
+                    response["truncated"] = json!(true);
+                    response["warnings"] = json!([format!(
+                        "tool text content was truncated to {} bytes; structuredContent remains available",
+                        MAX_TOOL_TEXT_BYTES
+                    )]);
+                }
+                response
             })
     })
 }
 
 fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
+    let limit = limit(params);
+    let offset = offset(params);
+    let results = search_results(repo, store, params, search_fetch_limit(limit, offset))?;
+    paged_bounded_slice_response("results", results, limit, offset)
+}
+
+fn search_results(
+    repo: &Path,
+    store: &dyn MetadataStore,
+    params: &Value,
+    fetch_limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
     let query = params
         .get("query")
         .or_else(|| params.get("pattern"))
@@ -750,9 +859,9 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     if TantivySearchIndex::exists(&index_dir) {
         let index = TantivySearchIndex::open_or_create(index_dir)?;
         if mode == "graph" {
-            return Ok(json!(index.search_graph(query, limit(params))?));
+            return Ok(index.search_graph(query, fetch_limit)?);
         }
-        return Ok(json!(index.search(query, limit(params))?));
+        return Ok(index.search(query, fetch_limit)?);
     }
     if mode == "graph" {
         anyhow::bail!("graph search index is missing; run `ok index .` first");
@@ -760,13 +869,13 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     let files = store.list_files(usize::MAX, 0)?;
     let chunks = store.all_chunks()?;
     let symbols = store.list_symbols(None, usize::MAX, 0)?;
-    Ok(json!(search_chunks(
+    Ok(search_chunks(
         &chunks,
         &files,
         &symbols,
         query,
-        limit(params)
-    )?))
+        fetch_limit,
+    )?)
 }
 
 fn semantic_search_tool(
@@ -781,16 +890,22 @@ fn semantic_search_tool(
     let manager = SemanticIndexManager::new(repo, store, &semantic_config);
     let status = manager.status();
     if status.ready {
-        return Ok(json!({
-            "semantic_status": status,
-            "results": manager.search(query, limit(params))?,
-        }));
+        let limit = limit(params);
+        let offset = offset(params);
+        let results = manager.search(query, search_fetch_limit(limit, offset))?;
+        let mut response = paged_bounded_slice_response("results", results, limit, offset)?;
+        response["semantic_status"] = json!(status);
+        return Ok(response);
     }
-    Ok(json!({
-        "semantic_status": status,
-        "results": [],
-        "error": "semantic index is not ready; run `ok semantic index` first"
-    }))
+    let mut response = paged_slice_response::<open_kioku_core::SearchResult>(
+        "results",
+        Vec::new(),
+        limit(params),
+        offset(params),
+    )?;
+    response["semantic_status"] = json!(status);
+    response["error"] = json!("semantic index is not ready; run `ok semantic index` first");
+    Ok(response)
 }
 
 fn semantic_status_tool(
@@ -809,19 +924,18 @@ fn hybrid_search_tool(
     params: &Value,
 ) -> anyhow::Result<Value> {
     let query = required_str(params, "query")?;
-    let mut results = search_tool(repo, store, params)?
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect::<Vec<open_kioku_core::SearchResult>>();
+    let limit = limit(params);
+    let offset = offset(params);
+    let mut results = search_results(repo, store, params, search_fetch_limit(limit, offset))?;
     let mut semantic_config = config.semantic.clone();
     semantic_config.enabled = true;
     let manager = SemanticIndexManager::new(repo, store, &semantic_config);
     let status = manager.status();
     if status.ready {
-        merge_semantic_results(&mut results, manager.search(query, limit(params))?);
+        merge_semantic_results(
+            &mut results,
+            manager.search(query, search_fetch_limit(limit, offset))?,
+        );
     }
     results.sort_by(|left, right| {
         right
@@ -830,11 +944,9 @@ fn hybrid_search_tool(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.path.cmp(&right.path))
     });
-    results.truncate(limit(params));
-    Ok(json!({
-        "semantic_status": status,
-        "results": results,
-    }))
+    let mut response = paged_bounded_slice_response("results", results, limit, offset)?;
+    response["semantic_status"] = json!(status);
+    Ok(response)
 }
 
 fn merge_semantic_results(
@@ -875,22 +987,22 @@ fn merge_semantic_results(
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed.", json!({"type":"object","properties":{}})),
-        ("list_files", "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of files to return. Defaults to 20, capped at 100."}}})),
+        ("list_files", "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of files to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip. Defaults to 0."}}})),
         ("list_languages", "List all programming languages detected and indexed in the repository, alongside support status.", json!({"type":"object","properties":{}})),
-        ("list_symbols", "List or search indexed code symbols (such as classes, structs, functions, and interfaces) by name. Supports substring filtering.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names. If omitted, returns all symbols."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100."}}})),
-        ("search_symbols", "Search indexed code symbols by name using exact or fuzzy matching. Essential for finding definitions.", json!({"type":"object","properties":{"query":{"type":"string","description":"Fuzzy or exact search query for symbol names."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
+        ("list_symbols", "List or search indexed code symbols (such as classes, structs, functions, and interfaces) by name. Supports substring filtering.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names. If omitted, returns all symbols."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip. Defaults to 0."}}})),
+        ("search_symbols", "Search indexed code symbols by name using exact or fuzzy matching. Essential for finding definitions.", json!({"type":"object","properties":{"query":{"type":"string","description":"Fuzzy or exact search query for symbol names."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip. Defaults to 0."}}})),
         ("detect_architecture", "Detect high-level architectural components and directories in the repository based on file layouts.", json!({"type":"object","properties":{}})),
         ("architecture_boundaries", "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Report any import or boundary violations that deviate from the defined codebase architecture rules.", json!({"type":"object","properties":{}})),
         ("architecture_policy_validate", "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.", json!({"type":"object","properties":{"path":{"type":"string","description":"Optional repository-relative or absolute path to a standalone architecture policy TOML file."}}})),
         ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
         ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
-        ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."}}})),
-        ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
-        ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
+        ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
+        ("search_files", "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths, file contents, or graph-node documents."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
+        ("regex_search", "Search indexed code using a regular expression pattern. Returns exact line matching snippets.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern to match against source code."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("semantic_status", "Report the current status, readiness, and staleness of the local semantic vector index.", json!({"type":"object","properties":{}})),
-        ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
-        ("hybrid_search", "Perform a hybrid search combining lexical BM25 candidates and semantic vector candidates to produce ranked, context-rich results.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match lexically and conceptually against the codebase."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."}}})),
+        ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
+        ("hybrid_search", "Perform a hybrid search combining lexical BM25 candidates and semantic vector candidates to produce ranked, context-rich results.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match lexically and conceptually against the codebase."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("explain_search_result", "Run a hybrid search and return detailed, explainable ranking scores and evidence for the top retrieved code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to analyze and explain results for."},"limit":{"type":"integer","description":"Maximum number of explained results. Defaults to 20, capped at 100."}}})),
         ("structural_search", "Perform a structural search across both symbol trees and code chunks to find structural matching syntax.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The query to run against structure trees and chunk indices."},"limit":{"type":"integer","description":"Maximum number of structural matches to return. Defaults to 20, capped at 100."}}})),
         ("get_definition", "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."}}})),
@@ -932,7 +1044,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("find_errors_for_symbol", "Retrieve recent runtime errors and stack traces associated with a given symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The symbol name to look up errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve. Defaults to 20."}}})),
         ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
-        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50."}}})),
+        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
 
     let write_tools: &[(&str, &str, Value)] = &[(
@@ -1012,7 +1124,187 @@ fn limit(params: &Value) -> usize {
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(20)
-        .min(100) as usize
+        .min(MAX_MCP_LIMIT as u64) as usize
+}
+
+fn offset(params: &Value) -> usize {
+    params
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(10_000) as usize
+}
+
+fn overfetch_limit(limit: usize) -> usize {
+    limit.saturating_add(1).min(MAX_MCP_LIMIT + 1)
+}
+
+fn search_fetch_limit(limit: usize, offset: usize) -> usize {
+    offset
+        .saturating_add(limit)
+        .saturating_add(1)
+        .min(MAX_MCP_FETCH)
+}
+
+fn paged_overfetch_response<T>(
+    key: &str,
+    mut values: Vec<T>,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    let has_more = values.len() > limit;
+    if has_more {
+        values.truncate(limit);
+    }
+    paged_response(key, values, PageMetadata::new(limit, offset, has_more))
+}
+
+fn paged_slice_response<T>(
+    key: &str,
+    values: Vec<T>,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    let has_more = values.len() > offset.saturating_add(limit);
+    paged_slice_response_with_metadata(key, values, PageMetadata::new(limit, offset, has_more))
+}
+
+fn paged_bounded_slice_response<T>(
+    key: &str,
+    values: Vec<T>,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    let has_more = values.len() > offset.saturating_add(limit);
+    let fetch_was_capped = offset.saturating_add(limit).saturating_add(1) > MAX_MCP_FETCH
+        && values.len() >= MAX_MCP_FETCH;
+    let mut metadata = PageMetadata::new(limit, offset, has_more || fetch_was_capped);
+    if fetch_was_capped {
+        metadata.truncated = true;
+        metadata.warnings.push(format!(
+            "search results were scanned up to {MAX_MCP_FETCH} candidates; narrow the query or use a lower offset"
+        ));
+    }
+    paged_slice_response_with_metadata(key, values, metadata)
+}
+
+fn paged_slice_response_with_metadata<T>(
+    key: &str,
+    values: Vec<T>,
+    metadata: PageMetadata,
+) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    let values = values
+        .into_iter()
+        .skip(metadata.offset)
+        .take(metadata.limit)
+        .collect::<Vec<_>>();
+    paged_response(key, values, metadata)
+}
+
+struct PageMetadata {
+    limit: usize,
+    offset: usize,
+    has_more: bool,
+    truncated: bool,
+    warnings: Vec<String>,
+    caveats: Vec<String>,
+}
+
+impl PageMetadata {
+    fn new(limit: usize, offset: usize, has_more: bool) -> Self {
+        Self {
+            limit,
+            offset,
+            has_more,
+            truncated: false,
+            warnings: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
+}
+
+fn paged_response<T>(key: &str, values: Vec<T>, metadata: PageMetadata) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    let returned = values.len();
+    let mut map = Map::new();
+    map.insert(key.to_string(), serde_json::to_value(values)?);
+    map.insert("returned".into(), json!(returned));
+    map.insert("limit".into(), json!(metadata.limit));
+    map.insert("offset".into(), json!(metadata.offset));
+    map.insert("has_more".into(), json!(metadata.has_more));
+    map.insert("truncated".into(), json!(metadata.truncated));
+    map.insert("warnings".into(), json!(metadata.warnings));
+    map.insert("caveats".into(), json!(metadata.caveats));
+    Ok(Value::Object(map))
+}
+
+fn graph_query_response(
+    query: &str,
+    params: &Value,
+    result: open_kioku_graph::query::GraphQueryResult,
+) -> anyhow::Result<Value> {
+    let has_more = result.has_more;
+    let next_offset = result.offset.saturating_add(result.returned);
+    let limit = result.limit;
+    let mut value = serde_json::to_value(result)?;
+    value["truncated"] = json!(false);
+    if has_more {
+        value["continuation"] = json!(continuation_handle("query_evidence_graph", params));
+        value["expires_at"] = json!(continuation_expires_at());
+        value["next"] = json!({
+            "method": "query_evidence_graph",
+            "arguments": {
+                "query": query,
+                "limit": limit,
+                "offset": next_offset
+            }
+        });
+    }
+    Ok(value)
+}
+
+fn continuation_handle(method: &str, params: &Value) -> String {
+    let mut hasher = DefaultHasher::new();
+    method.hash(&mut hasher);
+    serde_json::to_string(params)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    format!("okc_{:016x}", hasher.finish())
+}
+
+fn continuation_expires_at() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(CONTINUATION_TTL_SECS)
+}
+
+fn truncate_utf8(text: &mut String, max_bytes: usize) -> bool {
+    if text.len() <= max_bytes {
+        return false;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    text.truncate(end);
+    text.push_str("\n...[truncated]");
+    true
 }
 
 fn configured_architecture_policy_report<S>(
@@ -2021,9 +2313,18 @@ fn resolve_history_symbol(
 mod tests {
     use super::*;
     use open_kioku_config::OkConfig;
+    use open_kioku_core::{
+        CodeChunk, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdge, GraphEdgeType,
+        GraphNode, GraphNodeType, IndexManifest, Language, LineRange, NodeId, RepositoryId, Symbol,
+        SymbolId, SymbolKind,
+    };
+    use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index_with_graph};
+    use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
-    use serde_json::json;
-    use std::path::Path;
+    use serde_json::{json, Value};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_initialize_negotiates_version() {
@@ -2042,6 +2343,485 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result_other["protocolVersion"], "2023-01-01");
+    }
+
+    #[tokio::test]
+    async fn json_rpc_protocol_edges_are_stable() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+
+        let string_id = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":"req-1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        )
+        .await;
+        assert_eq!(string_id.id, Some(json!("req-1")));
+        assert_eq!(string_id.result.unwrap()["protocolVersion"], "2024-11-05");
+
+        let numeric_id = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#,
+        )
+        .await;
+        assert_eq!(numeric_id.id, Some(json!(7)));
+        assert!(numeric_id.error.is_none());
+
+        let missing_method = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":"missing-method","params":{}}"#,
+        )
+        .await;
+        assert_eq!(missing_method.id, Some(json!("missing-method")));
+        assert_eq!(missing_method.error.unwrap()["code"], -32600);
+
+        let malformed = handle_line(Path::new("."), &store, &config, "{").await;
+        assert_eq!(malformed.id, None);
+        assert_eq!(malformed.error.unwrap()["code"], -32700);
+
+        let malformed_unicode = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":"bad-unicode","method":"initialize","params":{"client":"\uD800"}}"#,
+        )
+        .await;
+        assert_eq!(malformed_unicode.id, None);
+        assert_eq!(malformed_unicode.error.unwrap()["code"], -32700);
+
+        let unknown_method = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":"unknown-method","method":"missing_method","params":{}}"#,
+        )
+        .await;
+        assert_eq!(unknown_method.id, Some(json!("unknown-method")));
+        assert_eq!(unknown_method.error.unwrap()["code"], -32000);
+
+        let tool_error = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
+        )
+        .await;
+        assert_eq!(tool_error.id, Some(json!("tool-error")));
+        let error = tool_error.error.unwrap();
+        assert_eq!(error["code"], -32000);
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown MCP method or tool"));
+    }
+
+    #[tokio::test]
+    async fn tool_timeout_and_idle_store_edges_are_stable() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let timeout = handle_request_with_timeout(
+            Path::new("."),
+            &store,
+            &config,
+            JsonRpcRequest {
+                id: Some(json!("timeout")),
+                method: Some("__test_sleep".into()),
+                params: json!({}),
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(timeout.id, Some(json!("timeout")));
+        assert_eq!(timeout.error.unwrap()["code"], -32001);
+
+        let stale = Instant::now() - STORE_IDLE_TTL - Duration::from_secs(1);
+        assert!(store_idle_expired(stale));
+        assert!(!store_idle_expired(Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn golden_mcp_protocol_snapshots_are_stable() {
+        let fixture = McpSnapshotFixture::new();
+        for (name, line) in [
+            (
+                "repo_status.json",
+                r#"{"jsonrpc":"2.0","id":"repo-status","method":"repo_status","params":{}}"#,
+            ),
+            (
+                "get_evidence_schema.json",
+                r#"{"jsonrpc":"2.0","id":"get-evidence-schema","method":"get_evidence_schema","params":{}}"#,
+            ),
+            (
+                "query_evidence_graph.json",
+                r#"{"jsonrpc":"2.0","id":"query-evidence-graph","method":"query_evidence_graph","params":{"query":"MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 1"}}"#,
+            ),
+            (
+                "broad_graph_search.json",
+                r#"{"jsonrpc":"2.0","id":"broad-graph-search","method":"search_code","params":{"query":"invoice id publish","mode":"graph","limit":1}}"#,
+            ),
+            (
+                "malformed_request.json",
+                r#"{"jsonrpc":"2.0","id":"malformed","method":"initialize","params":{"unterminated":}"#,
+            ),
+            (
+                "tool_error.json",
+                r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
+            ),
+            (
+                "pagination.json",
+                r#"{"jsonrpc":"2.0","id":"pagination","method":"list_files","params":{"limit":1,"offset":0}}"#,
+            ),
+        ] {
+            let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line).await;
+            assert_mcp_snapshot(name, &response);
+        }
+    }
+
+    struct McpSnapshotFixture {
+        repo: PathBuf,
+        store: SqliteStore,
+        config: OkConfig,
+    }
+
+    impl McpSnapshotFixture {
+        fn new() -> Self {
+            let repo = unique_snapshot_repo();
+            let store = SqliteStore::open(":memory:").unwrap();
+            let manifest = fixture_manifest();
+            let file = File {
+                id: FileId::new("file-billing"),
+                repository_id: RepositoryId::new("repo"),
+                path: "src/billing.rs".into(),
+                language: Language::Rust,
+                size_bytes: 128,
+                content_hash: "hash-billing".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let other_file = File {
+                id: FileId::new("file-routes"),
+                repository_id: RepositoryId::new("repo"),
+                path: "src/routes.rs".into(),
+                language: Language::Rust,
+                size_bytes: 96,
+                content_hash: "hash-routes".into(),
+                is_generated: false,
+                is_vendor: false,
+            };
+            let symbol = Symbol {
+                id: SymbolId::new("symbol-publish"),
+                name: "publish_invoice_event".into(),
+                qualified_name: "billing::routes::publish_invoice_event".into(),
+                kind: SymbolKind::Function,
+                file_id: file.id.clone(),
+                range: Some(LineRange::single(7)),
+                language: Language::Rust,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::Scip,
+            };
+            let secondary_symbol = Symbol {
+                id: SymbolId::new("symbol-archive"),
+                name: "archive_invoice_event".into(),
+                qualified_name: "billing::routes::archive_invoice_event".into(),
+                kind: SymbolKind::Function,
+                file_id: file.id.clone(),
+                range: Some(LineRange::single(12)),
+                language: Language::Rust,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::TreeSitter,
+            };
+            let chunk = CodeChunk {
+                id: "chunk-publish".into(),
+                file_id: file.id.clone(),
+                range: LineRange { start: 7, end: 9 },
+                language: Language::Rust,
+                text: "pub fn publish_invoice_event() {}".into(),
+                symbol_id: Some(symbol.id.clone()),
+            };
+            let files = vec![file.clone(), other_file];
+            let symbols = vec![symbol.clone(), secondary_symbol.clone()];
+            let chunks = vec![chunk];
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &files,
+                    symbols: &symbols,
+                    chunks: &chunks,
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                })
+                .unwrap();
+
+            let file_node = GraphNode {
+                id: NodeId::new("file:file-billing"),
+                node_type: GraphNodeType::File,
+                label: "src/billing.rs".into(),
+                file_id: Some(file.id.clone()),
+                properties: std::collections::BTreeMap::from([(
+                    "path".into(),
+                    json!("src/billing.rs"),
+                )]),
+                ..Default::default()
+            };
+            let symbol_node = GraphNode {
+                id: NodeId::new("symbol:symbol-publish"),
+                node_type: GraphNodeType::Function,
+                label: "publish_invoice_event".into(),
+                file_id: Some(file.id.clone()),
+                symbol_id: Some(symbol.id.clone()),
+                properties: std::collections::BTreeMap::from([(
+                    "qualified_name".into(),
+                    json!("billing::routes::publish_invoice_event"),
+                )]),
+                ..Default::default()
+            };
+            let endpoint_node = GraphNode {
+                id: NodeId::new("route:publish-invoice"),
+                node_type: GraphNodeType::Endpoint,
+                label: "POST /api/v1/invoices/{invoiceId}/publish".into(),
+                file_id: Some(file.id.clone()),
+                symbol_id: Some(symbol.id.clone()),
+                properties: std::collections::BTreeMap::from([
+                    (
+                        "route_path".into(),
+                        json!("/api/v1/invoices/{invoiceId}/publish"),
+                    ),
+                    (
+                        "qualified_name".into(),
+                        json!("billing::routes::publish_invoice_event"),
+                    ),
+                ]),
+                ..Default::default()
+            };
+            let secondary_symbol_node = GraphNode {
+                id: NodeId::new("symbol:symbol-archive"),
+                node_type: GraphNodeType::Function,
+                label: "archive_invoice_event".into(),
+                file_id: Some(file.id.clone()),
+                symbol_id: Some(secondary_symbol.id.clone()),
+                properties: std::collections::BTreeMap::from([(
+                    "qualified_name".into(),
+                    json!("billing::routes::archive_invoice_event"),
+                )]),
+                ..Default::default()
+            };
+            let graph_nodes = vec![
+                file_node.clone(),
+                symbol_node,
+                secondary_symbol_node,
+                endpoint_node,
+            ];
+            let graph_edges = vec![
+                GraphEdge {
+                    id: EdgeId::new("edge-file-defines-symbol"),
+                    from: file_node.id.clone(),
+                    to: NodeId::new("symbol:symbol-publish"),
+                    edge_type: GraphEdgeType::Defines,
+                    ..Default::default()
+                },
+                GraphEdge {
+                    id: EdgeId::new("edge-file-defines-archive"),
+                    from: file_node.id.clone(),
+                    to: NodeId::new("symbol:symbol-archive"),
+                    edge_type: GraphEdgeType::Defines,
+                    ..Default::default()
+                },
+            ];
+            store.replace_graph(&graph_nodes, &graph_edges).unwrap();
+            rebuild_disk_index_with_graph(
+                default_index_dir(&repo),
+                &chunks,
+                &files,
+                &symbols,
+                &graph_nodes,
+            )
+            .unwrap();
+
+            Self {
+                repo,
+                store,
+                config: OkConfig::default(),
+            }
+        }
+    }
+
+    impl Drop for McpSnapshotFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.repo);
+        }
+    }
+
+    fn unique_snapshot_repo() -> PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let repo = std::env::temp_dir().join(format!(
+            "open-kioku-mcp-snapshots-{}-{now}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&repo).unwrap();
+        repo
+    }
+
+    fn fixture_manifest() -> IndexManifest {
+        serde_json::from_value(json!({
+            "repository": {
+                "id": "repo",
+                "name": "mcp-fixture",
+                "root": ".",
+                "branch": "main",
+                "commit": "abc123",
+                "indexed_at": "2026-01-01T00:00:00Z"
+            },
+            "file_count": 2,
+            "symbol_count": 2,
+            "chunk_count": 1,
+            "indexed_at": "2026-01-01T00:00:00Z",
+            "schema_version": 1,
+            "index_mode": "full",
+            "phase_reports": []
+        }))
+        .unwrap()
+    }
+
+    fn assert_mcp_snapshot(name: &str, response: &JsonRpcResponse) {
+        let mut value = serde_json::to_value(response).unwrap();
+        normalize_mcp_snapshot(&mut value);
+        let formatted = format!("{}\n", serde_json::to_string_pretty(&value).unwrap());
+        let snapshot_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots/mcp");
+        fs::create_dir_all(&snapshot_dir).unwrap();
+        let snapshot_file = snapshot_dir.join(name);
+        if snapshot_file.exists() {
+            let expected = fs::read_to_string(&snapshot_file).unwrap();
+            assert_eq!(
+                expected.trim(),
+                formatted.trim(),
+                "MCP snapshot mismatch: {}",
+                snapshot_file.display()
+            );
+        } else {
+            fs::write(snapshot_file, formatted).unwrap();
+        }
+    }
+
+    fn normalize_mcp_snapshot(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map.iter_mut() {
+                    if key == "expires_at" {
+                        *value = json!("<expires_at>");
+                    } else if key == "freshness" {
+                        *value = json!("<freshness>");
+                    } else if matches!(
+                        key.as_str(),
+                        "score"
+                            | "confidence"
+                            | "raw_value"
+                            | "normalized_value"
+                            | "weight"
+                            | "contribution"
+                    ) && value.is_number()
+                    {
+                        *value = json!("<score>");
+                    } else {
+                        normalize_mcp_snapshot(value);
+                    }
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    normalize_mcp_snapshot(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn query_evidence_graph_returns_metadata_and_continuation() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let root = GraphNode {
+            id: NodeId::new("file:root"),
+            node_type: GraphNodeType::File,
+            label: "root".into(),
+            ..Default::default()
+        };
+        let mut nodes = vec![root.clone()];
+        let mut edges = Vec::new();
+        for idx in 0..3 {
+            let node = GraphNode {
+                id: NodeId::new(format!("symbol:fn{idx}")),
+                node_type: GraphNodeType::Function,
+                label: format!("fn{idx}"),
+                ..Default::default()
+            };
+            edges.push(GraphEdge {
+                id: EdgeId::new(format!("edge:{idx}")),
+                from: root.id.clone(),
+                to: node.id.clone(),
+                edge_type: GraphEdgeType::Defines,
+                ..Default::default()
+            });
+            nodes.push(node);
+        }
+        store.replace_graph(&nodes, &edges).unwrap();
+
+        let result = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "query_evidence_graph",
+            json!({
+                "query": "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 2"
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["returned"], 2);
+        assert_eq!(result["limit"], 2);
+        assert_eq!(result["offset"], 0);
+        assert_eq!(result["has_more"], true);
+        assert_eq!(result["truncated"], false);
+        assert!(result["continuation"].as_str().unwrap().starts_with("okc_"));
+        assert_eq!(result["next"]["arguments"]["offset"], 2);
+    }
+
+    #[test]
+    fn paged_response_metadata_and_utf8_truncation_are_stable() {
+        let page = paged_slice_response("results", vec![1, 2, 3, 4], 2, 1).unwrap();
+        assert_eq!(page["results"], json!([2, 3]));
+        assert_eq!(page["returned"], 2);
+        assert_eq!(page["limit"], 2);
+        assert_eq!(page["offset"], 1);
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["warnings"], json!([]));
+        assert_eq!(page["caveats"], json!([]));
+
+        let capped =
+            paged_bounded_slice_response("results", (0..MAX_MCP_FETCH).collect(), 2, 499).unwrap();
+        assert_eq!(capped["results"], json!([499]));
+        assert_eq!(capped["returned"], 1);
+        assert_eq!(capped["has_more"], true);
+        assert_eq!(capped["truncated"], true);
+        assert!(capped["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("scanned up to"));
+
+        let mut text = "é".repeat(10);
+        assert!(truncate_utf8(&mut text, 7));
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+        assert!(text.ends_with("...[truncated]"));
     }
 
     #[tokio::test]

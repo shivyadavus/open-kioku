@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32000,
+    "message": "unknown MCP method or tool `missing_tool`"
+  },
+  "id": "tool-error",
+  "jsonrpc": "2.0"
+}
