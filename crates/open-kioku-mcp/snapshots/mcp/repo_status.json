@@ -1,0 +1,45 @@
+{
+  "id": "repo-status",
+  "jsonrpc": "2.0",
+  "result": {
+    "chunk_count": 1,
+    "file_count": 2,
+    "index_mode": "full",
+    "indexed_at": "2026-01-01T00:00:00Z",
+    "phase_reports": [],
+    "quality": {
+      "architecture_facts": 0,
+      "build_systems": [],
+      "codeql_databases": 0,
+      "coverage_reports": 0,
+      "git_history_facts": 0,
+      "import_count": 0,
+      "index_mode": "full",
+      "junit_reports": 0,
+      "phase_reports": [],
+      "quality_notes": [],
+      "runtime_analysis_facts": 0,
+      "scip_enabled": false,
+      "scip_exact_references": 0,
+      "scip_indexes_imported": 0,
+      "scip_mode": "",
+      "scip_occurrences": 0,
+      "scip_symbols": 0,
+      "semantic_provider_notes": [],
+      "skip_counts": {},
+      "skipped_paths": [],
+      "static_analysis_facts": 0,
+      "test_count": 0
+    },
+    "repository": {
+      "branch": "main",
+      "commit": "abc123",
+      "id": "repo",
+      "indexed_at": "2026-01-01T00:00:00Z",
+      "name": "mcp-fixture",
+      "root": "."
+    },
+    "schema_version": 1,
+    "symbol_count": 2
+  }
+}

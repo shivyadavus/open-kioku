@@ -40,6 +40,10 @@
             "limit": {
               "description": "Maximum number of files to return. Defaults to 20, capped at 100.",
               "type": "integer"
+            },
+            "offset": {
+              "description": "Number of matching files to skip. Defaults to 0.",
+              "type": "integer"
             }
           },
           "type": "object"
@@ -66,6 +70,10 @@
               "description": "Maximum number of symbols to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
+            "offset": {
+              "description": "Number of matching symbols to skip. Defaults to 0.",
+              "type": "integer"
+            },
             "query": {
               "description": "Substring query to filter symbol names. If omitted, returns all symbols.",
               "type": "string"
@@ -83,6 +91,10 @@
           "properties": {
             "limit": {
               "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Number of matching symbols to skip. Defaults to 0.",
               "type": "integer"
             },
             "query": {
@@ -210,6 +222,10 @@
               ],
               "type": "string"
             },
+            "offset": {
+              "description": "Number of matching search results to skip. Defaults to 0.",
+              "type": "integer"
+            },
             "query": {
               "description": "The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys.",
               "type": "string"
@@ -240,6 +256,10 @@
               ],
               "type": "string"
             },
+            "offset": {
+              "description": "Number of matching search results to skip. Defaults to 0.",
+              "type": "integer"
+            },
             "query": {
               "description": "The search query to match against file paths, file contents, or graph-node documents.",
               "type": "string"
@@ -260,6 +280,10 @@
           "properties": {
             "limit": {
               "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Number of matching search results to skip. Defaults to 0.",
               "type": "integer"
             },
             "pattern": {
@@ -294,6 +318,10 @@
               "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
+            "offset": {
+              "description": "Number of matching search results to skip. Defaults to 0.",
+              "type": "integer"
+            },
             "query": {
               "description": "Natural language search query expressing the concept or functionality you are looking for.",
               "type": "string"
@@ -314,6 +342,10 @@
           "properties": {
             "limit": {
               "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Number of matching search results to skip. Defaults to 0.",
               "type": "integer"
             },
             "query": {
@@ -1404,7 +1436,11 @@
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum rows to return. Defaults to 50.",
+              "description": "Maximum rows to return. Defaults to 50, capped at 100.",
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Number of matching rows to skip. Defaults to 0.",
               "type": "integer"
             },
             "query": {

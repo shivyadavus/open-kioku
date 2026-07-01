@@ -1,0 +1,53 @@
+{
+  "id": "query-evidence-graph",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "Filters applied in-memory after indexed edge lookup."
+    ],
+    "columns": [
+      "f",
+      "s"
+    ],
+    "continuation": "okc_cfe241b5e7974532",
+    "expires_at": "<expires_at>",
+    "has_more": true,
+    "limit": 1,
+    "next": {
+      "arguments": {
+        "limit": 1,
+        "offset": 1,
+        "query": "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 1"
+      },
+      "method": "query_evidence_graph"
+    },
+    "offset": 0,
+    "returned": 1,
+    "rows": [
+      [
+        {
+          "file_id": "file-billing",
+          "id": "file:file-billing",
+          "label": "src/billing.rs",
+          "node_type": "file",
+          "properties": {
+            "path": "src/billing.rs"
+          },
+          "symbol_id": null
+        },
+        {
+          "file_id": "file-billing",
+          "id": "symbol:symbol-archive",
+          "label": "archive_invoice_event",
+          "node_type": "function",
+          "properties": {
+            "qualified_name": "billing::routes::archive_invoice_event"
+          },
+          "symbol_id": "symbol-archive"
+        }
+      ]
+    ],
+    "truncated": false,
+    "warnings": []
+  }
+}
