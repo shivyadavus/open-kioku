@@ -120,10 +120,10 @@ The source-read tools allow language-agnostic code exploration and AI-ready cont
 
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
 - `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
-- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
-- `create_change_contract`: Builds a `ChangeContractV1` from a task, inline `PlanReport`, or `plan_json`. It stores the contract in `.ok/contracts` by default and supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, evidence quality, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `create_change_contract`: Builds a `ChangeContractV1` from a task, inline `PlanReport`, or `plan_json`. It stores the contract in `.ok/contracts` by default, preserves source-plan `evidence_quality`, and supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
 - `get_change_contract`: Retrieves a stored contract by `contract_id` and can export JSON, Markdown, or TOON.
-- `verify_change_contract`: Verifies changed files, a diff, or a git range against a stored contract id, inline contract object, or `contract_json`. Stored contract ids append verification records under `.ok/contracts`.
+- `verify_change_contract`: Verifies changed files, a diff, or a git range against a stored contract id, inline contract object, or `contract_json`. Stored contract ids append verification records under `.ok/contracts`; stale evidence quality warns by default and fails under strict traceability, while missing validation attestations warn as pending validation.
 - `explain_verification`: Summarizes a `ContractVerificationReport` decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.
 - `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
 - `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files, active architecture policy when configured, and an overall risk score.
@@ -156,7 +156,10 @@ checks dependency deltas against it by default; `check_dependency_delta` remains
 available for explicit dependency-delta checks in repositories without policy.
 `create_change_contract` preserves policy evidence from the source plan, and
 `verify_change_contract` applies the same configured-policy dependency-delta
-default.
+default. Plans and generated contracts also preserve `evidence_quality` so
+agents can distinguish fresh exact-reference evidence from fast-mode, stale,
+skipped-path, unresolved-import, ambiguous-edge, missing-runtime, missing-history,
+or missing-coverage caveats.
 
 Stable source-read tools:
 

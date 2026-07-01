@@ -628,6 +628,7 @@ async fn dispatch(
                         check_api_surface,
                         check_dependency_delta,
                         architecture_policy,
+                        suppress_plan_validation_pending: false,
                     },
                 )?))
         }
@@ -1767,6 +1768,7 @@ fn verify_change_contract_tool(
                 check_api_surface: bool_arg(params, "check_api_surface"),
                 check_dependency_delta,
                 architecture_policy,
+                suppress_plan_validation_pending: false,
             },
         )?;
     format_contract_verification_output(&report, format_arg(params, "json"))
@@ -2024,6 +2026,10 @@ fn render_contract_markdown(contract: &ChangeContractV1) -> String {
             .map(|command| format!("{}: {}", command.command, command.reason))
             .collect::<Vec<_>>(),
     );
+    if let Some(quality) = contract.extensions.get("evidence_quality") {
+        out.push_str("\n## Evidence Quality\n\n");
+        out.push_str(&format!("```json\n{}\n```\n", quality));
+    }
     out.push_str(&format!(
         "\nRisk: `{:?}` {:.2}\nConfidence: `{:?}` {:.2}\nEvidence refs: `{}`\n",
         contract.risk.level,
@@ -2068,6 +2074,9 @@ fn render_contract_toon(contract: &ChangeContractV1) -> String {
             .map(|command| command.command.clone())
             .collect::<Vec<_>>(),
     );
+    if let Some(quality) = contract.extensions.get("evidence_quality") {
+        out.push_str(&format!("evidence_quality: {}\n", quality));
+    }
     out
 }
 
@@ -2097,6 +2106,11 @@ fn render_contract_verification_markdown(report: &ContractVerificationReport) ->
         "Warnings",
         &verification_finding_summaries(&report.change_report.warnings),
     );
+    out.push_str(&format!(
+        "\nEvidence quality: mode `{}`, freshness `{}`\n\n",
+        report.policy_snapshot.evidence_quality.index_mode,
+        report.policy_snapshot.evidence_quality.freshness
+    ));
     push_markdown_list(
         &mut out,
         "Dependency Deltas",
