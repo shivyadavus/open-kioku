@@ -1,0 +1,80 @@
+{
+  "id": "broad-graph-search",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [],
+    "has_more": true,
+    "limit": 1,
+    "offset": 0,
+    "results": [
+      {
+        "confidence": "<score>",
+        "evidence": [
+          "BM25 lexical match from local Tantivy index",
+          "query variant `invoice OR id OR publish` matched local index",
+          "graph-node identifier document `graph-node:route:publish-invoice` matched"
+        ],
+        "evidence_refs": [
+          "graph-node:route:publish-invoice"
+        ],
+        "line_range": null,
+        "match_reason": "graph node identifier match",
+        "path": "src/billing.rs",
+        "score": "<score>",
+        "score_breakdown": [
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "graph-node:route:publish-invoice"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "BM25 score from local Tantivy index",
+            "raw_value": "<score>",
+            "signal": "bm25_relevance",
+            "weight": "<score>"
+          },
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "graph-node:route:publish-invoice"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
+            "raw_value": "<score>",
+            "signal": "query_variant_boost",
+            "weight": "<score>"
+          },
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "graph-node:route:publish-invoice"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "indexed graph-node identifiers, qualified names, routes, or properties matched",
+            "raw_value": "<score>",
+            "signal": "graph_node_identifier",
+            "weight": "<score>"
+          }
+        ],
+        "snippet": "graph node",
+        "symbol": {
+          "confidence": "exact",
+          "file_id": "file-billing",
+          "id": "symbol-publish",
+          "kind": "function",
+          "language": "rust",
+          "name": "publish_invoice_event",
+          "provenance": "scip",
+          "qualified_name": "billing::routes::publish_invoice_event",
+          "range": {
+            "end": 7,
+            "start": 7
+          }
+        }
+      }
+    ],
+    "returned": 1,
+    "truncated": false,
+    "warnings": []
+  }
+}

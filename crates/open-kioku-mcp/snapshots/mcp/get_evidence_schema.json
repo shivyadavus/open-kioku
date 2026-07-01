@@ -1,0 +1,631 @@
+{
+  "id": "get-evidence-schema",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "schema availability reflects the current persisted index manifest"
+    ],
+    "edge_types": [
+      {
+        "count": 0,
+        "description": "Edge of type Contains",
+        "evidence_available": false,
+        "name": "Contains",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 2,
+        "description": "Edge of type Defines",
+        "evidence_available": true,
+        "freshness": "<freshness>",
+        "name": "Defines",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type References",
+        "evidence_available": false,
+        "name": "References",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Calls",
+        "evidence_available": false,
+        "name": "Calls",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Implements",
+        "evidence_available": false,
+        "name": "Implements",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Extends",
+        "evidence_available": false,
+        "name": "Extends",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Imports",
+        "evidence_available": false,
+        "name": "Imports",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type DependsOn",
+        "evidence_available": false,
+        "name": "DependsOn",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type ExposesEndpoint",
+        "evidence_available": false,
+        "name": "ExposesEndpoint",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type CallsEndpoint",
+        "evidence_available": false,
+        "name": "CallsEndpoint",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type ReadsConfig",
+        "evidence_available": false,
+        "name": "ReadsConfig",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type WritesConfig",
+        "evidence_available": false,
+        "name": "WritesConfig",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type ReadsTable",
+        "evidence_available": false,
+        "name": "ReadsTable",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type WritesTable",
+        "evidence_available": false,
+        "name": "WritesTable",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type PublishesEvent",
+        "evidence_available": false,
+        "name": "PublishesEvent",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type ConsumesEvent",
+        "evidence_available": false,
+        "name": "ConsumesEvent",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Tests",
+        "evidence_available": false,
+        "name": "Tests",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type TestCovers",
+        "evidence_available": false,
+        "name": "TestCovers",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type Validates",
+        "evidence_available": false,
+        "name": "Validates",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type OwnedBy",
+        "evidence_available": false,
+        "name": "OwnedBy",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type ChangedBy",
+        "evidence_available": false,
+        "name": "ChangedBy",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type FailedIn",
+        "evidence_available": false,
+        "name": "FailedIn",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type BelongsTo",
+        "evidence_available": false,
+        "name": "BelongsTo",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type MentionedIn",
+        "evidence_available": false,
+        "name": "MentionedIn",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type RelatedToTicket",
+        "evidence_available": false,
+        "name": "RelatedToTicket",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type SimilarTo",
+        "evidence_available": false,
+        "name": "SimilarTo",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
+        "count": 0,
+        "description": "Edge of type SemanticallyRelated",
+        "evidence_available": false,
+        "name": "SemanticallyRelated",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      }
+    ],
+    "evidence_source_types": [
+      "tree_sitter",
+      "scip",
+      "lsp",
+      "regex",
+      "lexical",
+      "semantic",
+      "runtime",
+      "git_history",
+      "static_analysis",
+      "external_integration",
+      "heuristic"
+    ],
+    "feature_flags": [
+      "identifiers",
+      "routes",
+      "config_keys",
+      "service_boundaries",
+      "read_only_graph_query"
+    ],
+    "indexed_at": "2026-01-01T00:00:00+00:00",
+    "node_types": [
+      {
+        "count": 1,
+        "description": "Node of type File",
+        "evidence_available": true,
+        "freshness": "<freshness>",
+        "name": "File",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Directory",
+        "evidence_available": false,
+        "name": "Directory",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Module",
+        "evidence_available": false,
+        "name": "Module",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Package",
+        "evidence_available": false,
+        "name": "Package",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Class",
+        "evidence_available": false,
+        "name": "Class",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Trait",
+        "evidence_available": false,
+        "name": "Trait",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Interface",
+        "evidence_available": false,
+        "name": "Interface",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 2,
+        "description": "Node of type Function",
+        "evidence_available": true,
+        "freshness": "<freshness>",
+        "name": "Function",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Method",
+        "evidence_available": false,
+        "name": "Method",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Field",
+        "evidence_available": false,
+        "name": "Field",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 1,
+        "description": "Node of type Endpoint",
+        "evidence_available": true,
+        "freshness": "<freshness>",
+        "name": "Endpoint",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type DatabaseTable",
+        "evidence_available": false,
+        "name": "DatabaseTable",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Collection",
+        "evidence_available": false,
+        "name": "Collection",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Queue",
+        "evidence_available": false,
+        "name": "Queue",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Topic",
+        "evidence_available": false,
+        "name": "Topic",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type ConfigKey",
+        "evidence_available": false,
+        "name": "ConfigKey",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Test",
+        "evidence_available": false,
+        "name": "Test",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type BuildTarget",
+        "evidence_available": false,
+        "name": "BuildTarget",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type RuntimeError",
+        "evidence_available": false,
+        "name": "RuntimeError",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Ticket",
+        "evidence_available": false,
+        "name": "Ticket",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type PullRequest",
+        "evidence_available": false,
+        "name": "PullRequest",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type Resource",
+        "evidence_available": false,
+        "name": "Resource",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      },
+      {
+        "count": 0,
+        "description": "Node of type ArchitectureComponent",
+        "evidence_available": false,
+        "name": "ArchitectureComponent",
+        "optional_fields": [],
+        "required_fields": [],
+        "stable": true
+      }
+    ],
+    "optional_evidence": [
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "SCIP exact reference evidence",
+        "evidence_count": 0,
+        "name": "scip",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "local semantic vector index evidence",
+        "evidence_count": 0,
+        "name": "semantic",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "runtime trace and incident evidence",
+        "evidence_count": 0,
+        "name": "runtime",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "local git history and co-change evidence",
+        "evidence_count": 0,
+        "name": "history",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "coverage report evidence",
+        "evidence_count": 0,
+        "name": "coverage",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "JUnit-style test report evidence",
+        "evidence_count": 0,
+        "name": "junit",
+        "status": "not_observed"
+      },
+      {
+        "available": false,
+        "caveats": [
+          "no persisted evidence for this family is present in the current index"
+        ],
+        "description": "architecture policy graph evidence",
+        "evidence_count": 0,
+        "name": "architecture_policy",
+        "status": "not_observed"
+      }
+    ],
+    "property_specs": [
+      {
+        "description": "Repository-relative file path",
+        "name": "file_path",
+        "type_name": "string"
+      },
+      {
+        "description": "Fully qualified symbol name",
+        "name": "qualified_name",
+        "type_name": "string"
+      },
+      {
+        "description": "Service-boundary protocol such as http, tcp, graphql, grpc, or trpc",
+        "name": "protocol",
+        "type_name": "string"
+      },
+      {
+        "description": "Normalized route, URL path, port, topic, queue, config key, or resource target",
+        "name": "normalized_path",
+        "type_name": "string"
+      },
+      {
+        "description": "Static/runtime pass or framework that produced a service-boundary fact",
+        "name": "source_framework",
+        "type_name": "string"
+      }
+    ],
+    "query_features": [
+      "node_type_filters",
+      "edge_type_filters",
+      "one_hop_directed_traversal",
+      "bounded_multi_hop_traversal",
+      "property_equality_filters",
+      "property_prefix_filters",
+      "regex_filters_on_label_qualified_name_file_path",
+      "return_variables",
+      "limit",
+      "offset",
+      "row_cap",
+      "depth_cap",
+      "timeout",
+      "read_only_syntax_rejection"
+    ],
+    "version": "1.0.0"
+  }
+}
