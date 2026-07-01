@@ -2815,6 +2815,7 @@ async fn main() -> anyhow::Result<()> {
                         check_api_surface,
                         check_dependency_delta,
                         architecture_policy,
+                        suppress_plan_validation_pending: false,
                     },
                 )?;
             if cli.json {
@@ -7121,6 +7122,7 @@ fn score_workflow_case(
                 check_api_surface: false,
                 check_dependency_delta: false,
                 architecture_policy: None,
+                suppress_plan_validation_pending: false,
             },
         )?)
     } else {
@@ -7383,6 +7385,7 @@ fn run_contract_bench(args: ContractBenchArgs) -> anyhow::Result<ContractBenchRe
                 check_api_surface: case.check_api_surface,
                 check_dependency_delta: case.check_dependency_delta,
                 architecture_policy: load_architecture_policy(&temp_repo.path)?,
+                suppress_plan_validation_pending: false,
             },
         )?;
         let verification_ms = duration_ms(verification_started.elapsed());
@@ -8531,6 +8534,7 @@ fn handle_contract_command(
                         check_api_surface,
                         check_dependency_delta,
                         architecture_policy,
+                        suppress_plan_validation_pending: false,
                     },
                 )?;
             let failed = matches!(
@@ -8796,6 +8800,10 @@ fn render_contract_markdown(contract: &ChangeContractV1) -> String {
             .map(|command| format!("{}: {}", command.command, command.reason))
             .collect::<Vec<_>>(),
     );
+    if let Some(quality) = contract.extensions.get("evidence_quality") {
+        out.push_str("\n## Evidence Quality\n\n");
+        out.push_str(&format!("```json\n{}\n```\n", quality));
+    }
     out.push_str(&format!(
         "\nRisk: `{:?}` {:.2}\nConfidence: `{:?}` {:.2}\nEvidence refs: `{}`\n",
         contract.risk.level,
@@ -8840,6 +8848,9 @@ fn render_contract_toon(contract: &ChangeContractV1) -> String {
             .map(|command| command.command.clone())
             .collect::<Vec<_>>(),
     );
+    if let Some(quality) = contract.extensions.get("evidence_quality") {
+        out.push_str(&format!("evidence_quality: {}\n", quality));
+    }
     out
 }
 
@@ -8930,6 +8941,11 @@ fn render_contract_verification_markdown(report: &ContractVerificationReport) ->
         "Warnings",
         &finding_summaries(&report.change_report.warnings),
     );
+    out.push_str(&format!(
+        "\nEvidence quality: mode `{}`, freshness `{}`\n\n",
+        report.policy_snapshot.evidence_quality.index_mode,
+        report.policy_snapshot.evidence_quality.freshness
+    ));
     push_markdown_list(
         &mut out,
         "Dependency Deltas",

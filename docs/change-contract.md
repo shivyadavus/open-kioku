@@ -54,6 +54,15 @@ plan carries it. The builder writes a `history_signal_summary` extension and a
 is advisory and does not alter the v1 schema or the rule that exact code,
 boundary, and validation evidence remain authoritative.
 
+Generated contracts preserve source-plan evidence quality in an
+`evidence_quality` extension and an `evidence_freshness_requirement` extension.
+The quality object records index mode, freshness, exact-reference availability,
+runtime availability, history availability, coverage/JUnit availability,
+skipped-path counts, unresolved imports, ambiguous edges, failed optional
+passes, and caveats. Contract verification reports these caveats as warnings;
+stale evidence remains warning-grade by default and becomes a failure when
+strict traceability verification is requested.
+
 ## CLI and MCP Workflow
 
 The CLI exposes first-class contract commands without removing the legacy
@@ -80,6 +89,11 @@ The MCP server exposes the same workflow through `create_change_contract`,
 `contract_json`; `get_change_contract` can export JSON, Markdown, or TOON.
 Stored contract verification appends JSONL verification records next to the
 contract, while inline verification leaves the store untouched.
+
+Required validation commands must be either run during verification or backed by
+matching `ValidationAttestation` records. Missing validation evidence is
+reported as a pending-validation warning; failed, denied, stale, mismatched, or
+wrong-contract attestations remain verification failures.
 
 Use `open_kioku_contract::schema()` to obtain the JSON Schema root. The
 canonical JSON example is

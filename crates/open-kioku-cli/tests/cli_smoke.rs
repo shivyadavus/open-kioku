@@ -1706,7 +1706,8 @@ fn demo_creates_indexed_sample_repo() {
             .arg(&verify_diff_path);
         command
     });
-    assert!(verify_pass.contains("\"verdict\": \"pass\""));
+    assert!(verify_pass.contains("\"verdict\": \"warn\""));
+    assert!(verify_pass.contains("\"evidence_quality\""));
     assert!(verify_pass.contains("\"changed_symbols\""));
 
     let verify_warn = run({
