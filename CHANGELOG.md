@@ -9,6 +9,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.2.1] — 2026-07-02
+
+### Added
+- Added root `glama.json` metadata so Glama can associate the MCP listing with the repository maintainer.
+- Added MCP `title`, `annotations`, and `outputSchema` metadata to every tool definition.
+
+### Changed
+- Expanded MCP tool descriptions with explicit when-to-use guidance, sibling alternatives, and side-effect transparency for better Glama TDQS scoring.
+- Marked write-like MCP tools with accurate read/write/destructive/open-world annotations.
+- Decomposed the CLI crate into command, benchmark, report, and shared type modules while keeping the binary behavior intact.
+- Added GitHub star and npm download badges to the README.
+- Reconciled the release line after `v2.2.0` so package registries receive the current `main` MCP tool surface.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.1.1] — 2026-06-21
 
 ### Fixed
@@ -238,6 +265,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.2.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.1
 [2.1.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.1
 [2.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.0
 [2.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.1

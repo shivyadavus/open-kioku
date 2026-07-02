@@ -821,9 +821,13 @@ fn call_tool<'a>(
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
                 };
                 let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
+                let structured_content = match value {
+                    Value::Object(_) => value,
+                    other => json!({ "value": other }),
+                };
                 let mut response = json!({
                     "content": [{"type": "text", "text": text}],
-                    "structuredContent": value
+                    "structuredContent": structured_content
                 });
                 if text_truncated {
                     response["truncated"] = json!(true);
@@ -1039,13 +1043,14 @@ fn tool_annotations(name: &str) -> Value {
 
 fn tool_output_schema() -> Value {
     json!({
-        "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings.",
-        "anyOf": [
-            {"type": "object"},
-            {"type": "array"},
-            {"type": "string"},
-            {"type": "null"}
-        ]
+        "type": "object",
+        "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+        "additionalProperties": true,
+        "properties": {
+            "value": {
+                "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses.",
+            }
+        }
     })
 }
 

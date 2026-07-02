@@ -38,21 +38,14 @@
         "maturity": "stable",
         "name": "repo_status",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Repo Status"
       },
@@ -81,21 +74,14 @@
         "maturity": "stable",
         "name": "list_files",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku List Files"
       },
@@ -115,21 +101,14 @@
         "maturity": "stable",
         "name": "list_languages",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku List Languages"
       },
@@ -162,21 +141,14 @@
         "maturity": "stable",
         "name": "list_symbols",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku List Symbols"
       },
@@ -209,21 +181,14 @@
         "maturity": "stable",
         "name": "search_symbols",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Search Symbols"
       },
@@ -243,21 +208,14 @@
         "maturity": "stable",
         "name": "detect_architecture",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Detect Architecture"
       },
@@ -277,21 +235,14 @@
         "maturity": "stable",
         "name": "architecture_boundaries",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Architecture Boundaries"
       },
@@ -311,21 +262,14 @@
         "maturity": "stable",
         "name": "architecture_violations",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Architecture Violations"
       },
@@ -350,21 +294,14 @@
         "maturity": "stable",
         "name": "architecture_policy_validate",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Architecture Policy Validate"
       },
@@ -384,21 +321,14 @@
         "maturity": "stable",
         "name": "architecture_policy_check",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Architecture Policy Check"
       },
@@ -451,21 +381,14 @@
         "maturity": "stable",
         "name": "architecture_policy_explain",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Architecture Policy Explain"
       },
@@ -509,21 +432,14 @@
         "maturity": "stable",
         "name": "search_code",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Search Code"
       },
@@ -567,21 +483,14 @@
         "maturity": "stable",
         "name": "search_files",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Search Files"
       },
@@ -617,21 +526,14 @@
         "maturity": "stable",
         "name": "regex_search",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Regex Search"
       },
@@ -651,21 +553,14 @@
         "maturity": "experimental",
         "name": "semantic_status",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Semantic Status"
       },
@@ -701,21 +596,14 @@
         "maturity": "experimental",
         "name": "semantic_search",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Semantic Search"
       },
@@ -751,21 +639,14 @@
         "maturity": "experimental",
         "name": "hybrid_search",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Hybrid Search"
       },
@@ -797,21 +678,14 @@
         "maturity": "experimental",
         "name": "explain_search_result",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain Search Result"
       },
@@ -843,21 +717,14 @@
         "maturity": "experimental",
         "name": "structural_search",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Structural Search"
       },
@@ -885,21 +752,14 @@
         "maturity": "stable",
         "name": "get_definition",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Definition"
       },
@@ -931,21 +791,14 @@
         "maturity": "stable",
         "name": "get_references",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get References"
       },
@@ -977,21 +830,14 @@
         "maturity": "experimental",
         "name": "get_implementations",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Implementations"
       },
@@ -1023,21 +869,14 @@
         "maturity": "experimental",
         "name": "get_callers",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Callers"
       },
@@ -1069,21 +908,14 @@
         "maturity": "experimental",
         "name": "get_callees",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Callees"
       },
@@ -1111,21 +943,14 @@
         "maturity": "stable",
         "name": "get_symbol_context",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Symbol Context"
       },
@@ -1158,21 +983,14 @@
         "maturity": "stable",
         "name": "dependency_path",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Dependency Path"
       },
@@ -1200,21 +1018,14 @@
         "maturity": "stable",
         "name": "impact_analysis",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Impact Analysis"
       },
@@ -1259,21 +1070,14 @@
         "maturity": "experimental",
         "name": "history_provenance_lookup",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku History Provenance Lookup"
       },
@@ -1323,21 +1127,14 @@
         "maturity": "experimental",
         "name": "churn_analysis",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Churn Analysis"
       },
@@ -1388,21 +1185,14 @@
         "maturity": "experimental",
         "name": "history_similar_changes",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku History Similar Changes"
       },
@@ -1430,21 +1220,14 @@
         "maturity": "experimental",
         "name": "ownership_lookup",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Ownership Lookup"
       },
@@ -1472,21 +1255,14 @@
         "maturity": "experimental",
         "name": "reviewer_suggestions",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Reviewer Suggestions"
       },
@@ -1518,21 +1294,14 @@
         "maturity": "stable",
         "name": "module_dependencies",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Module Dependencies"
       },
@@ -1573,21 +1342,14 @@
         "maturity": "stable",
         "name": "build_context_pack",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Build Context Pack"
       },
@@ -1627,21 +1389,14 @@
         "maturity": "stable",
         "name": "build_compressed_context",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Build Compressed Context"
       },
@@ -1669,21 +1424,14 @@
         "maturity": "stable",
         "name": "retrieve_context",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Retrieve Context"
       },
@@ -1728,21 +1476,14 @@
         "maturity": "stable",
         "name": "plan_change",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Plan Change"
       },
@@ -1813,21 +1554,14 @@
         "maturity": "stable",
         "name": "create_change_contract",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Create Change Contract"
       },
@@ -1864,21 +1598,14 @@
         "maturity": "stable",
         "name": "get_change_contract",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Change Contract"
       },
@@ -1920,21 +1647,14 @@
         "maturity": "stable",
         "name": "remember_fact",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Remember Fact"
       },
@@ -1966,21 +1686,14 @@
         "maturity": "stable",
         "name": "search_memory",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Search Memory"
       },
@@ -2008,21 +1721,14 @@
         "maturity": "stable",
         "name": "explain_file",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain File"
       },
@@ -2050,21 +1756,14 @@
         "maturity": "stable",
         "name": "explain_symbol",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain Symbol"
       },
@@ -2084,21 +1783,14 @@
         "maturity": "experimental",
         "name": "explain_flow",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain Flow"
       },
@@ -2118,21 +1810,14 @@
         "maturity": "stable",
         "name": "summarize_architecture",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Summarize Architecture"
       },
@@ -2164,21 +1849,14 @@
         "maturity": "stable",
         "name": "find_tests_for_change",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Find Tests For Change"
       },
@@ -2210,21 +1888,14 @@
         "maturity": "stable",
         "name": "recommend_validation_plan",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Recommend Validation Plan"
       },
@@ -2253,21 +1924,14 @@
         "maturity": "stable",
         "name": "explain_test_coverage",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain Test Coverage"
       },
@@ -2295,21 +1959,14 @@
         "maturity": "stable",
         "name": "propose_patch",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Propose Patch"
       },
@@ -2337,21 +1994,14 @@
         "maturity": "stable",
         "name": "review_patch",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Review Patch"
       },
@@ -2379,21 +2029,14 @@
         "maturity": "stable",
         "name": "validate_patch",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Validate Patch"
       },
@@ -2464,21 +2107,14 @@
         "maturity": "stable",
         "name": "verify_change",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Verify Change"
       },
@@ -2586,21 +2222,14 @@
         "maturity": "stable",
         "name": "verify_change_contract",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Verify Change Contract"
       },
@@ -2650,21 +2279,14 @@
         "maturity": "stable",
         "name": "explain_verification",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Explain Verification"
       },
@@ -2689,21 +2311,14 @@
         "maturity": "experimental",
         "name": "map_stacktrace_to_code",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Map Stacktrace To Code"
       },
@@ -2731,21 +2346,14 @@
         "maturity": "experimental",
         "name": "find_errors_for_symbol",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Find Errors For Symbol"
       },
@@ -2770,21 +2378,14 @@
         "maturity": "experimental",
         "name": "find_recent_failures",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Find Recent Failures"
       },
@@ -2804,21 +2405,14 @@
         "maturity": "stable",
         "name": "get_evidence_schema",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Get Evidence Schema"
       },
@@ -2854,21 +2448,14 @@
         "maturity": "stable",
         "name": "query_evidence_graph",
         "outputSchema": {
-          "anyOf": [
-            {
-              "type": "object"
-            },
-            {
-              "type": "array"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
             }
-          ],
-          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+          },
+          "type": "object"
         },
         "title": "Open Kioku Query Evidence Graph"
       }
