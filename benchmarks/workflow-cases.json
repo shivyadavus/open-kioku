@@ -104,9 +104,9 @@
   {
     "id": "cli-eval",
     "task": "add eval report ablations to CLI",
-    "expected_primary_context": ["crates/open-kioku-cli/src/main.rs"],
-    "expected_boundary": ["crates/open-kioku-cli/src/main.rs"],
-    "changed_files": ["crates/open-kioku-cli/src/main.rs"],
+    "expected_primary_context": ["crates/open-kioku-cli/src/bench/mod.rs"],
+    "expected_boundary": ["crates/open-kioku-cli/src/bench/mod.rs"],
+    "changed_files": ["crates/open-kioku-cli/src/bench/mod.rs"],
     "expected_verdict": "warn",
     "expected_confidence": true
   },
