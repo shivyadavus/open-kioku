@@ -2026,7 +2026,7 @@ fn contract_cli_and_mcp_round_trip() {
         &(mcp_get_req + "\n"),
     );
     let mcp_get: serde_json::Value = serde_json::from_str(mcp_get.trim()).unwrap();
-    assert!(mcp_get["result"]["structuredContent"]
+    assert!(mcp_get["result"]["structuredContent"]["value"]
         .as_str()
         .unwrap()
         .contains("# Change Contract"));
@@ -2078,7 +2078,7 @@ fn contract_cli_and_mcp_round_trip() {
         &(mcp_explain_req + "\n"),
     );
     let mcp_explain: serde_json::Value = serde_json::from_str(mcp_explain.trim()).unwrap();
-    assert!(mcp_explain["result"]["structuredContent"]
+    assert!(mcp_explain["result"]["structuredContent"]["value"]
         .as_str()
         .unwrap()
         .contains("# Verification Explanation"));
