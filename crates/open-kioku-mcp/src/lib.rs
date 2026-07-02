@@ -985,6 +985,138 @@ fn merge_semantic_results(
     }
 }
 
+fn tool_title(name: &str) -> String {
+    let words = name
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("Open Kioku {words}")
+}
+
+fn tool_annotations(name: &str) -> Value {
+    let mut read_only = true;
+    let mut destructive = false;
+    let mut idempotent = true;
+    let mut open_world = false;
+
+    match name {
+        "apply_patch" => {
+            read_only = false;
+            destructive = true;
+            idempotent = false;
+        }
+        "build_compressed_context"
+        | "create_change_contract"
+        | "remember_fact"
+        | "verify_change_contract" => {
+            read_only = false;
+            idempotent = false;
+        }
+        "verify_change" => {
+            read_only = false;
+            idempotent = false;
+            open_world = true;
+        }
+        _ => {}
+    }
+
+    json!({
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "idempotentHint": idempotent,
+        "openWorldHint": open_world
+    })
+}
+
+fn tool_output_schema() -> Value {
+    json!({
+        "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings.",
+        "anyOf": [
+            {"type": "object"},
+            {"type": "array"},
+            {"type": "string"},
+            {"type": "null"}
+        ]
+    })
+}
+
+fn tool_description(name: &str, base: &str) -> String {
+    let guidance = match name {
+        "repo_status" => "Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
+        "list_files" => "Use for broad repository inventory and pagination over indexed paths; use search_files when you already have a keyword or path fragment. This is read-only and returns indexed data only.",
+        "list_languages" => "Use for a quick language/support overview before choosing language-specific investigation paths. This is read-only and does not rescan the repository.",
+        "list_symbols" => "Use to browse or substring-filter the symbol table; use search_symbols for fuzzy ranking and get_definition when you need one symbol body. This is read-only.",
+        "search_symbols" => "Use when an agent has an approximate symbol name and needs ranked candidates; use list_symbols for inventory and get_definition for a resolved definition. This is read-only.",
+        "detect_architecture" => "Use to infer architectural components from directories when no policy-specific answer is required. Use architecture_policy_check for enforced dependency rules. This is read-only.",
+        "architecture_boundaries" => "Use to inspect component boundary configuration before explaining or checking violations. Use architecture_violations for legacy detected issues and architecture_policy_check for policy-backed edge evaluation. This is read-only.",
+        "architecture_violations" => "Use for a quick legacy boundary violation report; use architecture_policy_check when repository policy TOML and indexed dependency edges should be authoritative. This is read-only.",
+        "architecture_policy_validate" => "Use before architecture_policy_check when editing or debugging policy TOML syntax and component resolution. It validates policy shape only and does not evaluate graph edges.",
+        "architecture_policy_check" => "Use to enforce architecture policy against indexed import/reference/call edges. Use architecture_policy_validate first for policy syntax errors and architecture_policy_explain for why a specific file or symbol matched. This is read-only.",
+        "architecture_policy_explain" => "Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
+        "search_code" => "Use for lexical BM25 code search when exact identifiers, terms, routes, or config keys are known. Prefer semantic_search for conceptual queries, hybrid_search when both lexical and semantic evidence are needed, and regex_search for exact patterns. This is read-only.",
+        "search_files" => "Use when the target is a file path, filename, or file-content keyword rather than a symbol. Prefer list_files for inventory, search_code for code snippets, and regex_search for precise line pattern matching. This is read-only.",
+        "regex_search" => "Use for exact regular-expression line matches after lexical or semantic search narrows the area. Prefer search_code for ranked keyword search and structural_search for syntax-shaped queries. This is read-only.",
+        "semantic_status" => "Use before semantic_search or hybrid_search to confirm the local vector index is present and fresh. This is read-only and does not build embeddings.",
+        "semantic_search" => "Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
+        "hybrid_search" => "Use as the default investigative search when both words and concepts matter. Prefer search_code for deterministic lexical matches and semantic_search for concept-only exploration. This is read-only.",
+        "explain_search_result" => "Use when a search result must be justified with score components and evidence before relying on it in a plan. Prefer hybrid_search when explanations are unnecessary. This is read-only.",
+        "structural_search" => "Use for syntax or structure-shaped discovery across symbol trees and chunks. Prefer regex_search for literal text patterns and get_definition for a known symbol. This is read-only.",
+        "get_definition" => "Use after resolving a symbol name to retrieve its defining range and body. Prefer search_symbols for candidate discovery and get_symbol_context when surrounding references and documentation are needed. This is read-only.",
+        "get_references" => "Use to find usages of a resolved symbol across the index. Prefer get_callers for caller-only relationships and impact_analysis for broader file-level blast radius. This is read-only.",
+        "get_implementations" => "Use for traits, interfaces, abstract classes, and protocols where implementation sites matter. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
+        "get_callers" => "Use to trace inbound calls to a function or method. Prefer get_references for all usages and dependency_path when you need a route between two nodes. This is read-only.",
+        "get_callees" => "Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
+        "get_symbol_context" => "Use when an agent needs a richer single-symbol bundle than get_definition provides, including file context and docs when indexed. This is read-only.",
+        "dependency_path" => "Use to explain how two files or symbols are connected through indexed dependencies. Prefer module_dependencies for local neighbors and impact_analysis for downstream blast radius. This is read-only.",
+        "impact_analysis" => "Use before editing a file to estimate downstream dependents, callers, related tests, and policy impact. Prefer find_tests_for_change when only validation targets are needed. This is read-only.",
+        "history_provenance_lookup" => "Use when authorship timing or first/last-touch evidence is needed for exactly one path or symbol. Prefer churn_analysis for hotspot metrics and ownership_lookup for maintainers. This is read-only and reports uncertainty.",
+        "churn_analysis" => "Use to identify hotspots for one path, module, or symbol using materialized git statistics. Prefer history_provenance_lookup for commit provenance and history_similar_changes for prior change examples. This is read-only.",
+        "history_similar_changes" => "Use during planning to find prior commits related to a task, path, or symbol. Prefer churn_analysis for risk scoring and ownership_lookup for reviewer ownership. This is read-only.",
+        "ownership_lookup" => "Use to identify likely owners for one path from CODEOWNERS, git history, and memory facts. Prefer reviewer_suggestions when choosing reviewers for a proposed change. This is read-only.",
+        "reviewer_suggestions" => "Use when a change needs human reviewers and a path is known. Prefer ownership_lookup for ownership evidence without reviewer ranking. This is read-only.",
+        "module_dependencies" => "Use to inspect direct dependency neighbors for one file or symbol. Prefer dependency_path for a route between two nodes and architecture_policy_check for rule violations. This is read-only.",
+        "build_context_pack" => "Use before planning or editing to gather relevant files, symbols, tests, history, and policy evidence for a natural-language task. Prefer build_compressed_context when prompt budget is tight. This is read-only.",
+        "build_compressed_context" => "Use when a context pack is needed but prompt budget is constrained; retrieve_context can expand handles later. This writes reusable context handles under the repository .ok data directory.",
+        "retrieve_context" => "Use only with handles returned by build_compressed_context to recover original snippets. Prefer build_context_pack for a fresh task-level context bundle. This is read-only.",
+        "plan_change" => "Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. Prefer create_change_contract when the plan must be persisted and verified later. This is read-only.",
+        "create_change_contract" => "Use when a plan needs a durable verification contract for later review or CI evidence. By default it writes a contract under .ok/contracts; set store=false for a transient contract.",
+        "get_change_contract" => "Use to retrieve a previously stored contract by id before verification or explanation. Prefer create_change_contract for new contracts. This is read-only.",
+        "remember_fact" => "Use only for durable, repository-scoped facts an agent should reuse later. It appends memory under repository storage; use search_memory to read existing facts first when unsure.",
+        "search_memory" => "Use to retrieve stored repository facts by keyword or entity before planning or ownership decisions. Prefer live code/search tools for current source facts. This is read-only.",
+        "explain_file" => "Use for one known file when parsing status, chunks, and indexed metadata are needed. Prefer search_files to discover files and explain_symbol for symbol-level context. This is read-only.",
+        "explain_symbol" => "Use for a concise explanation of one known symbol's indexed definition and structure. Prefer get_symbol_context for a larger context bundle. This is read-only.",
+        "explain_flow" => "Use for a high-level narrative of repository flows and boundaries. Prefer architecture_policy_check for enforceable violations and summarize_architecture for structured architecture output. This is read-only.",
+        "summarize_architecture" => "Use for a structured architecture overview with layer constraints and violation checks. Prefer explain_flow for a narrative and architecture_policy_explain for file-level evidence. This is read-only.",
+        "find_tests_for_change" => "Use after identifying a changed file to select relevant test files. Prefer recommend_validation_plan when static checks, coverage, and broader validation steps are also needed. This is read-only.",
+        "recommend_validation_plan" => "Use before finalizing a change to choose tests, static checks, and coverage actions for one path. Prefer find_tests_for_change for test-only recommendations. This is read-only.",
+        "explain_test_coverage" => "Use to inspect known coverage evidence for one file or the repository. Prefer recommend_validation_plan when deciding what to run next. This is read-only and does not execute tests.",
+        "propose_patch" => "Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning and apply_patch only after explicit approval in write-enabled mode. This is read-only.",
+        "review_patch" => "Use to review a proposed patch plan for safety and completeness before applying it. Prefer validate_patch for boundary/reference validation. This is read-only.",
+        "validate_patch" => "Use to check a patch plan against architecture boundaries and references before application. Prefer verify_change after a real diff exists. This is read-only.",
+        "verify_change" => "Use after edits to compare an actual diff or changed files against a saved plan. It may run configured validation commands when run_commands=true and may write attestations when write_attestation=true.",
+        "verify_change_contract" => "Use after edits to verify a diff against a stored or inline change contract. Stored contract ids append verification records under .ok/contracts, and command execution is opt-in via run_commands.",
+        "explain_verification" => "Use after verify_change_contract to translate a verification report into a decision, failures, warnings, and next tests. This is read-only.",
+        "map_stacktrace_to_code" => "Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
+        "find_errors_for_symbol" => "Use to look up recent stored runtime errors for one symbol. Prefer map_stacktrace_to_code for ad hoc stack traces and find_recent_failures for incident inventory. This tool is read-only and returns disabled status when runtime integration is not configured.",
+        "find_recent_failures" => "Use to list recent stored runtime failures before debugging. Prefer find_errors_for_symbol for a specific symbol. This tool is read-only and returns disabled status when runtime integration is not configured.",
+        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.",
+        "query_evidence_graph" => "Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
+        "apply_patch" => "Use only after propose_patch, review_patch, or an equivalent human-approved plan has produced an id and the caller passes approved=true. This mutates the working tree, requires write mode, and should not be used for exploration.",
+        _ => "Use when this exact indexed repository capability is needed. Prefer narrower sibling tools when they match the task. This tool reports local Open Kioku index data and does not contact external services.",
+    };
+
+    format!("{base} {guidance}")
+}
+
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
         ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed.", json!({"type":"object","properties":{}})),
@@ -1067,10 +1199,13 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         }
         tools.push(json!({
             "name": name,
-            "description": description,
+            "title": tool_title(name),
+            "description": tool_description(name, description),
             "maturity": maturity,
             "experimental": maturity == "experimental",
-            "inputSchema": schema
+            "inputSchema": schema,
+            "outputSchema": tool_output_schema(),
+            "annotations": tool_annotations(name)
         }));
     }
 
@@ -1085,10 +1220,13 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
             }
             tools.push(json!({
                 "name": name,
-                "description": description,
+                "title": tool_title(name),
+                "description": tool_description(name, description),
                 "maturity": maturity,
                 "experimental": maturity == "experimental",
-                "inputSchema": schema
+                "inputSchema": schema,
+                "outputSchema": tool_output_schema(),
+                "annotations": tool_annotations(name)
             }));
         }
     }
@@ -2857,6 +2995,43 @@ mod tests {
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
         assert!(tools_ro.iter().all(|t| t["name"] != "apply_patch"));
+        for tool in tools_ro {
+            let name = tool["name"].as_str().unwrap();
+            let title = tool["title"].as_str().unwrap_or_default();
+            let description = tool["description"].as_str().unwrap_or_default();
+            assert!(
+                title.starts_with("Open Kioku ") && title.len() > name.len(),
+                "{name} should expose a meaningful MCP title"
+            );
+            assert!(
+                description.contains("Use ") && description.len() >= 160,
+                "{name} should include TDQS usage guidance"
+            );
+            assert!(
+                tool["inputSchema"].is_object(),
+                "{name} should expose an input schema"
+            );
+            assert!(
+                tool["outputSchema"].is_object(),
+                "{name} should expose an output schema"
+            );
+            assert!(
+                tool["annotations"]["readOnlyHint"].is_boolean(),
+                "{name} should expose MCP annotations"
+            );
+            assert!(
+                tool["annotations"]["destructiveHint"].is_boolean(),
+                "{name} should expose destructiveHint"
+            );
+            assert!(
+                tool["annotations"]["idempotentHint"].is_boolean(),
+                "{name} should expose idempotentHint"
+            );
+            assert!(
+                tool["annotations"]["openWorldHint"].is_boolean(),
+                "{name} should expose openWorldHint"
+            );
+        }
         let provenance = tools_ro
             .iter()
             .find(|tool| tool["name"] == "history_provenance_lookup")
@@ -2882,6 +3057,18 @@ mod tests {
             .find(|tool| tool["name"] == "reviewer_suggestions")
             .unwrap();
         assert_eq!(reviewer_suggestions["maturity"], "experimental");
+        let remember_fact = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "remember_fact")
+            .unwrap();
+        assert_eq!(remember_fact["annotations"]["readOnlyHint"], false);
+        assert_eq!(remember_fact["annotations"]["destructiveHint"], false);
+        let verify_change = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "verify_change")
+            .unwrap();
+        assert_eq!(verify_change["annotations"]["readOnlyHint"], false);
+        assert_eq!(verify_change["annotations"]["openWorldHint"], true);
 
         let mut config_write = OkConfig::default();
         config_write.security.allow_write = true;
@@ -2890,7 +3077,13 @@ mod tests {
             .await
             .unwrap();
         let tools_rw = result_rw["tools"].as_array().unwrap();
-        assert!(tools_rw.iter().any(|t| t["name"] == "apply_patch"));
+        let apply_patch = tools_rw
+            .iter()
+            .find(|tool| tool["name"] == "apply_patch")
+            .unwrap();
+        assert_eq!(apply_patch["annotations"]["readOnlyHint"], false);
+        assert_eq!(apply_patch["annotations"]["destructiveHint"], true);
+        assert_eq!(apply_patch["annotations"]["idempotentHint"], false);
     }
 
     #[tokio::test]

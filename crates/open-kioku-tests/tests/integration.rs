@@ -150,7 +150,9 @@ fn test_mcp_tools_list_snapshot() {
     let parsed: serde_json::Value = serde_json::from_str(last_json).unwrap();
     let formatted = serde_json::to_string_pretty(&parsed).unwrap();
 
-    if snapshot_file.exists() {
+    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+        std::fs::write(&snapshot_file, formatted).unwrap();
+    } else if snapshot_file.exists() {
         let expected = std::fs::read_to_string(&snapshot_file).unwrap();
         assert_eq!(
             expected.trim(),
