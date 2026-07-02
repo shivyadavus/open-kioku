@@ -1,8 +1,10 @@
 # Open Kioku (`ok`)
 
 [![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/shivyadavus/open-kioku?style=social)](https://github.com/shivyadavus/open-kioku/stargazers)
 [![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
+[![npm downloads](https://img.shields.io/npm/dm/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
 
 Open Kioku is local code intelligence for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, Codex, and other MCP clients the facts they need before editing: code search, symbols, impact analysis, validation commands, context packs, repo memory, architecture policy evaluation, evidence graph queries, and static/runtime graph evidence.
