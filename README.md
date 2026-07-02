@@ -475,7 +475,7 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 ## Repository Layout
 
-This is a 44-crate Cargo workspace. Important crates:
+This is a 41-crate Cargo workspace. Important crates:
 
 - `open-kioku-cli`: the `ok` binary (33 subcommands).
 - `open-kioku-mcp`: JSON-RPC MCP server over stdio (58 tools).
