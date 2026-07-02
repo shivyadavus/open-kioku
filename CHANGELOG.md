@@ -9,6 +9,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.2.0] — 2026-07-02
+
+### Added
+- **Evidence Quality Gates & Trust Workflow**:
+  - Added enforcement of evidence quality gates inside the trust workflow.
+  - Added bounded git history signals across the trust workflow.
+  - Added evidence traceability rules and contract validation attestation.
+- **Reviewer & Patch Intelligence**:
+  - Introduced a reviewer suggestion engine to suggest code reviewers based on ownership intelligence.
+  - Implemented a code change verification flow using policy contracts.
+  - Implemented automatic detection of public API and dependency delta changes in patches.
+  - Added validation command attestation for patch proposals.
+- **Architecture Boundaries**:
+  - Exposed user-facing contract and architecture policy UX CLI commands.
+  - Added architecture policy checking to planning and verification, enforcing public API boundary rules.
+  - Added architecture policy benchmark corpus and contract benchmark corpus.
+- **Git History & Churn Analysis**:
+  - Materialized churn hotspots at symbol and file levels.
+  - Implemented historical similarity change retrieval for contextual planning.
+  - Added public API benchmark corpus for history-based retrieval.
+- **MCP & Protocol Hardening**:
+  - Hardened the Model Context Protocol (MCP) server, improving pagination and continuation logic.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.1.1] — 2026-06-21
 
 ### Fixed
@@ -238,6 +275,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.2.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.0
 [2.1.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.1
 [2.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.1.0
 [2.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.0.1

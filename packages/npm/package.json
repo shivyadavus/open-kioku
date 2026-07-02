@@ -1,6 +1,6 @@
 {
   "name": "open-kioku",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Local-first code intelligence for AI agents. Plan before edit. Verify after edit.",
   "mcpName": "open-kioku",
   "bin": {
@@ -8,11 +8,11 @@
     "open-kioku": "./bin/ok.js"
   },
   "optionalDependencies": {
-    "@open-kioku/darwin-x64": "2.1.1",
-    "@open-kioku/darwin-arm64": "2.1.1",
-    "@open-kioku/linux-x64": "2.1.1",
-    "@open-kioku/linux-arm64": "2.1.1",
-    "@open-kioku/win32-x64": "2.1.1"
+    "@open-kioku/darwin-x64": "2.2.0",
+    "@open-kioku/darwin-arm64": "2.2.0",
+    "@open-kioku/linux-x64": "2.2.0",
+    "@open-kioku/linux-arm64": "2.2.0",
+    "@open-kioku/win32-x64": "2.2.0"
   },
   "repository": {
     "type": "git",

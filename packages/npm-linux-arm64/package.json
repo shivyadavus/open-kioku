@@ -1,6 +1,6 @@
 {
   "name": "@open-kioku/linux-arm64",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "os": ["linux"],
   "cpu": ["arm64"],
   "main": "",
