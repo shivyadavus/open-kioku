@@ -23,17 +23,47 @@
     ],
     "tools": [
       {
-        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed. Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "repo_status"
+        "name": "repo_status",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Repo Status"
       },
       {
-        "description": "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery. Use for broad repository inventory and pagination over indexed paths; use search_files when you already have a keyword or path fragment. This is read-only and returns indexed data only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -49,20 +79,68 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "list_files"
+        "name": "list_files",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku List Files"
       },
       {
-        "description": "List all programming languages detected and indexed in the repository, alongside support status.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "List all programming languages detected and indexed in the repository, alongside support status. Use for a quick language/support overview before choosing language-specific investigation paths. This is read-only and does not rescan the repository.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "list_languages"
+        "name": "list_languages",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku List Languages"
       },
       {
-        "description": "List or search indexed code symbols (such as classes, structs, functions, and interfaces) by name. Supports substring filtering.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "List or search indexed code symbols (such as classes, structs, functions, and interfaces) by name. Supports substring filtering. Use to browse or substring-filter the symbol table; use search_symbols for fuzzy ranking and get_definition when you need one symbol body. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -82,10 +160,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "list_symbols"
+        "name": "list_symbols",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku List Symbols"
       },
       {
-        "description": "Search indexed code symbols by name using exact or fuzzy matching. Essential for finding definitions.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Search indexed code symbols by name using exact or fuzzy matching. Essential for finding definitions. Use when an agent has an approximate symbol name and needs ranked candidates; use list_symbols for inventory and get_definition for a resolved definition. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -105,40 +207,136 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "search_symbols"
+        "name": "search_symbols",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Search Symbols"
       },
       {
-        "description": "Detect high-level architectural components and directories in the repository based on file layouts.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Detect high-level architectural components and directories in the repository based on file layouts. Use to infer architectural components from directories when no policy-specific answer is required. Use architecture_policy_check for enforced dependency rules. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "detect_architecture"
+        "name": "detect_architecture",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Detect Architecture"
       },
       {
-        "description": "Show the configured or inferred boundaries between architectural components, useful to understand import constraints.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Show the configured or inferred boundaries between architectural components, useful to understand import constraints. Use to inspect component boundary configuration before explaining or checking violations. Use architecture_violations for legacy detected issues and architecture_policy_check for policy-backed edge evaluation. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "architecture_boundaries"
+        "name": "architecture_boundaries",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Architecture Boundaries"
       },
       {
-        "description": "Report any import or boundary violations that deviate from the defined codebase architecture rules.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Report any import or boundary violations that deviate from the defined codebase architecture rules. Use for a quick legacy boundary violation report; use architecture_policy_check when repository policy TOML and indexed dependency edges should be authoritative. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "architecture_violations"
+        "name": "architecture_violations",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Architecture Violations"
       },
       {
-        "description": "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges. Use before architecture_policy_check when editing or debugging policy TOML syntax and component resolution. It validates policy shape only and does not evaluate graph edges.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -150,20 +348,68 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "architecture_policy_validate"
+        "name": "architecture_policy_validate",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Architecture Policy Validate"
       },
       {
-        "description": "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples. Use to enforce architecture policy against indexed import/reference/call edges. Use architecture_policy_validate first for policy syntax errors and architecture_policy_explain for why a specific file or symbol matched. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "architecture_policy_check"
+        "name": "architecture_policy_check",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Architecture Policy Check"
       },
       {
-        "description": "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository. Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
         "experimental": false,
         "inputSchema": {
           "oneOf": [
@@ -203,10 +449,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "architecture_policy_explain"
+        "name": "architecture_policy_explain",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Architecture Policy Explain"
       },
       {
-        "description": "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties. Use for lexical BM25 code search when exact identifiers, terms, routes, or config keys are known. Prefer semantic_search for conceptual queries, hybrid_search when both lexical and semantic evidence are needed, and regex_search for exact patterns. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -237,10 +507,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "search_code"
+        "name": "search_code",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Search Code"
       },
       {
-        "description": "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index. Use when the target is a file path, filename, or file-content keyword rather than a symbol. Prefer list_files for inventory, search_code for code snippets, and regex_search for precise line pattern matching. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -271,10 +565,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "search_files"
+        "name": "search_files",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Search Files"
       },
       {
-        "description": "Search indexed code using a regular expression pattern. Returns exact line matching snippets.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Search indexed code using a regular expression pattern. Returns exact line matching snippets. Use for exact regular-expression line matches after lexical or semantic search narrows the area. Prefer search_code for ranked keyword search and structural_search for syntax-shaped queries. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -297,20 +615,68 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "regex_search"
+        "name": "regex_search",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Regex Search"
       },
       {
-        "description": "Report the current status, readiness, and staleness of the local semantic vector index.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Report the current status, readiness, and staleness of the local semantic vector index. Use before semantic_search or hybrid_search to confirm the local vector index is present and fresh. This is read-only and does not build embeddings.",
         "experimental": true,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "semantic_status"
+        "name": "semantic_status",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Semantic Status"
       },
       {
-        "description": "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets. Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -333,10 +699,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "semantic_search"
+        "name": "semantic_search",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Semantic Search"
       },
       {
-        "description": "Perform a hybrid search combining lexical BM25 candidates and semantic vector candidates to produce ranked, context-rich results.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Perform a hybrid search combining lexical BM25 candidates and semantic vector candidates to produce ranked, context-rich results. Use as the default investigative search when both words and concepts matter. Prefer search_code for deterministic lexical matches and semantic_search for concept-only exploration. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -359,10 +749,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "hybrid_search"
+        "name": "hybrid_search",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Hybrid Search"
       },
       {
-        "description": "Run a hybrid search and return detailed, explainable ranking scores and evidence for the top retrieved code snippets.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Run a hybrid search and return detailed, explainable ranking scores and evidence for the top retrieved code snippets. Use when a search result must be justified with score components and evidence before relying on it in a plan. Prefer hybrid_search when explanations are unnecessary. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -381,10 +795,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "explain_search_result"
+        "name": "explain_search_result",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain Search Result"
       },
       {
-        "description": "Perform a structural search across both symbol trees and code chunks to find structural matching syntax.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Perform a structural search across both symbol trees and code chunks to find structural matching syntax. Use for syntax or structure-shaped discovery across symbol trees and chunks. Prefer regex_search for literal text patterns and get_definition for a known symbol. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -403,10 +841,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "structural_search"
+        "name": "structural_search",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Structural Search"
       },
       {
-        "description": "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name. Use after resolving a symbol name to retrieve its defining range and body. Prefer search_symbols for candidate discovery and get_symbol_context when surrounding references and documentation are needed. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -421,10 +883,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "get_definition"
+        "name": "get_definition",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Definition"
       },
       {
-        "description": "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase. Use to find usages of a resolved symbol across the index. Prefer get_callers for caller-only relationships and impact_analysis for broader file-level blast radius. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -443,10 +929,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "get_references"
+        "name": "get_references",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get References"
       },
       {
-        "description": "Find all implementations of a given interface, trait, or abstract class in the repository.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Find all implementations of a given interface, trait, or abstract class in the repository. Use for traits, interfaces, abstract classes, and protocols where implementation sites matter. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -465,10 +975,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "get_implementations"
+        "name": "get_implementations",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Implementations"
       },
       {
-        "description": "Find all parent functions, methods, or modules that call the target symbol.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Find all parent functions, methods, or modules that call the target symbol. Use to trace inbound calls to a function or method. Prefer get_references for all usages and dependency_path when you need a route between two nodes. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -487,10 +1021,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "get_callers"
+        "name": "get_callers",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Callers"
       },
       {
-        "description": "Find all functions, methods, or symbols called by the target symbol.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Find all functions, methods, or symbols called by the target symbol. Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -509,10 +1067,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "get_callees"
+        "name": "get_callees",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Callees"
       },
       {
-        "description": "Retrieve the comprehensive context of a symbol, including definition details, range, file context, and documentation if available.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the comprehensive context of a symbol, including definition details, range, file context, and documentation if available. Use when an agent needs a richer single-symbol bundle than get_definition provides, including file context and docs when indexed. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -527,10 +1109,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "get_symbol_context"
+        "name": "get_symbol_context",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Symbol Context"
       },
       {
-        "description": "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected. Use to explain how two files or symbols are connected through indexed dependencies. Prefer module_dependencies for local neighbors and impact_analysis for downstream blast radius. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -550,10 +1156,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "dependency_path"
+        "name": "dependency_path",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Dependency Path"
       },
       {
-        "description": "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files. Use before editing a file to estimate downstream dependents, callers, related tests, and policy impact. Prefer find_tests_for_change when only validation targets are needed. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -568,10 +1198,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "impact_analysis"
+        "name": "impact_analysis",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Impact Analysis"
       },
       {
-        "description": "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty. Use when authorship timing or first/last-touch evidence is needed for exactly one path or symbol. Prefer churn_analysis for hotspot metrics and ownership_lookup for maintainers. This is read-only and reports uncertainty.",
         "experimental": true,
         "inputSchema": {
           "oneOf": [
@@ -603,10 +1257,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "history_provenance_lookup"
+        "name": "history_provenance_lookup",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku History Provenance Lookup"
       },
       {
-        "description": "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history. Use to identify hotspots for one path, module, or symbol using materialized git statistics. Prefer history_provenance_lookup for commit provenance and history_similar_changes for prior change examples. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "oneOf": [
@@ -643,10 +1321,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "churn_analysis"
+        "name": "churn_analysis",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Churn Analysis"
       },
       {
-        "description": "Retrieve ranked similar historical commits using task text, paths, symbols, co-change neighborhoods, churn, and commit metadata. Returns evidence and confidence for each hit.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve ranked similar historical commits using task text, paths, symbols, co-change neighborhoods, churn, and commit metadata. Returns evidence and confidence for each hit. Use during planning to find prior commits related to a task, path, or symbol. Prefer churn_analysis for risk scoring and ownership_lookup for reviewer ownership. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -684,10 +1386,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "history_similar_changes"
+        "name": "history_similar_changes",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku History Similar Changes"
       },
       {
-        "description": "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty. Use to identify likely owners for one path from CODEOWNERS, git history, and memory facts. Prefer reviewer_suggestions when choosing reviewers for a proposed change. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -702,10 +1428,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "ownership_lookup"
+        "name": "ownership_lookup",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Ownership Lookup"
       },
       {
-        "description": "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields. Use when a change needs human reviewers and a path is known. Prefer ownership_lookup for ownership evidence without reviewer ranking. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -720,10 +1470,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "reviewer_suggestions"
+        "name": "reviewer_suggestions",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Reviewer Suggestions"
       },
       {
-        "description": "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node. Use to inspect direct dependency neighbors for one file or symbol. Prefer dependency_path for a route between two nodes and architecture_policy_check for rule violations. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -742,10 +1516,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "module_dependencies"
+        "name": "module_dependencies",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Module Dependencies"
       },
       {
-        "description": "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description. Use before planning or editing to gather relevant files, symbols, tests, history, and policy evidence for a natural-language task. Prefer build_compressed_context when prompt budget is tight. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -773,10 +1571,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "build_context_pack"
+        "name": "build_context_pack",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Build Context Pack"
       },
       {
-        "description": "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space. Use when a context pack is needed but prompt budget is constrained; retrieve_context can expand handles later. This writes reusable context handles under the repository .ok data directory.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -803,10 +1625,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "build_compressed_context"
+        "name": "build_compressed_context",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Build Compressed Context"
       },
       {
-        "description": "Retrieve the original uncompressed source code snippet associated with a compressed context handle.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the original uncompressed source code snippet associated with a compressed context handle. Use only with handles returned by build_compressed_context to recover original snippets. Prefer build_context_pack for a fresh task-level context bundle. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -821,10 +1667,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "retrieve_context"
+        "name": "retrieve_context",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Retrieve Context"
       },
       {
-        "description": "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets. Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. Prefer create_change_contract when the plan must be persisted and verified later. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -856,10 +1726,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "plan_change"
+        "name": "plan_change",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Plan Change"
       },
       {
-        "description": "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility. Use when a plan needs a durable verification contract for later review or CI evidence. By default it writes a contract under .ok/contracts; set store=false for a transient contract.",
         "experimental": false,
         "inputSchema": {
           "oneOf": [
@@ -917,10 +1811,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "create_change_contract"
+        "name": "create_change_contract",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Create Change Contract"
       },
       {
-        "description": "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON. Use to retrieve a previously stored contract by id before verification or explanation. Prefer create_change_contract for new contracts. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -944,10 +1862,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "get_change_contract"
+        "name": "get_change_contract",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Change Contract"
       },
       {
-        "description": "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters. Use only for durable, repository-scoped facts an agent should reuse later. It appends memory under repository storage; use search_memory to read existing facts first when unsure.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -976,10 +1918,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "remember_fact"
+        "name": "remember_fact",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Remember Fact"
       },
       {
-        "description": "Search through the append-only repository memory facts using keyword and entity matches.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Search through the append-only repository memory facts using keyword and entity matches. Use to retrieve stored repository facts by keyword or entity before planning or ownership decisions. Prefer live code/search tools for current source facts. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -998,10 +1964,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "search_memory"
+        "name": "search_memory",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Search Memory"
       },
       {
-        "description": "Retrieve the metadata, syntax parsing status, and all code chunks for a single repository file.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the metadata, syntax parsing status, and all code chunks for a single repository file. Use for one known file when parsing status, chunks, and indexed metadata are needed. Prefer search_files to discover files and explain_symbol for symbol-level context. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1016,10 +2006,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "explain_file"
+        "name": "explain_file",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain File"
       },
       {
-        "description": "Retrieve definition, qualified name, range, and direct structural context for a given symbol name.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve definition, qualified name, range, and direct structural context for a given symbol name. Use for a concise explanation of one known symbol's indexed definition and structure. Prefer get_symbol_context for a larger context bundle. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1034,30 +2048,102 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "explain_symbol"
+        "name": "explain_symbol",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain Symbol"
       },
       {
-        "description": "Summarize the high-level architecture flows and directory boundaries within the repository.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Summarize the high-level architecture flows and directory boundaries within the repository. Use for a high-level narrative of repository flows and boundaries. Prefer architecture_policy_check for enforceable violations and summarize_architecture for structured architecture output. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "explain_flow"
+        "name": "explain_flow",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain Flow"
       },
       {
-        "description": "Return a structured summary of the codebase architecture, including layer constraints and violation checks.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Return a structured summary of the codebase architecture, including layer constraints and violation checks. Use for a structured architecture overview with layer constraints and violation checks. Prefer explain_flow for a narrative and architecture_policy_explain for file-level evidence. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "summarize_architecture"
+        "name": "summarize_architecture",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Summarize Architecture"
       },
       {
-        "description": "Analyze a file path and identify the test files that should be run to validate changes to it.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Analyze a file path and identify the test files that should be run to validate changes to it. Use after identifying a changed file to select relevant test files. Prefer recommend_validation_plan when static checks, coverage, and broader validation steps are also needed. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1076,10 +2162,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "find_tests_for_change"
+        "name": "find_tests_for_change",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Find Tests For Change"
       },
       {
-        "description": "Recommend a comprehensive validation plan (test targets, coverage checks, static checks) for a file change.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Recommend a comprehensive validation plan (test targets, coverage checks, static checks) for a file change. Use before finalizing a change to choose tests, static checks, and coverage actions for one path. Prefer find_tests_for_change for test-only recommendations. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1098,10 +2208,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "recommend_validation_plan"
+        "name": "recommend_validation_plan",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Recommend Validation Plan"
       },
       {
-        "description": "Retrieve and explain the test coverage metrics and associated test suites for a given file.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve and explain the test coverage metrics and associated test suites for a given file. Use to inspect known coverage evidence for one file or the repository. Prefer recommend_validation_plan when deciding what to run next. This is read-only and does not execute tests.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1117,10 +2251,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "explain_test_coverage"
+        "name": "explain_test_coverage",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain Test Coverage"
       },
       {
-        "description": "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files. Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning and apply_patch only after explicit approval in write-enabled mode. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1135,10 +2293,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "propose_patch"
+        "name": "propose_patch",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Propose Patch"
       },
       {
-        "description": "Review a proposed patch plan for safety, target constraints, and completeness.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Review a proposed patch plan for safety, target constraints, and completeness. Use to review a proposed patch plan for safety and completeness before applying it. Prefer validate_patch for boundary/reference validation. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1153,10 +2335,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "review_patch"
+        "name": "review_patch",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Review Patch"
       },
       {
-        "description": "Validate a patch plan against codebase boundaries and references to detect warnings.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Validate a patch plan against codebase boundaries and references to detect warnings. Use to check a patch plan against architecture boundaries and references before application. Prefer verify_change after a real diff exists. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1171,10 +2377,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "validate_patch"
+        "name": "validate_patch",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Validate Patch"
       },
       {
-        "description": "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands. Use after edits to compare an actual diff or changed files against a saved plan. It may run configured validation commands when run_commands=true and may write attestations when write_attestation=true.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1232,10 +2462,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "verify_change"
+        "name": "verify_change",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Verify Change"
       },
       {
-        "description": "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts. Use after edits to verify a diff against a stored or inline change contract. Stored contract ids append verification records under .ok/contracts, and command execution is opt-in via run_commands.",
         "experimental": false,
         "inputSchema": {
           "oneOf": [
@@ -1330,10 +2584,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "verify_change_contract"
+        "name": "verify_change_contract",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Verify Change Contract"
       },
       {
-        "description": "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests. Use after verify_change_contract to translate a verification report into a decision, failures, warnings, and next tests. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "oneOf": [
@@ -1370,10 +2648,34 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "explain_verification"
+        "name": "explain_verification",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Explain Verification"
       },
       {
-        "description": "Map a runtime stack trace to indexed source locations and file lines.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Map a runtime stack trace to indexed source locations and file lines. Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -1385,10 +2687,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "map_stacktrace_to_code"
+        "name": "map_stacktrace_to_code",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Map Stacktrace To Code"
       },
       {
-        "description": "Retrieve recent runtime errors and stack traces associated with a given symbol.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve recent runtime errors and stack traces associated with a given symbol. Use to look up recent stored runtime errors for one symbol. Prefer map_stacktrace_to_code for ad hoc stack traces and find_recent_failures for incident inventory. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -1403,10 +2729,34 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "find_errors_for_symbol"
+        "name": "find_errors_for_symbol",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Find Errors For Symbol"
       },
       {
-        "description": "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository. Use to list recent stored runtime failures before debugging. Prefer find_errors_for_symbol for a specific symbol. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -1418,20 +2768,68 @@
           "type": "object"
         },
         "maturity": "experimental",
-        "name": "find_recent_failures"
+        "name": "find_recent_failures",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Find Recent Failures"
       },
       {
-        "description": "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph. Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
           "type": "object"
         },
         "maturity": "stable",
-        "name": "get_evidence_schema"
+        "name": "get_evidence_schema",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Get Evidence Schema"
       },
       {
-        "description": "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.",
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`. Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1454,7 +2852,25 @@
           "type": "object"
         },
         "maturity": "stable",
-        "name": "query_evidence_graph"
+        "name": "query_evidence_graph",
+        "outputSchema": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MCP structuredContent payload returned by this Open Kioku tool. Most tools return JSON objects; tools with a format parameter may return Markdown or TOON strings."
+        },
+        "title": "Open Kioku Query Evidence Graph"
       }
     ]
   }
