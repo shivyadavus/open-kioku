@@ -7,20 +7,20 @@ class OpenKioku < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/shivyadavus/open-kioku/releases/download/v2.2.1/ok-macos-arm64"
-      sha256 "2db7ab0b77293988349b27da72cbdde2f37ddf5d897ef13ec3020cadc3fb90e0"
+      sha256 "85922cbad9f623ff8f6f85fba4c0670e6ab9fb0b6d3b46e612d96232a2e8c82d"
     else
       url "https://github.com/shivyadavus/open-kioku/releases/download/v2.2.1/ok-macos-x86_64"
-      sha256 "5bbcd44ccfee2fd304fc1887939e6374830c365802684cf46af79e9453ccc4a7"
+      sha256 "abde42f14789cbc01d4eaa9dc84d44a885d6b92df84bbe0b21a48921fb60bb96"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/shivyadavus/open-kioku/releases/download/v2.2.1/ok-linux-arm64"
-      sha256 "1a88a5031ef0c66a704c2c7f5469c0ed5f1a808da2baea305083e3237b9619b3"
+      sha256 "35868a85311749b8d4e9ccf6b1e721383094a037c1a98fd93ece18b6aa63e1b7"
     else
       url "https://github.com/shivyadavus/open-kioku/releases/download/v2.2.1/ok-linux-x86_64"
-      sha256 "ecc4c75971333587cb8fb662783f3623fd659ce03f29c153692ec231b2c62cd4"
+      sha256 "59cfb3dc68f8a9c803587145cc2b39a0baa10c9f74cb0b38c0e6136155c8124b"
     end
   end
 
