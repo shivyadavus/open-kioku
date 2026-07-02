@@ -119,20 +119,20 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "List or search indexed code symbols (such as classes, structs, functions, and interfaces) by name. Supports substring filtering. Use to browse or substring-filter the symbol table; use search_symbols for fuzzy ranking and get_definition when you need one symbol body. This is read-only.",
+        "description": "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry. Use to browse the indexed symbol table or filter by exact substring match. Supports pagination via limit and offset. Do NOT use for fuzzy or ranked symbol search (use search_symbols), for retrieving a symbol's full definition body (use get_definition), or for comprehensive symbol context (use get_symbol_context). This is read-only and reads from the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of symbols to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination.",
               "type": "integer"
             },
             "offset": {
-              "description": "Number of matching symbols to skip. Defaults to 0.",
+              "description": "Number of matching symbols to skip before returning results. Defaults to 0.",
               "type": "integer"
             },
             "query": {
-              "description": "Substring query to filter symbol names. If omitted, returns all symbols.",
+              "description": "Substring query to filter symbol names by exact match. If omitted, returns all symbols ordered by name.",
               "type": "string"
             }
           },
@@ -159,20 +159,20 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed code symbols by name using exact or fuzzy matching. Essential for finding definitions. Use when an agent has an approximate symbol name and needs ranked candidates; use list_symbols for inventory and get_definition for a resolved definition. This is read-only.",
+        "description": "Search indexed code symbols (functions, classes, structs, traits, interfaces) by name using fuzzy matching. Returns ranked candidates with symbol name, kind, file path, and line range. Use when an agent has an approximate or partial symbol name and needs fuzzy-ranked candidates from the indexed symbol table. Do NOT use for exact substring inventory (use list_symbols), retrieving a symbol's full body (use get_definition), or comprehensive symbol context with docs (use get_symbol_context). This is read-only and searches the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of ranked results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "offset": {
-              "description": "Number of matching symbols to skip. Defaults to 0.",
+              "description": "Number of matching symbols to skip before returning results. Defaults to 0.",
               "type": "integer"
             },
             "query": {
-              "description": "Fuzzy or exact search query for symbol names.",
+              "description": "Fuzzy or exact search query for symbol names. Supports partial names and approximate matches.",
               "type": "string"
             }
           },
@@ -199,7 +199,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Detect high-level architectural components and directories in the repository based on file layouts. Use to infer architectural components from directories when no policy-specific answer is required. Use architecture_policy_check for enforced dependency rules. This is read-only.",
+        "description": "Infer high-level architectural components and layers from the repository directory structure and file layout. Returns detected component names, directory paths, and inferred layer assignments using heuristic analysis. Use to infer high-level architectural components and layers from the repository directory structure using heuristic analysis. Do NOT use when enforced policy rules are needed (use architecture_policy_check), when specific boundary constraints are needed (use architecture_boundaries), or when file-level policy membership must be explained (use architecture_policy_explain). This is read-only and performs heuristic detection only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -226,7 +226,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Show the configured or inferred boundaries between architectural components, useful to understand import constraints. Use to inspect component boundary configuration before explaining or checking violations. Use architecture_violations for legacy detected issues and architecture_policy_check for policy-backed edge evaluation. This is read-only.",
+        "description": "Retrieve the configured or inferred component boundaries and their import constraints. Returns boundary definitions including component names, directory mappings, and allowed or forbidden dependency directions. Use to inspect the configured or inferred component boundaries and their import constraints before explaining or checking violations. Do NOT use for detecting actual violations (use architecture_violations), for policy-backed enforcement against indexed edges (use architecture_policy_check), or for explaining why a file belongs to a component (use architecture_policy_explain). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -253,7 +253,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Report any import or boundary violations that deviate from the defined codebase architecture rules. Use for a quick legacy boundary violation report; use architecture_policy_check when repository policy TOML and indexed dependency edges should be authoritative. This is read-only.",
+        "description": "Detect and report import-graph boundary violations that deviate from the inferred architecture layers. Returns violation details including source file, target file, violated boundary, and edge type. Use for a quick boundary-violation scan based on inferred architecture layers and import patterns without consulting ok.toml policy rules. Do NOT use when policy TOML rules must be authoritative (use architecture_policy_check instead) or when explaining why a specific file violates a boundary (use architecture_policy_explain). This is read-only and reads only from the local index.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -450,16 +450,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed file names and contents for specific keywords or file path patterns. Set mode=graph to search graph-node documents through the same index. Use when the target is a file path, filename, or file-content keyword rather than a symbol. Prefer list_files for inventory, search_code for code snippets, and regex_search for precise line pattern matching. This is read-only.",
+        "description": "Search indexed file names and contents for specific keywords or file path patterns, returning ranked file matches with path, size, and language metadata. Set mode=graph to search graph-node documents through the same index. Use when the target is a file path, filename, or file-content keyword rather than a code symbol. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for code snippet search (use search_code), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of file results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "mode": {
-              "description": "Search mode. Defaults to code; graph searches indexed graph-node documents.",
+              "description": "Search mode. 'code' (default) searches file names and contents; 'graph' searches indexed graph-node documents including entity names and properties.",
               "enum": [
                 "code",
                 "graph"
@@ -467,11 +467,11 @@
               "type": "string"
             },
             "offset": {
-              "description": "Number of matching search results to skip. Defaults to 0.",
+              "description": "Number of matching file results to skip before returning. Defaults to 0.",
               "type": "integer"
             },
             "query": {
-              "description": "The search query to match against file paths, file contents, or graph-node documents.",
+              "description": "The search query to match against file paths and file contents. Accepts filenames, directory fragments, or content keywords.",
               "type": "string"
             }
           },
@@ -501,20 +501,20 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed code using a regular expression pattern. Returns exact line matching snippets. Use for exact regular-expression line matches after lexical or semantic search narrows the area. Prefer search_code for ranked keyword search and structural_search for syntax-shaped queries. This is read-only.",
+        "description": "Search indexed source code using a regular expression pattern, returning exact line-level matches with file path, line number, and matching line content for each hit. Use for exact regular-expression pattern matching against indexed source code lines. Best used after lexical or semantic search has narrowed the search area. Do NOT use for ranked keyword search (use search_code), for natural-language concept search (use semantic_search or hybrid_search), or for syntax-structure-aware queries (use structural_search). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of matching lines to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "offset": {
-              "description": "Number of matching search results to skip. Defaults to 0.",
+              "description": "Number of matching lines to skip before returning results. Defaults to 0.",
               "type": "integer"
             },
             "pattern": {
-              "description": "A valid regular expression pattern to match against source code.",
+              "description": "A valid regular expression pattern (Rust regex syntax) to match against indexed source code lines. Example: 'fn\\s+main' to find main function declarations.",
               "type": "string"
             }
           },
@@ -544,7 +544,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Report the current status, readiness, and staleness of the local semantic vector index. Use before semantic_search or hybrid_search to confirm the local vector index is present and fresh. This is read-only and does not build embeddings.",
+        "description": "Report the current readiness, document count, staleness, and configured embedding provider of the local semantic vector index. Returns a status object indicating whether semantic_search and hybrid_search can produce vector results. Use before calling semantic_search or hybrid_search to confirm that the local vector index exists, is ready, and is not stale. Do NOT use to build or rebuild the index (run `ok semantic index` via the CLI instead). This is read-only, inspects only local metadata, and never generates embeddings or contacts external services.",
         "experimental": true,
         "inputSchema": {
           "properties": {},
@@ -614,20 +614,20 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Perform a hybrid search combining lexical BM25 candidates and semantic vector candidates to produce ranked, context-rich results. Use as the default investigative search when both words and concepts matter. Prefer search_code for deterministic lexical matches and semantic_search for concept-only exploration. This is read-only.",
+        "description": "Perform a hybrid search that merges ranked candidates from the Tantivy BM25 lexical index and the local semantic vector index, deduplicates by file path, and returns combined-score-sorted results with evidence spans. Falls back to lexical-only when the semantic index is unavailable. Use as the default investigative search when both keyword precision and semantic recall are needed — merges candidates from the Tantivy BM25 index and the local semantic vector index, deduplicates by file path, and sorts by combined score. Do NOT use when only exact lexical matches are needed (use search_code), when only conceptual similarity matters (use semantic_search), or when regex patterns are required (use regex_search). Falls back to lexical-only results when the semantic index is not ready. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of merged results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "offset": {
-              "description": "Number of matching search results to skip. Defaults to 0.",
+              "description": "Number of merged results to skip before returning. Defaults to 0.",
               "type": "integer"
             },
             "query": {
-              "description": "The search query to match lexically and conceptually against the codebase.",
+              "description": "Natural-language or keyword query to match both lexically (BM25) and semantically (vector similarity) against the indexed codebase. Supports identifiers, phrases, and conceptual descriptions.",
               "type": "string"
             }
           },
@@ -657,16 +657,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Run a hybrid search and return detailed, explainable ranking scores and evidence for the top retrieved code snippets. Use when a search result must be justified with score components and evidence before relying on it in a plan. Prefer hybrid_search when explanations are unnecessary. This is read-only.",
+        "description": "Run a hybrid search and return per-result ranking breakdowns including BM25 text relevance, semantic similarity, graph proximity, and evidence spans for each retrieved code snippet. Use when search results need transparent justification before being relied upon in a plan — returns per-result BM25 and semantic score breakdowns, matched evidence spans, and ranking signal weights. Do NOT use for basic search without explanation (use hybrid_search) or when only lexical matches are needed (use search_code). This is read-only and combines the local Tantivy lexical index with the semantic vector index when available.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of explained results. Defaults to 20, capped at 100.",
+              "description": "Maximum number of explained results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "query": {
-              "description": "The search query to analyze and explain results for.",
+              "description": "The search query whose results should be explained with full score breakdowns and evidence.",
               "type": "string"
             }
           },
@@ -696,7 +696,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Perform a structural search across both symbol trees and code chunks to find structural matching syntax. Use for syntax or structure-shaped discovery across symbol trees and chunks. Prefer regex_search for literal text patterns and get_definition for a known symbol. This is read-only.",
+        "description": "Perform a syntax-aware structural search across indexed symbol trees and code chunks, matching structural patterns such as function signatures, class hierarchies, and code block shapes. Use for syntax-aware and structure-shaped code discovery across indexed symbol trees and code chunks, matching patterns such as function signatures, class hierarchies, and code block shapes. Do NOT use for literal text pattern matching (use regex_search), for known symbol lookup (use get_definition), or for ranked keyword search (use search_code). This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -705,7 +705,7 @@
               "type": "integer"
             },
             "query": {
-              "description": "The query to run against structure trees and chunk indices.",
+              "description": "The structural query to match against symbol trees and chunk indices. Supports pattern-based syntax matching.",
               "type": "string"
             }
           },
@@ -848,16 +848,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Find all parent functions, methods, or modules that call the target symbol. Use to trace inbound calls to a function or method. Prefer get_references for all usages and dependency_path when you need a route between two nodes. This is read-only.",
+        "description": "Find all inbound call-sites to a function, method, or callable symbol from the indexed call graph. Returns caller symbol name, file path, and line range for each call-site found. Use to trace inbound call-sites to a function, method, or callable symbol from the indexed call graph. Do NOT use for all reference types including imports and type usages (use get_references), for outbound calls (use get_callees), or for finding a route between two nodes (use dependency_path). Accuracy depends on tree-sitter and optional SCIP indexing depth. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of callers to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of caller entries to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "query": {
-              "description": "The name of the symbol whose callers you want to find.",
+              "description": "The exact or partial name of the symbol whose inbound callers you want to find.",
               "type": "string"
             }
           },
@@ -926,12 +926,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the comprehensive context of a symbol, including definition details, range, file context, and documentation if available. Use when an agent needs a richer single-symbol bundle than get_definition provides, including file context and docs when indexed. This is read-only.",
+        "description": "Retrieve a comprehensive context bundle for one symbol, including its full definition body, file location and range, enclosing scope, documentation comments, and surrounding code context from the local index. Use to retrieve a comprehensive context bundle for one symbol, including its definition body, file location, enclosing scope, documentation comments, and surrounding code context when indexed. Returns more detail than get_definition. Do NOT use for simple definition lookup only (use get_definition), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "query": {
-              "description": "The name of the symbol.",
+              "description": "The exact or partial name of the symbol to retrieve comprehensive context for.",
               "type": "string"
             }
           },
@@ -1001,12 +1001,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Analyze the potential blast radius of a change to a file. Identifies downstream dependents, callers, and related test files. Use before editing a file to estimate downstream dependents, callers, related tests, and policy impact. Prefer find_tests_for_change when only validation targets are needed. This is read-only.",
+        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a comprehensive validation plan including static checks (use recommend_validation_plan). This is read-only and analyzes the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "path": {
-              "description": "The repository-relative path of the file to analyze.",
+              "description": "The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs').",
               "type": "string"
             }
           },
@@ -1312,12 +1312,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Assemble a comprehensive, token-efficient context pack of files, symbols, and tests relevant to a natural language task description. Use before planning or editing to gather relevant files, symbols, tests, history, and policy evidence for a natural-language task. Prefer build_compressed_context when prompt budget is tight. This is read-only.",
+        "description": "Assemble a ranked, token-efficient context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns results in JSON, Markdown, or TOON format. Use before planning or editing to assemble a ranked bundle of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task description. Returns results in the specified format (JSON, Markdown, or TOON). Do NOT use when prompt token budget is tight (use build_compressed_context with retrievable handles instead) or when only test recommendations are needed (use find_tests_for_change). This is read-only and queries the local index and git history only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "format": {
-              "description": "The output format of the context pack.",
+              "description": "Output format. 'json' returns structured objects, 'markdown' returns human-readable text, 'toon' returns token-optimized notation. Defaults to 'json' when omitted.",
               "enum": [
                 "json",
                 "markdown",
@@ -1326,11 +1326,11 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of context results to include. Defaults to 20.",
+              "description": "Maximum number of context items to include in the pack. Defaults to 20. Higher values increase completeness but also token cost.",
               "type": "integer"
             },
             "task": {
-              "description": "A natural language description of the task to gather context for.",
+              "description": "A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2').",
               "type": "string"
             }
           },
@@ -1360,12 +1360,12 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Build a reversible compressed context pack with references and handles. Allows retrieving original snippets later to save prompt space. Use when a context pack is needed but prompt budget is constrained; retrieve_context can expand handles later. This writes reusable context handles under the repository .ok data directory.",
+        "description": "Build a compressed context pack with short handles instead of full source snippets, reducing token count for prompt-constrained scenarios. Use retrieve_context with the returned handles to expand original snippets on demand. Use when a context pack is needed but prompt token budget is constrained. Returns compressed references with short handles instead of full source snippets, significantly reducing token count. Call retrieve_context later with a handle to expand the original snippet. Do NOT use when full inline context is acceptable (use build_context_pack) or when only test targets are needed (use find_tests_for_change). This tool writes reusable context handles under the .ok data directory and is not idempotent.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "format": {
-              "description": "The output format.",
+              "description": "Output format. 'json' returns structured handle objects, 'toon' returns token-optimized notation with handles. Defaults to 'json' when omitted.",
               "enum": [
                 "json",
                 "toon"
@@ -1373,11 +1373,11 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of context items. Defaults to 20.",
+              "description": "Maximum number of context items to compress. Defaults to 20. Higher values increase completeness but also stored handle count.",
               "type": "integer"
             },
             "task": {
-              "description": "A natural language description of the task.",
+              "description": "A natural language description of the task to gather compressed context for.",
               "type": "string"
             }
           },
@@ -1616,12 +1616,12 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Record a repository-scoped memory fact with metadata, entity links, and confidence parameters. Use only for durable, repository-scoped facts an agent should reuse later. It appends memory under repository storage; use search_memory to read existing facts first when unsure.",
+        "description": "Persist a durable, repository-scoped memory fact into the local .ok SQLite store with optional source attribution and confidence level. The fact is append-only and survives re-indexing. Use only for durable, repository-scoped facts (architectural decisions, ownership conventions, known anti-patterns) that an agent should recall across sessions. Appends an immutable record to the local .ok SQLite store; duplicates are not deduplicated. Do NOT use for transient session notes, per-task scratch data, or facts derivable from the live index. Call search_memory first to avoid recording redundant entries. This tool writes to local storage and is not idempotent.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "confidence": {
-              "description": "The confidence level of the fact.",
+              "description": "Confidence level indicating reliability of the fact. 'low' for uncertain inferences, 'exact' for verified truths. Defaults to 'medium' when omitted.",
               "enum": [
                 "low",
                 "medium",
@@ -1631,11 +1631,11 @@
               "type": "string"
             },
             "source": {
-              "description": "The source or tool that observed the fact. Defaults to 'mcp'.",
+              "description": "Identifier for the source that observed this fact (e.g., 'mcp', 'agent', 'human'). Defaults to 'mcp' when omitted.",
               "type": "string"
             },
             "text": {
-              "description": "The fact text to remember.",
+              "description": "The fact text to persist. Should be a complete, self-contained statement (e.g., 'The auth module uses JWT tokens with 24h expiry'). Maximum ~4KB.",
               "type": "string"
             }
           },
@@ -1665,16 +1665,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search through the append-only repository memory facts using keyword and entity matches. Use to retrieve stored repository facts by keyword or entity before planning or ownership decisions. Prefer live code/search tools for current source facts. This is read-only.",
+        "description": "Search the append-only repository memory store for previously recorded facts by keyword and entity match. Returns fact text, source, confidence level, and timestamp for each matching entry. Use to retrieve stored repository-scoped memory facts by keyword, entity, or text match from the local .ok SQLite store. Returns fact text, source, confidence, timestamp, and associated entities for each match. Do NOT use for current source code search (use search_code or hybrid_search) or for live index data (use the search and symbol tools). Use remember_fact to write new entries. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of facts to return. Defaults to 20.",
+              "description": "Maximum number of matching facts to return, ordered by relevance. Defaults to 20.",
               "type": "integer"
             },
             "query": {
-              "description": "The search query to match against facts.",
+              "description": "Keyword or phrase to match against stored fact text and entity names.",
               "type": "string"
             }
           },
@@ -1704,12 +1704,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the metadata, syntax parsing status, and all code chunks for a single repository file. Use for one known file when parsing status, chunks, and indexed metadata are needed. Prefer search_files to discover files and explain_symbol for symbol-level context. This is read-only.",
+        "description": "Retrieve comprehensive indexed metadata for one repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbol definitions. Use to retrieve comprehensive indexed metadata for one known repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbols. Do NOT use to discover files by keyword (use search_files), for symbol-level context (use explain_symbol or get_symbol_context), or for architecture-level file analysis (use architecture_policy_explain). This is read-only and returns only previously indexed data.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "path": {
-              "description": "The repository-relative path of the file.",
+              "description": "Repository-relative path of the file to explain (e.g., 'src/main.rs' or 'lib/auth/handler.ts').",
               "type": "string"
             }
           },
@@ -1739,12 +1739,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve definition, qualified name, range, and direct structural context for a given symbol name. Use for a concise explanation of one known symbol's indexed definition and structure. Prefer get_symbol_context for a larger context bundle. This is read-only.",
+        "description": "Retrieve a concise explanation of one indexed symbol, including its definition range, qualified name, kind (function, class, struct, trait), and direct structural relationships within the codebase. Use for a concise explanation of one known symbol, returning its definition range, qualified name, kind, and direct structural relationships. Do NOT use for a comprehensive context bundle with docs and surrounding code (use get_symbol_context), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "query": {
-              "description": "The symbol name to explain.",
+              "description": "The exact or partial name of the symbol to explain. Matches against indexed symbol names and qualified names.",
               "type": "string"
             }
           },
@@ -1828,16 +1828,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Analyze a file path and identify the test files that should be run to validate changes to it. Use after identifying a changed file to select relevant test files. Prefer recommend_validation_plan when static checks, coverage, and broader validation steps are also needed. This is read-only.",
+        "description": "Identify test files that should be run to validate changes to one repository-relative file. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use when a broader validation plan including static checks and coverage actions is needed (use recommend_validation_plan) or when checking existing coverage data (use explain_test_coverage). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum test recommendations to return. Defaults to 20.",
+              "description": "Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20.",
               "type": "integer"
             },
             "path": {
-              "description": "The repository-relative path of the file being changed.",
+              "description": "Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs').",
               "type": "string"
             }
           },
@@ -1906,16 +1906,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve and explain the test coverage metrics and associated test suites for a given file. Use to inspect known coverage evidence for one file or the repository. Prefer recommend_validation_plan when deciding what to run next. This is read-only and does not execute tests.",
+        "description": "Retrieve stored test-coverage evidence and associated test suites for one repository-relative file or the whole repository. Returns coverage percentages, test file associations, and suite metadata from indexed data. Use to inspect stored test-coverage evidence for one file path or the whole repository. Returns associated test suites, coverage percentage when available, and test file associations from indexed metadata. Do NOT use to decide what tests to run next (use recommend_validation_plan) or to find tests for a specific change (use find_tests_for_change). This is read-only, does not execute any tests, and reports only previously indexed or stored coverage data.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum coverage elements to return. Defaults to 20.",
+              "description": "Maximum number of coverage entries to return. Defaults to 20.",
               "type": "integer"
             },
             "path": {
-              "description": "The repository-relative path of the file.",
+              "description": "Repository-relative path of the file to inspect coverage for. If omitted, returns repository-wide coverage summary.",
               "type": "string"
             }
           },
@@ -1977,12 +1977,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Review a proposed patch plan for safety, target constraints, and completeness. Use to review a proposed patch plan for safety and completeness before applying it. Prefer validate_patch for boundary/reference validation. This is read-only.",
+        "description": "Review a proposed patch plan for safety, target constraints, completeness, and potential regressions. Returns a structured safety assessment with warnings, risk indicators, and recommendations. Use to review a proposed patch plan for safety, target constraints, completeness, and potential regressions before applying it. Returns a structured safety assessment with warnings and recommendations. Do NOT use for architecture boundary and reference validation only (use validate_patch) or for post-edit verification against a plan (use verify_change). This is read-only and does not modify any files.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "task": {
-              "description": "The task name or identifier associated with the patch.",
+              "description": "The task name or identifier associated with the patch plan to review.",
               "type": "string"
             }
           },
@@ -2012,12 +2012,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Validate a patch plan against codebase boundaries and references to detect warnings. Use to check a patch plan against architecture boundaries and references before application. Prefer verify_change after a real diff exists. This is read-only.",
+        "description": "Validate a proposed patch plan against architecture boundaries, symbol references, and import constraints. Returns boundary violations, broken reference warnings, and policy conflicts without modifying any files. Use to check a proposed patch plan against architecture boundaries, symbol references, and import constraints before applying it. Returns boundary violations, broken reference warnings, and policy conflicts. Do NOT use after real edits have been made (use verify_change or verify_change_contract instead) or for full safety review (use review_patch). This is read-only and checks against the local index and policy rules only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "task": {
-              "description": "The task name or identifier.",
+              "description": "The task name or identifier of the patch plan to validate.",
               "type": "string"
             }
           },
@@ -2047,58 +2047,58 @@
           "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Verify an actual diff or set of changed files against a saved pre-edit plan. Validates constraints and runs test commands. Use after edits to compare an actual diff or changed files against a saved plan. It may run configured validation commands when run_commands=true and may write attestations when write_attestation=true.",
+        "description": "Verify an actual unified diff or set of changed files against a saved PlanReport, checking boundary constraints, expected file coverage, API surface stability, and dependency policy. Optionally executes configured validation commands and persists timestamped attestation records. Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change), contract-based verification (use verify_change_contract), or boundary-only checks (use validate_patch). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "changed_files": {
-              "description": "List of repository-relative paths of changed files.",
+              "description": "List of repository-relative paths of changed files. Used when diff is not provided.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "check_api_surface": {
-              "description": "Set true to detect public API additions, removals, and signature changes during verification.",
+              "description": "Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false.",
               "type": "boolean"
             },
             "check_dependency_delta": {
-              "description": "Set true to detect dependency graph deltas and flag forbidden dependency additions.",
+              "description": "Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false.",
               "type": "boolean"
             },
             "diff": {
-              "description": "The unified diff showing the actual changes.",
+              "description": "The unified diff (git diff format) showing the actual changes to verify.",
               "type": "string"
             },
             "evidence_refs": {
-              "description": "List of evidence reference identifiers.",
+              "description": "List of evidence reference identifiers supporting the change.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "plan": {
-              "description": "A JSON object containing the saved PlanReport.",
+              "description": "A JSON object containing the saved PlanReport to verify against.",
               "type": "object"
             },
             "plan_json": {
-              "description": "A JSON-encoded string representation of the PlanReport.",
+              "description": "A JSON-encoded string representation of the PlanReport to verify against.",
               "type": "string"
             },
             "run_commands": {
-              "description": "Set true to execute the validation commands defined in the plan.",
+              "description": "Set true to execute shell validation commands (test runners, linters) defined in the plan on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false.",
               "type": "boolean"
             },
             "since_plan": {
-              "description": "Optional git revision/range used with git diff --unified=0 to derive changed files and diff input.",
+              "description": "Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically.",
               "type": "string"
             },
             "traceability_strict": {
-              "description": "Set true to reject supplied evidence references that are not present in the saved plan.",
+              "description": "Set true to reject any evidence references not present in the saved plan, enforcing full traceability. Defaults to false (lenient mode allows extra evidence).",
               "type": "boolean"
             },
             "write_attestation": {
-              "description": "Set true with run_commands to persist validation attestations under .ok/contracts/validation.",
+              "description": "Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. Has no effect when run_commands is false. Defaults to false.",
               "type": "boolean"
             }
           },
@@ -2329,12 +2329,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve recent runtime errors and stack traces associated with a given symbol. Use to look up recent stored runtime errors for one symbol. Prefer map_stacktrace_to_code for ad hoc stack traces and find_recent_failures for incident inventory. This tool is read-only and returns disabled status when runtime integration is not configured.",
+        "description": "Retrieve recently stored runtime errors and stack traces for one specific symbol from the local error store. Returns error messages, stack frames, and timestamps when runtime integration is configured; otherwise returns a disabled-status response. Use to look up recently stored runtime errors and stack traces for one specific symbol name. Returns error messages, stack frames, and timestamps when runtime integration is configured. Do NOT use for ad-hoc stack trace text mapping (use map_stacktrace_to_code) or for a broad inventory of recent failures (use find_recent_failures). This is read-only and returns a disabled-status response when runtime error integration is not configured in the repository.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "query": {
-              "description": "The symbol name to look up errors for.",
+              "description": "The exact symbol name to look up stored runtime errors for.",
               "type": "string"
             }
           },
@@ -2364,12 +2364,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve a list of recent runtime failures, errors, or incidents recorded in the repository. Use to list recent stored runtime failures before debugging. Prefer find_errors_for_symbol for a specific symbol. This tool is read-only and returns disabled status when runtime integration is not configured.",
+        "description": "Retrieve a list of recently stored runtime failures, errors, and incidents from the repository's local error store. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured; otherwise returns a disabled-status response. Use to list recently stored runtime failures, errors, and incidents across the repository before beginning a debugging investigation. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured. Do NOT use when errors for one specific symbol are needed (use find_errors_for_symbol) or for stack trace mapping (use map_stacktrace_to_code). This is read-only and returns a disabled-status response when runtime error integration is not configured.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of failure entries to retrieve. Defaults to 20.",
+              "description": "Maximum number of failure entries to retrieve, ordered by most recent. Defaults to 20.",
               "type": "integer"
             }
           },
