@@ -1,121 +1,62 @@
 # Open Kioku (`ok`)
 
 [![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/shivyadavus/open-kioku?style=social)](https://github.com/shivyadavus/open-kioku/stargazers)
-[![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![npm downloads](https://img.shields.io/npm/dm/open-kioku)](https://www.npmjs.com/package/open-kioku)
-[![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-Open Kioku is local code intelligence for AI coding agents. It indexes a repository on your machine and gives Claude, Cursor, Codex, and other MCP clients the facts they need before editing: code search, symbols, impact analysis, validation commands, context packs, repo memory, architecture policy evaluation, evidence graph queries, and static/runtime graph evidence.
+> **License:** Open Kioku is source-available under the [Elastic License 2.0](LICENSE) — not OSI open-source. See [`docs/license-faq.md`](docs/license-faq.md) for details.
 
-No hosted index. No source upload. No embeddings API required.
+Give Claude, Cursor, Codex, or any MCP-compatible coding agent an **evidence layer** before it edits your codebase, using local indexes and read-only MCP tools by default.
 
-The default path is offline and lexical. SCIP exact references, semantic search, git-history co-change evidence, and runtime evidence are optional local upgrades.
+![Open Kioku quickstart](assets/open-kioku-quickstart.gif)
 
-![Open Kioku 60-second quickstart](assets/open-kioku-quickstart.gif)
+## First Win: 3 Commands
 
-## Copy-Paste 60-Second Quickstart
+Run these three commands on **your own repo** and see what changes:
 
 ```sh
 npm install -g open-kioku
-ok demo --force
-ok --repo ./open-kioku-demo plan token --format markdown --limit 6
-ok --repo ./open-kioku-demo --json plan token > /tmp/open-kioku-plan.json
-ok --repo ./open-kioku-demo --json verify --plan /tmp/open-kioku-plan.json --changed src/auth.rs
-ok --repo ./open-kioku-demo --json contract create token --limit 6
+ok index .
+ok mcp install cursor --repo .     # or: claude, codex, gemini, windsurf, trae, zed, opencode
 ```
 
-This creates a local demo repo, indexes it, asks for an evidence-backed plan,
-verifies a bounded edit against that saved plan, and creates a stored change
-contract for the same task. The recording is
-reproducible with `scripts/quickstart-demo.sh`; regenerate the GIF with
-`scripts/render-quickstart-demo.py assets/open-kioku-quickstart.gif`.
-
-When a repository defines `.open-kioku/architecture.toml`, context, plan, and
-impact outputs include the active architecture policy report. `ok verify`,
-`ok contract verify`, MCP `verify_change`, and MCP `verify_change_contract`
-enforce dependency deltas against that configured policy by default.
-
-## The 60-Second Pitch
-
-Ask an agent to change code in a large repo and it usually starts by crawling files. Open Kioku gives it a better first move:
+Paste the printed MCP config into your agent, then paste this prompt:
 
 ```text
-search_code -> get_definition -> impact_analysis -> find_tests_for_change -> plan_change -> create_change_contract -> verify_change_contract
+Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan with
+plan_change first, then edit, and verify after the edit with verify_change.
 ```
 
-The output is an evidence-backed pre-edit plan and optional stored change
-contract: primary files, relevant symbols, likely blast radius, exact validation
-commands, confidence, and the next MCP calls to make.
+Your agent now has indexed evidence — symbols, references, impact analysis, test candidates, and edit boundaries — before it touches a single file.
 
-Tested across several large public repositories under permissive open-source
-licenses. These metrics are from one representative Open Kioku 2.1.0 run:
+## See the Proof
+
+Run `ok prove` on your repo to produce a shareable Markdown report with indexed counts, task scores, and validation signals. The report intentionally omits source snippets, so it is designed to be reviewed and shared from private repos:
+
+```sh
+ok prove . --task "the feature you're working on"
+```
+
+A representative public-repo audit indexed 4,600+ files, 46,000+ symbols, and 8,900+ tests locally in 33.1s. The exact Open Kioku version, repository revisions, caveats, and language limitations are recorded in [`docs/large-repo-proof.md`](docs/large-repo-proof.md).
+
+## What Your Agent Gets
 
 ```text
-4,623 files
-46,738 symbols
-49,459 chunks
-8,945 indexed tests
-79,426 graph edges
-33.1 seconds to index
+search_code → get_definition → impact_analysis → find_tests_for_change → plan_change → verify_change
 ```
 
-For a concrete prefix-cache task, Open Kioku found the implementation, related
-entry points, and focused tests including:
+An evidence-backed pre-edit plan with: primary files, relevant symbols, likely blast radius, exact validation commands, confidence scores, and the next MCP calls to make.
 
-```text
-core/cache_manager.py:491-505
-tests/core/test_reset_cache_e2e.py:14-69
-tests/core/test_prefix_caching.py:1923-1960
-```
+### What The First Plan Tells You
 
-The same audit records Python, TypeScript, and C++ coverage, including current
-language and exact-reference limitations. Proof:
-[`docs/large-repo-proof.md`](docs/large-repo-proof.md),
-[`docs/proof.md`](docs/proof.md), and
-[`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+`ok plan` and MCP `plan_change` return concrete file ranges, validation candidates, and confidence caveats from the local index. On the bundled demo repo, a `token` task currently surfaces:
 
-Hosted demo: https://www.openkioku.com/
-Stable CLI + MCP contracts documented in [`STABILITY.md`](STABILITY.md).
-
-### Example Pre-Edit Plan Output
-
-Here is what an evidence-backed plan produced by `ok plan` looks like:
-
-```markdown
-# Plan: token
-
-Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation candidate(s)
-
-## Risk
-- Level: `low`
-- Score: `0.10`
-
-## Confidence
-- Overall: `High` (`0.81`)
-- Caveats:
-  - exact symbol/reference evidence is absent
-  - runtime corroboration is absent
-
-## Primary Context
-- `src/auth.rs`:7-11: pub fn validate_token(token: &str) -> bool
-- `tests/auth_flow.rs`:4-7: fn login_returns_valid_token()
-- `src/auth.rs`:3-6: pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String
-
-## Impact Candidates
-- `src/session.rs` — caller dependency of validate_token
-- `src/middleware.rs` — route guard dependency of issue_token
-
-## Validation Targets
-- `cargo test auth_flow`
-- `cargo test token_expiration`
-
-## Boundary Policy
-- Allowed: `src/auth.rs`, `tests/auth_flow.rs`
-- Caution: `src/session.rs` (caller)
-- Forbidden: `generated/`, `vendor/`
-```
+- primary context in `src/auth.rs`, `src/lib.rs`, and `tests/auth_flow.rs`
+- validation candidates such as `issue_token`, `validate_token`, and `login_returns_valid_token` via `cargo test`
+- an edit boundary that allows the relevant source and test files while keeping generated, vendored, build, and `.ok/` artifacts out of scope
+- explicit caveats when exact-reference, runtime, history, or coverage evidence is unavailable
 
 ## Why It Exists
 
@@ -132,7 +73,7 @@ Open Kioku gives agents a pre-edit routine:
 
 ## Install
 
-### npm
+### npm (recommended)
 
 ```sh
 npm install -g open-kioku
@@ -149,23 +90,12 @@ Published platform packages:
 - `@open-kioku/linux-arm64`
 - `@open-kioku/win32-x64`
 
-### Homebrew
-
-```sh
-brew install shivyadavus/open-kioku/open-kioku
-ok --version
-```
-
-The Homebrew formula installs the native release binary for macOS or Linux from GitHub Releases.
-
 ### cargo-binstall
 
 ```sh
 cargo binstall open-kioku-cli
 ok --version
 ```
-
-`open-kioku-cli` includes cargo-binstall metadata for the same native release binaries. If a binary is unavailable for your platform, use the source install path below.
 
 ### crates.io
 
@@ -174,23 +104,9 @@ cargo install open-kioku-cli
 ok --version
 ```
 
-This compiles the CLI from crates.io. Use this path when you already have Rust installed or when native release binaries are not available for your platform.
-
 ### GitHub Releases
 
-Tagged releases publish native binaries and SHA-256 checksums for:
-
-- Linux x86_64 musl
-- Linux arm64 musl
-- macOS x86_64
-- macOS arm64
-- Windows x86_64
-
-Download from https://github.com/shivyadavus/open-kioku/releases, put `ok` on your `PATH`, then run:
-
-```sh
-ok --help
-```
+Tagged releases publish native binaries and SHA-256 checksums for Linux x86_64/arm64 musl, macOS x86_64/arm64, and Windows x86_64. Download from https://github.com/shivyadavus/open-kioku/releases.
 
 ### From Source
 
@@ -203,32 +119,58 @@ ok --help
 
 Requires a stable Rust toolchain.
 
-## Quick Start
-
-Use this path for a real repository:
+## Set Up Your Repo
 
 ```sh
-npm install -g open-kioku
 ok init /absolute/path/to/repo
 ok index /absolute/path/to/repo
 ok doctor /absolute/path/to/repo
 ok status /absolute/path/to/repo --markdown --write ok-status.md
 ok setup audit /absolute/path/to/repo
 ok --repo /absolute/path/to/repo search "the feature or bug you care about" --limit 5
+```
+
+`ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
+
+Keep the index fresh while editing:
+
+```sh
+ok watch /absolute/path/to/repo
+```
+
+## Connect Your Agent
+
+```sh
 ok mcp install cursor --repo /absolute/path/to/repo
 ok mcp install claude --repo /absolute/path/to/repo
 ok mcp install codex --repo /absolute/path/to/repo
+ok mcp install gemini --repo /absolute/path/to/repo
 ok mcp install windsurf --repo /absolute/path/to/repo
 ok mcp install trae --repo /absolute/path/to/repo
-ok mcp install gemini --repo /absolute/path/to/repo
 ok mcp install opencode --repo /absolute/path/to/repo
 ok mcp install zed --repo /absolute/path/to/repo
 ```
 
-`ok index` writes local data under `.ok/`: SQLite metadata and graph rows in `.ok/index.sqlite`, plus BM25 search data in `.ok/search/tantivy`. Repo memory is append-only under `.ok/memory.sqlite`; compressed context originals are retrievable from `.ok/context.sqlite`. Large indexes report progress phases such as `scan`, `parse`, `occurrences`, `store`, `graph`, `search`, and `complete`.
+Paste the printed MCP config snippet into your agent. The default server is read-only and runs locally over stdio. The install matrix is tested for Claude, Cursor, Codex, Gemini CLI, OpenCode, Zed, Windsurf, and Trae.
 
-For a fleet or multi-service workspace, index each project first, then create a
-workspace config:
+Agent-specific setup guides: [Claude](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html). OpenCode, Zed, Windsurf, and Trae use the same verified `ok mcp install <client> --repo /absolute/path/to/repo` flow shown above.
+
+### Plugin Metadata
+
+Open Kioku bundles pre-configured repository-scoped plugin and marketplace manifests:
+
+- **OpenAI Codex**: verified MCP setup is `ok mcp install codex --repo /absolute/path/to/repo`; `.codex-plugin/` metadata is included for Codex installations that support Git-scoped plugin manifests.
+- **Claude**: `.claude-plugin/` metadata is included alongside the verified `ok mcp install claude --repo /absolute/path/to/repo` MCP config path.
+- **Cursor**: `.cursor-plugin/` rules and skills are included alongside the verified `ok mcp install cursor --repo /absolute/path/to/repo` MCP config path.
+
+Starter examples with golden prompts and one-command smoke tests are available
+in [`examples/cursor`](examples/cursor) and [`examples/claude`](examples/claude).
+
+`ok status --markdown --write ok-status.md` creates a portable handoff with index counts, SCIP quality, readiness checks, and next steps. `ok setup audit` checks the index, security posture, MCP server health, plugin metadata, and the supported client install matrix.
+
+## Multi-Project Workspace
+
+For a fleet or multi-service workspace, index each project first, then create a workspace config:
 
 ```toml
 [workspace]
@@ -245,59 +187,15 @@ ok index --mode cross-project --workspace /absolute/path/to/workspace
 ok architecture fleet --workspace /absolute/path/to/workspace
 ```
 
-The linker opens each project `.ok/index.sqlite` read-only, matches route and
-async channel facts across projects, and writes only
-`/absolute/path/to/workspace/.ok/workspace.sqlite`. Ambiguous matches are
-reported as caveats, and recompute replaces stale workspace edges.
+## Index Snapshots
 
-Teams and CI can share a known-good local index without sharing personal memory
-or compressed context state:
+Teams and CI can share a known-good local index without sharing personal memory or compressed context state:
 
 ```sh
 ok --repo /absolute/path/to/repo snapshot export --quality best
 ok --repo /absolute/path/to/repo snapshot doctor
 ok --repo /absolute/path/to/repo snapshot import
 ok --repo /absolute/path/to/repo index --from-snapshot auto
-```
-
-Snapshots write `.ok/artifacts/index.snapshot.zst` plus
-`.ok/artifacts/index.snapshot.json`. The compressed artifact contains the
-SQLite index database only: metadata, chunks already stored in the index, and
-graph facts. It does not bundle `.ok/search/tantivy`, `.ok/memory.sqlite`, or
-`.ok/context.sqlite`; import validates the metadata, SQLite schema, byte sizes,
-and database integrity before promoting the index, then rebuilds Tantivy search
-locally.
-
-Paste the printed MCP config snippet into Cursor, Claude Code, Codex, Windsurf, Trae, Gemini CLI, OpenCode, Zed, or another MCP-compatible agent. The default server is read-only and runs locally over stdio.
-
-### Git-Based Plugin & Marketplace Distribution
-
-Open Kioku bundles pre-configured repository-scoped plugin and marketplace manifests. This allows teams to share and auto-load the server configurations directly from the repository using agent-specific plugin models:
-
-- **OpenAI Codex**: Install the repository-scoped plugin marketplace directly from GitHub:
-  ```sh
-  codex plugin marketplace add shivyadavus/open-kioku
-  ```
-- **Claude Code**: Integrates using the `.claude-plugin/` manifest.
-- **Cursor**: Integrates using the `.cursor-plugin/` ruleset.
-
-Starter examples with golden prompts and one-command smoke tests are available
-in [`examples/cursor`](examples/cursor) and [`examples/claude`](examples/claude).
-
-`ok status --markdown --write ok-status.md` creates a portable handoff with index counts, SCIP quality, readiness checks, and next steps. `ok setup audit` checks the index, security posture, MCP server health, plugin metadata, and the supported client install matrix.
-
-Ask your agent to use Open Kioku before editing:
-
-```text
-Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan first,
-then edit only after the indexed evidence is clear.
-```
-
-Keep the index fresh while editing:
-
-```sh
-ok watch /absolute/path/to/repo
 ```
 
 ## Quality Mode
@@ -318,11 +216,9 @@ SCIP is the primary precision provider. The default quality model stays local an
 
 Language-specific static analysis adds durable graph facts such as imports, Java inheritance and implemented interfaces, Spring/Express/FastAPI/Rust route declarations, config reads, and database table mappings. Git-history analysis is local and enabled by default: `ok index` and `ok watch` read a bounded local history window, store typed commit metadata and complete per-file touches (including detected renames), and preserve co-change, path-to-test co-run, churn, provenance, ownership, reviewer, and similar-change evidence for planning, ranking, impact, contracts, and test selection. History score components are named `history_churn`, `ownership_risk`, `similar_change_overlap`, and `reviewer_affinity`; exact references and exact symbol/file evidence remain authoritative. Configure the window with `[history] max_commits = 500`, or disable it with `[history] enabled = false` in `ok.toml`.
 
-Runtime analysis is opt-in evidence ingestion only: place local JSONL trace, span, log, incident, error, or failure artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths plus fields such as service, symbol/function, route, HTTP method, status code, duration, timestamp, SQL statement, and message, then re-run `ok index`. Open Kioku turns matching entries into runtime signals and aggregates for context, ranking, impact, test selection, and post-edit verification. Aggregate runtime facts include count, error count/rate, p50/p95/p99 latency, first/last observed timestamps, freshness, sampled redacted messages, and confidence. Runtime evidence is local observation only: it can say a route or file has recent failures and can require targeted validation during `ok verify`, but it never replaces source, symbol, test, or exact-reference truth. Inputs are capped and secret-like message tokens such as `password=`, `token=`, and `api_key=` are redacted.
+Runtime analysis is opt-in evidence ingestion only: place local JSONL trace, span, log, incident, error, or failure artifacts under `.ok/runtime/` or `.ok/analysis/runtime/` with source file paths plus fields such as service, symbol/function, route, HTTP method, status code, duration, timestamp, SQL statement, and message, then re-run `ok index`. Open Kioku turns matching entries into runtime signals and aggregates for context, ranking, impact, test selection, and post-edit verification. Runtime evidence is local observation only: it never replaces source, symbol, test, or exact-reference truth.
 
-Validation evidence is also local and opt-in. `ok index` ingests JUnit XML, lcov, Cobertura XML, JaCoCo XML, and coverage.py XML/JSON reports from `.ok/analysis/`, `.ok/coverage/`, `coverage/`, `target/site/`, `build/reports/`, and `reports/`. Covered lines are mapped to indexed files and symbols where possible, linked to plausible indexed tests, and surfaced as `TEST_COVERS` / `VALIDATES` graph facts. `find_tests_for_change` uses those facts together with static naming, exact symbol overlap, `similar_change_overlap` history signals, runtime failures, graph evidence, and command availability. Missing coverage or JUnit reports remain caveats, not blockers.
-
-`ok setup audit` keeps CodeQL, BSP, LSP, coverage, and JUnit artifacts in an optional advanced section only when those artifacts are actually present.
+Validation evidence is also local and opt-in. `ok index` ingests JUnit XML, lcov, Cobertura XML, JaCoCo XML, and coverage.py XML/JSON reports from `.ok/analysis/`, `.ok/coverage/`, `coverage/`, `target/site/`, `build/reports/`, and `reports/`. Covered lines are mapped to indexed files and symbols where possible, linked to plausible indexed tests, and surfaced as `TEST_COVERS` / `VALIDATES` graph facts.
 
 Use `ok eval` to protect quality on real workflows:
 
@@ -333,25 +229,13 @@ ok eval /absolute/path/to/repo \
   --min-mrr 0.5
 ```
 
-Use `ok workflow-bench` for plan -> edit -> verify benchmark cases:
+Use `ok workflow-bench` for plan → edit → verify benchmark cases:
 
 ```sh
 ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
 ```
 
-See [`docs/workflow-benchmarks.md`](docs/workflow-benchmarks.md) for the case
-format and rollup metrics.
-
-Use `ok contract-bench` for contract generation and verification benchmark
-cases:
-
-```sh
-ok contract-bench benchmarks/contract-fixture \
-  --cases-file benchmarks/contract-cases.json
-```
-
-See [`docs/contract-benchmarks.md`](docs/contract-benchmarks.md) for the case
-schema, Epic #53 rule-family coverage, and threshold metrics.
+See [`docs/workflow-benchmarks.md`](docs/workflow-benchmarks.md) for the case format and rollup metrics.
 
 ## Try The Demo
 
@@ -368,12 +252,21 @@ ok status ./open-kioku-demo --markdown --write ok-status.md
 ok setup audit ./open-kioku-demo --markdown
 ok mcp install cursor --repo ./open-kioku-demo
 ok mcp install claude --repo ./open-kioku-demo
-ok mcp install codex --repo ./open-kioku-demo
-ok mcp install windsurf --repo ./open-kioku-demo
-ok mcp install trae --repo ./open-kioku-demo
 ```
 
-`ok demo` creates `./open-kioku-demo`, writes `ok.toml`, and builds the local SQLite and Tantivy indexes. Use `ok demo --path /tmp/open-kioku-demo --force` for a custom path.
+`ok demo` creates `./open-kioku-demo`, writes `ok.toml`, and builds the local SQLite and Tantivy indexes.
+
+## Share Your Results
+
+Open Kioku outputs are designed to be attached to issues, PRs, and social posts:
+
+```sh
+ok --repo /path/to/repo plan "your task" --format markdown > plan.md
+ok status /path/to/repo --markdown --write ok-status.md
+ok prove /path/to/repo --task "your task"
+```
+
+These reports include indexed counts, evidence scores, validation commands, and path shapes, but intentionally omit source snippets so you can review and share them without posting repository contents.
 
 ## Useful Commands
 
@@ -399,7 +292,7 @@ ok --repo /path/to/repo plan "update MCP docs" --format toon
 ok --repo /path/to/repo --json contract create "update MCP docs" --limit 12
 ok --repo /path/to/repo contract show <contract-id> --format markdown
 ok --repo /path/to/repo contract export <contract-id> --format toon
-ok --repo /path/to/repo --json contract verify --id <contract-id> --changed src/auth.rs
+ok --repo /path/to/repo --json contract verify --id <contract-id> --changed README.md
 ok status /path/to/repo --markdown --write ok-status.md
 ok setup audit /path/to/repo --markdown --write ok-setup.md
 ok --repo /path/to/repo snapshot export --quality fast
@@ -407,10 +300,7 @@ ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
-ok --repo /path/to/repo history bench
-ok --repo /path/to/repo history similar-bench --min-recall-at-5 0.75
-ok --repo /path/to/repo history reviewers-bench --min-accuracy 0.80
-ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed src/auth.rs
+ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed README.md
 ok --repo /path/to/repo architecture detect
 ok --repo /path/to/repo architecture policy check --json
 ok --repo /path/to/repo graph schema
@@ -418,20 +308,6 @@ ok --repo /path/to/repo semantic status
 ok --repo /path/to/repo explain file src/auth.rs
 ok --repo /path/to/repo explain symbol validate_token
 ```
-
-## Share Your Results
-
-Open Kioku outputs are designed to be attached to issues, PRs, and social posts:
-
-```sh
-ok --repo /path/to/repo plan "your task" --format markdown > plan.md
-ok status /path/to/repo --markdown --write ok-status.md
-ok prove /path/to/repo --task "your task"
-```
-
-These reports include indexed counts, evidence scores, validation commands, and
-path shapes — but intentionally omit source code, so they are safe to share
-from private repos.
 
 Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
 
@@ -519,12 +395,9 @@ Contributor guide: [`docs/contributor-guide.md`](docs/contributor-guide.md)
 
 Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 
-## License
+Hosted demo: https://www.openkioku.com/
 
-Open Kioku is licensed under the [Elastic License 2.0](LICENSE), a
-source-available license with hosted-service, license-key, and notice
-limitations. Review the license text and the
-[`docs/license-faq.md`](docs/license-faq.md) summary for details.
+Stable CLI + MCP contracts documented in [`STABILITY.md`](STABILITY.md).
 
 ## Development
 
@@ -533,6 +406,8 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 cargo test -p open-kioku-cli --test cli_smoke
+ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
+ok --repo . history bench --cases-file benchmarks/history-cases.json
 ```
 
 CI also runs audit and dependency policy checks.
@@ -542,3 +417,7 @@ CI also runs audit and dependency policy checks.
 Issues and PRs are welcome, especially for parser quality, fixture coverage, MCP tool quality, and distribution improvements.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+---
+
+If Open Kioku helps your agent workflow, consider [starring it on GitHub](https://github.com/shivyadavus/open-kioku).

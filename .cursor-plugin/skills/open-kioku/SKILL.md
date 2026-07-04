@@ -5,7 +5,7 @@ description: Use Open Kioku to search code, resolve symbols, trace blast radius,
 
 # Open Kioku — Code Intelligence
 
-Open Kioku gives you precise, evidence-backed answers about this codebase. It runs entirely locally — no cloud, no embeddings API.
+Open Kioku gives you precise, evidence-backed answers about this codebase from a local index. No hosted index or embeddings API is required for the default workflow.
 
 ## When to use
 

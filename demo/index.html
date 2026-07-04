@@ -882,21 +882,21 @@
         <section class="hero">
             <div class="hero-grid">
                 <div>
-                    <div class="eyebrow"><span class="status-dot"></span> v2.1.1 — plan before edit, verify after edit</div>
+                    <div class="eyebrow"><span class="status-dot"></span> v2.2.3 — plan before edit, verify after edit</div>
                     <h1>Plan before edit.<br>Verify after edit.</h1>
-                    <p class="hero-copy">Open Kioku is the local evidence layer for Claude, Cursor, Codex, and other MCP coding agents. It indexes your repo once, builds evidence-backed plans before edits begin, then verifies bounded changes stayed inside the plan. No cloud. No source upload. Read-only by default.</p>
+                    <p class="hero-copy">Open Kioku is the local evidence layer for Claude, Cursor, Codex, and other MCP coding agents. It indexes your repo once, builds evidence-backed plans before edits begin, then verifies bounded changes stayed inside the plan. Open Kioku does not upload source and runs read-only by default.</p>
                     <div class="hero-actions">
-                        <a class="button button-primary" href="#demo" aria-label="Try Open Kioku with the 60-second quickstart">
-                            <span>Try in 60 seconds</span>
+                        <a class="button button-primary" href="#demo" aria-label="Try the Open Kioku quickstart">
+                            <span>Try the workflow</span>
                             <span aria-hidden="true">→</span>
                         </a>
-                        <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku" aria-label="View the Open Kioku repository on GitHub">
-                            <span>View GitHub</span>
-                            <span aria-hidden="true">★</span>
+                        <a class="button button-secondary" href="#connect" aria-label="Set up Open Kioku with your coding agent">
+                            <span>Try on your repo</span>
+                            <span aria-hidden="true">→</span>
                         </a>
                         <a class="button button-secondary" href="https://www.npmjs.com/package/open-kioku" aria-label="Open the Open Kioku npm package">
                             <span>Install with npm</span>
-                            <span aria-hidden="true">open</span>
+                            <span aria-hidden="true">↓</span>
                         </a>
                     </div>
 
@@ -938,7 +938,7 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install an
                         <div class="trust-row" aria-label="Security guarantees">
                             <div class="trust-chip">Local SQLite and Tantivy indexes</div>
                             <div class="trust-chip">MCP stdio transport</div>
-                            <div class="trust-chip">No source code upload</div>
+                            <div class="trust-chip">No source upload by Open Kioku</div>
                         </div>
                     </div>
                 </aside>
@@ -949,7 +949,7 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install an
             <div class="section-heading">
                 <div class="section-kicker">Public Repository Testing</div>
                 <h2>Tested across several large public repositories.</h2>
-                <p class="section-copy">The metrics below are from one representative local run with Open Kioku 2.1.1. The full audit includes source-checked results and documented limitations across languages. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-repo-proof.md" style="color: var(--cyan); text-decoration: underline;">Read the full audit →</a></p>
+                <p class="section-copy">The metrics below are from a representative local audit with fixed repository revisions, source-checked results, and documented language limitations. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-repo-proof.md" style="color: var(--cyan); text-decoration: underline;">Read the full audit →</a></p>
             </div>
             <div class="stats-grid">
                 <div class="stat-card"><div class="stat-value">4,623</div><div class="stat-label">files indexed</div></div>
@@ -959,12 +959,7 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy install an
                 <div class="stat-card"><div class="stat-value">79,426</div><div class="stat-label">graph edges</div></div>
                 <div class="stat-card stat-card-accent"><div class="stat-value">33.1<span class="stat-unit">s</span></div><div class="stat-label">local index time</div></div>
             </div>
-            <div class="star-cta-box" style="margin: 28px auto 0; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; background: rgba(45, 212, 191, 0.04); border: 1px solid rgba(45, 212, 191, 0.15); border-radius: 8px; max-width: 480px; text-align: center;">
-                <span style="font-size: 0.95rem; color: var(--muted); line-height: 1.4;">If Open Kioku helps your agent workflow, consider starring it on GitHub.</span>
-                <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku" target="_blank" rel="noopener noreferrer" style="min-height: 36px; padding: 0 14px; font-size: 0.88rem; border-color: rgba(45, 212, 191, 0.3); color: var(--cyan);">
-                    <span>⭐ Star on GitHub</span>
-                </a>
-            </div>
+
         </section>
 
         <section id="proof">
@@ -1063,35 +1058,23 @@ ok mcp install cursor --repo /absolute/path/to/repo" aria-label="Copy real repo 
                 </div>
                 <pre style="white-space: pre-wrap; font-family: 'Fira Code', monospace; font-size: 0.88rem; line-height: 1.5; overflow-x: auto; padding: 20px; color: var(--text);"><code># Plan: token
 
-Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation candidate(s)
+Primary context:
+- src/auth.rs: validate_token, issue_token
+- src/lib.rs: handle_login
+- tests/auth_flow.rs: login_returns_valid_token
 
-## Risk
-- Level: `low`
-- Score: `0.10`
+Validation candidates:
+- issue_token via cargo test
+- validate_token via cargo test
+- login_returns_valid_token via cargo test
 
-## Confidence
-- Overall: `High` (`0.81`)
-- Caveats:
-  - exact symbol/reference evidence is absent
-  - runtime corroboration is absent
+Edit boundary:
+- allowed: src/auth.rs, src/lib.rs, tests/auth_flow.rs
+- forbidden: .ok/**, target/**, build/**, dist/**, generated/**, vendor/**
 
-## Primary Context
-- `src/auth.rs`:7-11: pub fn validate_token(token: &str) -> bool
-- `tests/auth_flow.rs`:4-7: fn login_returns_valid_token()
-- `src/auth.rs`:3-6: pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String
-
-## Impact Candidates
-- `src/session.rs` — caller dependency of validate_token
-- `src/middleware.rs` — route guard dependency of issue_token
-
-## Validation Targets
-- `cargo test auth_flow`
-- `cargo test token_expiration`
-
-## Boundary Policy
-- Allowed: `src/auth.rs`, `tests/auth_flow.rs`
-- Caution: `src/session.rs` (caller)
-- Forbidden: `generated/`, `vendor/`</code></pre>
+Evidence quality:
+- exact-reference, runtime, history, and coverage availability are reported explicitly
+- missing optional evidence is a caveat, not hidden confidence</code></pre>
             </div>
         </section>
 
@@ -1157,7 +1140,8 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
             <div class="section-heading">
                 <div class="section-kicker">Connect</div>
                 <h2>Copy-paste setup for every major MCP client.</h2>
-                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. These commands print client-specific configuration; they do not edit your config files automatically.</p>
+                <p class="section-copy">Open Kioku runs as a local MCP server over stdio. These commands print client-specific configuration; they do not edit your config files automatically. The matrix is tested for Claude, Cursor, Codex, Gemini CLI, OpenCode, Zed, Windsurf, and Trae.</p>
+                <p class="section-copy" style="margin-top: 12px;">Detailed setup guides: <a href="https://www.openkioku.com/claude-code-setup.html">Claude</a> · <a href="https://www.openkioku.com/cursor-setup.html">Cursor</a> · <a href="https://www.openkioku.com/codex-setup.html">Codex</a> · <a href="https://www.openkioku.com/gemini-cli-setup.html">Gemini CLI</a>. OpenCode, Zed, Windsurf, and Trae use the same verified one-command MCP config flow below.</p>
             </div>
 
             <div class="client-grid">
@@ -1178,12 +1162,9 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 <div class="setup-block" id="codex">
                     <div class="setup-block-header">
                         <div class="setup-block-title">Codex</div>
-                        <button class="copy-button" type="button" data-copy="codex plugin marketplace add shivyadavus/open-kioku" aria-label="Copy Codex setup command">Copy</button>
+                        <button class="copy-button" type="button" data-copy="ok mcp install codex --repo /absolute/path/to/repo" aria-label="Copy Codex setup command">Copy</button>
                     </div>
-                    <pre style="padding-bottom: 8px;"><code># Install Git-scoped plugin (Recommended):
-codex plugin marketplace add shivyadavus/open-kioku</code></pre>
-                    <pre style="padding-top: 8px; border-top: 1px dashed var(--border);"><code># Or configure manual MCP server:
-ok mcp install codex --repo /absolute/path/to/repo</code></pre>
+                    <pre><code>ok mcp install codex --repo /absolute/path/to/repo</code></pre>
                 </div>
                 <div class="setup-block" id="gemini">
                     <div class="setup-block-header">
@@ -1272,7 +1253,7 @@ ok mcp install codex --repo /absolute/path/to/repo</code></pre>
             </a>
         </div>
         <div class="footer-row">
-            <div>Open Kioku v2.1.1 — Plan before edit. Verify after edit.</div>
+            <div>Open Kioku v2.2.3 — Plan before edit. Verify after edit.</div>
             <div class="footer-links">
                 <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
                 <a href="https://www.npmjs.com/package/open-kioku">npm</a>
@@ -1289,7 +1270,7 @@ ok mcp install codex --repo /absolute/path/to/repo</code></pre>
         const steps = [
             { kind: "note", text: "# Install once. The wrapper pulls the native binary for your OS." },
             { kind: "cmd", text: "npm install -g open-kioku" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> installed ok 2.1.1<br><span class="term-muted">native packages are published for macOS, Linux, and Windows</span>' },
+            { kind: "out", html: '<span class="term-good">[ok]</span> installed ok 2.2.3<br><span class="term-muted">native packages are published for macOS, Linux, and Windows</span>' },
             { kind: "pause", ms: 900 },
             { kind: "note", text: "\n# Initialize and index the repo your agent will edit." },
             { kind: "cmd", text: "ok init /work/acme-api" },
