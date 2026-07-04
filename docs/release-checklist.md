@@ -7,11 +7,18 @@ Open Kioku release metadata is canonicalized by `release-metadata.json` and chec
 ```sh
 scripts/validate-versions.sh
 scripts/validate-docs.sh
+scripts/check-no-ignored-tests.py
+scripts/validate-release-metadata.py
+scripts/validate-trust-gates.py
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 scripts/verify-release-readiness.sh
 ```
+
+Review `docs/release-trust.md` before tagging. It documents the checksums,
+SBOM, provenance, third-party notices, local processing threat model, and
+install audit evidence expected on every release.
 
 ## Version And Tag
 
@@ -49,6 +56,16 @@ GitHub release notes, the release workflow, in-repo Homebrew formula URLs, cargo
 - `ok-macos-arm64.sha256`
 - `ok-windows-x86_64.exe`
 - `ok-windows-x86_64.exe.sha256`
+- `SHA256SUMS`
+- `SBOM.cargo-metadata.json`
+- `PROVENANCE.json`
+- `THIRD_PARTY_NOTICES.md`
+- `release-metadata.json`
+
+`scripts/generate-release-trust-artifacts.sh dist` generates the aggregate
+release trust artifacts after the platform binaries have been downloaded into
+`dist/`. GitHub Actions also publishes build provenance attestations for the
+five binary artifacts.
 
 ## Post-Publish Smoke
 
