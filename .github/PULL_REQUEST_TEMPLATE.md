@@ -1,26 +1,14 @@
-## What Changed
+# Pull Request Policy
 
-<!-- Describe the change in 1–3 sentences. Link to related issues with "Closes #123". -->
+Thank you for taking the time to contribute.
 
-## Why
+Open Kioku is currently not accepting unsolicited code contributions. If this pull request was not previously discussed with the maintainer, it may be closed without review.
 
-<!-- Why is this change needed? What problem does it solve or what feature does it enable? -->
+Before opening a PR, please start with an issue describing:
 
-## Crate(s) Touched
+* The problem
+* The use case
+* The proposed change
+* Why it belongs in Open Kioku Core
 
-<!-- List the crate(s) modified by this PR (e.g. open-kioku-impact, open-kioku-cli). -->
-
-- 
-
-## Verification Checklist
-
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes
-- [ ] `cargo test --all` passes
-- [ ] Relevant smoke tests pass (if applicable)
-- [ ] New functionality includes tests
-- [ ] Documentation updated (if applicable)
-
-## Additional Notes
-
-<!-- Optional: screenshots, benchmarks, migration notes, or anything reviewers should know. -->
+By submitting a PR, you confirm that you have the right to submit the contribution and that, if accepted, it will be licensed under the project’s existing license unless a separate written agreement applies.
