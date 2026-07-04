@@ -1460,6 +1460,246 @@ fn mcp_install_prints_client_config() {
 }
 
 #[test]
+fn hooks_install_is_dry_run_safe_and_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+
+    let dry_run = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("warn")
+            .arg("--deadline-ms")
+            .arg("500")
+            .arg("--dry-run")
+            .arg(repo);
+        command
+    });
+    let dry_run: serde_json::Value = serde_json::from_str(&dry_run).unwrap();
+    assert_eq!(dry_run["dry_run"], true);
+    assert!(dry_run["changed_files"].as_array().unwrap().len() >= 4);
+    assert!(!repo.join(".open-kioku/agent-hooks.toml").exists());
+
+    let first = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("warn")
+            .arg("--deadline-ms")
+            .arg("500")
+            .arg(repo);
+        command
+    });
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(first["mode"], "warn");
+    assert!(first["changed_files"].as_array().unwrap().len() >= 4);
+    assert!(repo.join(".open-kioku/agent-hooks.toml").exists());
+    assert!(repo.join(".open-kioku/AGENTS.md").exists());
+    assert!(repo.join(".cursor/rules/open-kioku-hooks.mdc").exists());
+    assert!(repo.join(".claude/CLAUDE.md").exists());
+
+    let second = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("warn")
+            .arg("--deadline-ms")
+            .arg("500")
+            .arg(repo);
+        command
+    });
+    let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert!(second["changed_files"].as_array().unwrap().is_empty());
+    assert!(second["unchanged_files"].as_array().unwrap().len() >= 4);
+}
+
+#[test]
+fn hooks_replace_marker_blocks_and_uninstall_preserves_user_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let cursor_rule = repo.join(".cursor/rules/open-kioku-hooks.mdc");
+    fs::create_dir_all(cursor_rule.parent().unwrap()).unwrap();
+    fs::write(
+        &cursor_rule,
+        "user header\n\n<!-- OPEN-KIOKU-HOOKS:BEGIN -->\nstale generated text\n<!-- OPEN-KIOKU-HOOKS:END -->\n\nuser footer\n",
+    )
+    .unwrap();
+
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("advisory")
+            .arg(repo);
+        command
+    });
+    assert!(output.contains("Open Kioku hooks install"));
+    let content = fs::read_to_string(&cursor_rule).unwrap();
+    assert!(content.contains("user header"));
+    assert!(content.contains("user footer"));
+    assert!(content.contains("Mode: `advisory`"));
+    assert!(!content.contains("stale generated text"));
+
+    let output = run({
+        let mut command = ok();
+        command.arg("hooks").arg("uninstall").arg(repo);
+        command
+    });
+    assert!(output.contains("Open Kioku hooks uninstall"));
+    let content = fs::read_to_string(&cursor_rule).unwrap();
+    assert!(content.contains("user header"));
+    assert!(content.contains("user footer"));
+    assert!(!content.contains("OPEN-KIOKU-HOOKS"));
+    assert!(!repo.join(".open-kioku/agent-hooks.toml").exists());
+}
+
+#[test]
+fn hooks_enforce_requires_policy_gate_and_rejects_long_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("enforce")
+            .arg(repo);
+        command
+    });
+    assert!(stderr.contains("enforce hooks require policy-gated ok.toml"));
+    assert!(!repo.join(".open-kioku/agent-hooks.toml").exists());
+    assert!(!repo.join(".cursor/rules/open-kioku-hooks.mdc").exists());
+
+    let _ = run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let enforce = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("hooks")
+            .arg("install")
+            .arg("--mode")
+            .arg("enforce")
+            .arg(repo);
+        command
+    });
+    let enforce: serde_json::Value = serde_json::from_str(&enforce).unwrap();
+    assert_eq!(enforce["mode"], "enforce");
+    assert!(enforce["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("enforce mode is explicit"));
+
+    let (_, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("hooks")
+            .arg("install")
+            .arg("--deadline-ms")
+            .arg("5000")
+            .arg(repo);
+        command
+    });
+    assert!(stderr.contains("exceeds the maximum short deadline"));
+}
+
+#[test]
+fn doctor_hooks_and_agents_report_missing_and_installed_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+
+    let hooks = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("--repo")
+            .arg(repo)
+            .arg("doctor")
+            .arg("hooks");
+        command
+    });
+    let hooks: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+    assert_eq!(hooks["ok"], true);
+    assert_eq!(hooks["checks"][0]["status"], "warn");
+    assert!(hooks["next_steps"][0]
+        .as_str()
+        .unwrap()
+        .contains("ok hooks install"));
+
+    let agents = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("--repo")
+            .arg(repo)
+            .arg("doctor")
+            .arg("agents");
+        command
+    });
+    let agents: serde_json::Value = serde_json::from_str(&agents).unwrap();
+    assert_eq!(agents["ok"], true);
+    assert_eq!(agents["checks"][0]["status"], "warn");
+
+    let _ = run({
+        let mut command = ok();
+        command.arg("hooks").arg("install").arg(repo);
+        command
+    });
+
+    let hooks = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("--repo")
+            .arg(repo)
+            .arg("doctor")
+            .arg("hooks");
+        command
+    });
+    let hooks: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+    assert_eq!(hooks["ok"], true);
+    assert!(hooks["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["status"] == "pass" && check["name"] == "managed-file"));
+
+    let agents = run({
+        let mut command = ok();
+        command
+            .arg("--json")
+            .arg("--repo")
+            .arg(repo)
+            .arg("doctor")
+            .arg("agents");
+        command
+    });
+    let agents: serde_json::Value = serde_json::from_str(&agents).unwrap();
+    assert_eq!(agents["ok"], true);
+    assert!(agents["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["status"] == "pass" && check["name"] == "hooks"));
+}
+
+#[test]
 fn demo_creates_indexed_sample_repo() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("demo");

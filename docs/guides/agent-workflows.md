@@ -4,10 +4,11 @@ Open Kioku is the local evidence layer an agent should use before it edits. The 
 
 1. Confirm readiness with `ok status --markdown --write ok-status.md`.
 2. Confirm install posture with `ok setup audit`.
-3. Ask the MCP client to call `repo_status`, `search_code`, `search_symbols`, `get_definition`, and `get_references`.
-4. Use `impact_analysis` and `find_tests_for_change` before changing code.
-5. Use `plan_change` as the pre-edit plan and treat low-confidence plans as a stop signal.
-6. Use `search_memory` only as supporting context; indexed code and exact references outrank memory.
+3. Optionally install local agent hook guidance with `ok hooks install --mode advisory`.
+4. Ask the MCP client to call `repo_status`, `search_code`, `search_symbols`, `get_definition`, and `get_references`.
+5. Use `impact_analysis` and `find_tests_for_change` before changing code.
+6. Use `plan_change` as the pre-edit plan and treat low-confidence plans as a stop signal.
+7. Use `search_memory` only as supporting context; indexed code and exact references outrank memory.
 
 For large repositories, prefer a short task anchor:
 
@@ -25,6 +26,21 @@ ok prove /path/to/repo --task "the workflow being changed"
 ```
 
 The status and setup files are safe handoff artifacts: they include counts, checks, commands, and redacted guidance, not source snippets.
+
+## Agent Hooks
+
+Open Kioku can install reversible local guidance files that nudge agents toward the evidence workflow before editing:
+
+```sh
+ok hooks install --mode advisory /path/to/repo
+ok hooks install --mode warn /path/to/repo
+ok hooks install --mode enforce /path/to/repo
+ok doctor hooks --repo /path/to/repo
+ok doctor agents --repo /path/to/repo
+ok hooks uninstall /path/to/repo
+```
+
+`advisory` is the default. `warn` tells the agent to warn before editing when no fresh plan or contract exists. `enforce` is explicit and requires an enforce-ready `ok.toml` policy gate; read/search/status operations must still fail open. Install and uninstall report exact files changed, support `--dry-run`, and only mutate generated marker blocks.
 
 ## Validation Quality
 

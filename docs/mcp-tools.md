@@ -8,6 +8,9 @@ ok index /absolute/path/to/repo
 ok doctor /absolute/path/to/repo
 ok status /absolute/path/to/repo --markdown --write ok-status.md
 ok setup audit /absolute/path/to/repo
+ok hooks install --mode advisory /absolute/path/to/repo
+ok doctor hooks --repo /absolute/path/to/repo
+ok doctor agents --repo /absolute/path/to/repo
 ```
 
 Then print client-specific config and paste it into the client:
@@ -47,6 +50,17 @@ Write mode requires explicit opt-in:
 ```sh
 ok mcp serve --repo /absolute/path/to/repo --allow-write --approval-required --allow-command "cargo test" --deny-network
 ```
+
+Agent hook guidance is optional and reversible:
+
+```sh
+ok hooks install --mode advisory /absolute/path/to/repo
+ok hooks install --mode warn /absolute/path/to/repo
+ok hooks install --mode enforce /absolute/path/to/repo
+ok hooks uninstall /absolute/path/to/repo
+```
+
+The default advisory mode never blocks basic reads. Warn and enforce modes are explicit; enforce mode requires an enforce-ready `ok.toml` policy gate and still keeps read/search/status operations fail-open.
 
 ## Recommended Agent Routine
 

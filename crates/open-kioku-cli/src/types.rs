@@ -50,6 +50,8 @@ enum Command {
         exit_code: bool,
     },
     Doctor {
+        #[command(subcommand)]
+        command: Option<DoctorCommand>,
         #[arg(default_value = ".")]
         repo: PathBuf,
         #[arg(long, value_enum, default_value_t = DoctorFormat::Text)]
@@ -58,6 +60,10 @@ enum Command {
     Setup {
         #[command(subcommand)]
         command: SetupCommand,
+    },
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
     },
     Demo {
         #[arg(long)]
@@ -480,6 +486,66 @@ enum SetupCommand {
         #[arg(long, default_value_t = false)]
         exit_code: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HooksCommand {
+    /// Install advisory/warn/enforce agent hook guidance.
+    Install {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = HookMode::Advisory)]
+        mode: HookMode,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = 750)]
+        deadline_ms: u64,
+    },
+    /// Remove generated Open Kioku hook guidance and manifest.
+    Uninstall {
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DoctorCommand {
+    /// Check installed Open Kioku hook guidance.
+    Hooks {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Check local agent configuration surfaces.
+    Agents {
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum HookMode {
+    Advisory,
+    Warn,
+    Enforce,
+}
+
+impl HookMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Warn => "warn",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+impl fmt::Display for HookMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Args)]
@@ -1803,6 +1869,59 @@ struct DoctorReport {
     next_steps: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct HookInstallReport {
+    ok: bool,
+    repo: PathBuf,
+    mode: HookMode,
+    dry_run: bool,
+    deadline_ms: u64,
+    changed_files: Vec<PathBuf>,
+    unchanged_files: Vec<PathBuf>,
+    removed_files: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HookDoctorReport {
+    ok: bool,
+    repo: PathBuf,
+    checks: Vec<DoctorCheck>,
+    manifest: Option<HookManifest>,
+    managed_files: Vec<PathBuf>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentDoctorReport {
+    ok: bool,
+    repo: PathBuf,
+    checks: Vec<DoctorCheck>,
+    surfaces: Vec<AgentSurfaceReport>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HookManifest {
+    schema_version: u32,
+    mode: HookMode,
+    deadline_ms: u64,
+    fail_open: bool,
+    enforce_fail_closed: bool,
+    policy_gated: bool,
+    generated_at: String,
+    managed_files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentSurfaceReport {
+    name: &'static str,
+    path: PathBuf,
+    present: bool,
+    managed: bool,
+    note: &'static str,
+}
+
 #[derive(Serialize)]
 struct SetupAuditReport {
     ok: bool,
@@ -1857,7 +1976,7 @@ struct DemoReport {
     commands: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct DoctorCheck {
     name: &'static str,
     status: CheckStatus,

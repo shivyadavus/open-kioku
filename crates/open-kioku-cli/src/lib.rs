@@ -61,6 +61,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 include!("types.rs");
+include!("commands/hooks.rs");
 include!("commands/mod.rs");
 include!("commands/architecture.rs");
 include!("reports/status_setup_doctor.rs");

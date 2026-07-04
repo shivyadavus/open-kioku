@@ -181,10 +181,50 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
         }
         Command::Doctor {
+            command,
             repo: command_repo,
             format,
         } => {
             let repo = resolve_repo(&repo, command_repo);
+            if let Some(command) = command {
+                match command {
+                    DoctorCommand::Hooks {
+                        repo: subcommand_repo,
+                    } => {
+                        let repo = subcommand_repo
+                            .map(|subcommand_repo| resolve_repo(&repo, subcommand_repo))
+                            .unwrap_or_else(|| repo.clone());
+                        let report = hook_doctor_report(&repo);
+                        let ok = report.ok;
+                        if cli.json || format == DoctorFormat::Json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            print_hook_doctor_report(&report);
+                        }
+                        if !ok {
+                            std::process::exit(1);
+                        }
+                    }
+                    DoctorCommand::Agents {
+                        repo: subcommand_repo,
+                    } => {
+                        let repo = subcommand_repo
+                            .map(|subcommand_repo| resolve_repo(&repo, subcommand_repo))
+                            .unwrap_or_else(|| repo.clone());
+                        let report = agent_doctor_report(&repo);
+                        let ok = report.ok;
+                        if cli.json || format == DoctorFormat::Json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            print_agent_doctor_report(&report);
+                        }
+                        if !ok {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                return Ok(());
+            }
             let report = doctor_report(&repo);
             let ok = report.ok;
             if cli.json || format == DoctorFormat::Json {
@@ -264,6 +304,34 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 }
                 if exit_code && !report.ok {
                     anyhow::bail!("Open Kioku setup audit has failing checks");
+                }
+            }
+        },
+        Command::Hooks { command } => match command {
+            HooksCommand::Install {
+                repo: command_repo,
+                mode,
+                dry_run,
+                deadline_ms,
+            } => {
+                let repo = resolve_repo(&repo, command_repo);
+                let report = install_hooks(&repo, mode, dry_run, deadline_ms)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_hook_install_report(&report, "install");
+                }
+            }
+            HooksCommand::Uninstall {
+                repo: command_repo,
+                dry_run,
+            } => {
+                let repo = resolve_repo(&repo, command_repo);
+                let report = uninstall_hooks(&repo, dry_run)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_hook_install_report(&report, "uninstall");
                 }
             }
         },
