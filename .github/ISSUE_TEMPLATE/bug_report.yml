@@ -65,7 +65,6 @@ body:
       label: Install Method
       options:
         - npm
-        - Homebrew
         - cargo-binstall
         - crates.io
         - GitHub Release

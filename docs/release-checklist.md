@@ -28,9 +28,6 @@ Each channel must report the same `ok --version` value.
 npm install -g open-kioku
 ok --version
 
-brew install shivyadavus/open-kioku/open-kioku
-ok --version
-
 cargo binstall open-kioku-cli
 ok --version
 
@@ -40,7 +37,7 @@ ok --version
 
 ## Release Artifacts
 
-GitHub release notes, the release workflow, Homebrew formula URLs, cargo-binstall metadata, and npm platform packages must reference the same artifact set:
+GitHub release notes, the release workflow, in-repo Homebrew formula URLs, cargo-binstall metadata, and npm platform packages must reference the same artifact set. Do not advertise Homebrew as a public install channel until a `shivyadavus/homebrew-open-kioku` tap exists and the install command has been verified.
 
 - `ok-linux-x86_64`
 - `ok-linux-x86_64.sha256`

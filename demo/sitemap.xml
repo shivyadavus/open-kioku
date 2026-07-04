@@ -4,4 +4,20 @@
     <loc>https://www.openkioku.com/</loc>
     <priority>1.0</priority>
   </url>
+  <url>
+    <loc>https://www.openkioku.com/claude-code-setup.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://www.openkioku.com/cursor-setup.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://www.openkioku.com/codex-setup.html</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://www.openkioku.com/gemini-cli-setup.html</loc>
+    <priority>0.8</priority>
+  </url>
 </urlset>

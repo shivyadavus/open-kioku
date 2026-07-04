@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "version": "2.2.3",
-  "description": "Local-first code intelligence for AI agents — instant code search, symbol resolution, impact analysis, dependency graphs, and context packs across any codebase. Works offline. No data leaves your machine.",
+  "description": "Local-first code intelligence for AI agents — code search, symbol resolution, impact analysis, dependency graphs, and context packs from a local Open Kioku index. No hosted index or embeddings API required.",
   "author": {
     "name": "Shiv Yadav",
     "email": "shivyadavus@users.noreply.github.com",
@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "Open Kioku",
     "shortDescription": "Local code intelligence for AI agents",
-    "longDescription": "Instant code search, symbol resolution, blast-radius analysis, and patch planning — all 100% offline, zero hosted data.",
+    "longDescription": "Code search, symbol resolution, blast-radius analysis, and patch planning from a local Open Kioku index. No hosted index or embeddings API required.",
     "developerName": "Shiv Yadav",
     "category": "Productivity",
     "capabilities": [
