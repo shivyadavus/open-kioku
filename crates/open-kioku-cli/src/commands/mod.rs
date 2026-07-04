@@ -736,7 +736,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
-            println!("{}", format.render(&report)?);
+            let governed_adrs = governing_adrs_for_plan(&report, &load_adrs(&repo)?);
+            println!(
+                "{}",
+                render_plan_report_with_adrs(format, &report, &governed_adrs)?
+            );
             verify_plan_evidence(&report, verify_evidence)?;
         }
         Command::VerifyBoundary {
@@ -760,6 +764,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::Verify {
             plan,
+            format,
             diff,
             git,
             since_plan,
@@ -818,10 +823,19 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         suppress_plan_validation_pending: false,
                     },
                 )?;
-            if cli.json {
-                println!("{}", serde_json::to_string_pretty(&verification)?);
+            let governed_adrs =
+                governing_adrs_for_changed_files(&verification.changed_files, &load_adrs(&repo)?);
+            let format = if cli.json {
+                VerifyReportFormat::Json
             } else {
-                print_verify_report(&verification);
+                format
+            };
+            if matches!(format, VerifyReportFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&verification)?);
+            } else if matches!(format, VerifyReportFormat::Html) {
+                println!("{}", render_verify_html(&verification, &governed_adrs));
+            } else {
+                print_verify_report_with_adrs(&verification, &governed_adrs);
             }
             if matches!(
                 verification.verdict,
@@ -975,19 +989,41 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Command::Prove(args) => {
             let format = if cli.json {
                 ProveFormat::Json
+            } else if args.html {
+                ProveFormat::Html
             } else {
                 args.format
             };
             let report = run_proof(args)?;
             if matches!(format, ProveFormat::Json) {
                 println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if matches!(format, ProveFormat::Html) {
+                println!("{}", render_proof_html(&report));
             } else {
                 println!("{}", render_proof_markdown(&report));
                 println!("\nShareable proof generated.");
                 println!("Repo: https://github.com/shivyadavus/open-kioku");
             }
         }
+        Command::Adr { command } => {
+            handle_adr_command(cli.json, &repo, command)?;
+        }
+        Command::Ui(args) => {
+            handle_ui_command(cli.json, &repo, args)?;
+        }
         Command::Architecture { command } => match command {
+            ArchitectureCommand::Overview => {
+                handle_architecture_trust_command(cli.json, &repo, "overview")?;
+            }
+            ArchitectureCommand::Clusters => {
+                handle_architecture_trust_command(cli.json, &repo, "clusters")?;
+            }
+            ArchitectureCommand::Hotspots => {
+                handle_architecture_trust_command(cli.json, &repo, "hotspots")?;
+            }
+            ArchitectureCommand::Drift => {
+                handle_architecture_trust_command(cli.json, &repo, "drift")?;
+            }
             ArchitectureCommand::Policy { command } => {
                 handle_architecture_policy_command(cli.json, &repo, command)?;
             }
@@ -997,9 +1033,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 output(cli.json, &summary, || {})?;
             }
             ArchitectureCommand::Boundaries => {
-                let store = open_store(&repo)?;
-                let summary = ArchitectureDetector::new(&store, None).detect()?;
-                output(cli.json, &summary.components, || {})?;
+                handle_architecture_trust_command(cli.json, &repo, "boundaries")?;
             }
             ArchitectureCommand::Violations => {
                 let store = open_store(&repo)?;

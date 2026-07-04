@@ -50,7 +50,8 @@ fn handle_contract_command(
         } => {
             let store = open_store(repo)?;
             let plan = contract_plan_from_input(repo, &store, task, plan, plan_json, limit)?;
-            let contract = ContractBuilder::from_plan(&plan)?;
+            let mut contract = ContractBuilder::from_plan(&plan)?;
+            let _governed_adrs = annotate_contract_with_adrs(&mut contract, &plan, repo)?;
             let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
             let stored = !no_store;
             if stored {

@@ -28,6 +28,7 @@ pub enum PlanFormat {
     Markdown,
     Json,
     Toon,
+    Html,
 }
 
 impl PlanFormat {
@@ -35,6 +36,7 @@ impl PlanFormat {
         match self {
             Self::Json => Ok(serde_json::to_string_pretty(report)?),
             Self::Toon => Ok(open_kioku_format::render_plan_toon(report)),
+            Self::Html => Ok(render_html(report)),
             Self::Markdown => Ok(render_markdown(report)),
             Self::Text => Ok(render_text(report)),
         }
@@ -1531,6 +1533,210 @@ fn render_text(report: &PlanReport) -> String {
     }
 
     out
+}
+
+fn render_html(report: &PlanReport) -> String {
+    let mut out = String::new();
+    out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    out.push_str("<title>Open Kioku Plan</title>");
+    out.push_str("<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.45;margin:0;color:#17202a;background:#f8fafc}main{max-width:1040px;margin:0 auto;padding:32px 20px}.panel{background:#fff;border:1px solid #d8e0ea;border-radius:8px;padding:18px;margin:14px 0}h1,h2{line-height:1.2}code{background:#edf2f7;border-radius:4px;padding:2px 5px}table{border-collapse:collapse;width:100%;font-size:14px}th,td{border-bottom:1px solid #e5ebf2;padding:8px;text-align:left;vertical-align:top}.pill{display:inline-block;border:1px solid #b9c6d3;border-radius:999px;padding:2px 8px;margin:2px;background:#f8fafc}.warn{color:#8a4b00}</style>");
+    out.push_str("</head><body><main>");
+    out.push_str(&format!(
+        "<h1>Plan</h1><p><strong>Task:</strong> {}</p>",
+        html_escape(&report.task)
+    ));
+    out.push_str(&format!(
+        "<section class=\"panel\"><h2>Summary</h2><p>{}</p><p><strong>Risk:</strong> {} {:.2} &nbsp; <strong>Confidence:</strong> {:?} {:.2}</p></section>",
+        html_escape(&report.summary),
+        html_escape(&report.risk.level),
+        report.risk.score,
+        report.confidence_breakdown.overall_enum,
+        report.confidence_breakdown.overall_score
+    ));
+
+    out.push_str("<section class=\"panel\"><h2>Affected Files</h2>");
+    write_html_results_table(&mut out, &report.primary_context);
+    out.push_str("</section>");
+
+    out.push_str("<section class=\"panel\"><h2>Affected Symbols</h2><ul>");
+    if report.relevant_symbols.is_empty() {
+        out.push_str("<li>None found.</li>");
+    } else {
+        for symbol in &report.relevant_symbols {
+            out.push_str(&format!(
+                "<li><code>{}</code> <span class=\"pill\">{:?}</span></li>",
+                html_escape(&symbol.qualified_name),
+                symbol.kind
+            ));
+        }
+    }
+    out.push_str("</ul></section>");
+
+    out.push_str("<section class=\"panel\"><h2>Tests</h2><ul>");
+    if report.validation.is_empty() {
+        out.push_str("<li class=\"warn\">No validation candidates found.</li>");
+    } else {
+        for test in &report.validation {
+            out.push_str(&format!(
+                "<li><code>{}</code> via <code>{}</code><br><small>evidence: {}</small></li>",
+                html_escape(&test.name),
+                html_escape(test.command.as_deref().unwrap_or("manual validation")),
+                html_escape(&evidence_refs_text(&test.evidence_refs))
+            ));
+        }
+    }
+    out.push_str("</ul></section>");
+
+    out.push_str("<section class=\"panel\"><h2>Runtime Evidence</h2><ul>");
+    if report.runtime_signals.is_empty() {
+        out.push_str("<li>No runtime signals were attached to this plan.</li>");
+    } else {
+        for signal in &report.runtime_signals {
+            out.push_str(&format!(
+                "<li><code>{}</code> {} ({:?})</li>",
+                html_escape(&signal.id),
+                html_escape(&signal.message),
+                signal.confidence
+            ));
+        }
+    }
+    out.push_str("</ul></section>");
+
+    out.push_str("<section class=\"panel\"><h2>Boundary</h2>");
+    out.push_str("<h3>Allowed</h3>");
+    write_html_boundary_paths(&mut out, &report.recommended_change_boundary.allowed_files);
+    write_html_boundary_files(&mut out, &report.recommended_change_boundary.allowed_rules);
+    out.push_str("<h3>Caution</h3>");
+    write_html_boundary_paths(&mut out, &report.recommended_change_boundary.caution_files);
+    write_html_boundary_files(&mut out, &report.recommended_change_boundary.caution_rules);
+    out.push_str("<h3>Forbidden</h3>");
+    write_html_boundary_paths(
+        &mut out,
+        &report.recommended_change_boundary.forbidden_files,
+    );
+    write_html_forbidden_files(
+        &mut out,
+        &report.recommended_change_boundary.forbidden_rules,
+    );
+    out.push_str("</section>");
+
+    out.push_str("<section class=\"panel\"><h2>Caveats</h2><ul>");
+    for caveat in &report.evidence_quality.caveats {
+        out.push_str(&format!("<li>{}</li>", html_escape(caveat)));
+    }
+    for negative in &report.negative_evidence {
+        out.push_str(&format!(
+            "<li>{}: {}</li>",
+            html_escape(&negative.scope),
+            html_escape(&negative.reason)
+        ));
+    }
+    if report.evidence_quality.caveats.is_empty() && report.negative_evidence.is_empty() {
+        out.push_str("<li>No caveats reported.</li>");
+    }
+    out.push_str("</ul></section>");
+
+    out.push_str("<section class=\"panel\"><h2>Reproduce</h2>");
+    out.push_str(&format!(
+        "<p><code>ok plan --format html {}</code></p>",
+        html_escape(&shell_quote(&report.task))
+    ));
+    out.push_str("<p>This report is source-safe by default: it lists paths, symbols, evidence handles, and validation guidance, not source snippets.</p>");
+    out.push_str("</section></main></body></html>");
+    out
+}
+
+fn write_html_results_table(out: &mut String, results: &[SearchResult]) {
+    if results.is_empty() {
+        out.push_str("<p>No files found.</p>");
+        return;
+    }
+    out.push_str("<table><thead><tr><th>Path</th><th>Lines</th><th>Score</th><th>Evidence</th></tr></thead><tbody>");
+    for result in results {
+        let lines = result
+            .line_range
+            .as_ref()
+            .map(|range| format!("{}-{}", range.start, range.end))
+            .unwrap_or_else(|| "unknown".into());
+        out.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{:.2}</td><td>{}</td></tr>",
+            html_escape(&result.path.display().to_string()),
+            html_escape(&lines),
+            result.score,
+            html_escape(&evidence_refs_text(&result.derived_evidence_ids()))
+        ));
+    }
+    out.push_str("</tbody></table>");
+}
+
+fn write_html_boundary_paths(out: &mut String, files: &[PathBuf]) {
+    if files.is_empty() {
+        out.push_str("<p>None.</p>");
+        return;
+    }
+    out.push_str("<ul>");
+    for file in files {
+        out.push_str(&format!(
+            "<li><code>{}</code></li>",
+            html_escape(&file.display().to_string())
+        ));
+    }
+    out.push_str("</ul>");
+}
+
+fn write_html_boundary_files(out: &mut String, files: &[BoundaryFileRule]) {
+    if files.is_empty() {
+        out.push_str("<p>None.</p>");
+        return;
+    }
+    out.push_str("<ul>");
+    for file in files {
+        out.push_str(&format!(
+            "<li><code>{}</code>: {}<br><small>evidence: {}</small></li>",
+            html_escape(&file.path.display().to_string()),
+            html_escape(&file.reason),
+            html_escape(&evidence_refs_text(&file.evidence_refs))
+        ));
+    }
+    out.push_str("</ul>");
+}
+
+fn write_html_forbidden_files(out: &mut String, files: &[BoundaryForbiddenRule]) {
+    if files.is_empty() {
+        out.push_str("<p>None.</p>");
+        return;
+    }
+    out.push_str("<ul>");
+    for file in files {
+        out.push_str(&format!(
+            "<li><code>{}</code>: {}<br><small>evidence: {}</small></li>",
+            html_escape(&file.pattern),
+            html_escape(&file.reason),
+            html_escape(&evidence_refs_text(&file.evidence_refs))
+        ));
+    }
+    out.push_str("</ul>");
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn render_markdown(report: &PlanReport) -> String {
