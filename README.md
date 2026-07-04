@@ -31,10 +31,11 @@ Your agent now has indexed evidence — symbols, references, impact analysis, te
 
 ## See the Proof
 
-Run `ok prove` on your repo to produce a shareable Markdown report with indexed counts, task scores, and validation signals. The report intentionally omits source snippets, so it is designed to be reviewed and shared from private repos:
+Run `ok prove` on your repo to produce a shareable Markdown or HTML report with indexed counts, task scores, and validation signals. The report intentionally omits source snippets, so it is designed to be reviewed and shared from private repos:
 
 ```sh
 ok prove . --task "the feature you're working on"
+ok prove . --task "the feature you're working on" --html
 ```
 
 A representative public-repo audit indexed 4,600+ files, 46,000+ symbols, and 8,900+ tests locally in 33.1s. The exact Open Kioku version, repository revisions, caveats, and language limitations are recorded in [`docs/large-repo-proof.md`](docs/large-repo-proof.md).
@@ -286,11 +287,16 @@ ok --repo /path/to/repo context "update MCP docs" --compressed --format toon
 ok --repo /path/to/repo memory remember "release workflow uses scripts/publish-crates.sh" --source human
 ok --repo /path/to/repo memory search "release workflow"
 ok --repo /path/to/repo plan "update MCP docs" --format markdown
+ok --repo /path/to/repo plan "update MCP docs" --format html
 ok --repo /path/to/repo plan "update MCP docs" --format toon
 ok --repo /path/to/repo --json contract create "update MCP docs" --limit 12
 ok --repo /path/to/repo contract show <contract-id> --format markdown
 ok --repo /path/to/repo contract export <contract-id> --format toon
 ok --repo /path/to/repo --json contract verify --id <contract-id> --changed README.md
+ok --repo /path/to/repo adr add "API boundary" --component api --file src/api/mod.rs
+ok --repo /path/to/repo adr link <adr-id> --validation-rule "cargo test"
+ok --repo /path/to/repo adr explain --task "update API boundary"
+ok --repo /path/to/repo ui --task "update API boundary"
 ok status /path/to/repo --markdown --write ok-status.md
 ok setup audit /path/to/repo --markdown --write ok-setup.md
 ok --repo /path/to/repo snapshot export --quality fast
@@ -298,8 +304,10 @@ ok --repo /path/to/repo snapshot import
 ok eval /path/to/repo --case "auth flow=src/auth.rs,tests/auth_flow.rs"
 ok prove /path/to/repo --task "auth flow" --task "release workflow"
 ok bench /path/to/repo
-ok --repo /path/to/repo --json verify --plan /tmp/plan.json --changed README.md
+ok --repo /path/to/repo verify --plan /tmp/plan.json --changed README.md --format html
 ok --repo /path/to/repo architecture detect
+ok --repo /path/to/repo architecture overview
+ok --repo /path/to/repo architecture hotspots
 ok --repo /path/to/repo architecture policy check --json
 ok --repo /path/to/repo graph schema
 ok --repo /path/to/repo semantic status
@@ -307,7 +315,7 @@ ok --repo /path/to/repo explain file src/auth.rs
 ok --repo /path/to/repo explain symbol validate_token
 ```
 
-Current top-level commands (33): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `demo`, `setup`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `architecture`, `history`, `graph`, `patch`, `memory`, `mcp`, and `scip`.
+Current top-level commands (35): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
 History provenance, churn hotspots, similar changes, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (59 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 

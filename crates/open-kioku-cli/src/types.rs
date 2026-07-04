@@ -133,6 +133,8 @@ enum Command {
     Verify {
         #[arg(long, value_name = "PLAN_JSON")]
         plan: PathBuf,
+        #[arg(long, value_enum, default_value_t = VerifyReportFormat::Text)]
+        format: VerifyReportFormat,
         #[arg(long, value_name = "UNIFIED_DIFF")]
         diff: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -163,6 +165,11 @@ enum Command {
     ContractBench(ContractBenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),
+    Adr {
+        #[command(subcommand)]
+        command: AdrCommand,
+    },
+    Ui(UiArgs),
 
     Architecture {
         #[command(subcommand)]
@@ -672,6 +679,25 @@ struct ProveArgs {
     /// Include repository-relative paths instead of redacted path shapes.
     #[arg(long, default_value_t = false)]
     reveal_paths: bool,
+
+    /// Shorthand for --format html.
+    #[arg(long, default_value_t = false)]
+    html: bool,
+}
+
+#[derive(Args)]
+struct UiArgs {
+    /// Optional task shown at the start of the trust workflow.
+    #[arg(long)]
+    task: Option<String>,
+
+    /// Output format for the local trust workflow UI.
+    #[arg(long, value_enum, default_value_t = UiFormat::Html)]
+    format: UiFormat,
+
+    /// Write the rendered UI/report to a file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -709,6 +735,28 @@ struct EvalArgs {
 enum ProveFormat {
     Markdown,
     Json,
+    Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum VerifyReportFormat {
+    Text,
+    Json,
+    Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum UiFormat {
+    Html,
+    Markdown,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AdrFormat {
+    Text,
+    Json,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -742,6 +790,10 @@ struct ImpactArgs {
 
 #[derive(Subcommand)]
 enum ArchitectureCommand {
+    Overview,
+    Clusters,
+    Hotspots,
+    Drift,
     Detect,
     Boundaries,
     Violations,
@@ -754,6 +806,59 @@ enum ArchitectureCommand {
     Policy {
         #[command(subcommand)]
         command: ArchitecturePolicyCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdrCommand {
+    List {
+        #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
+        format: AdrFormat,
+    },
+    Add {
+        title: String,
+        #[arg(long, default_value = "accepted")]
+        status: String,
+        #[arg(long)]
+        decision: Option<String>,
+        #[arg(long = "component")]
+        components: Vec<String>,
+        #[arg(long = "boundary")]
+        boundaries: Vec<String>,
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        #[arg(long = "route")]
+        routes: Vec<String>,
+        #[arg(long = "contract")]
+        contracts: Vec<String>,
+        #[arg(long = "validation-rule")]
+        validation_rules: Vec<String>,
+        #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
+        format: AdrFormat,
+    },
+    Link {
+        #[arg(value_name = "ADR_ID")]
+        id: Option<String>,
+        #[arg(long = "component")]
+        components: Vec<String>,
+        #[arg(long = "boundary")]
+        boundaries: Vec<String>,
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        #[arg(long = "route")]
+        routes: Vec<String>,
+        #[arg(long = "contract")]
+        contracts: Vec<String>,
+        #[arg(long = "validation-rule")]
+        validation_rules: Vec<String>,
+        #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
+        format: AdrFormat,
+    },
+    Explain {
+        #[arg(long)]
+        task: String,
+        #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
+        format: AdrFormat,
     },
 }
 
