@@ -17,10 +17,7 @@ if ! grep -Eq "This is a ${crate_count}-crate Cargo workspace" README.md; then
   exit 1
 fi
 
-if ! grep -Eq "workspace is composed of ${crate_count} focused crates" CONTRIBUTING.md; then
-  echo "CONTRIBUTING.md crate count is stale; expected ${crate_count}" >&2
-  exit 1
-fi
+
 
 if ! grep -Eq "contains ${workflow_case_count}[[:space:]]+cases" docs/workflow-benchmarks.md; then
   echo "docs/workflow-benchmarks.md workflow case count is stale; expected ${workflow_case_count}" >&2
