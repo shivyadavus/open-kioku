@@ -120,9 +120,7 @@ async fn handle_request_with_timeout(
     timeout: Duration,
 ) -> Option<JsonRpcResponse> {
     let id = request.id.clone();
-    if id.is_none() {
-        return None;
-    }
+    id.as_ref()?;
     let Some(method) = request.method.as_deref() else {
         return Some(JsonRpcResponse {
             jsonrpc: "2.0",
