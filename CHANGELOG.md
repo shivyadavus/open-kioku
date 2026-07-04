@@ -9,6 +9,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [2.3.0] — 2026-07-04
+
+### Added
+- Added dedicated setup guides for Claude Code, Cursor, Codex, and Gemini CLI in the `demo/` directory.
+
+### Changed
+- Optimized the documentation layout and repository quickstart to focus on local-first onboarding diagnostics.
+- Updated the release manifest synchronization script to automate version propagation to demo site resources.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [2.2.3] — 2026-07-04
 
 ### Fixed
@@ -308,6 +331,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.3.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.3.0
 [2.2.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.3
 [2.2.2]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.2
 [2.2.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.1
