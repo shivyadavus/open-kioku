@@ -76,11 +76,12 @@ pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> 
             store = SqliteStore::open(&store_path)?;
         }
         last_request = Instant::now();
-        let response = handle_line(&repo, &store, &config, &line).await;
-        stdout
-            .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
-            .await?;
-        stdout.flush().await?;
+        if let Some(response) = handle_line(&repo, &store, &config, &line).await {
+            stdout
+                .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
+                .await?;
+            stdout.flush().await?;
+        }
     }
     Ok(())
 }
@@ -90,15 +91,15 @@ async fn handle_line(
     store: &SqliteStore,
     config: &OkConfig,
     line: &str,
-) -> JsonRpcResponse {
+) -> Option<JsonRpcResponse> {
     match serde_json::from_str::<JsonRpcRequest>(line) {
         Ok(request) => handle_request(repo, store, config, request).await,
-        Err(err) => JsonRpcResponse {
+        Err(err) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
             id: None,
             result: None,
             error: Some(json!({"code": -32700, "message": err.to_string()})),
-        },
+        }),
     }
 }
 
@@ -107,7 +108,7 @@ async fn handle_request(
     store: &SqliteStore,
     config: &OkConfig,
     request: JsonRpcRequest,
-) -> JsonRpcResponse {
+) -> Option<JsonRpcResponse> {
     handle_request_with_timeout(repo, store, config, request, TOOL_TIMEOUT).await
 }
 
@@ -117,15 +118,18 @@ async fn handle_request_with_timeout(
     config: &OkConfig,
     request: JsonRpcRequest,
     timeout: Duration,
-) -> JsonRpcResponse {
+) -> Option<JsonRpcResponse> {
     let id = request.id.clone();
+    if id.is_none() {
+        return None;
+    }
     let Some(method) = request.method.as_deref() else {
-        return JsonRpcResponse {
+        return Some(JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(json!({"code": -32600, "message": "missing required JSON-RPC method"})),
-        };
+        });
     };
     let result = tokio::time::timeout(
         timeout,
@@ -133,26 +137,26 @@ async fn handle_request_with_timeout(
     )
     .await;
     match result {
-        Ok(Ok(value)) => JsonRpcResponse {
+        Ok(Ok(value)) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: Some(value),
             error: None,
-        },
-        Ok(Err(err)) => JsonRpcResponse {
+        }),
+        Ok(Err(err)) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(json!({"code": -32000, "message": err.to_string()})),
-        },
-        Err(_) => JsonRpcResponse {
+        }),
+        Err(_) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
             error: Some(
                 json!({"code": -32001, "message": format!("MCP method `{method}` timed out after {}s", timeout.as_secs())}),
             ),
-        },
+        }),
     }
 }
 
@@ -2513,7 +2517,8 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":"req-1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
         )
-        .await;
+        .await
+        .expect("initialize request should return a response");
         assert_eq!(string_id.id, Some(json!("req-1")));
         assert_eq!(string_id.result.unwrap()["protocolVersion"], "2024-11-05");
 
@@ -2523,9 +2528,19 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#,
         )
-        .await;
+        .await
+        .expect("numeric request should return a response");
         assert_eq!(numeric_id.id, Some(json!(7)));
         assert!(numeric_id.error.is_none());
+
+        let initialized_notification = handle_line(
+            Path::new("."),
+            &store,
+            &config,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        )
+        .await;
+        assert!(initialized_notification.is_none());
 
         let missing_method = handle_line(
             Path::new("."),
@@ -2533,11 +2548,14 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":"missing-method","params":{}}"#,
         )
-        .await;
+        .await
+        .expect("invalid request with id should return an error response");
         assert_eq!(missing_method.id, Some(json!("missing-method")));
         assert_eq!(missing_method.error.unwrap()["code"], -32600);
 
-        let malformed = handle_line(Path::new("."), &store, &config, "{").await;
+        let malformed = handle_line(Path::new("."), &store, &config, "{")
+            .await
+            .expect("parse errors should return an error response");
         assert_eq!(malformed.id, None);
         assert_eq!(malformed.error.unwrap()["code"], -32700);
 
@@ -2547,7 +2565,8 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":"bad-unicode","method":"initialize","params":{"client":"\uD800"}}"#,
         )
-        .await;
+        .await
+        .expect("parse errors should return an error response");
         assert_eq!(malformed_unicode.id, None);
         assert_eq!(malformed_unicode.error.unwrap()["code"], -32700);
 
@@ -2557,7 +2576,8 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":"unknown-method","method":"missing_method","params":{}}"#,
         )
-        .await;
+        .await
+        .expect("unknown request with id should return an error response");
         assert_eq!(unknown_method.id, Some(json!("unknown-method")));
         assert_eq!(unknown_method.error.unwrap()["code"], -32000);
 
@@ -2567,7 +2587,8 @@ mod tests {
             &config,
             r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
         )
-        .await;
+        .await
+        .expect("tool error request should return an error response");
         assert_eq!(tool_error.id, Some(json!("tool-error")));
         let error = tool_error.error.unwrap();
         assert_eq!(error["code"], -32000);
@@ -2592,7 +2613,8 @@ mod tests {
             },
             Duration::from_millis(1),
         )
-        .await;
+        .await
+        .expect("timeout request should return an error response");
         assert_eq!(timeout.id, Some(json!("timeout")));
         assert_eq!(timeout.error.unwrap()["code"], -32001);
 
@@ -2634,7 +2656,9 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"pagination","method":"list_files","params":{"limit":1,"offset":0}}"#,
             ),
         ] {
-            let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line).await;
+            let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
+                .await
+                .expect("snapshot request should return a response");
             assert_mcp_snapshot(name, &response);
         }
     }
