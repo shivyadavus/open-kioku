@@ -71,7 +71,7 @@ Open Kioku gives agents a pre-edit routine:
 
 ## Install
 
-### npm (recommended)
+### npm
 
 ```sh
 npm install -g open-kioku
