@@ -71,3 +71,25 @@ that baseline.
 
 Benchmark fixture files are excluded from retrieval while scoring so cases do
 not answer themselves by being indexed as searchable source.
+
+## CI Benchmark Matrix
+
+`.github/workflows/bench.yml` writes reproducible benchmark artifacts under
+`artifacts/benchmarks` and uploads them as the `benchmark-reports` artifact.
+Run the same commands locally after `cargo build --release -p open-kioku-cli`.
+
+| Metric | Command | Artifact |
+| --- | --- | --- |
+| indexing time by phase | `ok bench . --quality-case PlanEngine=crates/open-kioku-plan/src/lib.rs --quality-min-precision-at-1 1.0` | `quality-bench.txt` |
+| memory usage | `cargo bench --workspace` | `criterion.txt` |
+| graph node/edge counts | `ok bench .` | `quality-bench.txt` |
+| graph query latency | `ok --repo . graph query --dsl "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 2" --limit 2` | `graph-query-latency.txt` |
+| search latency | `ok bench .` | `quality-bench.txt` |
+| test selection quality | `ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10 --min-cases 20` | `workflow-bench.txt` |
+| plan quality | `ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10` | `workflow-bench.txt` |
+| verification false positives/negatives | `ok workflow-bench . --cases-file benchmarks/workflow-cases.json --min-verification-accuracy 1.0` and `ok contract-bench benchmarks/contract-fixture --cases-file benchmarks/contract-cases.json` | `workflow-bench.txt`, `contract-bench.txt` |
+| snapshot export/import time | `ok --repo . snapshot export --quality fast` and `ok --repo . snapshot import` | `snapshot-export.txt`, `snapshot-import.txt` |
+| token savings | `ok contract-bench benchmarks/contract-fixture --cases-file benchmarks/contract-cases.json --min-toon-reduction 0.35` | `contract-bench.txt` |
+
+The CI thresholds are intentionally checked in the workflow command line rather
+than only described here, so a regression fails the benchmark job.

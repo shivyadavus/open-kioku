@@ -26,8 +26,20 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: no ignored tests without allowlist
+        run: scripts/check-no-ignored-tests.py
       - run: cargo test --all
       - run: cargo test -p open-kioku-tests
+      - name: MCP golden snapshot contract
+        run: cargo test -p open-kioku-mcp golden_mcp_protocol_snapshots_are_stable
+      - name: parser safety redaction
+        run: cargo test -p open-kioku-ingest redacts_secret_like_message_tokens
+      - name: local-mode network denial
+        run: cargo test -p open-kioku-actions network_denied_by_default
+      - name: snapshot export/import contract
+        run: cargo test -p open-kioku-cli snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index
+      - name: semantic disabled state
+        run: cargo test -p open-kioku-semantic disabled_config_returns_no_provider
       - name: release readiness smoke
         run: scripts/verify-release-readiness.sh
       - name: Cursor starter smoke
@@ -91,3 +103,7 @@ jobs:
         run: |
           chmod +x scripts/validate-docs.sh
           scripts/validate-docs.sh
+      - name: Validate release metadata
+        run: scripts/validate-release-metadata.py
+      - name: Validate release trust gates
+        run: scripts/validate-trust-gates.py

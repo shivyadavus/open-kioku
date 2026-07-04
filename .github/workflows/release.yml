@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -99,6 +101,24 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Generate SHA256SUMS SBOM.cargo-metadata.json PROVENANCE.json THIRD_PARTY_NOTICES.md
+        shell: bash
+        run: scripts/generate-release-trust-artifacts.sh dist
+
+      - name: Attest release binaries
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/ok-linux-x86_64
+            dist/ok-linux-arm64
+            dist/ok-macos-x86_64
+            dist/ok-macos-arm64
+            dist/ok-windows-x86_64.exe
 
       - name: Extract Changelog
         id: changelog
