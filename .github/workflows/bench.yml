@@ -24,29 +24,47 @@ jobs:
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       
+    - name: Prepare benchmark artifact directory
+      run: mkdir -p artifacts/benchmarks
+
     - name: Run Criterion Benchmarks
-      run: cargo bench --workspace
+      shell: bash
+      run: |
+        set -o pipefail
+        cargo bench --workspace | tee artifacts/benchmarks/criterion.txt
       
     - name: Run CLI Bench
+      shell: bash
       run: |
+        set -o pipefail
         cargo build --release -p open-kioku-cli
         ./target/release/ok init .
         ./target/release/ok bench . \
           --quality-case PlanEngine=crates/open-kioku-plan/src/lib.rs \
           --quality-case TantivySearchIndex=crates/open-kioku-search-tantivy/src/lib.rs \
           --quality-case WatchIndexStatus=crates/open-kioku-watch/src/lib.rs \
-          --quality-min-precision-at-1 1.0
+          --quality-min-precision-at-1 1.0 \
+          | tee artifacts/benchmarks/quality-bench.txt
+        ./target/release/ok --repo . graph query --dsl "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 2" \
+          --limit 2 \
+          | tee artifacts/benchmarks/graph-query-latency.txt
+        ./target/release/ok --repo . snapshot export --quality fast \
+          | tee artifacts/benchmarks/snapshot-export.txt
+        ./target/release/ok --repo . snapshot import \
+          | tee artifacts/benchmarks/snapshot-import.txt
         ./target/release/ok workflow-bench . \
           --cases-file benchmarks/workflow-cases.json \
           --limit 10 \
           --min-cases 20 \
           --min-context-recall 1.0 \
           --min-verification-accuracy 1.0 \
-          --no-index
+          --no-index \
+          | tee artifacts/benchmarks/workflow-bench.txt
         ./target/release/ok architecture bench benchmarks/architecture-policy-fixture \
           --cases-file benchmarks/architecture-policy-cases.json \
           --min-precision 0.95 \
-          --min-recall 0.90
+          --min-recall 0.90 \
+          | tee artifacts/benchmarks/architecture-bench.txt
         ./target/release/ok contract-bench benchmarks/contract-fixture \
           --cases-file benchmarks/contract-cases.json \
           --min-cases 7 \
@@ -54,7 +72,15 @@ jobs:
           --min-verification-precision 0.95 \
           --min-boundary-precision 0.97 \
           --min-boundary-recall 0.90 \
-          --min-toon-reduction 0.35
+          --min-toon-reduction 0.35 \
+          | tee artifacts/benchmarks/contract-bench.txt
         ./target/release/ok --json history similar-bench \
           --cases-file benchmarks/similar-history-cases.json \
-          --min-recall-at-5 0.75
+          --min-recall-at-5 0.75 \
+          | tee artifacts/benchmarks/history-similar-bench.json
+
+    - name: Upload benchmark-reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-reports
+        path: artifacts/benchmarks
