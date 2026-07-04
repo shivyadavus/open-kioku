@@ -149,10 +149,21 @@ jobs:
       - name: Publish optional dependency packages
         shell: bash
         run: |
+          publish_package() {
+            local package_dir="$1"
+            local name
+            local version
+            name="$(node -p "require('./${package_dir}/package.json').name")"
+            version="$(node -p "require('./${package_dir}/package.json').version")"
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already published; skipping"
+              return 0
+            fi
+            (cd "${package_dir}" && npm publish --access public)
+          }
+
           for package in npm-darwin-x64 npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
-            cd packages/$package
-            npm publish --access public
-            cd ../..
+            publish_package "packages/${package}"
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -160,6 +171,12 @@ jobs:
       - name: Publish main wrapper package
         shell: bash
         run: |
+          name="$(node -p "require('./packages/npm/package.json').name")"
+          version="$(node -p "require('./packages/npm/package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already published; skipping"
+            exit 0
+          fi
           cd packages/npm
           npm publish --access public
         env:
