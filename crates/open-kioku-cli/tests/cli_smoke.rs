@@ -433,6 +433,218 @@ reason = "domain code must use the api facade"
 }
 
 #[test]
+fn trust_reports_adrs_and_html_outputs_are_source_safe() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    fs::write(
+        repo.join("src/auth.rs"),
+        r#"
+pub fn issue_token(user: &str) -> String {
+    let secret_token_value = "do-not-leak-this-source";
+    format!("{user}:{secret_token_value}")
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("tests/auth_test.rs"),
+        r#"
+#[test]
+fn auth_flow() {
+    assert!(true);
+}
+"#,
+    )
+    .unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let added = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("adr")
+            .arg("add")
+            .arg("Auth boundary")
+            .arg("--component")
+            .arg("auth")
+            .arg("--file")
+            .arg("src/auth.rs")
+            .arg("--validation-rule")
+            .arg("cargo test")
+            .arg("--decision")
+            .arg("Authentication code owns token checks");
+        command
+    });
+    let added: serde_json::Value = serde_json::from_str(&added).unwrap();
+    let adr_id = added[0]["id"].as_str().unwrap().to_string();
+
+    let linked = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("adr")
+            .arg("link")
+            .arg(&adr_id)
+            .arg("--boundary")
+            .arg("auth-boundary")
+            .arg("--contract")
+            .arg("token-contract");
+        command
+    });
+    assert!(linked.contains(&adr_id));
+
+    let adr_explain = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("adr")
+            .arg("explain")
+            .arg("--task")
+            .arg("change auth token flow");
+        command
+    });
+    assert!(adr_explain.contains(&adr_id));
+
+    for subcommand in ["overview", "clusters", "hotspots", "boundaries", "drift"] {
+        let output = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("architecture")
+                .arg(subcommand);
+            command
+        });
+        assert!(output.contains("Architecture"), "{subcommand}: {output}");
+        assert!(
+            output.contains("Validation Requirements") || output.contains("Components"),
+            "{subcommand}: {output}"
+        );
+        assert!(!output.contains("do-not-leak-this-source"));
+    }
+    let hotspots = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("architecture")
+            .arg("hotspots");
+        command
+    });
+    assert!(hotspots.contains("High-risk Files"));
+    assert!(hotspots.contains("src/auth.rs"));
+
+    let ui = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("ui");
+        command
+    });
+    assert!(ui.contains("<!doctype html>"));
+    assert!(ui.contains("Task"));
+    assert!(ui.contains("Verification result"));
+    assert!(!ui.contains("do-not-leak-this-source"));
+
+    let plan_html = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("plan")
+            .arg("change auth token flow")
+            .arg("--format")
+            .arg("html");
+        command
+    });
+    assert!(plan_html.contains("<!doctype html>"));
+    assert!(plan_html.contains("ADR Governance"));
+    assert!(plan_html.contains(&adr_id));
+    assert!(!plan_html.contains("do-not-leak-this-source"));
+
+    let plan_json = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("plan")
+            .arg("change auth token flow")
+            .arg("--format")
+            .arg("json");
+        command
+    });
+    let plan_path = repo.join("plan.json");
+    fs::write(&plan_path, &plan_json).unwrap();
+
+    let contract = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("contract")
+            .arg("create")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--no-store")
+            .arg("--format")
+            .arg("json");
+        command
+    });
+    let contract: serde_json::Value = serde_json::from_str(&contract).unwrap();
+    assert_eq!(
+        contract["contract"]["adr_governance"][0]["id"].as_str(),
+        Some(adr_id.as_str())
+    );
+
+    let verify_html = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("verify")
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--format")
+            .arg("html")
+            .arg("--changed")
+            .arg("src/auth.rs");
+        command
+    });
+    assert!(verify_html.contains("<!doctype html>"));
+    assert!(verify_html.contains("Verification"));
+    assert!(verify_html.contains(&adr_id));
+    assert!(!verify_html.contains("do-not-leak-this-source"));
+
+    let proof_html = run({
+        let mut command = ok();
+        command
+            .arg("prove")
+            .arg(repo)
+            .arg("--task")
+            .arg("auth")
+            .arg("--html");
+        command
+    });
+    assert!(proof_html.contains("<!doctype html>"));
+    assert!(proof_html.contains("Open Kioku Proof"));
+    assert!(!proof_html.contains("do-not-leak-this-source"));
+}
+
+#[test]
 fn verify_enforces_configured_architecture_policy_without_dependency_flag() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
