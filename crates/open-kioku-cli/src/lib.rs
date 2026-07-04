@@ -10,8 +10,9 @@ use open_kioku_config::{
 use open_kioku_context::{expanded_task_search_terms, ContextPackBuilder, ContextPackFormat};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
-    ApiSurfaceConstraint, ChangeContractV1, ContractFile, ContractId, ContractStore,
-    DependencyDeltaConstraint, FsContractStore, StoredContractRecord,
+    ApiSurfaceConstraint, ArchitectureConstraint, ChangeContractV1, ConstraintSeverity,
+    ContractFile, ContractId, ContractStore, DependencyDeltaConstraint, EvidenceRef,
+    FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
     ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
@@ -21,7 +22,7 @@ use open_kioku_core::{
     OwnershipReport, OwnershipSourceType, PlanReport, PolicyCheckReport, PolicyComponentMatch,
     PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ReviewerAvailability,
     ReviewerEvidence, ReviewerRole, ReviewerSuggestionReport, ScoreComponent, SearchResult,
-    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolProvenance,
+    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolProvenance, TestTarget,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;
@@ -29,7 +30,7 @@ use open_kioku_ingest::{IndexProgress, Indexer};
 use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
     ChangeVerificationReport, ChangeVerifier, ContractVerificationReport, ContractVerifier,
-    PatchPlanner, VerificationVerdict, VerifyChangeInput,
+    PatchPlanner, VerificationFinding, VerificationVerdict, VerifyChangeInput,
 };
 use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat};
 use open_kioku_ranking::{
@@ -63,6 +64,8 @@ use std::time::{Duration, Instant};
 include!("types.rs");
 include!("commands/mod.rs");
 include!("commands/architecture.rs");
+include!("commands/adr.rs");
+include!("reports/trust.rs");
 include!("reports/status_setup_doctor.rs");
 include!("bench/mod.rs");
 include!("commands/verification.rs");
