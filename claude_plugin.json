@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "displayName": "Open Kioku — Code Intelligence",
-  "description": "Blazing-fast, local-first code intelligence for AI agents. Gives Claude a persistent, evidence-backed memory of your repository via BM25 search, Tree-sitter symbol navigation, impact analysis, architecture detection, and patch planning — all 100% local, zero cloud.",
+  "description": "Local-first code intelligence for AI agents. Gives Claude an evidence-backed repository index via BM25 search, Tree-sitter symbol navigation, impact analysis, architecture detection, and patch planning. No hosted index or embeddings API required.",
   "version": "2.2.3",
   "author": {
     "name": "Shiv Yadav",

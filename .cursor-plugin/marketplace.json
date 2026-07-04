@@ -5,7 +5,7 @@
     "email": "155265880+shivyadavus@users.noreply.github.com"
   },
   "metadata": {
-    "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search — all on your machine. No cloud. No embeddings API. No data leaves your machine.",
+    "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search under .ok/. No hosted index or embeddings API required.",
     "version": "2.2.3"
   },
   "plugins": [

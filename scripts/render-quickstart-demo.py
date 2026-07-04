@@ -61,44 +61,45 @@ FRAMES = [
         ],
     ),
     (
-        "Create a demo repo",
+        "Index your repo",
         [
-            ("$ ok demo --force", CYAN),
-            ("Indexed demo repo with SQLite + Tantivy", GREEN),
-            ("src/auth.rs  tests/auth_flow.rs  ok.toml", MUTED),
+            ("$ ok index .", CYAN),
+            ("Local metadata: .ok/index.sqlite", GREEN),
+            ("Local search: .ok/search/tantivy", MUTED),
         ],
     ),
     (
-        "Ask for a plan",
+        "Connect your agent",
         [
-            ("$ ok --repo ./open-kioku-demo plan token --format markdown", CYAN),
-            ("Primary context: src/auth.rs", TEXT),
-            ("Impact: tests/auth_flow.rs", TEXT),
-            ("Validation: cargo test auth_flow", YELLOW),
+            ("$ ok mcp install cursor --repo .", CYAN),
+            ("Also tested: claude, codex, gemini, opencode", TEXT),
+            ("zed, windsurf, trae", TEXT),
+            ("Server args include: --read-only", YELLOW),
         ],
     ),
     (
-        "Inspect evidence",
+        "Paste the prompt",
         [
-            ("Confidence: grounded", GREEN),
-            ("Evidence: indexed symbols, tests, boundaries", TEXT),
-            ("Negative evidence: exact references not available", MUTED),
+            ("Use Open Kioku before editing.", GREEN),
+            ("repo_status -> search_code -> get_definition", TEXT),
+            ("impact_analysis -> find_tests_for_change", TEXT),
+            ("plan_change first, verify_change after", YELLOW),
         ],
     ),
     (
-        "Verify the edit",
+        "Plan from evidence",
         [
-            ("$ ok --repo ./open-kioku-demo --json verify --plan /tmp/ok-plan.json --changed src/auth.rs", CYAN),
-            ('"verdict": "pass"', GREEN),
-            ('"changed_symbols": ["issue_token"]', TEXT),
+            ("$ ok plan \"token\" --format markdown", CYAN),
+            ("Primary context, symbols, impact, tests", TEXT),
+            ("Confidence caveats are reported explicitly", MUTED),
         ],
     ),
     (
-        "Ready for the agent",
+        "Share proof",
         [
-            ("search_code -> get_definition -> impact_analysis", TEXT),
-            ("find_tests_for_change -> plan_change -> verify_change", TEXT),
-            ("Local facts first. No hosted index. No source upload.", GREEN),
+            ("$ ok prove . --task \"auth flow\"", CYAN),
+            ("Indexed counts, task scores, validation signals", TEXT),
+            ("No source snippets in the report", GREEN),
         ],
     ),
 ]
@@ -115,7 +116,7 @@ def draw_frame(title: str, lines: list[tuple[str, str]], step: int, total: int) 
     draw.ellipse((72, 68, 88, 84), fill=RED)
     draw.ellipse((100, 68, 116, 84), fill=YELLOW)
     draw.ellipse((128, 68, 144, 84), fill=GREEN)
-    draw.text((74, 122), "Open Kioku 60-second quickstart", font=TITLE, fill=TEXT)
+    draw.text((74, 122), "Open Kioku first-win workflow", font=TITLE, fill=TEXT)
     draw.text((76, 174), title, font=BODY, fill=GREEN)
     y = 238
     for line, color in lines:

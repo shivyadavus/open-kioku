@@ -182,10 +182,17 @@ def check_release_checklist(metadata: dict, version: str, errors: list[str]) -> 
         "cargo clippy --all-targets --all-features -- -D warnings",
         "cargo test --all",
         "cargo binstall open-kioku-cli",
-        metadata["homebrew"]["install"],
         "npm install -g open-kioku",
         f"v{version}",
     ]
+    homebrew = metadata.get("homebrew", {})
+    install = homebrew.get("install")
+    if install:
+        required.append(install)
+    elif homebrew.get("published") is False:
+        required.append("Do not advertise Homebrew as a public install channel")
+    else:
+        fail("release metadata homebrew entry must set install or published=false", errors)
     for item in required:
         if item not in checklist:
             fail(f"release checklist missing {item}", errors)

@@ -1,0 +1,1051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>How to Set Up Open Kioku MCP Server for Claude Code | openkioku.com</title>
+    <meta name="description" content="Set up the Open Kioku MCP server for Claude Code in 4 steps. Give Claude Code local code intelligence—search, symbol resolution, impact analysis, and evidence-backed edit plans—without uploading your source code.">
+    <meta name="keywords" content="Claude Code MCP server, Claude Code code intelligence, MCP server for Claude Code, Claude Code local code search, Open Kioku Claude Code, Claude Code setup guide">
+    <link rel="canonical" href="https://www.openkioku.com/claude-code-setup.html">
+
+    <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
+    <meta property="og:description" content="Give Claude Code an evidence layer before it edits your codebase. Local code search, symbol resolution, impact analysis, and edit plans via MCP.">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://www.openkioku.com/claude-code-setup.html">
+    <meta property="og:image" content="https://www.openkioku.com/og-image.png">
+    <meta property="og:site_name" content="Open Kioku">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
+    <meta name="twitter:description" content="Give Claude Code an evidence layer before it edits your codebase. Local code search, symbol resolution, impact analysis, and edit plans via MCP.">
+    <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
+
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "HowTo",
+      "name": "How to Set Up Open Kioku MCP Server for Claude Code",
+      "description": "Connect Open Kioku's local code intelligence MCP server to Claude Code in 4 steps. Get search, symbol resolution, impact analysis, and evidence-backed edit plans without uploading source code.",
+      "image": "https://www.openkioku.com/og-image.png",
+      "totalTime": "PT2M",
+      "tool": [
+        {
+          "@type": "HowToTool",
+          "name": "Node.js / npm"
+        },
+        {
+          "@type": "HowToTool",
+          "name": "Claude Code CLI"
+        }
+      ],
+      "step": [
+        {
+          "@type": "HowToStep",
+          "position": 1,
+          "name": "Install Open Kioku",
+          "text": "Install the Open Kioku CLI globally via npm.",
+          "itemListElement": {
+            "@type": "HowToDirection",
+            "text": "Run: npm install -g open-kioku"
+          }
+        },
+        {
+          "@type": "HowToStep",
+          "position": 2,
+          "name": "Index your repository",
+          "text": "Index your codebase to build a local SQLite and Tantivy search index.",
+          "itemListElement": {
+            "@type": "HowToDirection",
+            "text": "Run: ok index ."
+          }
+        },
+        {
+          "@type": "HowToStep",
+          "position": 3,
+          "name": "Connect MCP to Claude Code",
+          "text": "Generate the MCP server configuration for Claude Code and paste it into your Claude Code MCP settings.",
+          "itemListElement": {
+            "@type": "HowToDirection",
+            "text": "Run: ok mcp install claude --repo ."
+          }
+        },
+        {
+          "@type": "HowToStep",
+          "position": 4,
+          "name": "Paste the golden agent prompt",
+          "text": "Add the recommended agent prompt so Claude Code uses Open Kioku tools before every edit.",
+          "itemListElement": {
+            "@type": "HowToDirection",
+            "text": "Paste into your CLAUDE.md or system prompt: Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change."
+          }
+        }
+      ]
+    }
+    </script>
+
+    <style>
+        @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap");
+
+        :root {
+            color-scheme: dark;
+            --bg: #080a0d;
+            --bg-raised: rgba(16, 20, 24, 0.88);
+            --bg-panel: rgba(21, 26, 31, 0.82);
+            --bg-soft: rgba(255, 255, 255, 0.055);
+            --border: rgba(233, 240, 247, 0.12);
+            --border-strong: rgba(233, 240, 247, 0.22);
+            --text: #f5f7fa;
+            --muted: #a8b0ba;
+            --subtle: #737d89;
+            --green: #22c55e;
+            --cyan: #2dd4bf;
+            --amber: #f59e0b;
+            --rose: #fb7185;
+            --ink: #101418;
+            --terminal: rgba(5, 8, 12, 0.94);
+            --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            min-height: 100vh;
+            background:
+                linear-gradient(180deg, rgba(8, 10, 13, 0.66), var(--bg) 58%),
+                var(--bg);
+            color: var(--text);
+            font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            line-height: 1.5;
+            overflow-x: hidden;
+        }
+
+        a {
+            color: inherit;
+        }
+
+        button, a {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        /* Background scene */
+        .hero-scene {
+            position: fixed;
+            inset: 0;
+            z-index: -2;
+            background:
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(135deg, rgba(45, 212, 191, 0.08), transparent 44%),
+                linear-gradient(315deg, rgba(245, 158, 11, 0.07), transparent 48%),
+                #080a0d;
+            background-size: 44px 44px, 44px 44px, auto, auto, auto;
+        }
+
+        /* Layout */
+        .page {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+        }
+
+        /* Nav */
+        .nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 72px;
+            gap: 20px;
+        }
+
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            font-weight: 800;
+            font-size: 1rem;
+        }
+
+        .brand-mark {
+            width: 32px;
+            height: 32px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--border-strong);
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            color: var(--cyan);
+            font-family: "Fira Code", monospace;
+            font-weight: 700;
+        }
+
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            color: var(--muted);
+            font-size: 0.93rem;
+        }
+
+        .nav-links a {
+            text-decoration: none;
+        }
+
+        .nav-links a:hover {
+            color: var(--text);
+        }
+
+        /* Dropdown */
+        .nav-dropdown {
+            position: relative;
+        }
+
+        .nav-dropdown-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: none;
+            border: none;
+            color: var(--muted);
+            font-family: inherit;
+            font-size: 0.93rem;
+            cursor: pointer;
+            padding: 0;
+        }
+
+        .nav-dropdown-toggle:hover {
+            color: var(--text);
+        }
+
+        .nav-dropdown-toggle .chevron {
+            font-size: 0.7rem;
+            transition: transform 160ms ease;
+        }
+
+        .nav-dropdown:hover .chevron,
+        .nav-dropdown:focus-within .chevron {
+            transform: rotate(180deg);
+        }
+
+        .nav-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 50%;
+            transform: translateX(-50%);
+            min-width: 180px;
+            background: var(--bg-raised);
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            padding: 6px;
+            box-shadow: var(--shadow);
+            z-index: 100;
+        }
+
+        .nav-dropdown:hover .nav-dropdown-menu,
+        .nav-dropdown:focus-within .nav-dropdown-menu {
+            display: block;
+        }
+
+        .nav-dropdown-menu a {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 12px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            color: var(--muted);
+            text-decoration: none;
+            transition: background 120ms ease;
+        }
+
+        .nav-dropdown-menu a:hover {
+            background: rgba(255, 255, 255, 0.07);
+            color: var(--text);
+        }
+
+        .nav-dropdown-menu a.active {
+            color: var(--cyan);
+            background: rgba(45, 212, 191, 0.08);
+        }
+
+        .nav-dropdown-menu .guide-badge {
+            margin-left: auto;
+            font-size: 0.72rem;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: rgba(45, 212, 191, 0.12);
+            color: var(--cyan);
+            font-weight: 700;
+        }
+
+        /* Hero */
+        .hero {
+            padding: 72px 0 56px;
+            text-align: center;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 14px;
+            border: 1px solid rgba(45, 212, 191, 0.32);
+            background: rgba(45, 212, 191, 0.08);
+            border-radius: 999px;
+            color: #99f6e4;
+            font-size: 0.84rem;
+            font-weight: 700;
+            margin-bottom: 22px;
+        }
+
+        .hero-badge-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 999px;
+            background: var(--cyan);
+            box-shadow: 0 0 14px rgba(45, 212, 191, 0.8);
+        }
+
+        h1 {
+            max-width: 780px;
+            margin: 0 auto;
+            font-size: 3.8rem;
+            line-height: 1.06;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+
+        h1 .accent {
+            color: var(--cyan);
+        }
+
+        .hero-sub {
+            max-width: 640px;
+            margin: 20px auto 0;
+            color: #c8d0d8;
+            font-size: 1.18rem;
+        }
+
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 28px;
+            justify-content: center;
+        }
+
+        /* Buttons */
+        .button {
+            min-height: 46px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            padding: 0 18px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            font-weight: 700;
+            text-decoration: none;
+            cursor: pointer;
+            transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+            font-size: 0.95rem;
+        }
+
+        .button:hover {
+            transform: translateY(-1px);
+        }
+
+        .button-primary {
+            background: #f5f7fa;
+            color: #0b0f13;
+        }
+
+        .button-secondary {
+            background: rgba(255, 255, 255, 0.075);
+            border-color: var(--border);
+            color: var(--text);
+        }
+
+        .button-secondary:hover {
+            border-color: var(--border-strong);
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* Sections */
+        section {
+            padding: 72px 0;
+        }
+
+        .section-heading {
+            max-width: 760px;
+            margin-bottom: 26px;
+        }
+
+        .section-kicker {
+            color: var(--cyan);
+            font-weight: 800;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+        }
+
+        h2 {
+            margin-top: 8px;
+            font-size: 2.45rem;
+            line-height: 1.08;
+            letter-spacing: 0;
+        }
+
+        .section-copy {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 1.03rem;
+        }
+
+        /* Steps grid */
+        .steps-grid {
+            display: grid;
+            gap: 28px;
+            counter-reset: step;
+        }
+
+        .step-card {
+            display: grid;
+            grid-template-columns: 52px 1fr;
+            gap: 22px;
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            padding: 28px;
+            counter-increment: step;
+        }
+
+        .step-number {
+            width: 42px;
+            height: 42px;
+            display: grid;
+            place-items: center;
+            border-radius: 10px;
+            color: #06110b;
+            background: var(--green);
+            font-weight: 800;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+        }
+
+        .step-content h3 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: 0;
+        }
+
+        .step-content p {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.96rem;
+        }
+
+        /* Terminal / code blocks */
+        pre, code {
+            font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .terminal-card {
+            margin-top: 16px;
+            border: 1px solid var(--border-strong);
+            background: var(--terminal);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+
+        .terminal-header {
+            min-height: 46px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 14px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.045);
+        }
+
+        .window-controls {
+            display: flex;
+            gap: 7px;
+        }
+
+        .window-controls span {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+        }
+
+        .control-red { background: #ff5f57; }
+        .control-amber { background: #ffbd2e; }
+        .control-green { background: #28c840; }
+
+        .terminal-title {
+            color: var(--muted);
+            font-family: "Fira Code", monospace;
+            font-size: 0.82rem;
+        }
+
+        .copy-button {
+            min-width: 62px;
+            min-height: 34px;
+            padding: 0 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 700;
+            font-family: inherit;
+        }
+
+        .copy-button:hover {
+            border-color: var(--border-strong);
+        }
+
+        .terminal-body {
+            padding: 20px;
+            overflow-x: auto;
+        }
+
+        .terminal-body pre {
+            color: #e7edf4;
+            font-size: 0.92rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .shell-prompt {
+            color: var(--green);
+            margin-right: 9px;
+        }
+
+        /* JSON config block */
+        .json-block {
+            margin-top: 16px;
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .json-block-header {
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 14px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .json-block-title {
+            font-weight: 800;
+            font-size: 0.9rem;
+        }
+
+        .json-block pre {
+            padding: 18px;
+            overflow-x: auto;
+            color: #dbeafe;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            line-height: 1.55;
+        }
+
+        .json-key { color: #67e8f9; }
+        .json-string { color: #86efac; }
+
+        /* Prompt block */
+        .prompt-block {
+            margin-top: 16px;
+            border: 1px solid rgba(34, 197, 94, 0.25);
+            background: rgba(34, 197, 94, 0.04);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .prompt-block-header {
+            min-height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 0 14px;
+            border-bottom: 1px solid rgba(34, 197, 94, 0.15);
+        }
+
+        .prompt-block-title {
+            font-weight: 800;
+            font-size: 0.9rem;
+            color: #bbf7d0;
+        }
+
+        .prompt-block pre {
+            padding: 18px;
+            color: #d1fae5;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            line-height: 1.55;
+        }
+
+        /* Tools grid */
+        .tools-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .tool-card {
+            border: 1px solid var(--border);
+            background: var(--bg-panel);
+            border-radius: 8px;
+            padding: 22px;
+        }
+
+        .tool-card h3 {
+            font-family: "Fira Code", monospace;
+            font-size: 0.92rem;
+            color: var(--cyan);
+            font-weight: 600;
+        }
+
+        .tool-card p {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        .tool-card-accent {
+            border-color: rgba(45, 212, 191, 0.25);
+            background: rgba(45, 212, 191, 0.04);
+        }
+
+        /* Back link */
+        .back-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 36px 0 0;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            color: var(--cyan);
+            text-decoration: none;
+            font-weight: 700;
+            font-size: 0.95rem;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+
+        /* Footer */
+        footer {
+            padding: 34px 0 56px;
+            color: var(--subtle);
+            font-size: 0.92rem;
+        }
+
+        .footer-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            border-top: 1px solid var(--border);
+            padding-top: 22px;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 16px;
+        }
+
+        .footer-links a {
+            text-decoration: none;
+        }
+
+        .footer-links a:hover {
+            color: var(--text);
+        }
+
+        /* Breadcrumb */
+        .breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 0 0;
+            font-size: 0.86rem;
+            color: var(--subtle);
+        }
+
+        .breadcrumb a {
+            color: var(--muted);
+            text-decoration: none;
+        }
+
+        .breadcrumb a:hover {
+            color: var(--text);
+        }
+
+        .breadcrumb .sep {
+            color: var(--subtle);
+        }
+
+        /* Responsive */
+        @media (max-width: 980px) {
+            h1 {
+                font-size: 3rem;
+            }
+
+            .tools-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 680px) {
+            .page {
+                width: min(100% - 22px, 1180px);
+            }
+
+            .nav {
+                min-height: 64px;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            h1 {
+                font-size: 2.2rem;
+            }
+
+            h2 {
+                font-size: 1.9rem;
+            }
+
+            .hero-sub,
+            .section-copy {
+                font-size: 1rem;
+            }
+
+            .step-card {
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+
+            .tools-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .button {
+                width: 100%;
+            }
+
+            section {
+                padding: 52px 0;
+            }
+
+            .hero {
+                padding: 48px 0 36px;
+            }
+
+            .footer-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="hero-scene" aria-hidden="true"></div>
+
+    <main class="page">
+        <!-- Nav -->
+        <nav class="nav" aria-label="Primary navigation">
+            <a class="brand" href="https://www.openkioku.com/">
+                <span class="brand-mark">ok</span>
+                <span>Open Kioku</span>
+            </a>
+            <div class="nav-links">
+                <div class="nav-dropdown">
+                    <button class="nav-dropdown-toggle" aria-haspopup="true" aria-expanded="false">
+                        Setup Guides <span class="chevron" aria-hidden="true">▾</span>
+                    </button>
+                    <div class="nav-dropdown-menu" role="menu">
+                        <a href="https://www.openkioku.com/claude-code-setup.html" role="menuitem" class="active">Claude Code <span class="guide-badge">Current</span></a>
+                        <a href="https://www.openkioku.com/cursor-setup.html" role="menuitem">Cursor</a>
+                        <a href="https://www.openkioku.com/codex-setup.html" role="menuitem">Codex</a>
+                        <a href="https://www.openkioku.com/gemini-cli-setup.html" role="menuitem">Gemini CLI</a>
+                    </div>
+                </div>
+                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+            </div>
+        </nav>
+
+        <!-- Breadcrumb -->
+        <div class="breadcrumb" aria-label="Breadcrumb">
+            <a href="https://www.openkioku.com/">Home</a>
+            <span class="sep" aria-hidden="true">›</span>
+            <span>Claude Code Setup</span>
+        </div>
+
+        <!-- Hero -->
+        <section class="hero" aria-label="Page introduction">
+            <div class="hero-badge">
+                <span class="hero-badge-dot"></span>
+                Claude Code + Open Kioku MCP
+            </div>
+            <h1>Give Claude Code an <span class="accent">evidence layer</span> before it edits your codebase</h1>
+            <p class="hero-sub">Connect Open Kioku as a local MCP server so Claude Code can search your code, resolve symbols, trace impact, build plans, and verify edits from a local index.</p>
+            <div class="hero-actions">
+                <a class="button button-primary" href="#step-1">
+                    <span>Start setup</span>
+                    <span aria-hidden="true">→</span>
+                </a>
+                <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku">
+                    <span>View on GitHub</span>
+                    <span aria-hidden="true">↗</span>
+                </a>
+            </div>
+        </section>
+
+        <!-- Steps -->
+        <section id="step-1" aria-label="Setup steps">
+            <div class="section-heading">
+                <div class="section-kicker">Setup Guide</div>
+                <h2>4 steps to code intelligence in Claude Code.</h2>
+                <p class="section-copy">Install, index, connect, prompt. Indexing time depends on repo size; Open Kioku commands run locally on your machine.</p>
+            </div>
+
+            <div class="steps-grid">
+                <!-- Step 1 -->
+                <article class="step-card" id="install">
+                    <div class="step-number">1</div>
+                    <div class="step-content">
+                        <h3>Install Open Kioku</h3>
+                        <p>Install the CLI globally. The npm wrapper pulls the native binary for macOS, Linux, or Windows automatically.</p>
+                        <div class="terminal-card">
+                            <div class="terminal-header">
+                                <div class="window-controls" aria-hidden="true">
+                                    <span class="control-red"></span>
+                                    <span class="control-amber"></span>
+                                    <span class="control-green"></span>
+                                </div>
+                                <div class="terminal-title">terminal</div>
+                                <button class="copy-button" type="button" data-copy="npm install -g open-kioku" aria-label="Copy install command">Copy</button>
+                            </div>
+                            <div class="terminal-body">
+                                <pre><span class="shell-prompt">$</span> npm install -g open-kioku</pre>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- Step 2 -->
+                <article class="step-card" id="index">
+                    <div class="step-number">2</div>
+                    <div class="step-content">
+                        <h3>Index your repository</h3>
+                        <p>Navigate to your project directory and run the indexer. Open Kioku scans files, extracts symbols, builds a dependency graph, and creates local SQLite + Tantivy search indexes under <code>.ok/</code>.</p>
+                        <div class="terminal-card">
+                            <div class="terminal-header">
+                                <div class="window-controls" aria-hidden="true">
+                                    <span class="control-red"></span>
+                                    <span class="control-amber"></span>
+                                    <span class="control-green"></span>
+                                </div>
+                                <div class="terminal-title">terminal</div>
+                                <button class="copy-button" type="button" data-copy="ok index ." aria-label="Copy index command">Copy</button>
+                            </div>
+                            <div class="terminal-body">
+                                <pre><span class="shell-prompt">$</span> ok index .</pre>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- Step 3 -->
+                <article class="step-card" id="connect">
+                    <div class="step-number">3</div>
+                    <div class="step-content">
+                        <h3>Connect MCP to Claude Code</h3>
+                        <p>Generate the MCP configuration for Claude Code. The command prints a JSON snippet — paste it into your Claude Code MCP settings file.</p>
+                        <div class="terminal-card">
+                            <div class="terminal-header">
+                                <div class="window-controls" aria-hidden="true">
+                                    <span class="control-red"></span>
+                                    <span class="control-amber"></span>
+                                    <span class="control-green"></span>
+                                </div>
+                                <div class="terminal-title">terminal</div>
+                                <button class="copy-button" type="button" data-copy="ok mcp install claude --repo ." aria-label="Copy MCP install command">Copy</button>
+                            </div>
+                            <div class="terminal-body">
+                                <pre><span class="shell-prompt">$</span> ok mcp install claude --repo .</pre>
+                            </div>
+                        </div>
+                        <div class="json-block">
+                            <div class="json-block-header">
+                                <div class="json-block-title">MCP config output — paste into Claude Code settings</div>
+                                <button class="copy-button" type="button" data-copy='{"mcpServers":{"open-kioku":{"command":"ok","args":["mcp","serve","--repo","/absolute/path/to/repo","--read-only"]}}}' aria-label="Copy MCP JSON config">Copy</button>
+                            </div>
+                            <pre><code>{
+  <span class="json-key">"mcpServers"</span>: {
+    <span class="json-key">"open-kioku"</span>: {
+      <span class="json-key">"command"</span>: <span class="json-string">"ok"</span>,
+      <span class="json-key">"args"</span>: [
+        <span class="json-string">"mcp"</span>,
+        <span class="json-string">"serve"</span>,
+        <span class="json-string">"--repo"</span>,
+        <span class="json-string">"/absolute/path/to/repo"</span>,
+        <span class="json-string">"--read-only"</span>
+      ]
+    }
+  }
+}</code></pre>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- Step 4 -->
+                <article class="step-card" id="prompt">
+                    <div class="step-number">4</div>
+                    <div class="step-content">
+                        <h3>Paste the golden agent prompt</h3>
+                        <p>Add this prompt to your <code>CLAUDE.md</code> file or system instructions. It tells Claude Code to gather evidence from Open Kioku before every edit and verify changes afterward.</p>
+                        <div class="prompt-block">
+                            <div class="prompt-block-header">
+                                <div class="prompt-block-title">CLAUDE.md — golden prompt</div>
+                                <button class="copy-button" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change." aria-label="Copy golden agent prompt" style="border-color: rgba(34,197,94,0.3); color: #bbf7d0;">Copy</button>
+                            </div>
+                            <pre><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+get_references, impact_analysis, and find_tests_for_change. Build a plan with
+plan_change first, then edit, and verify after the edit with verify_change.</code></pre>
+                        </div>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <!-- What you get -->
+        <section aria-label="Available MCP tools">
+            <div class="section-heading">
+                <div class="section-kicker">What You Get</div>
+                <h2>MCP tools Claude Code can call after setup.</h2>
+                <p class="section-copy">Every Open Kioku tool runs locally against your indexed repo. No hosted index or embeddings service required, read-only by default.</p>
+            </div>
+
+            <div class="tools-grid">
+                <div class="tool-card tool-card-accent">
+                    <h3>plan_change</h3>
+                    <p>Build an evidence-backed edit plan with primary context, impact candidates, validation targets, and boundary policies — before touching a single file.</p>
+                </div>
+                <div class="tool-card tool-card-accent">
+                    <h3>verify_change</h3>
+                    <p>After editing, verify the change stayed within the plan's boundaries and didn't break expected contracts.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>search_code</h3>
+                    <p>BM25-ranked code search returning snippets with file paths, line ranges, and confidence scores.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>get_definition</h3>
+                    <p>Jump to the definition of any symbol — functions, classes, types — from the local symbol index.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>get_references</h3>
+                    <p>Find every reference to a symbol across the codebase using indexed graph edges, not text matching.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>impact_analysis</h3>
+                    <p>Trace which modules, callers, and dependents a proposed change would affect before it happens.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>find_tests_for_change</h3>
+                    <p>Identify which tests cover the files and symbols you're about to change, so the agent runs the right ones.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>repo_status</h3>
+                    <p>Check index health, file counts, symbol totals, and last-indexed timestamps at a glance.</p>
+                </div>
+                <div class="tool-card">
+                    <h3>build_context_pack</h3>
+                    <p>Assemble a focused context window of relevant files, symbols, and tests for a specific task.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Back link -->
+        <div class="back-row">
+            <a class="back-link" href="https://www.openkioku.com/">
+                <span aria-hidden="true">←</span>
+                <span>Back to openkioku.com</span>
+            </a>
+        </div>
+    </main>
+
+    <footer class="page">
+        <div class="footer-row">
+            <div>Open Kioku — Plan before edit. Verify after edit.</div>
+            <div class="footer-links">
+                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+                <a href="https://www.npmjs.com/package/open-kioku">npm</a>
+                <a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
+                <a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Copy buttons
+        document.querySelectorAll("[data-copy]").forEach(button => {
+            button.addEventListener("click", async () => {
+                const value = button.getAttribute("data-copy");
+                try {
+                    await navigator.clipboard.writeText(value);
+                    button.textContent = "Done";
+                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
+                } catch {
+                    button.textContent = "!";
+                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
+                }
+            });
+        });
+
+        // Dropdown accessibility
+        const toggle = document.querySelector('.nav-dropdown-toggle');
+        if (toggle) {
+            toggle.addEventListener('click', () => {
+                const expanded = toggle.getAttribute('aria-expanded') === 'true';
+                toggle.setAttribute('aria-expanded', String(!expanded));
+            });
+        }
+    </script>
+</body>
+</html>

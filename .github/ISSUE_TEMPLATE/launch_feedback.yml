@@ -15,7 +15,7 @@ body:
       label: Launch Feedback / Experience
       description: How was your experience setting up and using Open Kioku? What worked well, and what could be improved?
       placeholder: |
-        I installed Open Kioku via Homebrew, configured Cursor, and it was able to index my repo in X seconds...
+        I installed Open Kioku via npm, configured Cursor, and it was able to index my repo in X seconds...
     validations:
       required: true
 

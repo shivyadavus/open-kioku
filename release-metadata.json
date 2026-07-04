@@ -15,14 +15,14 @@
   },
   "homebrew": {
     "formula": "Formula/open-kioku.rb",
-    "tap": "shivyadavus/open-kioku",
-    "install": "brew install shivyadavus/open-kioku/open-kioku"
+    "published": false,
+    "note": "Formula is maintained in-repo for release metadata; no public Homebrew tap is published yet."
   },
   "artifacts": [
     {
       "name": "ok-linux-x86_64",
       "sha256": "59cfb3dc68f8a9c803587145cc2b39a0baa10c9f74cb0b38c0e6136155c8124b",
-      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+      "channels": ["github-release", "cargo-binstall", "npm"]
     },
     {
       "name": "ok-linux-x86_64.sha256",
@@ -31,7 +31,7 @@
     {
       "name": "ok-linux-arm64",
       "sha256": "35868a85311749b8d4e9ccf6b1e721383094a037c1a98fd93ece18b6aa63e1b7",
-      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+      "channels": ["github-release", "cargo-binstall", "npm"]
     },
     {
       "name": "ok-linux-arm64.sha256",
@@ -40,7 +40,7 @@
     {
       "name": "ok-macos-x86_64",
       "sha256": "abde42f14789cbc01d4eaa9dc84d44a885d6b92df84bbe0b21a48921fb60bb96",
-      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+      "channels": ["github-release", "cargo-binstall", "npm"]
     },
     {
       "name": "ok-macos-x86_64.sha256",
@@ -49,7 +49,7 @@
     {
       "name": "ok-macos-arm64",
       "sha256": "85922cbad9f623ff8f6f85fba4c0670e6ab9fb0b6d3b46e612d96232a2e8c82d",
-      "channels": ["github-release", "homebrew", "cargo-binstall", "npm"]
+      "channels": ["github-release", "cargo-binstall", "npm"]
     },
     {
       "name": "ok-macos-arm64.sha256",
