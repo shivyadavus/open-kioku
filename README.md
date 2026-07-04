@@ -5,8 +5,6 @@
 [![npm downloads](https://img.shields.io/npm/dm/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-> **License:** Open Kioku is source-available under the [Elastic License 2.0](LICENSE) — not OSI open-source. See [`docs/license-faq.md`](docs/license-faq.md) for details.
-
 Give Claude, Cursor, Codex, or any MCP-compatible coding agent an **evidence layer** before it edits your codebase, using local indexes and read-only MCP tools by default.
 
 ![Open Kioku quickstart](assets/open-kioku-quickstart.gif)
