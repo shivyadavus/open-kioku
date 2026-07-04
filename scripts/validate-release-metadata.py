@@ -137,6 +137,12 @@ def check_release_workflow(metadata: dict, errors: list[str]) -> None:
 
     required_steps = [
         "scripts/validate-versions.sh",
+        "scripts/generate-release-trust-artifacts.sh",
+        "SHA256SUMS",
+        "SBOM.cargo-metadata.json",
+        "PROVENANCE.json",
+        "THIRD_PARTY_NOTICES.md",
+        "actions/attest-build-provenance",
         "softprops/action-gh-release",
         "npm publish --access public",
     ]
@@ -177,12 +183,21 @@ def check_release_checklist(metadata: dict, version: str, errors: list[str]) -> 
     checklist = load_text(checklist_path)
     required = [
         "scripts/validate-versions.sh",
+        "scripts/check-no-ignored-tests.py",
+        "scripts/validate-release-metadata.py",
+        "scripts/validate-trust-gates.py",
         "scripts/verify-release-readiness.sh",
+        "scripts/generate-release-trust-artifacts.sh",
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
         "cargo test --all",
         "cargo binstall open-kioku-cli",
         "npm install -g open-kioku",
+        "docs/release-trust.md",
+        "SHA256SUMS",
+        "SBOM.cargo-metadata.json",
+        "PROVENANCE.json",
+        "THIRD_PARTY_NOTICES.md",
         f"v{version}",
     ]
     homebrew = metadata.get("homebrew", {})
