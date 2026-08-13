@@ -2718,6 +2718,18 @@ mod tests {
                 "hybrid_search_lexical_fallback.json",
                 r#"{"jsonrpc":"2.0","id":"hybrid-search","method":"hybrid_search","params":{"query":"publish invoice","limit":1}}"#,
             ),
+            (
+                "map_stacktrace_to_code_disabled.json",
+                r#"{"jsonrpc":"2.0","id":"map-stacktrace","method":"map_stacktrace_to_code","params":{"stacktrace":"Error at billing::publish_invoice_event"}}"#,
+            ),
+            (
+                "find_errors_for_symbol_disabled.json",
+                r#"{"jsonrpc":"2.0","id":"find-errors","method":"find_errors_for_symbol","params":{"query":"publish_invoice_event"}}"#,
+            ),
+            (
+                "find_recent_failures_disabled.json",
+                r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
+            ),
         ] {
             let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
                 .await

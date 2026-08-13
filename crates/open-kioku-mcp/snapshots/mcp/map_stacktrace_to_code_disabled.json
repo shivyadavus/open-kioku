@@ -1,0 +1,14 @@
+{
+  "id": "map-stacktrace",
+  "jsonrpc": "2.0",
+  "result": {
+    "confidence": "low",
+    "configured": false,
+    "evidence": [
+      "runtime integrations are disabled by default"
+    ],
+    "integration": "sentry",
+    "reason": "map_stacktrace_to_code requires an explicitly configured runtime provider",
+    "results": []
+  }
+}
