@@ -2589,14 +2589,7 @@ fn resolve_history_symbol(
 fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
     let query = required_str(params, "query")?;
     let limit = limit(params);
-    let matching_facts = store
-        .analysis_facts(None, MAX_MCP_FETCH)?
-        .into_iter()
-        .filter(|fact| {
-            fact.edge_type == GraphEdgeType::Implements
-                && implementation_target_matches(query, &fact.target)
-        })
-        .collect::<Vec<_>>();
+    let matching_facts = store.implementation_facts_for_target(query, overfetch_limit(limit))?;
     let has_more = matching_facts.len() > limit;
     let mut implementations = Vec::new();
     for fact in matching_facts.into_iter().take(limit) {
@@ -2620,16 +2613,6 @@ fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyh
             "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
         ],
     }))
-}
-
-fn implementation_target_matches(query: &str, target: &str) -> bool {
-    let query = query.trim();
-    !query.is_empty()
-        && (target == query
-            || target
-                .rsplit(['.', ':'])
-                .next()
-                .is_some_and(|suffix| suffix == query))
 }
 
 #[cfg(test)]
