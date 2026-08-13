@@ -10,8 +10,8 @@ use open_kioku_contract::{
     ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
-    Confidence, ContextHandleId, PlanReport, PolicyCheckReport, PolicyComponentMatch,
-    SimilarChangeQuery, SymbolId,
+    Confidence, ContextHandleId, GraphEdgeType, PlanReport, PolicyCheckReport,
+    PolicyComponentMatch, SimilarChangeQuery, SymbolId,
 };
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
@@ -513,7 +513,28 @@ async fn dispatch(
             let query = required_str(&params, "query")?;
             let symbol = SymbolEngine::new(store).definition(query)?;
             let node = format!("symbol:{}", symbol.id.0);
-            let (nodes, edges) = store.neighbors(&node, limit(&params))?;
+            let (nodes, edges) = store.neighbors(&node, MAX_MCP_FETCH)?;
+            let callers = method == "get_callers";
+            let edges = edges
+                .into_iter()
+                .filter(|edge| {
+                    edge.edge_type == GraphEdgeType::Calls
+                        && if callers {
+                            edge.to.0 == node
+                        } else {
+                            edge.from.0 == node
+                        }
+                })
+                .take(limit(&params))
+                .collect::<Vec<_>>();
+            let related_ids = edges
+                .iter()
+                .map(|edge| if callers { &edge.from.0 } else { &edge.to.0 })
+                .collect::<std::collections::BTreeSet<_>>();
+            let nodes = nodes
+                .into_iter()
+                .filter(|candidate| related_ids.contains(&candidate.id.0))
+                .collect::<Vec<_>>();
             Ok(json!({"symbol": symbol, "nodes": nodes, "edges": edges}))
         }
         "semantic_status" => semantic_status_tool(repo, store, config),
@@ -2731,6 +2752,14 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"get-implementations","method":"get_implementations","params":{"query":"publish_invoice_event","limit":1}}"#,
             ),
             (
+                "get_callees.json",
+                r#"{"jsonrpc":"2.0","id":"get-callees","method":"get_callees","params":{"query":"publish_invoice_event","limit":1}}"#,
+            ),
+            (
+                "get_callers.json",
+                r#"{"jsonrpc":"2.0","id":"get-callers","method":"get_callers","params":{"query":"archive_invoice_event","limit":1}}"#,
+            ),
+            (
                 "explain_flow.json",
                 r#"{"jsonrpc":"2.0","id":"explain-flow","method":"explain_flow","params":{}}"#,
             ),
@@ -2911,6 +2940,13 @@ mod tests {
                     edge_type: GraphEdgeType::Defines,
                     ..Default::default()
                 },
+                GraphEdge {
+                    id: EdgeId::new("edge-publish-calls-archive"),
+                    from: NodeId::new("symbol:symbol-publish"),
+                    to: NodeId::new("symbol:symbol-archive"),
+                    edge_type: GraphEdgeType::Calls,
+                    ..Default::default()
+                },
             ];
             store.replace_graph(&graph_nodes, &graph_edges).unwrap();
             store
@@ -3038,6 +3074,8 @@ mod tests {
                         *value = json!("<freshness>");
                     } else if key == "generated_at" {
                         *value = json!("<generated_at>");
+                    } else if key == "indexed_at" {
+                        *value = json!("<indexed_at>");
                     } else if key == "observed_at" {
                         *value = json!("<observed_at>");
                     } else if key == "current_dir" {

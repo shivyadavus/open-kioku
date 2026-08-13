@@ -5,7 +5,7 @@
     "chunk_count": 1,
     "file_count": 2,
     "index_mode": "full",
-    "indexed_at": "2026-01-01T00:00:00Z",
+    "indexed_at": "<indexed_at>",
     "phase_reports": [],
     "quality": {
       "architecture_facts": 0,
@@ -35,7 +35,7 @@
       "branch": "main",
       "commit": "abc123",
       "id": "repo",
-      "indexed_at": "2026-01-01T00:00:00Z",
+      "indexed_at": "<indexed_at>",
       "name": "mcp-fixture",
       "root": "."
     },
