@@ -71,6 +71,143 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 }
 
 #[test]
+fn agent_setup_is_safe_idempotent_and_verifies_local_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join(".cursor")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"onboarding-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn answer() -> u8 { 42 }\n").unwrap();
+    fs::write(
+        repo.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"unrelated":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    let dry_run = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo);
+        command
+    });
+    assert!(dry_run.contains("dry_run"));
+    assert!(!repo.join(".ok").exists());
+
+    let applied = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--apply");
+        command
+    });
+    assert!(applied.contains("[passed] mcp_stdio"));
+    assert!(repo.join(".ok/index.sqlite").is_file());
+    assert!(repo
+        .join(".cursor/rules/open-kioku-preflight.mdc")
+        .is_file());
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["unrelated"]["command"], "other");
+    assert_eq!(config["mcpServers"]["open-kioku"]["command"], "ok");
+
+    let checked = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--check");
+        command
+    });
+    assert!(checked.contains("Open Kioku is ready for this repository."));
+
+    let uninstalled = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--uninstall");
+        command
+    });
+    assert!(uninstalled.contains("[removed] config"));
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["unrelated"]["command"], "other");
+    assert!(config["mcpServers"].get("open-kioku").is_none());
+    assert!(repo.join(".ok/index.sqlite").is_file());
+}
+
+#[test]
+fn preflight_has_cli_mcp_parity() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"preflight-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn issue_token(subject: &str) -> String { subject.to_owned() }\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let cli = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("preflight")
+            .arg("add token expiration");
+        command
+    });
+    let cli: serde_json::Value = serde_json::from_str(&cli).unwrap();
+    assert!(cli["verdict"].is_string());
+    assert!(cli["confidence"].is_string());
+    assert!(cli["evidence_quality"].is_object());
+    assert!(cli["edit_files"].is_array());
+    assert!(cli["evidence_refs"].is_array());
+
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preflight_change","arguments":{"task":"add token expiration"}}}"#,
+    );
+    let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    let mcp = &mcp["result"]["structuredContent"];
+    assert_eq!(mcp["verdict"], cli["verdict"]);
+    assert_eq!(mcp["confidence"], cli["confidence"]);
+    assert_eq!(mcp["task"], cli["task"]);
+}
+
+#[test]
 fn history_bench_covers_public_api_families() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cases = repo.join("benchmarks/history-cases.json");

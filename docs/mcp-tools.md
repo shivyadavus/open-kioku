@@ -69,7 +69,7 @@ A good default tool sequence is:
 6. `reviewer_suggestions`: rank reviewer candidates from stored review evidence when present, otherwise explicit ownership and author-history inference.
 7. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
 8. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
-9. `plan_change` or `build_context_pack`: assemble the grounded plan the agent should use before editing. Use `format: "toon"` when the result is going straight into an LLM prompt and `format: "json"` when another tool needs structured data.
+9. `preflight_change`: get the short, evidence-backed start decision for a multi-file or risky edit. Use `plan_change` or `build_context_pack` when the agent needs the complete grounding detail. Use `format: "json"` when another tool needs structured data.
 10. `create_change_contract`: turn the plan into a stored, versioned contract when the workflow needs a durable pre-edit artifact.
 11. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
 12. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
@@ -121,6 +121,7 @@ The source-read tools allow language-agnostic code exploration and AI-ready cont
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
 - `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
 - `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, evidence quality, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
+- `preflight_change`: Builds a concise, schema-stable pre-edit decision from the same planning evidence. It reports a verdict, confidence, confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality. Supports `format: "json"`, `format: "markdown"`, `format: "html"`, and `format: "text"`.
 - `create_change_contract`: Builds a `ChangeContractV1` from a task, inline `PlanReport`, or `plan_json`. It stores the contract in `.ok/contracts` by default, preserves source-plan `evidence_quality`, and supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
 - `get_change_contract`: Retrieves a stored contract by `contract_id` and can export JSON, Markdown, or TOON.
 - `verify_change_contract`: Verifies changed files, a diff, or a git range against a stored contract id, inline contract object, or `contract_json`. Stored contract ids append verification records under `.ok/contracts`; stale evidence quality warns by default and fails under strict traceability, while missing validation attestations warn as pending validation.
@@ -149,7 +150,7 @@ Architecture policy tool schemas:
 
 Each tool returned by `tools/list` includes a `maturity` field. Stable tools are intended for default agent use. Experimental tools are exposed for early workflows but may rely on heuristic or fallback behavior.
 
-`build_context_pack`, `build_compressed_context`, `plan_change`, and
+`build_context_pack`, `build_compressed_context`, `plan_change`, `preflight_change`, and
 `impact_analysis` include an `architecture_policy` report when a repository
 policy is configured. `verify_change` loads configured policy automatically and
 checks dependency deltas against it by default; `check_dependency_delta` remains
@@ -168,7 +169,7 @@ Stable source-read tools:
 - `search_code`, `search_files`, `search_symbols`, `regex_search`
 - `get_definition`, `get_references`, `get_symbol_context`
 - `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
+- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `preflight_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
 - `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
 - `propose_patch`, `review_patch`, `validate_patch`, `verify_change`, `verify_change_contract`, `explain_verification`

@@ -2,14 +2,15 @@
 
 Use this starter to verify that Cursor can reach Open Kioku before an agent edits.
 
-## Install Snippet
+## One-command setup
 
 ```sh
-ok mcp install cursor --repo /absolute/path/to/repo
+ok setup agent cursor --repo /absolute/path/to/repo --apply
 ```
 
-Paste the printed JSON into Cursor MCP settings and confirm the `open-kioku`
-server is enabled.
+The default command is a dry run; `--apply` indexes the repo, adds only the
+Open Kioku entry to `.cursor/mcp.json`, installs a managed rule, and validates
+the local MCP server. Use `--check` later to verify readiness.
 
 ## First Invocation
 
@@ -34,4 +35,3 @@ examples/cursor/smoke.sh
 ```
 
 Set `OK_BIN=/path/to/ok` to test a specific binary.
-

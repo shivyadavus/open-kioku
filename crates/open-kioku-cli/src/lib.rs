@@ -32,7 +32,7 @@ use open_kioku_patch::{
     ChangeVerificationReport, ChangeVerifier, ContractVerificationReport, ContractVerifier,
     PatchPlanner, VerificationFinding, VerificationVerdict, VerifyChangeInput,
 };
-use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat};
+use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
     RankingSignal, RankingWeights,
@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,7 @@ include!("reports/ranking.rs");
 include!("reports/proof.rs");
 include!("commands/context.rs");
 include!("commands/index.rs");
+include!("commands/onboarding.rs");
 include!("commands/snapshot.rs");
 include!("search.rs");
 
