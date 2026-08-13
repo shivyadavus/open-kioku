@@ -243,6 +243,7 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_analysis_facts_file ON analysis_facts(file_id);
             CREATE INDEX IF NOT EXISTS idx_analysis_facts_source ON analysis_facts(source_type);
+            CREATE INDEX IF NOT EXISTS idx_analysis_facts_target ON analysis_facts(target);
             CREATE TABLE IF NOT EXISTS vector_targets (
               id TEXT PRIMARY KEY,
               file_id TEXT NOT NULL,
@@ -705,6 +706,45 @@ impl MetadataStore for SqliteStore {
             collect_json(rows)?
         };
         Ok(rows)
+    }
+
+    fn implementation_facts_for_target(
+        &self,
+        target: &str,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let mut stmt = conn
+            .prepare(
+                "SELECT json FROM analysis_facts
+                 WHERE json_extract(json, '$.edge_type') = 'IMPLEMENTS'
+                   AND (
+                     target = ?1
+                     OR (
+                       length(target) > length(?1)
+                       AND substr(target, -length(?1)) = ?1
+                       AND (
+                         substr(target, -length(?1) - 1, 1) = '.'
+                         OR substr(target, -length(?1) - 1, 1) = ':'
+                       )
+                     )
+                   )
+                 ORDER BY file_id, target, id
+                 LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![target, limit], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
     }
 
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>> {
@@ -4416,6 +4456,19 @@ mod tests {
             source_type: EvidenceSourceType::GitHistory,
             message: "git co-change observed in 1 commit(s), recency weight 1.00".into(),
         };
+        let implementation_fact = AnalysisFact {
+            id: "implementation-1".into(),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: "billing::InvoicePublisher".into(),
+            target_kind: GraphNodeType::Interface,
+            edge_type: GraphEdgeType::Implements,
+            range: Some(LineRange::single(24)),
+            confidence: Confidence::High,
+            source: "open-kioku-static".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "static implementation evidence".into(),
+        };
 
         store
             .replace_index(IndexData {
@@ -4426,7 +4479,12 @@ mod tests {
                 chunks: &[],
                 imports: &[],
                 tests: &[],
-                analysis_facts: &[runtime_fact.clone(), static_fact, git_fact.clone()],
+                analysis_facts: &[
+                    runtime_fact.clone(),
+                    static_fact,
+                    git_fact.clone(),
+                    implementation_fact.clone(),
+                ],
             })
             .unwrap();
 
@@ -4443,7 +4501,13 @@ mod tests {
         assert_eq!(git[0].id, git_fact.id);
         assert_eq!(git[0].target, git_fact.target);
         let all = store.analysis_facts(None, 10).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
+        let implementations = store
+            .implementation_facts_for_target("InvoicePublisher", 10)
+            .unwrap();
+        assert_eq!(implementations.len(), 1);
+        assert_eq!(implementations[0].id, implementation_fact.id);
+        assert_eq!(implementations[0].target, implementation_fact.target);
     }
 
     #[test]
