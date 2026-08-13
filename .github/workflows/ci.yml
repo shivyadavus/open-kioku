@@ -40,6 +40,8 @@ jobs:
         run: cargo test -p open-kioku-cli snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index
       - name: semantic disabled state
         run: cargo test -p open-kioku-semantic disabled_config_returns_no_provider
+      - name: public quickstart command contract
+        run: OK_BIN=target/debug/ok scripts/validate-public-quickstart.sh
       - name: release readiness smoke
         run: scripts/verify-release-readiness.sh
       - name: Cursor starter smoke
