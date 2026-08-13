@@ -225,7 +225,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the configured or inferred component boundaries and their import constraints. Returns boundary definitions including component names, directory mappings, and allowed or forbidden dependency directions. Use to inspect the configured or inferred component boundaries and their import constraints before explaining or checking violations. Do NOT use for detecting actual violations (use architecture_violations), for policy-backed enforcement against indexed edges (use architecture_policy_check), or for explaining why a file belongs to a component (use architecture_policy_explain). This is read-only.",
+        "description": "Return configured architecture-policy components, path mappings, dependency rules, and the evaluated policy report. Without a policy, returns heuristic components and an explicit caveat. Use to inspect configured architecture-policy components, path mappings, and dependency rules before planning or validating a change. When no policy exists, this returns heuristic components plus an explicit caveat; it does not invent constraints. Do NOT use for a policy syntax check (use architecture_policy_validate), a direct policy-only evaluation (use architecture_policy_check), or file-level membership evidence (use architecture_policy_explain). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -252,7 +252,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Detect and report import-graph boundary violations that deviate from the inferred architecture layers. Returns violation details including source file, target file, violated boundary, and edge type. Use for a quick boundary-violation scan based on inferred architecture layers and import patterns without consulting ok.toml policy rules. Do NOT use when policy TOML rules must be authoritative (use architecture_policy_check instead) or when explaining why a specific file violates a boundary (use architecture_policy_explain). This is read-only and reads only from the local index.",
+        "description": "Return evaluated configured architecture-policy violations, component mappings, and bounded unknown-edge evidence. Without a policy, returns an explicit unavailable result. Use to inspect evaluated architecture-policy violations with their configured component mappings and bounded unknown-edge evidence. When no policy exists, this returns an explicit unavailable result rather than inferred violations. Do NOT use to validate policy syntax (use architecture_policy_validate), for a policy-only report (use architecture_policy_check), or to explain a specific finding (use architecture_policy_explain). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
