@@ -2,14 +2,15 @@
 
 Use this starter to verify that Claude Code can reach Open Kioku before an agent edits.
 
-## Install Snippet
+## One-command setup
 
 ```sh
-ok mcp install claude --repo /absolute/path/to/repo
+ok setup agent claude --repo /absolute/path/to/repo --apply
 ```
 
-Paste the printed `mcpServers` JSON into Claude's MCP configuration, restart
-Claude, and confirm the `open-kioku` server is available.
+The default command is a dry run; `--apply` indexes the repo, adds only the
+Open Kioku entry to the repository's `.mcp.json`, installs a managed skill, and
+validates the local MCP server. Use `--check` later to verify readiness.
 
 ## First Invocation
 
@@ -35,4 +36,3 @@ examples/claude/smoke.sh
 ```
 
 Set `OK_BIN=/path/to/ok` to test a specific binary.
-

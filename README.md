@@ -9,25 +9,33 @@ Give Claude, Cursor, Codex, or any MCP-compatible coding agent an **evidence lay
 
 ![Open Kioku quickstart](assets/open-kioku-quickstart.gif)
 
-## First Win: 3 Commands
+## First Win: 2 Commands
 
-Run these three commands on **your own repo** and see what changes:
+Run these two commands on **your own repo**:
 
 ```sh
 npm install -g open-kioku
-ok index .
-ok mcp install cursor --repo .     # or: claude, codex, gemini, windsurf, trae, zed, opencode
+ok setup agent cursor --repo . --apply
 ```
 
-Paste the printed MCP config into your agent, then paste this prompt:
+The setup command indexes the repository, adds a repository-scoped read-only
+MCP entry at `.cursor/mcp.json`, installs the Open Kioku guidance rule, and
+verifies that the local MCP server responds. It preserves unrelated client
+configuration. Run it without `--apply` first to inspect the exact changes.
 
-```text
-Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan with
-plan_change first, then edit, and verify after the edit with verify_change.
+Then ask your agent for the change you need. The installed guidance tells it to
+explore unfamiliar code, plan risky multi-file edits, and verify the result.
+Open Kioku reports evidence caveats instead of pretending uncertain results are
+facts.
+
+For Claude Code, use:
+
+```sh
+ok setup agent claude --repo . --apply
 ```
 
-Your agent now has indexed evidence — symbols, references, impact analysis, test candidates, and edit boundaries — before it touches a single file.
+Other MCP-compatible clients can use the manual configuration snippets in
+[Connect Your Agent](#connect-your-agent).
 
 ## See the Proof
 
@@ -138,6 +146,19 @@ ok watch /absolute/path/to/repo
 ```
 
 ## Connect Your Agent
+
+Claude Code and Cursor have safe repository-scoped onboarding:
+
+```sh
+ok setup agent claude --repo /absolute/path/to/repo --apply
+ok setup agent cursor --repo /absolute/path/to/repo --apply
+```
+
+Without `--apply`, these commands are dry runs and make no changes. `--check`
+verifies the configuration, index, and local MCP response; `--uninstall` removes
+only Open Kioku-managed entries and guidance files while preserving `.ok/` data.
+
+For a manual configuration snippet, or for other supported MCP clients, use:
 
 ```sh
 ok mcp install cursor --repo /absolute/path/to/repo

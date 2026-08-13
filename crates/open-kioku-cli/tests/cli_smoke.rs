@@ -71,6 +71,90 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 }
 
 #[test]
+fn agent_setup_is_safe_idempotent_and_verifies_local_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join(".cursor")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"onboarding-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn answer() -> u8 { 42 }\n").unwrap();
+    fs::write(
+        repo.join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"unrelated":{"command":"other"}}}"#,
+    )
+    .unwrap();
+
+    let dry_run = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo);
+        command
+    });
+    assert!(dry_run.contains("dry_run"));
+    assert!(!repo.join(".ok").exists());
+
+    let applied = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--apply");
+        command
+    });
+    assert!(applied.contains("[passed] mcp_stdio"));
+    assert!(repo.join(".ok/index.sqlite").is_file());
+    assert!(repo
+        .join(".cursor/rules/open-kioku-preflight.mdc")
+        .is_file());
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["unrelated"]["command"], "other");
+    assert_eq!(config["mcpServers"]["open-kioku"]["command"], "ok");
+
+    let checked = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--check");
+        command
+    });
+    assert!(checked.contains("Open Kioku is ready for this repository."));
+
+    let uninstalled = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("cursor")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--uninstall");
+        command
+    });
+    assert!(uninstalled.contains("[removed] config"));
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["unrelated"]["command"], "other");
+    assert!(config["mcpServers"].get("open-kioku").is_none());
+    assert!(repo.join(".ok/index.sqlite").is_file());
+}
+
+#[test]
 fn history_bench_covers_public_api_families() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let cases = repo.join("benchmarks/history-cases.json");
