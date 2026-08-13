@@ -16,6 +16,12 @@ cargo test --all
 scripts/verify-release-readiness.sh
 ```
 
+For a release that changes the reusable GitHub Action, also run its independent
+`npm test` and `npm run check`, publish an immutable action tag, and verify the
+`v1` major tag points at that reviewed release. The action publishes no source
+snippets by default; re-check [`docs/github-action.md`](github-action.md) when
+its privacy behavior changes.
+
 Review `docs/release-trust.md` before tagging. It documents the checksums,
 SBOM, provenance, third-party notices, local processing threat model, and
 install audit evidence expected on every release.
