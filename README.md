@@ -51,14 +51,14 @@ A representative public-repo audit indexed 4,600+ files, 46,000+ symbols, and 8,
 ## What Your Agent Gets
 
 ```text
-search_code → get_definition → impact_analysis → find_tests_for_change → plan_change → verify_change
+Explore → preflight_change → edit → verify_change
 ```
 
-An evidence-backed pre-edit plan with: primary files, relevant symbols, likely blast radius, exact validation commands, confidence scores, and the next MCP calls to make.
+Start with `ok preflight "your task"` or MCP `preflight_change` for a legible decision in seconds. It returns confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and index quality. Use `ok plan` / `plan_change` when the full detailed plan is needed.
 
 ### What The First Plan Tells You
 
-`ok plan` and MCP `plan_change` return concrete file ranges, validation candidates, and confidence caveats from the local index. On the bundled demo repo, a `token` task currently surfaces:
+`ok preflight` and MCP `preflight_change` turn the detailed planning evidence into one bounded pre-edit decision. `ok plan` and `plan_change` remain available for full detail. On the bundled demo repo, a `token` task currently surfaces:
 
 - primary context in `src/auth.rs`, `src/lib.rs`, and `tests/auth_flow.rs`
 - validation candidates such as `issue_token`, `validate_token`, and `login_returns_valid_token` via `cargo test`
@@ -73,7 +73,7 @@ Open Kioku gives agents a pre-edit routine:
 
 1. Search indexed code and files.
 2. Resolve symbols and references.
-3. Build an evidence-backed pre-edit plan with likely impact and validation targets.
+3. Run preflight to get one evidence-backed start decision with likely impact and validation targets.
 4. Recall prior repo facts without letting memory outrank indexed code evidence.
 5. Compress context into handles that can retrieve the original snippets later.
 6. Serve those capabilities through MCP over local stdio.
@@ -336,7 +336,7 @@ ok --repo /path/to/repo explain file src/auth.rs
 ok --repo /path/to/repo explain symbol validate_token
 ```
 
-Current top-level commands (35): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
+Current top-level commands (36): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
 History provenance, churn hotspots, similar changes, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (59 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 

@@ -32,7 +32,7 @@ use open_kioku_patch::{
     ChangeVerificationReport, ChangeVerifier, ContractVerificationReport, ContractVerifier,
     PatchPlanner, VerificationFinding, VerificationVerdict, VerifyChangeInput,
 };
-use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat};
+use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
     RankingSignal, RankingWeights,

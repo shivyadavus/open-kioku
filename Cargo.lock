@@ -1477,6 +1477,8 @@ dependencies = [
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
  "open-kioku-tests",
+ "schemars",
+ "serde",
  "serde_json",
  "uuid",
 ]
