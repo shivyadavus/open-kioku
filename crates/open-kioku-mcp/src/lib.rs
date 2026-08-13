@@ -10,7 +10,7 @@ use open_kioku_contract::{
     ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
-    Confidence, ContextHandleId, GraphEdgeType, PlanReport, PolicyCheckReport,
+    Confidence, ContextHandleId, GraphEdgeType, GraphNodeType, PlanReport, PolicyCheckReport,
     PolicyComponentMatch, SimilarChangeQuery, SymbolId,
 };
 use open_kioku_impact::ImpactEngine;
@@ -571,9 +571,8 @@ async fn dispatch(
             };
             Ok(json!({"file": file, "chunks": chunks}))
         }
-        "explain_flow" | "summarize_architecture" => {
-            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
-        }
+        "explain_flow" => explain_flow_tool(store, &params),
+        "summarize_architecture" => Ok(json!(ArchitectureDetector::new(store, None).detect()?)),
         "explain_test_coverage" => {
             let path = params
                 .get("path")
@@ -1153,7 +1152,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "search_memory" => "Use to retrieve stored repository-scoped memory facts by keyword, entity, or text match from the local .ok SQLite store. Returns fact text, source, confidence, timestamp, and associated entities for each match. Do NOT use for current source code search (use search_code or hybrid_search) or for live index data (use the search and symbol tools). Use remember_fact to write new entries. This is read-only.",
         "explain_file" => "Use to retrieve comprehensive indexed metadata for one known repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbols. Do NOT use to discover files by keyword (use search_files), for symbol-level context (use explain_symbol or get_symbol_context), or for architecture-level file analysis (use architecture_policy_explain). This is read-only and returns only previously indexed data.",
         "explain_symbol" => "Use for a concise explanation of one known symbol, returning its definition range, qualified name, kind, and direct structural relationships. Do NOT use for a comprehensive context bundle with docs and surrounding code (use get_symbol_context), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
-        "explain_flow" => "Use for a high-level narrative of repository flows and boundaries. Prefer architecture_policy_check for enforceable violations and summarize_architecture for structured architecture output. This is read-only.",
+        "explain_flow" => "Use to retrieve graph-backed flow evidence from indexed endpoint nodes and directed CALLS edges, alongside heuristic architecture components. Each flow starts at an indexed endpoint and contains a bounded directed call path. Do NOT use for enforceable violations (use architecture_policy_check), for a components-only architecture report (use summarize_architecture), or for arbitrary graph traversal (use query_evidence_graph). This is read-only; repositories without persisted endpoint or call evidence return no flow entries.",
         "summarize_architecture" => "Use for a structured architecture overview with layer constraints and violation checks. Prefer explain_flow for a narrative and architecture_policy_explain for file-level evidence. This is read-only.",
         "find_tests_for_change" => "Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use when a broader validation plan including static checks and coverage actions is needed (use recommend_validation_plan) or when checking existing coverage data (use explain_test_coverage). This is read-only.",
         "recommend_validation_plan" => "Use before finalizing a change to choose tests, static checks, and coverage actions for one path. Prefer find_tests_for_change for test-only recommendations. This is read-only.",
@@ -1222,7 +1221,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("search_memory", "Search the append-only repository memory store for previously recorded facts by keyword and entity match. Returns fact text, source, confidence level, and timestamp for each matching entry.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Keyword or phrase to match against stored fact text and entity names."},"limit":{"type":"integer","description":"Maximum number of matching facts to return, ordered by relevance. Defaults to 20."}}})),
         ("explain_file", "Retrieve comprehensive indexed metadata for one repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbol definitions.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path of the file to explain (e.g., 'src/main.rs' or 'lib/auth/handler.ts')."}}})),
         ("explain_symbol", "Retrieve a concise explanation of one indexed symbol, including its definition range, qualified name, kind (function, class, struct, trait), and direct structural relationships within the codebase.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to explain. Matches against indexed symbol names and qualified names."}}})),
-        ("explain_flow", "Summarize the high-level architecture flows and directory boundaries within the repository.", json!({"type":"object","properties":{}})),
+        ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
         ("summarize_architecture", "Return a structured summary of the codebase architecture, including layer constraints and violation checks.", json!({"type":"object","properties":{}})),
         ("find_tests_for_change", "Identify test files that should be run to validate changes to one repository-relative file. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs')."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
         ("recommend_validation_plan", "Recommend a comprehensive validation plan (test targets, coverage checks, static checks) for a file change.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative file path."},"limit":{"type":"integer","description":"Maximum recommendations to return. Defaults to 20."}}})),
@@ -1309,7 +1308,6 @@ fn tool_maturity(name: &str) -> &'static str {
         | "history_similar_changes"
         | "ownership_lookup"
         | "reviewer_suggestions"
-        | "explain_flow"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
         | "find_recent_failures"
@@ -1474,6 +1472,73 @@ fn graph_query_response(
         });
     }
     Ok(value)
+}
+
+fn explain_flow_tool<S>(store: &S, params: &Value) -> anyhow::Result<Value>
+where
+    S: MetadataStore + GraphStore,
+{
+    let architecture = ArchitectureDetector::new(store, None).detect()?;
+    let mut endpoints = store.nodes_by_type(GraphNodeType::Endpoint, MAX_MCP_FETCH, 0)?;
+    endpoints.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+
+    let mut call_edges = store.edges_by_type(GraphEdgeType::Calls, MAX_MCP_FETCH, 0)?;
+    call_edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+
+    let flow_candidates = endpoints
+        .into_iter()
+        .filter_map(|endpoint| {
+            let call_path = endpoint
+                .symbol_id
+                .as_ref()
+                .map(|symbol_id| flow_call_path(&format!("symbol:{}", symbol_id.0), &call_edges))
+                .unwrap_or_default();
+            (!call_path.is_empty()).then(|| json!({"entrypoint": endpoint, "call_path": call_path}))
+        })
+        .collect::<Vec<_>>();
+    let endpoint_limit = limit(params);
+    let has_more = flow_candidates.len() > endpoint_limit;
+    let flows = flow_candidates
+        .into_iter()
+        .take(endpoint_limit)
+        .collect::<Vec<_>>();
+
+    let mut response = serde_json::to_value(architecture)?;
+    {
+        let response = response
+            .as_object_mut()
+            .context("architecture response must serialize as an object")?;
+        response.insert("flows".into(), json!(flows));
+        response.insert("returned".into(), json!(flows.len()));
+        response.insert("limit".into(), json!(endpoint_limit));
+        response.insert("has_more".into(), json!(has_more));
+        response.insert(
+            "caveats".into(),
+            json!([
+                "flows are derived only from persisted endpoint nodes and directed CALLS graph edges",
+                "each flow includes up to four directed call hops; repositories without endpoint or call evidence return no flow entries"
+            ]),
+        );
+    }
+    Ok(response)
+}
+
+fn flow_call_path(
+    start: &str,
+    call_edges: &[open_kioku_core::GraphEdge],
+) -> Vec<open_kioku_core::GraphEdge> {
+    const MAX_FLOW_CALL_HOPS: usize = 4;
+
+    let mut call_path = Vec::new();
+    let mut current = start.to_string();
+    for _ in 0..MAX_FLOW_CALL_HOPS {
+        let Some(edge) = call_edges.iter().find(|edge| edge.from.0 == current) else {
+            break;
+        };
+        current = edge.to.0.clone();
+        call_path.push(edge.clone());
+    }
+    call_path
 }
 
 fn continuation_handle(method: &str, params: &Value) -> String {

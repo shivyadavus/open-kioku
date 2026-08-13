@@ -2,7 +2,47 @@
   "id": "explain-flow",
   "jsonrpc": "2.0",
   "result": {
+    "caveats": [
+      "flows are derived only from persisted endpoint nodes and directed CALLS graph edges",
+      "each flow includes up to four directed call hops; repositories without endpoint or call evidence return no flow entries"
+    ],
     "components": [],
+    "flows": [
+      {
+        "call_path": [
+          {
+            "edge_type": "CALLS",
+            "evidence": {
+              "confidence": "low",
+              "file_range": null,
+              "id": "",
+              "indexed_at": "<indexed_at>",
+              "message": "",
+              "source": "",
+              "source_type": "lexical",
+              "symbol_id": null
+            },
+            "from": "symbol:symbol-publish",
+            "id": "edge-publish-calls-archive",
+            "to": "symbol:symbol-archive"
+          }
+        ],
+        "entrypoint": {
+          "file_id": "file-billing",
+          "id": "route:publish-invoice",
+          "label": "POST /api/v1/invoices/{invoiceId}/publish",
+          "node_type": "endpoint",
+          "properties": {
+            "qualified_name": "billing::routes::publish_invoice_event",
+            "route_path": "/api/v1/invoices/{invoiceId}/publish"
+          },
+          "symbol_id": "symbol-publish"
+        }
+      }
+    ],
+    "has_more": false,
+    "limit": 20,
+    "returned": 1,
     "unmapped_targets": [],
     "violations": []
   }
