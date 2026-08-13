@@ -266,6 +266,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     anyhow::bail!("Open Kioku setup audit has failing checks");
                 }
             }
+            SetupCommand::Agent { args } => {
+                setup_agent(args, cli.json, &repo)?;
+            }
         },
         Command::Graph { command } => match command {
             GraphCommand::Query {

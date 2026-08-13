@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,7 @@ include!("reports/ranking.rs");
 include!("reports/proof.rs");
 include!("commands/context.rs");
 include!("commands/index.rs");
+include!("commands/onboarding.rs");
 include!("commands/snapshot.rs");
 include!("search.rs");
 
