@@ -28,7 +28,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Return consistent evidence, confidence, and match reasons from every result.
 - Done: Add quality benchmarks for precision on fixture repos and real local repos.
 - Done: Add language-specific static facts and optional runtime facts to the graph so plans can reason about routes, config keys, tables, inheritance, and implementations.
-- Next: Add a SCIP Java installation proof path so exact Java refs are as easy to validate as tree-sitter static facts.
+- Done: Add a documented, fixture-backed Java SCIP proof path that generates the standard `index.scip`, requires a successful import, and surfaces the exact-reference count.
 
 ## 4. Tool Surface Maturity
 
