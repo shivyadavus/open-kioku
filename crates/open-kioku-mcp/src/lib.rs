@@ -2677,7 +2677,10 @@ mod tests {
     use serde_json::{json, Value};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    static SNAPSHOT_REPO_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn test_initialize_negotiates_version() {
@@ -3183,9 +3186,10 @@ paths = ["src/**"]
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        let sequence = SNAPSHOT_REPO_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let repo = std::env::temp_dir().join(format!(
-            "open-kioku-mcp-snapshots-{}-{now}",
-            std::process::id()
+            "open-kioku-mcp-snapshots-{}-{now}-{sequence}",
+            std::process::id(),
         ));
         fs::create_dir_all(&repo).unwrap();
         repo
