@@ -145,10 +145,16 @@ impl EvidenceQuality {
             return Self::default();
         };
         let quality = &manifest.quality;
-        let unresolved_import_count =
-            unresolved_import_count.max(count_quality_mentions(quality, "unresolved"));
-        let ambiguous_edge_count =
-            ambiguous_edge_count.max(count_quality_mentions(quality, "ambiguous"));
+        let unresolved_import_count = unresolved_import_count.max(count_resolution_notes(
+            quality,
+            "import resolver caveat",
+            "unresolved import",
+        ));
+        let ambiguous_edge_count = ambiguous_edge_count.max(count_resolution_notes(
+            quality,
+            "import resolver caveat",
+            "ambiguous import",
+        ));
         let failed_optional_passes = failed_optional_passes(quality);
         let mut value = Self {
             index_mode: manifest.index_mode.to_string(),
@@ -249,19 +255,16 @@ fn evidence_freshness(indexed_at: DateTime<Utc>) -> String {
     }
 }
 
-fn count_quality_mentions(quality: &IndexQuality, needle: &str) -> usize {
+fn count_resolution_notes(quality: &IndexQuality, source: &str, needle: &str) -> usize {
+    let source = source.to_ascii_lowercase();
     let needle = needle.to_ascii_lowercase();
     quality
         .quality_notes
         .iter()
-        .chain(quality.semantic_provider_notes.iter())
-        .chain(
-            quality
-                .phase_reports
-                .iter()
-                .flat_map(|report| report.warnings.iter()),
-        )
-        .filter(|note| note.to_ascii_lowercase().contains(&needle))
+        .filter(|note| {
+            let note = note.to_ascii_lowercase();
+            note.contains(&source) && note.contains(&needle)
+        })
         .count()
 }
 
@@ -2176,14 +2179,37 @@ pub struct PatchPlan {
 #[cfg(test)]
 mod tests {
     use super::{
-        reconcile_score_breakdown, score_component_total, Confidence, ConfidenceBreakdown,
-        ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType, FileRange, GitChangeKind,
-        GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType,
-        GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, LineRange,
-        NodeId, Owner, ScoreComponent, SymbolId, HISTORY_SCHEMA_VERSION,
+        count_resolution_notes, reconcile_score_breakdown, score_component_total, Confidence,
+        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
+        FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
+        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
+        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScoreComponent, SymbolId,
+        HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn quality_counts_only_import_resolver_notes() {
+        let quality = IndexQuality {
+            quality_notes: vec![
+                "import resolver caveat in src/lib.rs for `crate::missing`: unresolved import"
+                    .into(),
+                "symbol registry unresolved `documentation_word` in chunk abc".into(),
+                "ambiguous wording in a non-resolver diagnostic".into(),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            count_resolution_notes(&quality, "import resolver caveat", "unresolved import"),
+            1
+        );
+        assert_eq!(
+            count_resolution_notes(&quality, "import resolver caveat", "ambiguous import"),
+            0
+        );
+    }
 
     #[test]
     fn reconciliation_adds_delta_to_match_surfaced_score() {
