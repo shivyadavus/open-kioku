@@ -133,7 +133,12 @@ fn resolve_one(
     if matches!(source_file.language, Language::Go) {
         candidates.extend(resolve_go_module(imported, files, manifests));
     }
-    candidates.extend(resolve_language_module(source_file, imported, files));
+    candidates.extend(resolve_language_module(
+        source_file,
+        imported,
+        files,
+        manifests,
+    ));
 
     candidates.sort_by(|a, b| {
         a.strategy
@@ -638,6 +643,7 @@ fn resolve_language_module(
     source_file: &File,
     imported: &str,
     files: &FileIndex,
+    manifests: &ManifestIndex,
 ) -> Vec<Candidate> {
     match source_file.language {
         Language::Rust => {
@@ -646,7 +652,7 @@ fn resolve_language_module(
                 .or_else(|| imported.strip_prefix("self::"))
                 .unwrap_or(imported)
                 .replace("::", "/");
-            if module == imported && !imported.contains("::") {
+            let mut candidates = if module == imported && !imported.contains("::") {
                 Vec::new()
             } else {
                 files
@@ -657,7 +663,16 @@ fn resolve_language_module(
                         candidate
                     })
                     .collect()
+            };
+            if candidates.is_empty() && is_rust_current_crate_import(imported, manifests) {
+                candidates.extend(files.matching_files(Path::new("src/lib")).into_iter().map(
+                    |mut candidate| {
+                        candidate.strategy = "rust-crate-root".into();
+                        candidate
+                    },
+                ));
             }
+            candidates
         }
         Language::Python => files
             .matching_files(Path::new(&imported.replace('.', "/")))
@@ -683,6 +698,22 @@ fn resolve_language_module(
         }
         _ => Vec::new(),
     }
+}
+
+fn is_rust_current_crate_import(imported: &str, manifests: &ManifestIndex) -> bool {
+    if imported.starts_with("crate::")
+        || imported.starts_with("self::")
+        || imported.starts_with("super::")
+    {
+        return true;
+    }
+    let Some(prefix) = imported.split("::").next() else {
+        return false;
+    };
+    manifests
+        .packages
+        .iter()
+        .any(|package| package.replace('-', "_") == prefix)
 }
 
 fn candidate_paths(path: &Path) -> Vec<PathBuf> {
@@ -1004,6 +1035,41 @@ mod tests {
             report.resolutions[0].target_file,
             Some(FileId::new("utils"))
         );
+    }
+
+    #[test]
+    fn resolves_rust_current_crate_symbol_imports_at_the_crate_root() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"demo-crate\"\nversion = \"0.1.0\"",
+        )
+        .unwrap();
+        let files = vec![
+            file("lib", "src/lib.rs", Language::Rust),
+            file("auth", "src/auth.rs", Language::Rust),
+            file("flow", "tests/auth_flow.rs", Language::Rust),
+        ];
+        let report = resolve_imports(
+            tmp.path(),
+            &files,
+            &[],
+            &[
+                import("auth", "crate::RequestContext"),
+                import("auth", "super::*"),
+                import("flow", "demo_crate::{auth, handle_login}"),
+            ],
+        )
+        .unwrap();
+
+        assert!(report
+            .resolutions
+            .iter()
+            .all(|resolution| resolution.status == ResolutionStatus::Resolved));
+        assert!(report
+            .resolutions
+            .iter()
+            .all(|resolution| resolution.target_file == Some(FileId::new("lib"))));
     }
 
     #[test]
