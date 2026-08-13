@@ -34,6 +34,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 
 - Done: Split tools into stable and experimental groups.
 - Done: Hide or clearly label unsupported integrations so agents do not treat stubs as authoritative.
+- Done: Remove the nonfunctional `apply_patch` MCP surface; source edits stay in the user's editor and are verified against the evidence-backed plan.
 - Done: Keep the stable default tool set small, sharp, and reliable.
 - Done: Cover representative history, ownership, and reviewer MCP responses with deterministic fixtures and golden protocol snapshots.
 - Done: Cover disabled semantic status, explicit semantic-search unavailability, and hybrid lexical fallback with golden MCP snapshots.
@@ -44,7 +45,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Retrieve implementation evidence by indexed target so results are not lost behind unrelated analysis facts.
 - Done: Graduate `explain_flow` to stable with deterministic endpoint-to-directed-call evidence and a golden MCP snapshot.
 - Done: Back architecture summary, boundary, and violation responses with configured policy components and evaluated edge evidence when policy exists.
-- Next: Finish representative fixture-backed MCP snapshots for the remaining experimental tools before graduating them to stable.
+- Done: Cover every remaining experimental MCP tool with deterministic fixture-backed snapshots before considering graduation to stable.
 
 ## 5. Daily Workflow
 

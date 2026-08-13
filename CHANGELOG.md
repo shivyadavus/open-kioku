@@ -7,6 +7,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- Removed the nonfunctional experimental `apply_patch` MCP tool and its setup hints. Open Kioku now consistently keeps source edits in the user's normal editor while retaining evidence-backed patch planning and verification.
+
 ---
 
 ## [2.3.0] — 2026-07-04

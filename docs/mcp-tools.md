@@ -42,10 +42,10 @@ The MCP server runs over stdio:
 ok mcp serve --repo /absolute/path/to/repo --read-only
 ```
 
-Write mode requires explicit opt-in:
+Optional command execution and local validation attestations require explicit opt-in:
 
 ```sh
-ok mcp serve --repo /absolute/path/to/repo --allow-write --approval-required --allow-command "cargo test" --deny-network
+ok mcp serve --repo /absolute/path/to/repo --read-only --approval-required --allow-command "cargo test" --deny-network
 ```
 
 ## Recommended Agent Routine
@@ -74,7 +74,7 @@ A good default tool sequence is:
 11. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
 12. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
 
-By default these tools are source-tree read-only. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. The agent should make source edits with its normal editor tools unless the Open Kioku server was intentionally started with write mode.
+Open Kioku MCP tools do not edit source files. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. Agents should apply approved source edits with their normal editor tools, then use Open Kioku to verify the result.
 
 ## Protocol Hardening
 
@@ -172,7 +172,7 @@ Stable source-read tools:
 - `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `preflight_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
 - `remember_fact`, `search_memory`
 - `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
-- `propose_patch`, `review_patch`, `validate_patch`, `verify_change`, `verify_change_contract`, `explain_verification`
+- `propose_patch`, `verify_change`, `verify_change_contract`, `explain_verification`
 
 Experimental tools:
 
@@ -321,11 +321,11 @@ Response shape:
 - `explain_search_result`: returns hybrid search details for explaining semantic, lexical, and other score contributions.
 - `structural_search`: currently searches indexed symbols and chunks, not a full structural query language.
 - `get_implementations`, `get_callers`, `get_callees`: graph-backed heuristics until language-specific call resolution is stronger.
-- `explain_flow`: currently returns architecture summary data.
+- `explain_flow`: returns graph-backed endpoint-to-call flow evidence when indexed endpoint and call data are available.
 - `map_stacktrace_to_code`, `find_errors_for_symbol`, `find_recent_failures`: return a structured low-confidence disabled response unless a runtime provider such as Sentry is explicitly configured.
 
-## Write Tools
+## Source Edits
 
-`apply_patch` is experimental and omitted unless write mode is enabled (`--allow-write`). The patches MUST first be generated using `propose_patch` and user approval should be requested before actually executing `apply_patch` for safety.
+Open Kioku intentionally exposes no MCP source-editing tool. Use `propose_patch` to prepare an evidence-backed edit, apply the approved change with the normal editor, then run `verify_change` or `verify_change_contract`.
 
 Every response is JSON and includes evidence where indexed facts are available. Result limits are capped to avoid unbounded responses.

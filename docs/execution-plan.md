@@ -109,7 +109,7 @@ local-first
 read-only by default
 no hosted source upload
 no required embedding API
-source-tree writes only when explicitly enabled
+source-tree edits remain in the user's normal editor
 agent hooks advisory by default
 network denial preserved in MCP security posture
 ```

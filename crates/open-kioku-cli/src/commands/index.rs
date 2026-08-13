@@ -268,7 +268,7 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
     match client {
         McpClient::Claude => serde_json::json!({
             "client": "claude",
-            "instructions": "Add this entry to Claude Desktop's mcpServers config. To enable the apply_patch tool, add an \"env\" object with \"OPEN_KIOKU_ALLOW_WRITE\": \"true\".",
+            "instructions": "Add this entry to Claude Desktop's mcpServers config. Open Kioku MCP tools inspect local evidence; apply source edits with your normal editor.",
             "config": {
                 "mcpServers": {
                     "open-kioku": {
@@ -280,7 +280,7 @@ fn mcp_install_snippet(client: McpClient, repo: &Path) -> serde_json::Value {
         }),
         McpClient::Cursor => serde_json::json!({
             "client": "cursor",
-            "instructions": "Add this entry to Cursor's MCP config. To enable the apply_patch tool, set the environment variable OPEN_KIOKU_ALLOW_WRITE=true.",
+            "instructions": "Add this entry to Cursor's MCP config. Open Kioku MCP tools inspect local evidence; apply source edits with your normal editor.",
             "config": {
                 "open-kioku": {
                     "command": "ok",

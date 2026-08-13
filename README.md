@@ -354,7 +354,7 @@ ok --repo /path/to/repo explain symbol validate_token
 
 Current top-level commands (36): `init`, `index`, `snapshot`, `watch`, `status`, `doctor`, `setup`, `demo`, `search`, `semantic`, `symbol`, `explain`, `impact`, `path`, `tests`, `context`, `retrieve-context`, `plan`, `preflight`, `verify-boundary`, `verify`, `contract`, `bench`, `workflow-bench`, `contract-bench`, `eval`, `prove`, `adr`, `ui`, `architecture`, `history`, `patch`, `memory`, `mcp`, `scip`, and `graph`.
 
-History provenance, churn hotspots, similar changes, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (59 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
+History provenance, churn hotspots, similar changes, ownership lookup, and reviewer suggestions: [`docs/storage-model.md`](docs/storage-model.md). Full MCP tool reference (58 tools): [`docs/mcp-tools.md`](docs/mcp-tools.md). Ranking defaults: [`docs/ranking.md`](docs/ranking.md). Verified command output: [`docs/proof.md`](docs/proof.md). Local usefulness proof: [`docs/usefulness-proof.md`](docs/usefulness-proof.md).
 
 Operator guides: [`docs/guides/agent-workflows.md`](docs/guides/agent-workflows.md), [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md), [`docs/guides/security-threat-model.md`](docs/guides/security-threat-model.md), and [`docs/guides/compressed-context-and-toon.md`](docs/guides/compressed-context-and-toon.md).
 
@@ -374,7 +374,7 @@ Open Kioku's default path is local:
 - MCP uses stdio to talk to the local `ok` process.
 - Semantic search is not required for the default workflow.
 
-The MCP server is designed to be source-tree read-only unless write mode is explicitly enabled. Memory and compressed-context tools may write local `.ok/` artifacts so their results can be recalled or expanded later.
+The MCP server does not edit source files. Memory and compressed-context tools may write local `.ok/` artifacts so their results can be recalled or expanded later; make source edits with the normal editor and verify them with Open Kioku.
 
 ## Language Support
 
@@ -387,7 +387,7 @@ Tree-sitter parsing and symbol extraction covers Rust, Python, TypeScript (inclu
 - No embeddings API required for default search, symbol, impact, and context workflows.
 - Optional semantic search can run with the built-in local provider and no network calls.
 - Secret-like paths such as `.env`, `.aws/`, and `.ssh/` are blocked by policy.
-- Command execution and patch application are policy-gated.
+- Command execution is policy-gated; source edits remain in the normal editor.
 - Network denial is part of the MCP security config.
 
 See [`docs/security-model.md`](docs/security-model.md) for more detail.
