@@ -1,0 +1,62 @@
+{
+  "id": "ownership-lookup",
+  "jsonrpc": "2.0",
+  "result": {
+    "components": [],
+    "generated_at": "<generated_at>",
+    "owners": [
+      {
+        "confidence": "exact",
+        "confidence_breakdown": {
+          "ambiguity_penalty": 0.0,
+          "codeowners": 0.699999988079071,
+          "final_score": "<score>",
+          "freshness": "<freshness>",
+          "git_history": 0.4546666741371155,
+          "memory": 0.0
+        },
+        "evidence": [
+          {
+            "confidence": "high",
+            "message": "CODEOWNERS rule `src/billing.rs` matched `src/billing.rs`",
+            "observed_at": "<observed_at>",
+            "owner": {
+              "email": "billing@example.com",
+              "name": "billing@example.com"
+            },
+            "source": ".github/CODEOWNERS:1 `src/billing.rs`",
+            "source_type": "codeowners",
+            "stale": false
+          },
+          {
+            "confidence": "low",
+            "message": "Billing Developer authored 1 of 1 persisted touch(es) for `src/billing.rs`; latest `Publish invoice event`",
+            "observed_at": "<observed_at>",
+            "owner": {
+              "email": "billing@example.com",
+              "name": "Billing Developer"
+            },
+            "source": "git history:publish-invoice",
+            "source_type": "git_history",
+            "stale": false
+          }
+        ],
+        "owner": {
+          "email": "billing@example.com",
+          "name": "billing@example.com"
+        },
+        "rationale": "CODEOWNERS matched the queried path; local git history shows author touch evidence",
+        "score": "<score>",
+        "source_types": [
+          "codeowners",
+          "git_history"
+        ],
+        "stale": false
+      }
+    ],
+    "path": "src/billing.rs",
+    "uncertainty": [
+      "no repo memory ownership facts matched this path"
+    ]
+  }
+}
