@@ -120,6 +120,16 @@ enum Command {
         #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
         verify_evidence: EvidenceVerifyMode,
     },
+    /// Return a concise evidence-backed decision before starting a multi-file edit.
+    Preflight {
+        task: String,
+        #[arg(long, value_enum, default_value_t = PreflightFormat::Text)]
+        format: PreflightFormat,
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+    },
     /// Verify changed files against a saved JSON plan boundary.
     VerifyBoundary {
         #[arg(long, value_name = "PLAN_JSON")]
@@ -487,6 +497,29 @@ enum SetupCommand {
         #[arg(long, default_value_t = false)]
         exit_code: bool,
     },
+    /// Safely connect a repository-scoped coding-agent configuration to Open Kioku.
+    Agent {
+        #[command(flatten)]
+        args: SetupAgentArgs,
+    },
+}
+
+#[derive(Args)]
+struct SetupAgentArgs {
+    /// Coding-agent client to configure. Initial apply support is Claude and Cursor.
+    client: McpClient,
+    /// Repository to index and configure. Defaults to the current repository.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Apply the proposed configuration and index the repository. Without this flag, no files change.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["check", "uninstall"])]
+    apply: bool,
+    /// Check whether Open Kioku is already installed and the local MCP server is reachable.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["apply", "uninstall"])]
+    check: bool,
+    /// Remove only configuration and rule files that were created by Open Kioku.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["apply", "check"])]
+    uninstall: bool,
 }
 
 #[derive(Args)]
@@ -1079,7 +1112,7 @@ enum ScipCommand {
     },
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum McpClient {
     Claude,
     Cursor,

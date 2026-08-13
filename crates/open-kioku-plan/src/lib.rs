@@ -1,10 +1,10 @@
 use open_kioku_context::ContextPackBuilder;
 use open_kioku_core::{
     BoundaryExpansionRequirement, BoundaryFileRule, BoundaryForbiddenRule, BoundarySignalHooks,
-    ChangeBoundary, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack, EvidenceQuality,
-    EvidenceSourceType, FileId, ImpactReport, MemorySearchResult, NegativeEvidence, PlanReport,
-    PolicyCheckReport, RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget,
-    ToolCallRecommendation,
+    ChangeBoundary, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, ContextPack,
+    EvidenceQuality, EvidenceSourceType, FileId, ImpactReport, MemorySearchResult,
+    NegativeEvidence, PlanReport, PolicyCheckReport, RiskReport, RuntimeSignal, ScoreComponent,
+    SearchResult, Symbol, TestTarget, ToolCallRecommendation,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -41,6 +41,298 @@ impl PlanFormat {
             Self::Text => Ok(render_text(report)),
         }
     }
+}
+
+/// A short, agent-facing decision derived from the complete evidence-backed plan.
+///
+/// The detailed [`PlanReport`] remains the source of truth. This report deliberately
+/// exposes only the facts an agent needs before beginning an edit: scope, risk,
+/// validation, and the limitations of the available evidence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct PreflightReport {
+    pub task: String,
+    pub verdict: PreflightVerdict,
+    pub confidence: Confidence,
+    pub confidence_score: f32,
+    pub summary: String,
+    pub edit_files: Vec<PreflightFile>,
+    pub likely_affected_files: Vec<PreflightFile>,
+    pub validation: Vec<PreflightValidation>,
+    pub risks: Vec<String>,
+    pub caveats: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub evidence_quality: EvidenceQuality,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightVerdict {
+    SafeToStart,
+    StartWithCaution,
+    InsufficientEvidence,
+}
+
+impl PreflightVerdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SafeToStart => "SAFE TO START",
+            Self::StartWithCaution => "START WITH CAUTION",
+            Self::InsufficientEvidence => "INSUFFICIENT EVIDENCE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct PreflightFile {
+    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<open_kioku_core::LineRange>,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct PreflightValidation {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub reason: String,
+    pub confidence: Confidence,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PreflightFormat {
+    Text,
+    Markdown,
+    Json,
+    Html,
+}
+
+impl PreflightReport {
+    pub fn from_plan(plan: &PlanReport) -> Self {
+        let confidence = plan.confidence_breakdown.overall_enum;
+        let insufficient = plan.primary_context.is_empty() || confidence == Confidence::Low;
+        let caution = !insufficient
+            && (plan.risk.level.eq_ignore_ascii_case("high")
+                || plan.risk.level.eq_ignore_ascii_case("critical")
+                || plan.evidence_quality.unresolved_import_count > 0
+                || plan.evidence_quality.ambiguous_edge_count > 0);
+        let verdict = if insufficient {
+            PreflightVerdict::InsufficientEvidence
+        } else if caution {
+            PreflightVerdict::StartWithCaution
+        } else {
+            PreflightVerdict::SafeToStart
+        };
+
+        let edit_files = preflight_files(&plan.primary_context);
+        let edit_paths = edit_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<BTreeSet<_>>();
+        let likely_affected_files = preflight_files(&plan.impact.direct_impacts)
+            .into_iter()
+            .filter(|file| !edit_paths.contains(&file.path))
+            .collect();
+        let mut caveats = plan.confidence_breakdown.caveats.clone();
+        caveats.extend(plan.confidence_breakdown.blockers.clone());
+        caveats.extend(plan.evidence_quality.caveats.clone());
+        caveats.sort();
+        caveats.dedup();
+
+        Self {
+            task: plan.task.clone(),
+            verdict,
+            confidence,
+            confidence_score: plan.confidence_breakdown.overall_score,
+            summary: plan.summary.clone(),
+            edit_files,
+            likely_affected_files,
+            validation: plan
+                .validation
+                .iter()
+                .map(|test| PreflightValidation {
+                    name: test.name.clone(),
+                    command: test.command.clone(),
+                    reason: test.reason.clone(),
+                    confidence: test.confidence,
+                    evidence_refs: test.evidence_refs.clone(),
+                })
+                .collect(),
+            risks: plan.risk.reasons.clone(),
+            caveats,
+            evidence_refs: plan
+                .evidence
+                .iter()
+                .map(|evidence| evidence.id.0.clone())
+                .collect(),
+            evidence_quality: plan.evidence_quality.clone(),
+            next_steps: plan.recommended_next_steps.clone(),
+        }
+    }
+}
+
+fn preflight_files(results: &[SearchResult]) -> Vec<PreflightFile> {
+    let mut seen = BTreeSet::new();
+    results
+        .iter()
+        .filter(|result| seen.insert(result.path.clone()))
+        .map(|result| PreflightFile {
+            path: result.path.clone(),
+            line_range: result.line_range.clone(),
+            reason: result.match_reason.clone(),
+            evidence_refs: result.derived_evidence_ids(),
+        })
+        .collect()
+}
+
+impl PreflightFormat {
+    pub fn render(&self, report: &PreflightReport) -> Result<String> {
+        match self {
+            Self::Json => Ok(serde_json::to_string_pretty(report)?),
+            Self::Markdown => Ok(render_preflight_markdown(report)),
+            Self::Html => Ok(render_preflight_html(report)),
+            Self::Text => Ok(render_preflight_text(report)),
+        }
+    }
+}
+
+fn render_preflight_text(report: &PreflightReport) -> String {
+    let mut out = format!(
+        "{} — {} confidence ({:.2})\n{}\n",
+        report.verdict.label(),
+        confidence_label(report.confidence),
+        report.confidence_score,
+        report.summary
+    );
+    write_preflight_files_text(&mut out, "Edit", &report.edit_files);
+    write_preflight_files_text(&mut out, "Likely affected", &report.likely_affected_files);
+    out.push_str("Run:\n");
+    if report.validation.is_empty() {
+        out.push_str("  - No test target was identified; validate manually before merging.\n");
+    } else {
+        for validation in &report.validation {
+            out.push_str(&format!(
+                "  - {}\n",
+                validation.command.as_deref().unwrap_or(&validation.name)
+            ));
+        }
+    }
+    if !report.risks.is_empty() {
+        out.push_str("Risks:\n");
+        for risk in &report.risks {
+            out.push_str(&format!("  - {risk}\n"));
+        }
+    }
+    if !report.caveats.is_empty() {
+        out.push_str("Caveats:\n");
+        for caveat in &report.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+    out
+}
+
+fn write_preflight_files_text(out: &mut String, heading: &str, files: &[PreflightFile]) {
+    out.push_str(&format!("{heading}:\n"));
+    if files.is_empty() {
+        out.push_str("  - none confirmed\n");
+        return;
+    }
+    for file in files {
+        let range = file
+            .line_range
+            .as_ref()
+            .map(|range| format!(":{}-{}", range.start, range.end))
+            .unwrap_or_default();
+        out.push_str(&format!("  - {}{}\n", file.path.display(), range));
+    }
+}
+
+fn render_preflight_markdown(report: &PreflightReport) -> String {
+    let mut out = format!(
+        "# Preflight: {}\n\n## {} — {} confidence ({:.2})\n\n{}\n\n",
+        report.task,
+        report.verdict.label(),
+        confidence_label(report.confidence),
+        report.confidence_score,
+        report.summary
+    );
+    write_preflight_files_markdown(&mut out, "Edit", &report.edit_files);
+    write_preflight_files_markdown(&mut out, "Likely affected", &report.likely_affected_files);
+    out.push_str("## Run\n\n");
+    for validation in &report.validation {
+        out.push_str(&format!(
+            "- `{}` — {}\n",
+            validation.command.as_deref().unwrap_or(&validation.name),
+            validation.reason
+        ));
+    }
+    write_markdown_section(&mut out, "Risks", &report.risks);
+    write_markdown_section(&mut out, "Caveats", &report.caveats);
+    if !report.evidence_refs.is_empty() {
+        out.push_str("## Evidence\n\n");
+        for evidence in &report.evidence_refs {
+            out.push_str(&format!("- `{evidence}`\n"));
+        }
+    }
+    out
+}
+
+fn confidence_label(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Low => "low",
+        Confidence::Medium => "medium",
+        Confidence::High => "high",
+        Confidence::Exact => "exact",
+    }
+}
+
+fn write_preflight_files_markdown(out: &mut String, heading: &str, files: &[PreflightFile]) {
+    out.push_str(&format!("## {heading}\n\n"));
+    if files.is_empty() {
+        out.push_str("- None confirmed.\n\n");
+        return;
+    }
+    for file in files {
+        let range = file
+            .line_range
+            .as_ref()
+            .map(|range| format!(":{}-{}", range.start, range.end))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- `{}`{} — {}\n",
+            file.path.display(),
+            range,
+            file.reason
+        ));
+    }
+    out.push('\n');
+}
+
+fn write_markdown_section(out: &mut String, heading: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("## {heading}\n\n"));
+    for item in items {
+        out.push_str(&format!("- {item}\n"));
+    }
+    out.push('\n');
+}
+
+fn render_preflight_html(report: &PreflightReport) -> String {
+    let markdown = render_preflight_markdown(report);
+    format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open Kioku Preflight</title><style>body{{font-family:ui-sans-serif,system-ui,sans-serif;max-width:800px;margin:3rem auto;padding:0 1.25rem;line-height:1.5;color:#17202a}}code{{background:#eef2f7;padding:.1rem .25rem;border-radius:.25rem}}pre{{white-space:pre-wrap}}</style><pre>{}</pre></html>",
+        html_escape(&markdown)
+    )
 }
 
 pub struct PlanEngine<'a> {
@@ -2757,6 +3049,24 @@ mod tests {
         assert!(text.contains("Plan: token"));
         assert!(text.contains("Validation candidates"));
         assert!(text.contains("Edit boundary:"));
+    }
+
+    #[test]
+    fn preflight_is_concise_and_preserves_evidence_quality() {
+        let store = test_store();
+        let plan = PlanEngine::new(&store).plan("token", 10).unwrap();
+        let preflight = PreflightReport::from_plan(&plan);
+
+        assert!(!preflight.evidence_refs.is_empty());
+        assert_eq!(
+            preflight.evidence_quality.index_mode,
+            plan.evidence_quality.index_mode
+        );
+        let rendered = PreflightFormat::Text.render(&preflight).unwrap();
+        assert!(rendered.contains("Edit:"));
+        assert!(rendered.contains("Run:"));
+        let markdown = PreflightFormat::Markdown.render(&preflight).unwrap();
+        assert!(markdown.contains("# Preflight: token"));
     }
 
     #[test]
