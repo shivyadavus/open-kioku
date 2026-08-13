@@ -43,6 +43,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Return persisted IMPLEMENTS evidence, rather than lexical candidates, from the experimental implementation lookup tool.
 - Done: Retrieve implementation evidence by indexed target so results are not lost behind unrelated analysis facts.
 - Done: Graduate `explain_flow` to stable with deterministic endpoint-to-directed-call evidence and a golden MCP snapshot.
+- Done: Back architecture summary, boundary, and violation responses with configured policy components and evaluated edge evidence when policy exists.
 - Next: Finish representative fixture-backed MCP snapshots for the remaining experimental tools before graduating them to stable.
 
 ## 5. Daily Workflow
