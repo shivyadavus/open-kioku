@@ -120,6 +120,16 @@ enum Command {
         #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
         verify_evidence: EvidenceVerifyMode,
     },
+    /// Return a concise evidence-backed decision before starting a multi-file edit.
+    Preflight {
+        task: String,
+        #[arg(long, value_enum, default_value_t = PreflightFormat::Text)]
+        format: PreflightFormat,
+        #[arg(long, default_value_t = 12)]
+        limit: usize,
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+    },
     /// Verify changed files against a saved JSON plan boundary.
     VerifyBoundary {
         #[arg(long, value_name = "PLAN_JSON")]

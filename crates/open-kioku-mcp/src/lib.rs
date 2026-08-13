@@ -18,7 +18,7 @@ use open_kioku_memory::RepoMemoryStore;
 use open_kioku_patch::{
     ChangeVerifier, ContractVerificationReport, ContractVerifier, PatchPlanner, VerifyChangeInput,
 };
-use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat};
+use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
@@ -307,6 +307,35 @@ async fn dispatch(
             match format_arg {
                 "markdown" => Ok(json!(PlanFormat::Markdown.render(&report)?)),
                 "toon" => Ok(json!(PlanFormat::Toon.render(&report)?)),
+                _ => Ok(json!(report)),
+            }
+        }
+        "preflight_change" => {
+            let task = required_str(&params, "task")?;
+            let task = if let Some(since) = params.get("since").and_then(Value::as_str) {
+                task_with_changed_ranges(repo, task, since)?
+            } else {
+                task.to_string()
+            };
+            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
+            let limit = limit(&params);
+            let mut context = ContextPackBuilder::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
+                .build(&task, limit)?;
+            context.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            let plan = PlanEngine::new(store as &dyn OkStore)
+                .with_history_store(Some(store))
+                .with_memory_facts(memory_facts)
+                .plan_from_context(&task, limit, context)?;
+            let report = PreflightReport::from_plan(&plan);
+            let format_arg = params
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("json");
+            match format_arg {
+                "markdown" => Ok(json!(PreflightFormat::Markdown.render(&report)?)),
+                "html" => Ok(json!(PreflightFormat::Html.render(&report)?)),
+                "text" => Ok(json!(PreflightFormat::Text.render(&report)?)),
                 _ => Ok(json!(report)),
             }
         }
@@ -1095,6 +1124,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "build_compressed_context" => "Use when a context pack is needed but prompt token budget is constrained. Returns compressed references with short handles instead of full source snippets, significantly reducing token count. Call retrieve_context later with a handle to expand the original snippet. Do NOT use when full inline context is acceptable (use build_context_pack) or when only test targets are needed (use find_tests_for_change). This tool writes reusable context handles under the .ok data directory and is not idempotent.",
         "retrieve_context" => "Use only with handles returned by build_compressed_context to recover original snippets. Prefer build_context_pack for a fresh task-level context bundle. This is read-only.",
         "plan_change" => "Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. Prefer create_change_contract when the plan must be persisted and verified later. This is read-only.",
+        "preflight_change" => "Use before a multi-file or risky edit to get one concise, evidence-backed start decision: confirmed edit files, likely impact, tests, risks, caveats, and evidence quality. This is read-only. Use plan_change when the full detailed plan is needed.",
         "create_change_contract" => "Use when a plan needs a durable verification contract for later review or CI evidence. By default it writes a contract under .ok/contracts; set store=false for a transient contract.",
         "get_change_contract" => "Use to retrieve a previously stored contract by id before verification or explanation. Prefer create_change_contract for new contracts. This is read-only.",
         "remember_fact" => "Use only for durable, repository-scoped facts (architectural decisions, ownership conventions, known anti-patterns) that an agent should recall across sessions. Appends an immutable record to the local .ok SQLite store; duplicates are not deduplicated. Do NOT use for transient session notes, per-task scratch data, or facts derivable from the live index. Call search_memory first to avoid recording redundant entries. This tool writes to local storage and is not idempotent.",
@@ -1163,6 +1193,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("build_compressed_context", "Build a compressed context pack with short handles instead of full source snippets, reducing token count for prompt-constrained scenarios. Use retrieve_context with the returned handles to expand original snippets on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather compressed context for."},"limit":{"type":"integer","description":"Maximum number of context items to compress. Defaults to 20. Higher values increase completeness but also stored handle count."},"format":{"type":"string","enum":["json","toon"],"description":"Output format. 'json' returns structured handle objects, 'toon' returns token-optimized notation with handles. Defaults to 'json' when omitted."}}})),
         ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_compressed_context."}}})),
         ("plan_change", "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"The format of the plan."}}})),
+        ("preflight_change", "Return a concise pre-edit decision with confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the change to assess before editing."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to consider. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","html","text"],"description":"The preflight rendering. Defaults to json."}}})),
         ("create_change_contract", "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility.", json!({"type":"object","properties":{"task":{"type":"string","description":"Natural language task used to build a fresh plan before contract creation."},"plan":{"type":"object","description":"Inline PlanReport object used as the source plan."},"plan_json":{"type":"string","description":"JSON-encoded PlanReport used as the source plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 when planning from task."},"limit":{"type":"integer","description":"Maximum planning results to generate when task is provided. Defaults to 20."},"store":{"type":"boolean","description":"Persist the contract under .ok/contracts. Defaults to true."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["task"]},{"required":["plan"]},{"required":["plan_json"]}]})),
         ("get_change_contract", "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON.", json!({"type":"object","required":["contract_id"],"properties":{"contract_id":{"type":"string","description":"Stored contract id."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}}})),
         ("remember_fact", "Persist a durable, repository-scoped memory fact into the local .ok SQLite store with optional source attribution and confidence level. The fact is append-only and survives re-indexing.", json!({"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"The fact text to persist. Should be a complete, self-contained statement (e.g., 'The auth module uses JWT tokens with 24h expiry'). Maximum ~4KB."},"source":{"type":"string","description":"Identifier for the source that observed this fact (e.g., 'mcp', 'agent', 'human'). Defaults to 'mcp' when omitted."},"confidence":{"type":"string","enum":["low","medium","high","exact"],"description":"Confidence level indicating reliability of the fact. 'low' for uncertain inferences, 'exact' for verified truths. Defaults to 'medium' when omitted."}}})),

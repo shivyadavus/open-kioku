@@ -746,6 +746,34 @@ pub async fn run_cli() -> anyhow::Result<()> {
             );
             verify_plan_evidence(&report, verify_evidence)?;
         }
+        Command::Preflight {
+            task,
+            format,
+            limit,
+            since,
+        } => {
+            let store = open_store(&repo)?;
+            let task = if let Some(since) = since.as_deref() {
+                task_with_changed_ranges(&repo, &task, since)?
+            } else {
+                task
+            };
+            let context = build_context_pack(&repo, &store, &task, limit)?;
+            let index_dir = default_index_dir(&repo);
+            let search_index = if TantivySearchIndex::exists(&index_dir) {
+                Some(TantivySearchIndex::open_or_create(&index_dir)?)
+            } else {
+                None
+            };
+            let plan = PlanEngine::new(&store as &dyn OkStore)
+                .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
+                .with_history_store(Some(&store))
+                .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
+                .plan_from_context(&task, limit, context)?;
+            let report = PreflightReport::from_plan(&plan);
+            let format = if cli.json { PreflightFormat::Json } else { format };
+            println!("{}", format.render(&report)?);
+        }
         Command::VerifyBoundary {
             plan,
             changed,

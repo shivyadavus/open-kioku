@@ -1490,6 +1490,59 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Return a concise pre-edit decision with confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality. Use before a multi-file or risky edit to get one concise, evidence-backed start decision: confirmed edit files, likely impact, tests, risks, caveats, and evidence quality. This is read-only. Use plan_change when the full detailed plan is needed.",
+        "experimental": false,
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "description": "The preflight rendering. Defaults to json.",
+              "enum": [
+                "json",
+                "markdown",
+                "html",
+                "text"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "description": "Maximum planning results to consider. Defaults to 20.",
+              "type": "integer"
+            },
+            "since": {
+              "description": "Optional git revision/range used with git diff --unified=0 to include changed files and ranges in planning context.",
+              "type": "string"
+            },
+            "task": {
+              "description": "A natural language description of the change to assess before editing.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "type": "object"
+        },
+        "maturity": "stable",
+        "name": "preflight_change",
+        "outputSchema": {
+          "additionalProperties": true,
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "properties": {
+            "value": {
+              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+            }
+          },
+          "type": "object"
+        },
+        "title": "Open Kioku Preflight Change"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
