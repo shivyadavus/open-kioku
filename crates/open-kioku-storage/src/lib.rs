@@ -35,6 +35,30 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<Vec<AnalysisFact>> {
         Ok(Vec::new())
     }
+    fn implementation_facts_for_target(
+        &self,
+        target: &str,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .analysis_facts(None, usize::MAX)?
+            .into_iter()
+            .filter(|fact| {
+                fact.edge_type == GraphEdgeType::Implements
+                    && (fact.target == target
+                        || fact
+                            .target
+                            .rsplit(['.', ':'])
+                            .next()
+                            .is_some_and(|suffix| suffix == target))
+            })
+            .take(limit)
+            .collect())
+    }
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>>;
     fn occurrences_for_file(&self, file_id: &FileId) -> Result<Vec<SymbolOccurrence>>;
     fn symbols_for_file(&self, _file_id: &FileId) -> Result<Vec<Symbol>> {
