@@ -583,11 +583,8 @@ async fn dispatch(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
         }
-        "propose_patch" | "review_patch" | "validate_patch" => {
-            let task = params
-                .get("task")
-                .and_then(Value::as_str)
-                .unwrap_or("review requested patch");
+        "propose_patch" => {
+            let task = required_str(&params, "task")?;
             Ok(json!(
                 PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
             ))
@@ -702,17 +699,6 @@ async fn dispatch(
                 &explanation,
                 format_arg(&params, "json"),
             )?)
-        }
-        "apply_patch" => {
-            gate.ensure_allowed(ActionKind::ApplyPatch)?;
-            if std::env::var("OPEN_KIOKU_ALLOW_WRITE").unwrap_or_default() != "true" {
-                return Ok(
-                    json!({"denied": true, "reason": "apply_patch requires OPEN_KIOKU_ALLOW_WRITE=true in the server environment"}),
-                );
-            }
-            Ok(
-                json!({"denied": true, "reason": "apply_patch requires explicit stored patch approval flow"}),
-            )
         }
         "get_evidence_schema" => {
             let manifest = store.manifest().ok().flatten();
@@ -1061,16 +1047,11 @@ fn tool_title(name: &str) -> String {
 
 fn tool_annotations(name: &str) -> Value {
     let mut read_only = true;
-    let mut destructive = false;
+    let destructive = false;
     let mut idempotent = true;
     let mut open_world = false;
 
     match name {
-        "apply_patch" => {
-            read_only = false;
-            destructive = true;
-            idempotent = false;
-        }
         "build_compressed_context"
         | "create_change_contract"
         | "remember_fact"
@@ -1158,10 +1139,8 @@ fn tool_description(name: &str, base: &str) -> String {
         "find_tests_for_change" => "Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use when a broader validation plan including static checks and coverage actions is needed (use recommend_validation_plan) or when checking existing coverage data (use explain_test_coverage). This is read-only.",
         "recommend_validation_plan" => "Use before finalizing a change to choose tests, static checks, and coverage actions for one path. Prefer find_tests_for_change for test-only recommendations. This is read-only.",
         "explain_test_coverage" => "Use to inspect stored test-coverage evidence for one file path or the whole repository. Returns associated test suites, coverage percentage when available, and test file associations from indexed metadata. Do NOT use to decide what tests to run next (use recommend_validation_plan) or to find tests for a specific change (use find_tests_for_change). This is read-only, does not execute any tests, and reports only previously indexed or stored coverage data.",
-        "propose_patch" => "Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning and apply_patch only after explicit approval in write-enabled mode. This is read-only.",
-        "review_patch" => "Use to review a proposed patch plan for safety, target constraints, completeness, and potential regressions before applying it. Returns a structured safety assessment with warnings and recommendations. Do NOT use for architecture boundary and reference validation only (use validate_patch) or for post-edit verification against a plan (use verify_change). This is read-only and does not modify any files.",
-        "validate_patch" => "Use to check a proposed patch plan against architecture boundaries, symbol references, and import constraints before applying it. Returns boundary violations, broken reference warnings, and policy conflicts. Do NOT use after real edits have been made (use verify_change or verify_change_contract instead) or for full safety review (use review_patch). This is read-only and checks against the local index and policy rules only.",
-        "verify_change" => "Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change), contract-based verification (use verify_change_contract), or boundary-only checks (use validate_patch). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
+        "propose_patch" => "Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning, then apply approved source edits with the normal editor before using verify_change. This is read-only.",
+        "verify_change" => "Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change) or contract-based verification (use verify_change_contract). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
         "verify_change_contract" => "Use after edits to verify a diff against a stored or inline change contract. Stored contract ids append verification records under .ok/contracts, and command execution is opt-in via run_commands.",
         "explain_verification" => "Use after verify_change_contract to translate a verification report into a decision, failures, warnings, and next tests. This is read-only.",
         "map_stacktrace_to_code" => "Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
@@ -1169,7 +1148,6 @@ fn tool_description(name: &str, base: &str) -> String {
         "find_recent_failures" => "Use to list recently stored runtime failures, errors, and incidents across the repository before beginning a debugging investigation. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured. Do NOT use when errors for one specific symbol are needed (use find_errors_for_symbol) or for stack trace mapping (use map_stacktrace_to_code). This is read-only and returns a disabled-status response when runtime error integration is not configured.",
         "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.",
         "query_evidence_graph" => "Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
-        "apply_patch" => "Use only after propose_patch, review_patch, or an equivalent human-approved plan has produced an id and the caller passes approved=true. This mutates the working tree, requires write mode, and should not be used for exploration.",
         _ => "Use when this exact indexed repository capability is needed. Prefer narrower sibling tools when they match the task. This tool reports local Open Kioku index data and does not contact external services.",
     };
 
@@ -1228,8 +1206,6 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("recommend_validation_plan", "Recommend a comprehensive validation plan (test targets, coverage checks, static checks) for a file change.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative file path."},"limit":{"type":"integer","description":"Maximum recommendations to return. Defaults to 20."}}})),
         ("explain_test_coverage", "Retrieve stored test-coverage evidence and associated test suites for one repository-relative file or the whole repository. Returns coverage percentages, test file associations, and suite metadata from indexed data.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file to inspect coverage for. If omitted, returns repository-wide coverage summary."},"limit":{"type":"integer","description":"Maximum number of coverage entries to return. Defaults to 20."}}})),
         ("propose_patch", "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the changes to propose."}}})),
-        ("review_patch", "Review a proposed patch plan for safety, target constraints, completeness, and potential regressions. Returns a structured safety assessment with warnings, risk indicators, and recommendations.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier associated with the patch plan to review."}}})),
-        ("validate_patch", "Validate a proposed patch plan against architecture boundaries, symbol references, and import constraints. Returns boundary violations, broken reference warnings, and policy conflicts without modifying any files.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"The task name or identifier of the patch plan to validate."}}})),
         ("verify_change", "Verify an actual unified diff or set of changed files against a saved PlanReport, checking boundary constraints, expected file coverage, API surface stability, and dependency policy. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. Has no effect when run_commands is false. Defaults to false."}}})),
         ("verify_change_contract", "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts.", json!({"type":"object","properties":{"contract_id":{"type":"string","description":"Stored contract id."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the contract."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API additions, removals, and signature changes during verification."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph deltas and flag forbidden dependency additions."},"run_commands":{"type":"boolean","description":"Set true to execute validation commands defined in the contract."},"write_attestation":{"type":"boolean","description":"Set true with run_commands and a stored contract id to persist validation attestations."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during verification."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["contract_id"]},{"required":["contract"]},{"required":["contract_json"]}]})),
         ("explain_verification", "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.", json!({"type":"object","properties":{"verification":{"type":"object","description":"Inline ContractVerificationReport object."},"verification_json":{"type":"string","description":"JSON-encoded ContractVerificationReport."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["verification"]},{"required":["verification_json"]}]})),
@@ -1239,12 +1215,6 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
         ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
-
-    let write_tools: &[(&str, &str, Value)] = &[(
-        "apply_patch",
-        "Apply an approved patch plan to the codebase. Requires write mode enabled and approval.",
-        json!({"type":"object","required":["id","approved"],"properties":{"id":{"type":"string","description":"The identifier of the patch plan to apply."},"approved":{"type":"boolean","description":"Must be true to authorize applying the patch."}}}),
-    )];
 
     let mut tools = Vec::new();
     let mut unstable = Vec::new();
@@ -1269,28 +1239,6 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         }));
     }
 
-    if config.security.allow_write {
-        for (name, description, schema) in write_tools {
-            let maturity = tool_maturity(name);
-            if maturity == "experimental" {
-                unstable.push(name.to_string());
-                if config.mcp.hide_experimental {
-                    continue;
-                }
-            }
-            tools.push(json!({
-                "name": name,
-                "title": tool_title(name),
-                "description": tool_description(name, description),
-                "maturity": maturity,
-                "experimental": maturity == "experimental",
-                "inputSchema": schema,
-                "outputSchema": tool_output_schema(),
-                "annotations": tool_annotations(name)
-            }));
-        }
-    }
-
     (tools, unstable)
 }
 
@@ -1311,8 +1259,7 @@ fn tool_maturity(name: &str) -> &'static str {
         | "reviewer_suggestions"
         | "map_stacktrace_to_code"
         | "find_errors_for_symbol"
-        | "find_recent_failures"
-        | "apply_patch" => "experimental",
+        | "find_recent_failures" => "experimental",
         _ => "stable",
     }
 }
@@ -3410,7 +3357,12 @@ paths = ["src/**"]
         .await
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
-        assert!(tools_ro.iter().all(|t| t["name"] != "apply_patch"));
+        for retired_tool in ["apply_patch", "review_patch", "validate_patch"] {
+            assert!(
+                tools_ro.iter().all(|tool| tool["name"] != retired_tool),
+                "{retired_tool} must not be advertised"
+            );
+        }
         for tool in tools_ro {
             let name = tool["name"].as_str().unwrap();
             let title = tool["title"].as_str().unwrap_or_default();
@@ -3504,20 +3456,27 @@ paths = ["src/**"]
         assert_eq!(verify_change["annotations"]["readOnlyHint"], false);
         assert_eq!(verify_change["annotations"]["openWorldHint"], true);
 
-        let mut config_write = OkConfig::default();
-        config_write.security.allow_write = true;
+        let mut config_write_enabled = OkConfig::default();
+        config_write_enabled.security.allow_write = true;
 
-        let result_rw = dispatch(Path::new("."), &store, &config_write, "tools/list", params)
-            .await
-            .unwrap();
-        let tools_rw = result_rw["tools"].as_array().unwrap();
-        let apply_patch = tools_rw
-            .iter()
-            .find(|tool| tool["name"] == "apply_patch")
-            .unwrap();
-        assert_eq!(apply_patch["annotations"]["readOnlyHint"], false);
-        assert_eq!(apply_patch["annotations"]["destructiveHint"], true);
-        assert_eq!(apply_patch["annotations"]["idempotentHint"], false);
+        let result_write_enabled = dispatch(
+            Path::new("."),
+            &store,
+            &config_write_enabled,
+            "tools/list",
+            params,
+        )
+        .await
+        .unwrap();
+        let tools_write_enabled = result_write_enabled["tools"].as_array().unwrap();
+        for retired_tool in ["apply_patch", "review_patch", "validate_patch"] {
+            assert!(
+                tools_write_enabled
+                    .iter()
+                    .all(|tool| tool["name"] != retired_tool),
+                "{retired_tool} must not be restored by write configuration"
+            );
+        }
     }
 
     #[tokio::test]

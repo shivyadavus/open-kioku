@@ -911,7 +911,7 @@
                         </div>
                         <div class="proof-item">
                             <div class="proof-value">read-only</div>
-                            <div class="proof-label">write tools stay gated unless explicitly enabled</div>
+                            <div class="proof-label">source edits stay in your normal editor</div>
                         </div>
                     </div>
                 </div>
@@ -1220,7 +1220,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                     <p>BM25 search, symbols, and graph operations work locally without uploading code to a model provider.</p>
                 </div>
                 <div class="security-card">
-                    <h3>Write tools gated</h3>
+                    <h3>Source edits stay local</h3>
                     <p>Patch and command paths are opt-in, policy-controlled, and separate from read-only context tools.</p>
                 </div>
             </div>
@@ -1282,7 +1282,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
             { kind: "note", text: "\n# Print the MCP config, then paste it into your coding agent settings." },
             { kind: "cmd", text: "ok mcp install cursor --repo /work/acme-api" },
             { kind: "cmd", text: "ok mcp install claude --repo /work/acme-api" },
-            { kind: "out", html: '<span class="term-good">[ok]</span> printed MCP config for Cursor and Claude Code<br><span class="term-good">[ok]</span> stable tools: repo_status, search_code, get_definition, get_references, impact_analysis, plan_change<br><span class="term-muted">read-only by default; write tools require explicit opt-in</span>' }
+            { kind: "out", html: '<span class="term-good">[ok]</span> printed MCP config for Cursor and Claude Code<br><span class="term-good">[ok]</span> stable tools: repo_status, search_code, get_definition, get_references, impact_analysis, plan_change<br><span class="term-muted">source edits stay in your normal editor; Open Kioku verifies the result</span>' }
         ];
 
         let running = false;

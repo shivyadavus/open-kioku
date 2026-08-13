@@ -1,4 +1,4 @@
-use open_kioku_actions::{ActionKind, PolicyGate};
+use open_kioku_actions::PolicyGate;
 use open_kioku_architecture::PolicyResolver;
 use open_kioku_config::{ArchitecturePolicy, DependencyAction, OkConfig};
 use open_kioku_context::ContextPackBuilder;
@@ -50,12 +50,14 @@ impl<'a> PatchPlanner<'a> {
             change_steps: vec![
                 "Inspect primary symbols and definitions from the context pack".into(),
                 "Constrain edits to allowed files unless evidence justifies expansion".into(),
-                "Run the recommended validation plan after approval".into(),
+                "Apply reviewed source edits with the normal editor".into(),
+                "Run the recommended validation plan after editing".into(),
             ],
             risks: context.risk_report.reasons,
             assumptions: vec![
                 "Generated and vendor files remain out of scope".into(),
-                "Patch application requires explicit write mode and approval".into(),
+                "Source edits are applied outside Open Kioku MCP and verified against this plan"
+                    .into(),
             ],
             tests: context.test_candidates,
             rollback_notes: vec!["Revert the unified diff if validation fails".into()],
@@ -63,18 +65,6 @@ impl<'a> PatchPlanner<'a> {
             requires_approval: self.config.security.approval_required,
             evidence: context.evidence,
         })
-    }
-
-    pub fn apply(&self, _patch: &PatchPlan, approved: bool) -> Result<()> {
-        PolicyGate::new(self.config).ensure_allowed(ActionKind::ApplyPatch)?;
-        if self.config.security.approval_required && !approved {
-            return Err(OkError::PolicyDenied(
-                "patch application requires explicit approval".into(),
-            ));
-        }
-        Err(OkError::Unsupported(
-            "patch application is intentionally not implemented without a diff applicator".into(),
-        ))
     }
 }
 
