@@ -696,16 +696,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Perform a syntax-aware structural search across indexed symbol trees and code chunks, matching structural patterns such as function signatures, class hierarchies, and code block shapes. Use for syntax-aware and structure-shaped code discovery across indexed symbol trees and code chunks, matching patterns such as function signatures, class hierarchies, and code block shapes. Do NOT use for literal text pattern matching (use regex_search), for known symbol lookup (use get_definition), or for ranked keyword search (use search_code). This is read-only.",
+        "description": "Use for experimental local candidate discovery with structure-shaped queries. Currently returns lexical candidates from the local index rather than guaranteed AST-pattern matches; inspect match_reason on each result. Use for experimental local candidate discovery with structure-shaped queries. It currently returns lexical candidates from the local index; inspect each result's match_reason and do not treat it as an AST-pattern match. Use regex_search for literal patterns, get_definition for a known symbol, or search_code for ordinary ranked keyword search. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of structural matches to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of candidate results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "query": {
-              "description": "The structural query to match against symbol trees and chunk indices. Supports pattern-based syntax matching.",
+              "description": "Structure-shaped query used for lexical candidate discovery; this is not yet a guaranteed AST pattern.",
               "type": "string"
             }
           },
@@ -809,16 +809,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Find all implementations of a given interface, trait, or abstract class in the repository. Use for traits, interfaces, abstract classes, and protocols where implementation sites matter. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
+        "description": "Use for experimental local candidate discovery of likely implementation sites. Currently returns lexical candidates, not a verified type-hierarchy result; inspect match_reason on each result. Use for experimental local candidate discovery of likely implementation sites. It currently returns lexical candidates rather than a verified type-hierarchy result; inspect match_reason before relying on it. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of implementations to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of candidate results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "query": {
-              "description": "The name of the interface or trait.",
+              "description": "Name used to find lexical implementation candidates; this is not yet a verified hierarchy lookup.",
               "type": "string"
             }
           },
