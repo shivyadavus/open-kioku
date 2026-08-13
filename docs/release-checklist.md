@@ -10,6 +10,7 @@ scripts/validate-docs.sh
 scripts/check-no-ignored-tests.py
 scripts/validate-release-metadata.py
 scripts/validate-trust-gates.py
+OK_BIN=target/debug/ok scripts/validate-public-quickstart.sh
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
@@ -86,6 +87,9 @@ five binary artifacts.
 ```sh
 ok demo --force
 ok prove ./open-kioku-demo --task token
+ok init ./open-kioku-demo
+ok index ./open-kioku-demo
+ok plan "change token expiration"
 ok mcp install cursor --repo "$PWD/open-kioku-demo"
 ok mcp install claude --repo "$PWD/open-kioku-demo"
 ok mcp install codex --repo "$PWD/open-kioku-demo"
