@@ -167,20 +167,16 @@ pub fn generate_configured_scip_files(
             config.timeout_seconds,
         )?);
     }
-    if root.join("pom.xml").exists()
-        || root.join("build.gradle").exists()
-        || root.join("build.gradle.kts").exists()
-    {
-        let output = PathBuf::from(".ok/indexes/java.scip");
+    if has_java_scip_project(root) {
+        // scip-java writes index.scip at the repository root by default. Keep
+        // that default so the generated file is immediately covered by the
+        // standard SCIP configuration without relying on undocumented flags.
+        let output = PathBuf::from("index.scip");
         attempts.push(run_installed_indexer(
             root,
             "java",
             "scip-java",
-            vec![
-                "index".into(),
-                "--output".into(),
-                output.to_string_lossy().into_owned(),
-            ],
+            vec!["index".into()],
             output,
             config.timeout_seconds,
         )?);
@@ -215,6 +211,15 @@ fn typescript_args(root: &Path, output: &Path) -> Vec<String> {
         args.push("--yarn-workspaces".into());
     }
     args
+}
+
+fn has_java_scip_project(root: &Path) -> bool {
+    root.join("pom.xml").exists()
+        || root.join("settings.gradle").exists()
+        || root.join("settings.gradle.kts").exists()
+        || root.join("gradlew").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
 }
 
 fn run_installed_indexer(
@@ -522,8 +527,12 @@ fn _project_path(root: &Path, relative: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{import_configured_scip_files, import_scip_file};
-    use open_kioku_core::RepositoryId;
+    use super::{
+        generate_configured_scip_files, import_configured_scip_files, import_scip_file,
+        prepare_and_import_scip,
+    };
+    use open_kioku_config::OkConfig;
+    use open_kioku_core::{Language, RepositoryId};
     use protobuf::Enum;
     use scip::types::{
         symbol_information, Document, Index, Occurrence, SymbolInformation, SymbolRole,
@@ -603,5 +612,78 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("may not escape"));
+    }
+
+    #[test]
+    fn java_scip_generation_uses_the_supported_default_output() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("settings.gradle.kts"),
+            "rootProject.name = \"proof\"\n",
+        )
+        .unwrap();
+        let config = OkConfig::default().scip;
+
+        let attempts = generate_configured_scip_files(temp.path(), &config).unwrap();
+        let java = attempts
+            .iter()
+            .find(|attempt| attempt.language == "java")
+            .expect("Gradle project should have a Java SCIP generator attempt");
+
+        assert_eq!(java.command, "scip-java index");
+        assert_eq!(java.output_path, PathBuf::from("index.scip"));
+    }
+
+    #[test]
+    fn imports_java_index_from_the_default_scip_path_with_exact_references() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src/main/java/example")).unwrap();
+        std::fs::write(
+            temp.path().join("pom.xml"),
+            "<project><modelVersion>4.0.0</modelVersion></project>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("src/main/java/example/App.java"),
+            "package example;\n\nclass App {\n  void hello() {}\n  void call() { hello(); }\n}\n",
+        )
+        .unwrap();
+
+        let symbol_name = "scip-java maven example/App#hello().";
+        let mut index = Index::new();
+        let mut document = Document::new();
+        document.relative_path = "src/main/java/example/App.java".into();
+        document.language = "java".into();
+
+        let mut info = SymbolInformation::new();
+        info.symbol = symbol_name.into();
+        info.display_name = "hello".into();
+        info.kind = symbol_information::Kind::Method.into();
+        document.symbols.push(info);
+
+        let mut definition = Occurrence::new();
+        definition.symbol = symbol_name.into();
+        definition.range = vec![3, 7, 3, 12];
+        definition.symbol_roles = SymbolRole::Definition.value();
+        document.occurrences.push(definition);
+
+        let mut reference = Occurrence::new();
+        reference.symbol = symbol_name.into();
+        reference.range = vec![4, 16, 4, 21];
+        document.occurrences.push(reference);
+
+        index.documents.push(document);
+        scip::write_message_to_file(temp.path().join("index.scip"), index).unwrap();
+
+        let config = OkConfig::default().scip;
+        let (imported, report) =
+            prepare_and_import_scip(temp.path(), &config, &RepositoryId::new("java-proof"))
+                .unwrap();
+
+        assert_eq!(report.imported_paths, vec![PathBuf::from("index.scip")]);
+        assert_eq!(report.exact_references, 1);
+        assert_eq!(imported.symbols.len(), 1);
+        assert_eq!(imported.symbols[0].language, Language::Java);
+        assert_eq!(imported.symbols[0].name, "hello");
     }
 }
