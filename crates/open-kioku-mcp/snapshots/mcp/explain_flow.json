@@ -1,0 +1,9 @@
+{
+  "id": "explain-flow",
+  "jsonrpc": "2.0",
+  "result": {
+    "components": [],
+    "unmapped_targets": [],
+    "violations": []
+  }
+}

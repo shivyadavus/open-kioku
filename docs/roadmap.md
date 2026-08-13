@@ -38,6 +38,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Cover representative history, ownership, and reviewer MCP responses with deterministic fixtures and golden protocol snapshots.
 - Done: Cover disabled semantic status, explicit semantic-search unavailability, and hybrid lexical fallback with golden MCP snapshots.
 - Done: Cover the disabled-by-default responses for runtime stack-trace and error lookup tools with golden MCP snapshots.
+- Done: Cover representative explanatory, structural-candidate, implementation-candidate, and architecture-flow MCP responses with golden snapshots.
 - Next: Finish representative fixture-backed MCP snapshots for experimental tools before graduating any of them to stable.
 
 ## 5. Daily Workflow

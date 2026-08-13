@@ -1,0 +1,93 @@
+{
+  "id": "explain-search",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [],
+    "has_more": false,
+    "limit": 1,
+    "offset": 0,
+    "results": [
+      {
+        "confidence": "<score>",
+        "evidence": [
+          "BM25 lexical match from local Tantivy index",
+          "query variant `publish OR invoice` matched local index"
+        ],
+        "evidence_refs": [
+          "search:src/billing.rs:7-9:0",
+          "search:src/billing.rs:7-9:1"
+        ],
+        "line_range": {
+          "end": 9,
+          "start": 7
+        },
+        "match_reason": "tantivy hybrid lexical match",
+        "path": "src/billing.rs",
+        "score": "<score>",
+        "score_breakdown": [
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "search:src/billing.rs:7-9:0",
+              "search:src/billing.rs:7-9:1"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "BM25 score from local Tantivy index",
+            "raw_value": "<score>",
+            "signal": "bm25_relevance",
+            "weight": "<score>"
+          },
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "search:src/billing.rs:7-9:0",
+              "search:src/billing.rs:7-9:1"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
+            "raw_value": "<score>",
+            "signal": "query_variant_boost",
+            "weight": "<score>"
+          }
+        ],
+        "snippet": "pub fn publish_invoice_event() {}",
+        "symbol": {
+          "confidence": "exact",
+          "file_id": "file-billing",
+          "id": "symbol-publish",
+          "kind": "function",
+          "language": "rust",
+          "name": "publish_invoice_event",
+          "provenance": "scip",
+          "qualified_name": "billing::routes::publish_invoice_event",
+          "range": {
+            "end": 7,
+            "start": 7
+          }
+        }
+      }
+    ],
+    "returned": 1,
+    "semantic_status": {
+      "backend": "exact-flat",
+      "corrupt": false,
+      "current_dir": "<current_dir>",
+      "dimensions": 384,
+      "disk_usage_bytes": 0,
+      "distance": "cosine",
+      "failed_count": 0,
+      "indexed_count": 0,
+      "manifest": null,
+      "model": "local-hash",
+      "notes": [],
+      "provider": "local",
+      "ready": false,
+      "stale": false,
+      "stale_count": 0,
+      "state": "missing",
+      "vector_count": 0
+    },
+    "truncated": false,
+    "warnings": []
+  }
+}
