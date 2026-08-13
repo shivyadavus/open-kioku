@@ -2,73 +2,46 @@
   "id": "get-implementations",
   "jsonrpc": "2.0",
   "result": {
-    "caveats": [],
+    "caveats": [
+      "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
+    ],
     "has_more": false,
-    "limit": 1,
-    "offset": 0,
-    "results": [
+    "implementations": [
       {
-        "confidence": "<score>",
-        "evidence": [
-          "BM25 lexical match from local Tantivy index",
-          "query variant `publish OR invoice OR event` matched local index"
-        ],
-        "evidence_refs": [
-          "search:src/billing.rs:7-9:0",
-          "search:src/billing.rs:7-9:1"
-        ],
-        "line_range": {
-          "end": 9,
-          "start": 7
-        },
-        "match_reason": "tantivy hybrid lexical match",
-        "path": "src/billing.rs",
-        "score": "<score>",
-        "score_breakdown": [
-          {
-            "contribution": "<score>",
-            "evidence_ids": [
-              "search:src/billing.rs:7-9:0",
-              "search:src/billing.rs:7-9:1"
-            ],
-            "normalized_value": "<score>",
-            "rationale": "BM25 score from local Tantivy index",
-            "raw_value": "<score>",
-            "signal": "bm25_relevance",
-            "weight": "<score>"
-          },
-          {
-            "contribution": "<score>",
-            "evidence_ids": [
-              "search:src/billing.rs:7-9:0",
-              "search:src/billing.rs:7-9:1"
-            ],
-            "normalized_value": "<score>",
-            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
-            "raw_value": "<score>",
-            "signal": "query_variant_boost",
-            "weight": "<score>"
-          }
-        ],
-        "snippet": "pub fn publish_invoice_event() {}",
-        "symbol": {
-          "confidence": "exact",
+        "evidence": {
+          "confidence": "high",
+          "edge_type": "IMPLEMENTS",
           "file_id": "file-billing",
-          "id": "symbol-publish",
-          "kind": "function",
-          "language": "rust",
-          "name": "publish_invoice_event",
-          "provenance": "scip",
-          "qualified_name": "billing::routes::publish_invoice_event",
+          "id": "invoice-publisher-implementation",
+          "message": "fixture implementation evidence",
           "range": {
-            "end": 7,
-            "start": 7
+            "end": 15,
+            "start": 15
+          },
+          "source": "fixture-static-analysis",
+          "source_type": "static_analysis",
+          "symbol_id": "symbol-invoice-publisher-impl",
+          "target": "InvoicePublisher",
+          "target_kind": "interface"
+        },
+        "implementation": {
+          "confidence": "high",
+          "file_id": "file-billing",
+          "id": "symbol-invoice-publisher-impl",
+          "kind": "class",
+          "language": "java",
+          "name": "InvoicePublisherImpl",
+          "provenance": "static_analysis",
+          "qualified_name": "billing::InvoicePublisherImpl",
+          "range": {
+            "end": 15,
+            "start": 15
           }
         }
       }
     ],
-    "returned": 1,
-    "truncated": false,
-    "warnings": []
+    "limit": 1,
+    "query": "InvoicePublisher",
+    "returned": 1
   }
 }
