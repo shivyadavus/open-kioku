@@ -40,6 +40,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Cover the disabled-by-default responses for runtime stack-trace and error lookup tools with golden MCP snapshots.
 - Done: Cover representative explanatory, structural-candidate, implementation-candidate, and architecture-flow MCP responses with golden snapshots.
 - Done: Make experimental caller and callee lookups directional and cover both paths with golden MCP snapshots.
+- Done: Return persisted IMPLEMENTS evidence, rather than lexical candidates, from the experimental implementation lookup tool.
 - Next: Finish representative fixture-backed MCP snapshots for experimental tools before graduating any of them to stable.
 
 ## 5. Daily Workflow

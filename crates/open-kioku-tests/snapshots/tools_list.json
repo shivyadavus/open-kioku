@@ -809,16 +809,16 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use for experimental local candidate discovery of likely implementation sites. Currently returns lexical candidates, not a verified type-hierarchy result; inspect match_reason on each result. Use for experimental local candidate discovery of likely implementation sites. It currently returns lexical candidates rather than a verified type-hierarchy result; inspect match_reason before relying on it. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
+        "description": "Retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes parser provenance and confidence. Use to retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes the implementing symbol when available plus parser provenance and confidence. Do NOT use for lexical candidates (use search_code) or all usages (use get_references). This is read-only and returns no result when the current index has no implementation evidence.",
         "experimental": true,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of candidate results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of verified implementation results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "query": {
-              "description": "Name used to find lexical implementation candidates; this is not yet a verified hierarchy lookup.",
+              "description": "Name of the interface, trait, abstract class, or protocol whose persisted implementation evidence is needed.",
               "type": "string"
             }
           },

@@ -541,7 +541,8 @@ async fn dispatch(
         "semantic_search" => semantic_search_tool(repo, store, config, &params),
         "hybrid_search" => hybrid_search_tool(repo, store, config, &params),
         "explain_search_result" => hybrid_search_tool(repo, store, config, &params),
-        "get_implementations" | "structural_search" => search_tool(repo, store, &params),
+        "structural_search" => search_tool(repo, store, &params),
+        "get_implementations" => implementation_lookup_tool(store, &params),
         "dependency_path" => {
             let from = required_str(&params, "from")?;
             let to = required_str(&params, "to")?;
@@ -1129,7 +1130,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "structural_search" => "Use for experimental local candidate discovery with structure-shaped queries. It currently returns lexical candidates from the local index; inspect each result's match_reason and do not treat it as an AST-pattern match. Use regex_search for literal patterns, get_definition for a known symbol, or search_code for ordinary ranked keyword search. This is read-only.",
         "get_definition" => "Use after resolving a symbol name to retrieve its defining range and body. Prefer search_symbols for candidate discovery and get_symbol_context when surrounding references and documentation are needed. This is read-only.",
         "get_references" => "Use to find usages of a resolved symbol across the index. Prefer get_callers for caller-only relationships and impact_analysis for broader file-level blast radius. This is read-only.",
-        "get_implementations" => "Use for experimental local candidate discovery of likely implementation sites. It currently returns lexical candidates rather than a verified type-hierarchy result; inspect match_reason before relying on it. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
+        "get_implementations" => "Use to retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes the implementing symbol when available plus parser provenance and confidence. Do NOT use for lexical candidates (use search_code) or all usages (use get_references). This is read-only and returns no result when the current index has no implementation evidence.",
         "get_callers" => "Use to trace inbound call-sites to a function, method, or callable symbol from the indexed call graph. Do NOT use for all reference types including imports and type usages (use get_references), for outbound calls (use get_callees), or for finding a route between two nodes (use dependency_path). Accuracy depends on tree-sitter and optional SCIP indexing depth. This is read-only.",
         "get_callees" => "Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
         "get_symbol_context" => "Use to retrieve a comprehensive context bundle for one symbol, including its definition body, file location, enclosing scope, documentation comments, and surrounding code context when indexed. Returns more detail than get_definition. Do NOT use for simple definition lookup only (use get_definition), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
@@ -1198,7 +1199,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("structural_search", "Use for experimental local candidate discovery with structure-shaped queries. Currently returns lexical candidates from the local index rather than guaranteed AST-pattern matches; inspect match_reason on each result.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Structure-shaped query used for lexical candidate discovery; this is not yet a guaranteed AST pattern."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
         ("get_definition", "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."}}})),
         ("get_references", "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to find references for."},"limit":{"type":"integer","description":"Maximum number of references to return. Defaults to 20, capped at 100."}}})),
-        ("get_implementations", "Use for experimental local candidate discovery of likely implementation sites. Currently returns lexical candidates, not a verified type-hierarchy result; inspect match_reason on each result.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name used to find lexical implementation candidates; this is not yet a verified hierarchy lookup."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
+        ("get_implementations", "Retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes parser provenance and confidence.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name of the interface, trait, abstract class, or protocol whose persisted implementation evidence is needed."},"limit":{"type":"integer","description":"Maximum number of verified implementation results to return. Defaults to 20, capped at 100."}}})),
         ("get_callers", "Find all inbound call-sites to a function, method, or callable symbol from the indexed call graph. Returns caller symbol name, file path, and line range for each call-site found.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol whose inbound callers you want to find."},"limit":{"type":"integer","description":"Maximum number of caller entries to return. Defaults to 20, capped at 100."}}})),
         ("get_callees", "Find all functions, methods, or symbols called by the target symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol whose calls you want to trace."},"limit":{"type":"integer","description":"Maximum number of callees to return. Defaults to 20, capped at 100."}}})),
         ("get_symbol_context", "Retrieve a comprehensive context bundle for one symbol, including its full definition body, file location and range, enclosing scope, documentation comments, and surrounding code context from the local index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to retrieve comprehensive context for."}}})),
@@ -2520,16 +2521,63 @@ fn resolve_history_symbol(
     }
 }
 
+fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
+    let query = required_str(params, "query")?;
+    let limit = limit(params);
+    let matching_facts = store
+        .analysis_facts(None, MAX_MCP_FETCH)?
+        .into_iter()
+        .filter(|fact| {
+            fact.edge_type == GraphEdgeType::Implements
+                && implementation_target_matches(query, &fact.target)
+        })
+        .collect::<Vec<_>>();
+    let has_more = matching_facts.len() > limit;
+    let mut implementations = Vec::new();
+    for fact in matching_facts.into_iter().take(limit) {
+        let implementation = fact
+            .symbol_id
+            .as_ref()
+            .map(|symbol_id| store.symbol_by_id(symbol_id))
+            .transpose()?;
+        implementations.push(json!({
+            "implementation": implementation,
+            "evidence": fact,
+        }));
+    }
+    Ok(json!({
+        "query": query,
+        "implementations": implementations,
+        "returned": implementations.len(),
+        "limit": limit,
+        "has_more": has_more,
+        "caveats": [
+            "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
+        ],
+    }))
+}
+
+fn implementation_target_matches(query: &str, target: &str) -> bool {
+    let query = query.trim();
+    !query.is_empty()
+        && (target == query
+            || target
+                .rsplit(['.', ':'])
+                .next()
+                .is_some_and(|suffix| suffix == query))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
-        CodeChunk, Confidence, EdgeId, EvidenceSourceType, File, FileId, GitChangeKind,
-        GitCommitId, GitCommitRecord, GitFileTouch, GraphEdge, GraphEdgeType, GraphNode,
-        GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, Language, LineRange,
-        NodeId, Owner, RepositoryId, Symbol, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
+        AnalysisFact, CodeChunk, Confidence, EdgeId, EvidenceSourceType, File, FileId,
+        GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GraphEdge, GraphEdgeType,
+        GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, Language,
+        LineRange, NodeId, Owner, RepositoryId, Symbol, SymbolId, SymbolKind,
+        HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index_with_graph};
     use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
@@ -2749,7 +2797,7 @@ mod tests {
             ),
             (
                 "get_implementations.json",
-                r#"{"jsonrpc":"2.0","id":"get-implementations","method":"get_implementations","params":{"query":"publish_invoice_event","limit":1}}"#,
+                r#"{"jsonrpc":"2.0","id":"get-implementations","method":"get_implementations","params":{"query":"InvoicePublisher","limit":1}}"#,
             ),
             (
                 "get_callees.json",
@@ -2842,6 +2890,17 @@ mod tests {
                 confidence: Confidence::High,
                 provenance: EvidenceSourceType::TreeSitter,
             };
+            let implementation_symbol = Symbol {
+                id: SymbolId::new("symbol-invoice-publisher-impl"),
+                name: "InvoicePublisherImpl".into(),
+                qualified_name: "billing::InvoicePublisherImpl".into(),
+                kind: SymbolKind::Class,
+                file_id: file.id.clone(),
+                range: Some(LineRange::single(15)),
+                language: Language::Java,
+                confidence: Confidence::High,
+                provenance: EvidenceSourceType::StaticAnalysis,
+            };
             let chunk = CodeChunk {
                 id: "chunk-publish".into(),
                 file_id: file.id.clone(),
@@ -2851,8 +2910,25 @@ mod tests {
                 symbol_id: Some(symbol.id.clone()),
             };
             let files = vec![file.clone(), other_file];
-            let symbols = vec![symbol.clone(), secondary_symbol.clone()];
+            let symbols = vec![
+                symbol.clone(),
+                secondary_symbol.clone(),
+                implementation_symbol.clone(),
+            ];
             let chunks = vec![chunk];
+            let analysis_facts = vec![AnalysisFact {
+                id: "invoice-publisher-implementation".into(),
+                file_id: file.id.clone(),
+                symbol_id: Some(implementation_symbol.id.clone()),
+                target: "InvoicePublisher".into(),
+                target_kind: GraphNodeType::Interface,
+                edge_type: GraphEdgeType::Implements,
+                range: Some(LineRange::single(15)),
+                confidence: Confidence::High,
+                source: "fixture-static-analysis".into(),
+                source_type: EvidenceSourceType::StaticAnalysis,
+                message: "fixture implementation evidence".into(),
+            }];
             store
                 .replace_index(IndexData {
                     manifest: &manifest,
@@ -2862,7 +2938,7 @@ mod tests {
                     tests: &[],
                     imports: &[],
                     occurrences: &[],
-                    analysis_facts: &[],
+                    analysis_facts: &analysis_facts,
                 })
                 .unwrap();
 
@@ -3283,7 +3359,7 @@ mod tests {
         assert!(implementations["description"]
             .as_str()
             .unwrap()
-            .contains("not a verified type-hierarchy result"));
+            .contains("persisted IMPLEMENTS facts"));
         let remember_fact = tools_ro
             .iter()
             .find(|tool| tool["name"] == "remember_fact")
