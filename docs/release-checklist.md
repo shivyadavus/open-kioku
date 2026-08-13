@@ -14,6 +14,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 scripts/verify-release-readiness.sh
+scripts/verify-npm-package.sh
 ```
 
 For a release that changes the reusable GitHub Action, also run its independent
@@ -46,6 +47,13 @@ ok --version
 
 cargo install open-kioku-cli
 ok --version
+```
+
+Inspect the wrapper package before publishing; this confirms the package name,
+version, entrypoint, README, and generated tarball name without publishing:
+
+```sh
+scripts/verify-npm-package.sh
 ```
 
 ## Release Artifacts
