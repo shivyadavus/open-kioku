@@ -1,0 +1,14 @@
+{
+  "id": "find-errors",
+  "jsonrpc": "2.0",
+  "result": {
+    "confidence": "low",
+    "configured": false,
+    "evidence": [
+      "runtime integrations are disabled by default"
+    ],
+    "integration": "sentry",
+    "reason": "find_errors_for_symbol requires an explicitly configured runtime provider",
+    "results": []
+  }
+}

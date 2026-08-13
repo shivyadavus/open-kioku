@@ -1,0 +1,14 @@
+{
+  "id": "recent-failures",
+  "jsonrpc": "2.0",
+  "result": {
+    "confidence": "low",
+    "configured": false,
+    "evidence": [
+      "runtime integrations are disabled by default"
+    ],
+    "integration": "sentry",
+    "reason": "find_recent_failures requires an explicitly configured runtime provider",
+    "results": []
+  }
+}
