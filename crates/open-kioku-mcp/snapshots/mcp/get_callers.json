@@ -1,0 +1,50 @@
+{
+  "id": "get-callers",
+  "jsonrpc": "2.0",
+  "result": {
+    "edges": [
+      {
+        "edge_type": "CALLS",
+        "evidence": {
+          "confidence": "low",
+          "file_range": null,
+          "id": "",
+          "indexed_at": "<indexed_at>",
+          "message": "",
+          "source": "",
+          "source_type": "lexical",
+          "symbol_id": null
+        },
+        "from": "symbol:symbol-publish",
+        "id": "edge-publish-calls-archive",
+        "to": "symbol:symbol-archive"
+      }
+    ],
+    "nodes": [
+      {
+        "file_id": "file-billing",
+        "id": "symbol:symbol-publish",
+        "label": "publish_invoice_event",
+        "node_type": "function",
+        "properties": {
+          "qualified_name": "billing::routes::publish_invoice_event"
+        },
+        "symbol_id": "symbol-publish"
+      }
+    ],
+    "symbol": {
+      "confidence": "high",
+      "file_id": "file-billing",
+      "id": "symbol-archive",
+      "kind": "function",
+      "language": "rust",
+      "name": "archive_invoice_event",
+      "provenance": "tree_sitter",
+      "qualified_name": "billing::routes::archive_invoice_event",
+      "range": {
+        "end": 12,
+        "start": 12
+      }
+    }
+  }
+}
