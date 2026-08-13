@@ -42,14 +42,13 @@ Open Kioku's `PolicyGate` layer explicitly blocks the following path patterns fr
 
 These patterns are enforced via glob matching in code and cannot be bypassed by `.gitignore` configuration. Users may add additional deny patterns in `ok.toml` under `[paths] deny`.
 
-## Write Access
+## Source Edits
 
-The MCP server is **read-only by default** (`mcp.mode = "read-only"`, `security.allow_write = false`). The `apply_patch` tool requires both:
-
-1. `security.allow_write = true` set in `ok.toml` (or via the `OK_SECURITY_MODE` environment variable), **and**
-2. The `OPEN_KIOKU_ALLOW_WRITE=true` environment variable set on the MCP server process.
-
-Both conditions must be true simultaneously. If either is missing, `apply_patch` is denied.
+The MCP server does not provide a source-editing tool. Planning and verification
+operate on local evidence; apply reviewed source changes with the normal editor.
+Open Kioku may write local `.ok/` data only for explicitly stateful workflows
+such as repository memory, compressed-context handles, contracts, and validation
+attestations.
 
 ## Third-Party Services
 

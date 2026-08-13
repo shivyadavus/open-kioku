@@ -49,4 +49,4 @@ Keep the server read-only for normal use:
 ok mcp serve --repo /absolute/path/to/repo --read-only
 ```
 
-Only enable write mode for a deliberately bounded workflow with approvals and command allowlists.
+Apply source changes with the normal editor. Enable command execution only for a deliberately bounded workflow with approvals and command allowlists.
