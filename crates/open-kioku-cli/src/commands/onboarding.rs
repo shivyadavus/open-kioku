@@ -462,10 +462,15 @@ Use Open Kioku when navigating unfamiliar code, investigating a bug, planning a\
 multi-file change, or changing a public API. Its local index is evidence, not\n\
 a replacement for reading the relevant source.\n\n\
 ## Routine\n\n\
-1. Explore with `search_code` or `get_definition` before claiming what exists.\n\
-2. Run `plan_change` before a multi-file edit, rename, deletion, or public\n\
-   interface change.\n\
-3. After the edit, run `verify_change` against the saved preflight/plan.\n\n\
+1. **Explore** with `search_code` or `get_definition` before claiming what\n\
+   exists.\n\
+2. **Preflight** with `preflight_change` before a multi-file edit, rename,\n\
+   deletion, or public interface change. Read its caveats before editing.\n\
+3. **Edit** only within the returned scope unless new evidence justifies an\n\
+   expansion.\n\
+4. **Verify** the changed files and selected tests before finishing. For\n\
+   boundary verification, save a detailed `plan_change` result and pass it to\n\
+   `verify_change`.\n\n\
 Report caveats from Open Kioku exactly. Do not describe a guided MCP workflow as\n\
 enforced behavior.\n"
         ),
@@ -476,9 +481,13 @@ alwaysApply: true\n\
 ---\n\n\
 {MANAGED_SKILL_MARKER}\n\n\
 # Open Kioku pre-edit workflow\n\n\
-For unfamiliar code, investigate with `search_code` or `get_definition` before\n\
-making claims. Before a multi-file edit, rename, deletion, or public API change,\n\
-run `plan_change`. After edits, run `verify_change` against the saved plan.\n\n\
+Follow this routine: **Explore -> Preflight -> Edit -> Verify**. For unfamiliar\n\
+code, investigate with `search_code` or `get_definition` before making claims.\n\
+Before a multi-file edit, rename, deletion, or public API change, run\n\
+`preflight_change` and read its caveats. Keep edits within its returned scope\n\
+unless new evidence supports expansion. Before finishing, run the selected tests\n\
+and verify the changed files. When boundary verification is needed, save a\n\
+detailed `plan_change` result and pass it to `verify_change`.\n\n\
 Treat Open Kioku caveats as uncertainty. This rule guides tool selection; it\n\
 does not enforce a tool call.\n"
         ),
@@ -630,6 +639,21 @@ mod onboarding_tests {
         let layout = agent_setup_layout(McpClient::Cursor, repo).unwrap();
         assert_eq!(layout.config_path, repo.join(".cursor/mcp.json"));
         assert_eq!(layout.skill_path, repo.join(".cursor/rules/open-kioku-preflight.mdc"));
+    }
+
+    #[test]
+    fn installed_guidance_uses_the_canonical_advisory_routine() {
+        for client in [McpClient::Claude, McpClient::Cursor] {
+            let guidance = managed_skill_contents(client);
+            assert!(guidance.contains("Explore"));
+            assert!(guidance.contains("Preflight"));
+            assert!(guidance.contains("Edit"));
+            assert!(guidance.contains("Verify"));
+            assert!(guidance.contains("preflight_change"));
+            assert!(guidance.contains("plan_change"));
+            assert!(guidance.contains("verify_change"));
+            assert!(guidance.contains("enforced behavior") || guidance.contains("does not enforce"));
+        }
     }
 
     #[test]
