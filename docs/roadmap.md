@@ -9,7 +9,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Provide `ok mcp install <client>` to print copy-paste MCP config for all supported clients.
 - Done: Publish release binaries and SHA-256 checksums for macOS, Linux, and Windows.
 - Done: Add `cargo binstall`, npm, crates.io, and GitHub release installation paths.
-- Next: Add provenance signing or attestations for release artifacts.
+- Done: Publish GitHub build-provenance attestations for each release binary, alongside checksums, SBOM, and release metadata. See [`docs/release-trust.md`](release-trust.md).
 
 ## 2. Trust and Regression Coverage
 
