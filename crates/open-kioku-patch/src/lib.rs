@@ -1468,11 +1468,10 @@ fn public_api_signature(line: &str, extension: Option<&str>) -> Option<(String, 
 fn rust_public_signature(line: &str) -> Option<(String, String, String)> {
     let rest = if let Some(rest) = line.strip_prefix("pub ") {
         rest
-    } else if let Some(rest) = line.strip_prefix("pub(") {
+    } else {
+        let rest = line.strip_prefix("pub(")?;
         let close = rest.find(')')?;
         rest.get(close + 1..)?.trim_start()
-    } else {
-        return None;
     };
     let rest = strip_prefix_words(rest, &["async", "unsafe", "extern", "const"]);
     keyword_signature(
