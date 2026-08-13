@@ -72,6 +72,13 @@ for unsupported in 'ok setup agent ' 'ok preflight ' 'preflight_change'; do
   fi
 done
 
+for stale_claim in 'explicit write controls' 'Patch and command paths are opt-in'; do
+  reject_site_text "$stale_claim"
+done
+
+require_site_text 'Open Kioku does not upload source or edit source files.'
+require_site_text 'Source edits stay in your normal editor. Command execution is opt-in and policy-controlled.'
+
 if [[ "$static_only" == true ]]; then
   echo "public quickstart static contract passed"
   exit 0
