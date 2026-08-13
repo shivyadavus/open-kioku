@@ -14,6 +14,7 @@ else
 fi
 
 site="demo/index.html"
+readme="README.md"
 
 require_site_text() {
   local expected="$1"
@@ -56,6 +57,20 @@ if [[ "$copy_button_count" != "2" ]]; then
   echo "public quickstart must expose exactly two matching copyable command blocks; found $copy_button_count" >&2
   exit 1
 fi
+
+readme_quickstart=$'npm install -g open-kioku\nok init .\nok index .\nok mcp install cursor --repo .'
+if ! grep -Fq -- "$readme_quickstart" "$readme"; then
+  echo "README.md first-win commands are stale" >&2
+  exit 1
+fi
+
+readme_first_win="$(sed -n '/^## First Win:/,/^## /p' "$readme")"
+for unsupported in 'ok setup agent ' 'ok preflight ' 'preflight_change'; do
+  if grep -Fq -- "$unsupported" <<<"$readme_first_win"; then
+    echo "README.md first-win documentation advertises an unsupported published command: $unsupported" >&2
+    exit 1
+  fi
+done
 
 if [[ "$static_only" == true ]]; then
   echo "public quickstart static contract passed"
