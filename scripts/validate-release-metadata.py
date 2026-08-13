@@ -187,6 +187,7 @@ def check_release_checklist(metadata: dict, version: str, errors: list[str]) -> 
         "scripts/validate-release-metadata.py",
         "scripts/validate-trust-gates.py",
         "scripts/verify-release-readiness.sh",
+        "scripts/verify-npm-package.sh",
         "scripts/generate-release-trust-artifacts.sh",
         "cargo fmt --all -- --check",
         "cargo clippy --all-targets --all-features -- -D warnings",
