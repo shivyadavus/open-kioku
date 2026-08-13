@@ -1141,12 +1141,15 @@ fn scip_setup_report(repo: &Path, config: &OkConfig) -> ScipSetupReport {
         ScipIndexerReport {
             language: "java",
             applicable: repo.join("pom.xml").exists()
+                || repo.join("settings.gradle").exists()
+                || repo.join("settings.gradle.kts").exists()
+                || repo.join("gradlew").exists()
                 || repo.join("build.gradle").exists()
                 || repo.join("build.gradle.kts").exists(),
             installed: command_exists("scip-java"),
-            command: "scip-java index --output .ok/indexes/java.scip".into(),
-            output_path: ".ok/indexes/java.scip".into(),
-            note: "may run build-tool analysis and can take time".into(),
+            command: "scip-java index".into(),
+            output_path: "index.scip".into(),
+            note: "runs Maven or Gradle analysis and may clean compiler caches".into(),
         },
         ScipIndexerReport {
             language: "python",
@@ -1165,6 +1168,28 @@ fn scip_setup_report(repo: &Path, config: &OkConfig) -> ScipSetupReport {
         timeout_seconds: config.scip.timeout_seconds,
         indexers,
         configured_paths: config.scip.paths.clone(),
+    }
+}
+
+#[cfg(test)]
+mod scip_setup_tests {
+    use super::*;
+
+    #[test]
+    fn scip_setup_reports_the_java_default_for_a_gradle_settings_root() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("settings.gradle"), "rootProject.name = 'proof'\n").unwrap();
+
+        let report = scip_setup_report(temp.path(), &OkConfig::default());
+        let java = report
+            .indexers
+            .iter()
+            .find(|indexer| indexer.language == "java")
+            .expect("Java SCIP entry must be present");
+
+        assert!(java.applicable);
+        assert_eq!(java.command, "scip-java index");
+        assert_eq!(java.output_path, PathBuf::from("index.scip"));
     }
 }
 
