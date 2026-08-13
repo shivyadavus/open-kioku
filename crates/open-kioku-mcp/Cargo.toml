@@ -37,3 +37,6 @@ open-kioku-tests = { version = "2.0.0", path = "../open-kioku-tests" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true

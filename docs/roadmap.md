@@ -35,7 +35,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Split tools into stable and experimental groups.
 - Done: Hide or clearly label unsupported integrations so agents do not treat stubs as authoritative.
 - Done: Keep the stable default tool set small, sharp, and reliable.
-- Next: Graduate experimental tools only with fixture-backed behavior and snapshots.
+- Next: Finish representative fixture-backed MCP snapshots for experimental tools before graduating any of them to stable.
 
 ## 5. Daily Workflow
 

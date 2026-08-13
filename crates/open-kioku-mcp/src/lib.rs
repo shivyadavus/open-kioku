@@ -2502,14 +2502,16 @@ fn resolve_history_symbol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
-        CodeChunk, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdge, GraphEdgeType,
-        GraphNode, GraphNodeType, IndexManifest, Language, LineRange, NodeId, RepositoryId, Symbol,
-        SymbolId, SymbolKind,
+        CodeChunk, Confidence, EdgeId, EvidenceSourceType, File, FileId, GitChangeKind,
+        GitCommitId, GitCommitRecord, GitFileTouch, GraphEdge, GraphEdgeType, GraphNode,
+        GraphNodeType, HistoryRecordId, HistorySnapshot, IndexManifest, Language, LineRange,
+        NodeId, Owner, RepositoryId, Symbol, SymbolId, SymbolKind, HISTORY_SCHEMA_VERSION,
     };
     use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index_with_graph};
-    use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
+    use open_kioku_storage::{GraphStore, HistoryStore, IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
     use serde_json::{json, Value};
     use std::fs;
@@ -2684,6 +2686,18 @@ mod tests {
                 "pagination.json",
                 r#"{"jsonrpc":"2.0","id":"pagination","method":"list_files","params":{"limit":1,"offset":0}}"#,
             ),
+            (
+                "history_provenance.json",
+                r#"{"jsonrpc":"2.0","id":"history-provenance","method":"history_provenance_lookup","params":{"path":"src/billing.rs","limit":5}}"#,
+            ),
+            (
+                "churn_analysis.json",
+                r#"{"jsonrpc":"2.0","id":"churn-analysis","method":"churn_analysis","params":{"path":"src/billing.rs"}}"#,
+            ),
+            (
+                "history_similar_changes.json",
+                r#"{"jsonrpc":"2.0","id":"history-similar-changes","method":"history_similar_changes","params":{"task":"publish invoice","path":"src/billing.rs","limit":5}}"#,
+            ),
         ] {
             let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
                 .await
@@ -2845,6 +2859,9 @@ mod tests {
                 },
             ];
             store.replace_graph(&graph_nodes, &graph_edges).unwrap();
+            store
+                .put_history_snapshot(&fixture_history_snapshot())
+                .unwrap();
             rebuild_disk_index_with_graph(
                 default_index_dir(&repo),
                 &chunks,
@@ -2902,6 +2919,41 @@ mod tests {
         .unwrap()
     }
 
+    fn fixture_history_snapshot() -> HistorySnapshot {
+        let touched_at = Utc.with_ymd_and_hms(2026, 1, 2, 12, 0, 0).unwrap();
+        let commit_id = GitCommitId::new("publish-invoice");
+        HistorySnapshot {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            commits: vec![GitCommitRecord {
+                id: commit_id.clone(),
+                parent_ids: Vec::new(),
+                author: Owner {
+                    name: "Billing Developer".into(),
+                    email: Some("billing@example.com".into()),
+                },
+                committer: None,
+                authored_at: touched_at,
+                committed_at: touched_at,
+                summary: "Publish invoice event".into(),
+                message: "Publish invoice event from the billing route".into(),
+                file_count: 1,
+            }],
+            file_touches: vec![GitFileTouch {
+                id: HistoryRecordId::new("billing-touch"),
+                commit_id,
+                path: "src/billing.rs".into(),
+                previous_path: None,
+                change_kind: GitChangeKind::Added,
+                additions: Some(12),
+                deletions: Some(0),
+                touched_at,
+            }],
+            symbol_touches: Vec::new(),
+            cochange_edges: Vec::new(),
+            reviewer_evidence: Vec::new(),
+        }
+    }
+
     fn assert_mcp_snapshot(name: &str, response: &JsonRpcResponse) {
         let mut value = serde_json::to_value(response).unwrap();
         normalize_mcp_snapshot(&mut value);
@@ -2930,6 +2982,8 @@ mod tests {
                         *value = json!("<expires_at>");
                     } else if key == "freshness" {
                         *value = json!("<freshness>");
+                    } else if key == "generated_at" {
+                        *value = json!("<generated_at>");
                     } else if matches!(
                         key.as_str(),
                         "score"
@@ -2939,6 +2993,7 @@ mod tests {
                             | "weight"
                             | "contribution"
                     ) && value.is_number()
+                        || (key.ends_with("_score") && value.is_number())
                     {
                         *value = json!("<score>");
                     } else {

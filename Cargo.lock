@@ -1389,6 +1389,7 @@ name = "open-kioku-mcp"
 version = "2.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "open-kioku-actions",
  "open-kioku-architecture",
  "open-kioku-config",
