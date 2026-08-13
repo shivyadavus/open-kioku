@@ -1999,7 +1999,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files. Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning and apply_patch only after explicit approval in write-enabled mode. This is read-only.",
+        "description": "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files. Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning, then apply approved source edits with the normal editor before using verify_change. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -2030,81 +2030,11 @@
       {
         "annotations": {
           "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": false,
-          "readOnlyHint": true
-        },
-        "description": "Review a proposed patch plan for safety, target constraints, completeness, and potential regressions. Returns a structured safety assessment with warnings, risk indicators, and recommendations. Use to review a proposed patch plan for safety, target constraints, completeness, and potential regressions before applying it. Returns a structured safety assessment with warnings and recommendations. Do NOT use for architecture boundary and reference validation only (use validate_patch) or for post-edit verification against a plan (use verify_change). This is read-only and does not modify any files.",
-        "experimental": false,
-        "inputSchema": {
-          "properties": {
-            "task": {
-              "description": "The task name or identifier associated with the patch plan to review.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "task"
-          ],
-          "type": "object"
-        },
-        "maturity": "stable",
-        "name": "review_patch",
-        "outputSchema": {
-          "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
-          "properties": {
-            "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
-            }
-          },
-          "type": "object"
-        },
-        "title": "Open Kioku Review Patch"
-      },
-      {
-        "annotations": {
-          "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": false,
-          "readOnlyHint": true
-        },
-        "description": "Validate a proposed patch plan against architecture boundaries, symbol references, and import constraints. Returns boundary violations, broken reference warnings, and policy conflicts without modifying any files. Use to check a proposed patch plan against architecture boundaries, symbol references, and import constraints before applying it. Returns boundary violations, broken reference warnings, and policy conflicts. Do NOT use after real edits have been made (use verify_change or verify_change_contract instead) or for full safety review (use review_patch). This is read-only and checks against the local index and policy rules only.",
-        "experimental": false,
-        "inputSchema": {
-          "properties": {
-            "task": {
-              "description": "The task name or identifier of the patch plan to validate.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "task"
-          ],
-          "type": "object"
-        },
-        "maturity": "stable",
-        "name": "validate_patch",
-        "outputSchema": {
-          "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
-          "properties": {
-            "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
-            }
-          },
-          "type": "object"
-        },
-        "title": "Open Kioku Validate Patch"
-      },
-      {
-        "annotations": {
-          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Verify an actual unified diff or set of changed files against a saved PlanReport, checking boundary constraints, expected file coverage, API surface stability, and dependency policy. Optionally executes configured validation commands and persists timestamped attestation records. Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change), contract-based verification (use verify_change_contract), or boundary-only checks (use validate_patch). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
+        "description": "Verify an actual unified diff or set of changed files against a saved PlanReport, checking boundary constraints, expected file coverage, API surface stability, and dependency policy. Optionally executes configured validation commands and persists timestamped attestation records. Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change) or contract-based verification (use verify_change_contract). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {

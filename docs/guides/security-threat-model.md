@@ -17,7 +17,7 @@ Open Kioku assumes AI agents can be tricked by repository content, stale memory,
 | Prompt injection in source or docs | Agent follows untrusted repo text as instruction | Agents must treat Open Kioku output as evidence, not instruction. |
 | Secret exposure through indexing | Sensitive files become searchable | Secret-like paths are denied and hidden files are blocked by default. |
 | Memory poisoning | Stale or malicious facts outrank code | Memory is append-only support context; indexed code evidence wins. |
-| MCP over-permissioning | Agent gains write, command, or network access | Read-only MCP mode is default; write tools require explicit opt-in. |
+| MCP over-permissioning | Agent gains command or network access | Source edits stay in the normal editor; command execution and network access require explicit opt-in. |
 | Repo poisoning | Malicious files influence plan selection | `ok plan` reports confidence and evidence paths; low confidence should block edits. |
 | Context handle leakage | Stored originals expose code if copied | Handles resolve only from local `.ok/context.sqlite`; do not publish `.ok/`. |
 
@@ -31,17 +31,17 @@ Open Kioku assumes AI agents can be tricked by repository content, stale memory,
 - Regenerate the index after major branch changes.
 - Treat `ok status --markdown` and `ok prove` as shareable readiness artifacts; do not paste raw source unless needed.
 
-## Write Mode
+## Command Execution
 
-Write mode should be temporary and narrow:
+Command execution should be temporary and narrow:
 
 ```sh
 ok mcp serve \
   --repo /absolute/path/to/repo \
-  --allow-write \
+  --read-only \
   --approval-required \
   --allow-command "cargo test" \
   --deny-network
 ```
 
-Patch planning can stay read-only. Patch application should require user approval and normal code review.
+Patch planning is read-only. Apply source changes with the normal editor, then verify them against the plan or contract.

@@ -1311,21 +1311,6 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let planner = PatchPlanner::new(&config, &store as &dyn OkStore);
             match command {
                 PatchCommand::Plan { task } => output(cli.json, &planner.plan(&task)?, || {})?,
-                PatchCommand::Review { id } => {
-                    let response = serde_json::json!({
-                        "id": id,
-                        "status": "requires_stored_patch_plan",
-                        "message": "patch review requires a stored patch plan"
-                    });
-                    print_text_or_json(
-                        cli.json,
-                        &format!("patch review requires stored patch plan id={id}"),
-                        &response,
-                    )?;
-                }
-                PatchCommand::Apply { id, approved } => {
-                    anyhow::bail!("patch apply is policy gated and requires a stored diff; id={id} approved={approved}");
-                }
             }
         }
         Command::Memory { command } => {
@@ -1386,20 +1371,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
             McpCommand::Serve {
                 repo,
-                read_only,
-                allow_write,
+                read_only: _,
                 approval_required,
                 allow_command,
                 deny_network,
                 hide_experimental,
             } => {
                 let mut config = OkConfig::load_from_repo(&repo)?;
-                config.mcp.mode = if read_only && !allow_write {
-                    "read-only".into()
-                } else {
-                    "write".into()
-                };
-                config.security.allow_write = allow_write;
+                config.mcp.mode = "read-only".into();
+                config.security.allow_write = false;
                 config.security.approval_required = approval_required;
                 config.security.deny_network = deny_network;
                 config.mcp.hide_experimental = hide_experimental;

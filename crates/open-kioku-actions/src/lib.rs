@@ -7,7 +7,6 @@ use std::path::Path;
 pub enum ActionKind {
     Read,
     WriteFile,
-    ApplyPatch,
     RunCommand,
     Network,
 }
@@ -24,7 +23,7 @@ impl<'a> PolicyGate<'a> {
     pub fn ensure_allowed(&self, action: ActionKind) -> Result<()> {
         match action {
             ActionKind::Read => Ok(()),
-            ActionKind::WriteFile | ActionKind::ApplyPatch if !self.config.security.allow_write => {
+            ActionKind::WriteFile if !self.config.security.allow_write => {
                 Err(OkError::PolicyDenied("file writes are disabled".into()))
             }
             ActionKind::RunCommand => Err(OkError::PolicyDenied(
@@ -105,7 +104,6 @@ mod tests {
         let config = OkConfig::default();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_allowed(ActionKind::WriteFile).is_err());
-        assert!(gate.ensure_allowed(ActionKind::ApplyPatch).is_err());
     }
 
     #[test]
@@ -113,7 +111,6 @@ mod tests {
         let config = config_write_allowed();
         let gate = PolicyGate::new(&config);
         assert!(gate.ensure_allowed(ActionKind::WriteFile).is_ok());
-        assert!(gate.ensure_allowed(ActionKind::ApplyPatch).is_ok());
     }
 
     #[test]

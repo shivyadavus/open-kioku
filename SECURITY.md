@@ -8,7 +8,7 @@ Open Kioku is designed to give coding agents local code intelligence without mak
 - The default workflow does not require embeddings or a hosted index.
 - Index data is stored locally under the target repository's `.ok/` directory.
 - MCP transport is stdio to the local `ok` process.
-- Write tools are not listed unless write mode is explicitly enabled.
+- Source-editing tools are not exposed through MCP.
 
 ## Local Data
 
@@ -20,15 +20,12 @@ Open Kioku writes these local artifacts when a repo is indexed:
 
 These files are intended to stay on the developer's machine unless the user chooses to commit, copy, or upload them.
 
-## Write Controls
+## Source-Edit Controls
 
-`apply_patch` is gated in multiple places:
-
-- The MCP server must be started with `--allow-write`.
-- The server environment must include `OPEN_KIOKU_ALLOW_WRITE=true`.
-- Patch application requires an explicit stored approval flow.
-
-Read-only planning tools such as `plan_change`, `build_context_pack`, and `propose_patch` can produce recommendations, but they do not modify source files.
+Open Kioku MCP does not modify source files. Read-only planning tools such as
+`plan_change`, `build_context_pack`, and `propose_patch` produce evidence-backed
+recommendations; apply reviewed source changes with the normal editor, then use
+`verify_change` or `verify_change_contract` to evaluate the resulting diff.
 
 ## Path Controls
 

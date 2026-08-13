@@ -1063,16 +1063,6 @@ enum PatchCommand {
     Plan {
         task: String,
     },
-    Review {
-        #[arg(long)]
-        id: String,
-    },
-    Apply {
-        #[arg(long)]
-        id: String,
-        #[arg(long)]
-        approved: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1087,8 +1077,6 @@ enum McpCommand {
         repo: PathBuf,
         #[arg(long, default_value_t = true)]
         read_only: bool,
-        #[arg(long, default_value_t = false)]
-        allow_write: bool,
         #[arg(long, default_value_t = true)]
         approval_required: bool,
         #[arg(long = "allow-command")]

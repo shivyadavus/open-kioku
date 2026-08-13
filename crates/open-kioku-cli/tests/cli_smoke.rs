@@ -1741,6 +1741,8 @@ fn mcp_install_prints_client_config() {
     assert!(output.contains("mcpServers"));
     assert!(output.contains("\"command\": \"ok\""));
     assert!(output.contains("--read-only"));
+    assert!(output.contains("apply source edits with your normal editor"));
+    assert!(!output.contains("OPEN_KIOKU_ALLOW_WRITE"));
 
     let codex = run({
         let mut command = ok();
@@ -1806,6 +1808,26 @@ fn mcp_install_prints_client_config() {
     });
     assert!(trae.contains("mcpServers"));
     assert!(trae.contains("open-kioku"));
+}
+
+#[test]
+fn patch_and_mcp_help_expose_only_supported_source_workflow() {
+    let patch_help = run({
+        let mut command = ok();
+        command.arg("patch").arg("--help");
+        command
+    });
+    assert!(patch_help.contains("plan"));
+    assert!(!patch_help.contains("review"));
+    assert!(!patch_help.contains("apply"));
+
+    let mcp_serve_help = run({
+        let mut command = ok();
+        command.args(["mcp", "serve", "--help"]);
+        command
+    });
+    assert!(mcp_serve_help.contains("--read-only"));
+    assert!(!mcp_serve_help.contains("--allow-write"));
 }
 
 #[test]

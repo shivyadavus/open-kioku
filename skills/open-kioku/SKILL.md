@@ -36,7 +36,7 @@ Open Kioku gives you a persistent, evidence-backed memory of the indexed reposit
 ### Refactoring and patch planning
 - `build_context_pack` — assemble a full context bundle (files + symbols + tests + patch boundaries) for a complex task; pass the task in natural language
 - `propose_patch` — generate a patch plan without writing any files
-- `review_patch` / `validate_patch` — review or validate a planned patch against the index
+- `verify_change` / `verify_change_contract` — verify a completed source edit against an evidence-backed plan or contract
 
 ### File-level exploration
 - `explain_file` — get all chunks and metadata for a single file
@@ -53,7 +53,8 @@ Open Kioku gives you a persistent, evidence-backed memory of the indexed reposit
 **Starting a large refactor:**
 1. `build_context_pack` with your task description
 2. `propose_patch` to plan the changes
-3. `validate_patch` before applying
+3. apply reviewed source changes with the normal editor
+4. `verify_change` or `verify_change_contract` after editing
 
 **Exploring an unfamiliar repo:**
 1. `repo_status` → confirm index is fresh
