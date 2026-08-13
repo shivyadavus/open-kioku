@@ -24,6 +24,8 @@ if ! grep -Eq "contains ${workflow_case_count}[[:space:]]+cases" docs/workflow-b
   exit 1
 fi
 
+scripts/validate-public-quickstart.sh --static
+
 python3 - <<'PY'
 import re
 from pathlib import Path
@@ -69,4 +71,4 @@ if documented_count != len(expected) or documented != expected:
     )
 PY
 
-echo "docs validated: ${crate_count} crates, ${workflow_case_count} workflow cases, and CLI command inventory"
+echo "docs validated: ${crate_count} crates, ${workflow_case_count} workflow cases, CLI command inventory, and public quickstart"
