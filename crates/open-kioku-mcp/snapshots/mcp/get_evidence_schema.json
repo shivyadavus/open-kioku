@@ -38,9 +38,10 @@
         "target_types": []
       },
       {
-        "count": 0,
+        "count": 1,
         "description": "Edge of type Calls",
-        "evidence_available": false,
+        "evidence_available": true,
+        "freshness": "<freshness>",
         "name": "Calls",
         "required_evidence": [],
         "source_types": [],
@@ -298,7 +299,7 @@
       "service_boundaries",
       "read_only_graph_query"
     ],
-    "indexed_at": "2026-01-01T00:00:00+00:00",
+    "indexed_at": "<indexed_at>",
     "node_types": [
       {
         "count": 1,
