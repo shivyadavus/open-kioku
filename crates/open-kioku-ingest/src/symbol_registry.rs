@@ -234,9 +234,7 @@ impl SymbolRegistry {
             .flatten()
             .filter_map(|id| {
                 let symbol = self.by_id.get(id)?;
-                let normalized = self
-                    .qualified_name_normalized
-                    .get(&symbol.qualified_name)?;
+                let normalized = self.qualified_name_normalized.get(&symbol.qualified_name)?;
                 if imported_suffixes
                     .iter()
                     .any(|imported| normalized.ends_with(*imported))
