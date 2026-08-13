@@ -19,7 +19,7 @@ Open Kioku should win by making AI coding agents stop guessing. The roadmap is o
 - Done: Keep CI running format, clippy, tests, audit, and deny on Linux and macOS.
 - Done: Add `ok prove` for shareable local usefulness reports without source snippets.
 - Done: Add release-readiness smoke coverage for demo setup, status, setup audit, TOON planning, proof generation, and MCP installer output.
-- Next: Expand golden snapshots beyond tool listing to representative tool calls.
+- Done: Keep golden MCP snapshots for representative status, schema, graph-query, ranked-search, pagination, malformed-input, and tool-error calls.
 
 ## 3. Core Intelligence Quality
 
