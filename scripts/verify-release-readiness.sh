@@ -9,6 +9,8 @@ if [[ ! -x "$OK_BIN" ]]; then
   cargo build -p open-kioku-cli --manifest-path "$ROOT/Cargo.toml"
 fi
 
+"$ROOT/scripts/verify-npm-package.sh"
+
 rm -rf "$SMOKE_REPO"
 
 "$OK_BIN" demo --path "$SMOKE_REPO" --force >/tmp/open-kioku-demo.out
