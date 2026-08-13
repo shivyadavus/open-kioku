@@ -48,6 +48,28 @@ ok prove . --task "the feature you're working on" --html
 
 A representative public-repo audit indexed 4,600+ files, 46,000+ symbols, and 8,900+ tests locally in 33.1s. The exact Open Kioku version, repository revisions, caveats, and language limitations are recorded in [`docs/large-repo-proof.md`](docs/large-repo-proof.md).
 
+## Pull-request evidence
+
+Use the opt-in [`open-kioku-action`](https://github.com/shivyadavus/open-kioku-action)
+to attach a privacy-safe local preflight artifact to a pull-request workflow:
+
+```yaml
+permissions:
+  contents: read
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: shivyadavus/open-kioku-action@v1
+    with:
+      task: "change token expiration"
+      verify: true
+```
+
+The artifact records the CLI version, commit SHA, local-index hash, preflight
+hash, redacted changed-file shapes, decision, validation exit status, and
+caveats. It never includes source snippets. Validation execution and PR comments
+are explicit opt-ins; see [`docs/github-action.md`](docs/github-action.md).
+
 ## What Your Agent Gets
 
 ```text
