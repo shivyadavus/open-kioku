@@ -1232,7 +1232,7 @@ fn build_demo_repo(repo: &Path, force: bool) -> anyhow::Result<DemoReport> {
     fs::create_dir_all(repo.join("tests"))?;
     fs::write(
         repo.join("README.md"),
-        "# Open Kioku Demo\n\nSmall repo for trying code search, symbols, impact, and MCP setup.\n",
+        "# Open Kioku Demo: expired sessions\n\nTry `ok preflight \"change token expiration\"`. The safe path begins in `src/auth.rs` and must preserve the login flow in `src/lib.rs` plus `tests/auth_flow.rs`; changing only the handler is the tempting but incomplete edit.\n",
     )?;
     fs::write(
         repo.join("Cargo.toml"),
@@ -1296,7 +1296,17 @@ fn login_returns_valid_token() {
 }
 "#,
     )?;
-    OkConfig::write_default(repo.join("ok.toml"))?;
+    let config_path = repo.join("ok.toml");
+    OkConfig::write_default(&config_path)?;
+    let config = fs::read_to_string(&config_path)?;
+    fs::write(
+        &config_path,
+        config.replacen(
+            "[scip]\nenabled = true\nmode = \"consume\"",
+            "[scip]\nenabled = false\nmode = \"off\"",
+            1,
+        ),
+    )?;
 
     let snapshot = index_repo(repo)?;
     let repo_display = repo.display().to_string();
@@ -1310,10 +1320,9 @@ fn login_returns_valid_token() {
             format!("ok --repo {repo_display} symbol find issue_token"),
             format!("ok --repo {repo_display} impact --file src/auth.rs"),
             format!("ok --repo {repo_display} context token --format markdown"),
-            format!("ok --repo {repo_display} plan token --format markdown"),
+            format!("ok --repo {repo_display} preflight \"change token expiration\" --format markdown"),
             format!("ok prove {repo_display} --task token"),
             format!("ok mcp install claude --repo {repo_display}"),
         ],
     })
 }
-

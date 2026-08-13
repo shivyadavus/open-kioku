@@ -1980,6 +1980,13 @@ fn demo_creates_indexed_sample_repo() {
     assert!(plan_json.contains("\"caution_rules\""));
     assert!(plan_json.contains("\"forbidden_rules\""));
     assert!(plan_json.contains("\"expansion_requirements\""));
+    let plan_value: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+    assert_eq!(plan_value["evidence_quality"]["unresolved_import_count"], 0);
+    assert_eq!(plan_value["evidence_quality"]["ambiguous_edge_count"], 0);
+    assert!(plan_value["evidence_quality"]["failed_optional_passes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let plan_path = repo.join("plan.json");
     fs::write(&plan_path, &plan_json).unwrap();
@@ -2115,7 +2122,6 @@ fn demo_creates_indexed_sample_repo() {
     assert!(verify_fail_stdout.contains("out_of_boundary"));
     assert!(verify_fail_stderr.contains("change verification failed"));
 
-    let plan_value: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
     let mcp_verify_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 42,
