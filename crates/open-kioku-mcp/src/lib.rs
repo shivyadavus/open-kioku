@@ -469,8 +469,9 @@ async fn dispatch(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
         }
-        "detect_architecture" | "architecture_boundaries" | "architecture_violations" => {
-            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
+        "detect_architecture" => Ok(json!(ArchitectureDetector::new(store, None).detect()?)),
+        "architecture_boundaries" | "architecture_violations" => {
+            architecture_summary_tool(repo, store)
         }
         "architecture_policy_validate" => architecture_policy_validate_tool(repo, &params),
         "architecture_policy_check" => {
@@ -572,7 +573,7 @@ async fn dispatch(
             Ok(json!({"file": file, "chunks": chunks}))
         }
         "explain_flow" => explain_flow_tool(store, &params),
-        "summarize_architecture" => Ok(json!(ArchitectureDetector::new(store, None).detect()?)),
+        "summarize_architecture" => architecture_summary_tool(repo, store),
         "explain_test_coverage" => {
             let path = params
                 .get("path")
@@ -1114,8 +1115,8 @@ fn tool_description(name: &str, base: &str) -> String {
         "list_symbols" => "Use to browse the indexed symbol table or filter by exact substring match. Supports pagination via limit and offset. Do NOT use for fuzzy or ranked symbol search (use search_symbols), for retrieving a symbol's full definition body (use get_definition), or for comprehensive symbol context (use get_symbol_context). This is read-only and reads from the local index only.",
         "search_symbols" => "Use when an agent has an approximate or partial symbol name and needs fuzzy-ranked candidates from the indexed symbol table. Do NOT use for exact substring inventory (use list_symbols), retrieving a symbol's full body (use get_definition), or comprehensive symbol context with docs (use get_symbol_context). This is read-only and searches the local index only.",
         "detect_architecture" => "Use to infer high-level architectural components and layers from the repository directory structure using heuristic analysis. Do NOT use when enforced policy rules are needed (use architecture_policy_check), when specific boundary constraints are needed (use architecture_boundaries), or when file-level policy membership must be explained (use architecture_policy_explain). This is read-only and performs heuristic detection only.",
-        "architecture_boundaries" => "Use to inspect the configured or inferred component boundaries and their import constraints before explaining or checking violations. Do NOT use for detecting actual violations (use architecture_violations), for policy-backed enforcement against indexed edges (use architecture_policy_check), or for explaining why a file belongs to a component (use architecture_policy_explain). This is read-only.",
-        "architecture_violations" => "Use for a quick boundary-violation scan based on inferred architecture layers and import patterns without consulting ok.toml policy rules. Do NOT use when policy TOML rules must be authoritative (use architecture_policy_check instead) or when explaining why a specific file violates a boundary (use architecture_policy_explain). This is read-only and reads only from the local index.",
+        "architecture_boundaries" => "Use to inspect configured architecture-policy components, path mappings, and dependency rules before planning or validating a change. When no policy exists, this returns heuristic components plus an explicit caveat; it does not invent constraints. Do NOT use for a policy syntax check (use architecture_policy_validate), a direct policy-only evaluation (use architecture_policy_check), or file-level membership evidence (use architecture_policy_explain). This is read-only.",
+        "architecture_violations" => "Use to inspect evaluated architecture-policy violations with their configured component mappings and bounded unknown-edge evidence. When no policy exists, this returns an explicit unavailable result rather than inferred violations. Do NOT use to validate policy syntax (use architecture_policy_validate), for a policy-only report (use architecture_policy_check), or to explain a specific finding (use architecture_policy_explain). This is read-only.",
         "architecture_policy_validate" => "Use before architecture_policy_check when editing or debugging policy TOML syntax and component resolution. It validates policy shape only and does not evaluate graph edges.",
         "architecture_policy_check" => "Use to enforce architecture policy against indexed import/reference/call edges. Use architecture_policy_validate first for policy syntax errors and architecture_policy_explain for why a specific file or symbol matched. This is read-only.",
         "architecture_policy_explain" => "Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
@@ -1183,8 +1184,8 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("list_symbols", "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names by exact match. If omitted, returns all symbols ordered by name."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("search_symbols", "Search indexed code symbols (functions, classes, structs, traits, interfaces) by name using fuzzy matching. Returns ranked candidates with symbol name, kind, file path, and line range.", json!({"type":"object","properties":{"query":{"type":"string","description":"Fuzzy or exact search query for symbol names. Supports partial names and approximate matches."},"limit":{"type":"integer","description":"Maximum number of ranked results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("detect_architecture", "Infer high-level architectural components and layers from the repository directory structure and file layout. Returns detected component names, directory paths, and inferred layer assignments using heuristic analysis.", json!({"type":"object","properties":{}})),
-        ("architecture_boundaries", "Retrieve the configured or inferred component boundaries and their import constraints. Returns boundary definitions including component names, directory mappings, and allowed or forbidden dependency directions.", json!({"type":"object","properties":{}})),
-        ("architecture_violations", "Detect and report import-graph boundary violations that deviate from the inferred architecture layers. Returns violation details including source file, target file, violated boundary, and edge type.", json!({"type":"object","properties":{}})),
+        ("architecture_boundaries", "Return configured architecture-policy components, path mappings, dependency rules, and the evaluated policy report. Without a policy, returns heuristic components and an explicit caveat.", json!({"type":"object","properties":{}})),
+        ("architecture_violations", "Return evaluated configured architecture-policy violations, component mappings, and bounded unknown-edge evidence. Without a policy, returns an explicit unavailable result.", json!({"type":"object","properties":{}})),
         ("architecture_policy_validate", "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.", json!({"type":"object","properties":{"path":{"type":"string","description":"Optional repository-relative or absolute path to a standalone architecture policy TOML file."}}})),
         ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
         ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
@@ -1583,6 +1584,49 @@ where
     };
     let resolver = PolicyResolver::new(&policy)?;
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
+}
+
+fn architecture_summary_tool(repo: &Path, store: &SqliteStore) -> anyhow::Result<Value> {
+    let Some(policy) = load_architecture_policy(repo)? else {
+        let mut summary = serde_json::to_value(ArchitectureDetector::new(store, None).detect()?)?;
+        let response = summary
+            .as_object_mut()
+            .context("architecture summary must serialize as an object")?;
+        response.insert("configured".into(), json!(false));
+        response.insert("policy".into(), Value::Null);
+        response.insert(
+            "policy_check".into(),
+            json!(PolicyCheckReport {
+                configured: false,
+                uncertainty: vec![
+                    "no architecture policy configured; component boundaries are heuristic and dependency edges were not evaluated".into()
+                ],
+                ..PolicyCheckReport::default()
+            }),
+        );
+        response.insert(
+            "caveats".into(),
+            json!([
+                "configure .open-kioku/architecture.toml to evaluate declared component boundaries and violations"
+            ]),
+        );
+        return Ok(summary);
+    };
+
+    let resolver = PolicyResolver::new(&policy)?;
+    let mut summary = ArchitectureDetector::new(store, Some(&resolver)).detect()?;
+    let policy_check = evaluate_policy(store, &resolver, &policy)?;
+    summary.violations = policy_check.violations.clone();
+    let mut summary = serde_json::to_value(summary)?;
+    let response = summary
+        .as_object_mut()
+        .context("architecture summary must serialize as an object")?;
+    response.insert("configured".into(), json!(true));
+    response.insert("policy_source".into(), json!(policy.source.to_string()));
+    response.insert("policy".into(), serde_json::to_value(policy)?);
+    response.insert("policy_check".into(), serde_json::to_value(policy_check)?);
+    response.insert("caveats".into(), json!([]));
+    Ok(summary)
 }
 
 fn ownership_components(
@@ -2633,7 +2677,10 @@ mod tests {
     use serde_json::{json, Value};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    static SNAPSHOT_REPO_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn test_initialize_negotiates_version() {
@@ -2879,6 +2926,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn architecture_summary_uses_configured_policy_for_components_and_violations() {
+        let fixture = McpSnapshotFixture::new();
+        let policy_dir = fixture.repo.join(".open-kioku");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("architecture.toml"),
+            r#"
+version = "v1"
+
+[[layers]]
+id = "billing"
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+
+        let response = handle_line(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"architecture-summary","method":"summarize_architecture","params":{}}"#,
+        )
+        .await
+        .expect("architecture summary should return a response");
+        let result = response
+            .result
+            .expect("architecture summary should succeed");
+        assert_eq!(result["configured"], true);
+        assert_eq!(result["policy_source"], "canonical");
+        assert_eq!(result["components"][0]["id"], "billing");
+        assert_eq!(result["components"][0]["paths"][0], "src/billing.rs");
+        assert_eq!(result["policy_check"]["configured"], true);
+    }
+
     struct McpSnapshotFixture {
         repo: PathBuf,
         store: SqliteStore,
@@ -3104,9 +3186,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        let sequence = SNAPSHOT_REPO_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let repo = std::env::temp_dir().join(format!(
-            "open-kioku-mcp-snapshots-{}-{now}",
-            std::process::id()
+            "open-kioku-mcp-snapshots-{}-{now}-{sequence}",
+            std::process::id(),
         ));
         fs::create_dir_all(&repo).unwrap();
         repo
