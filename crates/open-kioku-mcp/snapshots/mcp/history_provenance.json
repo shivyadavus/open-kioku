@@ -1,0 +1,84 @@
+{
+  "id": "history-provenance",
+  "jsonrpc": "2.0",
+  "result": {
+    "confidence": "exact",
+    "first_seen": {
+      "change_kind": "added",
+      "commit": {
+        "author": {
+          "email": "billing@example.com",
+          "name": "Billing Developer"
+        },
+        "authored_at": "2026-01-02T12:00:00Z",
+        "committed_at": "2026-01-02T12:00:00Z",
+        "committer": null,
+        "file_count": 1,
+        "id": "publish-invoice",
+        "message": "Publish invoice event from the billing route",
+        "parent_ids": [],
+        "summary": "Publish invoice event"
+      },
+      "confidence": "exact",
+      "line_ranges": [],
+      "path": "src/billing.rs",
+      "previous_path": null,
+      "qualified_name": null,
+      "symbol_id": null,
+      "uncertainty": []
+    },
+    "last_touched": {
+      "change_kind": "added",
+      "commit": {
+        "author": {
+          "email": "billing@example.com",
+          "name": "Billing Developer"
+        },
+        "authored_at": "2026-01-02T12:00:00Z",
+        "committed_at": "2026-01-02T12:00:00Z",
+        "committer": null,
+        "file_count": 1,
+        "id": "publish-invoice",
+        "message": "Publish invoice event from the billing route",
+        "parent_ids": [],
+        "summary": "Publish invoice event"
+      },
+      "confidence": "exact",
+      "line_ranges": [],
+      "path": "src/billing.rs",
+      "previous_path": null,
+      "qualified_name": null,
+      "symbol_id": null,
+      "uncertainty": []
+    },
+    "path": "src/billing.rs",
+    "recent_touches": [
+      {
+        "change_kind": "added",
+        "commit": {
+          "author": {
+            "email": "billing@example.com",
+            "name": "Billing Developer"
+          },
+          "authored_at": "2026-01-02T12:00:00Z",
+          "committed_at": "2026-01-02T12:00:00Z",
+          "committer": null,
+          "file_count": 1,
+          "id": "publish-invoice",
+          "message": "Publish invoice event from the billing route",
+          "parent_ids": [],
+          "summary": "Publish invoice event"
+        },
+        "confidence": "exact",
+        "line_ranges": [],
+        "path": "src/billing.rs",
+        "previous_path": null,
+        "qualified_name": null,
+        "symbol_id": null,
+        "uncertainty": []
+      }
+    ],
+    "truncated": false,
+    "uncertainty": []
+  }
+}
