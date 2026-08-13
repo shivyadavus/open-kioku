@@ -1,0 +1,34 @@
+{
+  "id": "semantic-search",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [],
+    "error": "semantic index is not ready; run `ok semantic index` first",
+    "has_more": false,
+    "limit": 1,
+    "offset": 0,
+    "results": [],
+    "returned": 0,
+    "semantic_status": {
+      "backend": "exact-flat",
+      "corrupt": false,
+      "current_dir": "<current_dir>",
+      "dimensions": 384,
+      "disk_usage_bytes": 0,
+      "distance": "cosine",
+      "failed_count": 0,
+      "indexed_count": 0,
+      "manifest": null,
+      "model": "local-hash",
+      "notes": [],
+      "provider": "local",
+      "ready": false,
+      "stale": false,
+      "stale_count": 0,
+      "state": "missing",
+      "vector_count": 0
+    },
+    "truncated": false,
+    "warnings": []
+  }
+}
