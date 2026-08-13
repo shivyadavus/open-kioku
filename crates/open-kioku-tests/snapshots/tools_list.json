@@ -500,7 +500,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed source code using a regular expression pattern, returning exact line-level matches with file path, line number, and matching line content for each hit. Use for exact regular-expression pattern matching against indexed source code lines. Best used after lexical or semantic search has narrowed the search area. Do NOT use for ranked keyword search (use search_code), for natural-language concept search (use semantic_search or hybrid_search), or for syntax-structure-aware queries (use structural_search). This is read-only.",
+        "description": "Search indexed source code using a regular expression pattern, returning exact line-level matches with file path, line number, and matching line content for each hit. Use for exact regular-expression pattern matching against indexed source code lines. Best used after lexical or semantic search has narrowed the search area. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad lexical candidate discovery (use search_code, or structural_search for a structure-shaped phrase). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
