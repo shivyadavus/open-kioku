@@ -2698,6 +2698,14 @@ mod tests {
                 "history_similar_changes.json",
                 r#"{"jsonrpc":"2.0","id":"history-similar-changes","method":"history_similar_changes","params":{"task":"publish invoice","path":"src/billing.rs","limit":5}}"#,
             ),
+            (
+                "ownership_lookup.json",
+                r#"{"jsonrpc":"2.0","id":"ownership-lookup","method":"ownership_lookup","params":{"path":"src/billing.rs"}}"#,
+            ),
+            (
+                "reviewer_suggestions.json",
+                r#"{"jsonrpc":"2.0","id":"reviewer-suggestions","method":"reviewer_suggestions","params":{"path":"src/billing.rs"}}"#,
+            ),
         ] {
             let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
                 .await
@@ -2715,6 +2723,12 @@ mod tests {
     impl McpSnapshotFixture {
         fn new() -> Self {
             let repo = unique_snapshot_repo();
+            fs::create_dir_all(repo.join(".github")).unwrap();
+            fs::write(
+                repo.join(".github/CODEOWNERS"),
+                "src/billing.rs billing@example.com\n",
+            )
+            .unwrap();
             let store = SqliteStore::open(":memory:").unwrap();
             let manifest = fixture_manifest();
             let file = File {
@@ -2984,6 +2998,8 @@ mod tests {
                         *value = json!("<freshness>");
                     } else if key == "generated_at" {
                         *value = json!("<generated_at>");
+                    } else if key == "observed_at" {
+                        *value = json!("<observed_at>");
                     } else if matches!(
                         key.as_str(),
                         "score"

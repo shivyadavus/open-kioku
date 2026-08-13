@@ -1,0 +1,72 @@
+{
+  "id": "reviewer-suggestions",
+  "jsonrpc": "2.0",
+  "result": {
+    "availability": "inferred_from_ownership_and_authors",
+    "generated_at": "<generated_at>",
+    "path": "src/billing.rs",
+    "suggestions": [
+      {
+        "actual_review_evidence": false,
+        "availability": "inferred_from_ownership_and_authors",
+        "confidence": "high",
+        "confidence_breakdown": {
+          "ambiguity_penalty": 0.0,
+          "author_history": 0.36666667461395264,
+          "final_score": "<score>",
+          "freshness": "<freshness>",
+          "ownership": 0.5799999833106995,
+          "review_evidence": 0.0
+        },
+        "inferred_from_authors": true,
+        "rationale": "ownership lookup supports this reviewer candidate; local git author history supports this reviewer candidate; stored author or committer evidence supports this reviewer candidate; stored owner evidence supports this reviewer candidate; actual PR-review evidence was unavailable, so this is inferred",
+        "reviewer": {
+          "email": "billing@example.com",
+          "name": "billing@example.com"
+        },
+        "score": "<score>",
+        "signals": [
+          {
+            "actual_review_evidence": false,
+            "confidence": "medium",
+            "message": "ownership lookup suggested this reviewer candidate: CODEOWNERS matched the queried path; local git history shows author touch evidence",
+            "observed_at": "<observed_at>",
+            "reviewer": {
+              "email": "billing@example.com",
+              "name": "billing@example.com"
+            },
+            "role": "owner",
+            "source": "ownership:src/billing.rs",
+            "source_type": "ownership",
+            "stale": false
+          },
+          {
+            "actual_review_evidence": false,
+            "confidence": "low",
+            "message": "Billing Developer authored 1 of 1 persisted touch(es) for `src/billing.rs`; latest `Publish invoice event`",
+            "observed_at": "<observed_at>",
+            "reviewer": {
+              "email": "billing@example.com",
+              "name": "Billing Developer"
+            },
+            "role": "author",
+            "source": "git author:publish-invoice",
+            "source_type": "git_author",
+            "stale": false
+          }
+        ],
+        "source_types": [
+          "ownership",
+          "git_author"
+        ],
+        "stale": false
+      }
+    ],
+    "uncertainty": [
+      "no symbol-level history is stored for this path",
+      "no reviewer or owner evidence is stored for this path",
+      "no repo memory ownership facts matched this path",
+      "actual PR-review evidence is unavailable in the local index; suggestions are inferred from ownership and/or author history"
+    ]
+  }
+}
