@@ -1105,10 +1105,10 @@ fn tool_description(name: &str, base: &str) -> String {
         "semantic_search" => "Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
         "hybrid_search" => "Use as the default investigative search when both keyword precision and semantic recall are needed — merges candidates from the Tantivy BM25 index and the local semantic vector index, deduplicates by file path, and sorts by combined score. Do NOT use when only exact lexical matches are needed (use search_code), when only conceptual similarity matters (use semantic_search), or when regex patterns are required (use regex_search). Falls back to lexical-only results when the semantic index is not ready. This is read-only.",
         "explain_search_result" => "Use when search results need transparent justification before being relied upon in a plan — returns per-result BM25 and semantic score breakdowns, matched evidence spans, and ranking signal weights. Do NOT use for basic search without explanation (use hybrid_search) or when only lexical matches are needed (use search_code). This is read-only and combines the local Tantivy lexical index with the semantic vector index when available.",
-        "structural_search" => "Use for syntax-aware and structure-shaped code discovery across indexed symbol trees and code chunks, matching patterns such as function signatures, class hierarchies, and code block shapes. Do NOT use for literal text pattern matching (use regex_search), for known symbol lookup (use get_definition), or for ranked keyword search (use search_code). This is read-only.",
+        "structural_search" => "Use for experimental local candidate discovery with structure-shaped queries. It currently returns lexical candidates from the local index; inspect each result's match_reason and do not treat it as an AST-pattern match. Use regex_search for literal patterns, get_definition for a known symbol, or search_code for ordinary ranked keyword search. This is read-only.",
         "get_definition" => "Use after resolving a symbol name to retrieve its defining range and body. Prefer search_symbols for candidate discovery and get_symbol_context when surrounding references and documentation are needed. This is read-only.",
         "get_references" => "Use to find usages of a resolved symbol across the index. Prefer get_callers for caller-only relationships and impact_analysis for broader file-level blast radius. This is read-only.",
-        "get_implementations" => "Use for traits, interfaces, abstract classes, and protocols where implementation sites matter. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
+        "get_implementations" => "Use for experimental local candidate discovery of likely implementation sites. It currently returns lexical candidates rather than a verified type-hierarchy result; inspect match_reason before relying on it. Prefer get_references for all usages and get_definition for the declaration itself. This is read-only.",
         "get_callers" => "Use to trace inbound call-sites to a function, method, or callable symbol from the indexed call graph. Do NOT use for all reference types including imports and type usages (use get_references), for outbound calls (use get_callees), or for finding a route between two nodes (use dependency_path). Accuracy depends on tree-sitter and optional SCIP indexing depth. This is read-only.",
         "get_callees" => "Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
         "get_symbol_context" => "Use to retrieve a comprehensive context bundle for one symbol, including its definition body, file location, enclosing scope, documentation comments, and surrounding code context when indexed. Returns more detail than get_definition. Do NOT use for simple definition lookup only (use get_definition), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
@@ -1174,10 +1174,10 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("hybrid_search", "Perform a hybrid search that merges ranked candidates from the Tantivy BM25 lexical index and the local semantic vector index, deduplicates by file path, and returns combined-score-sorted results with evidence spans. Falls back to lexical-only when the semantic index is unavailable.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural-language or keyword query to match both lexically (BM25) and semantically (vector similarity) against the indexed codebase. Supports identifiers, phrases, and conceptual descriptions."},"limit":{"type":"integer","description":"Maximum number of merged results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of merged results to skip before returning. Defaults to 0."}}})),
         ("explain_search_result", "Run a hybrid search and return per-result ranking breakdowns including BM25 text relevance, semantic similarity, graph proximity, and evidence spans for each retrieved code snippet.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query whose results should be explained with full score breakdowns and evidence."},"limit":{"type":"integer","description":"Maximum number of explained results to return. Defaults to 20, capped at 100."}}})),
-        ("structural_search", "Perform a syntax-aware structural search across indexed symbol trees and code chunks, matching structural patterns such as function signatures, class hierarchies, and code block shapes.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The structural query to match against symbol trees and chunk indices. Supports pattern-based syntax matching."},"limit":{"type":"integer","description":"Maximum number of structural matches to return. Defaults to 20, capped at 100."}}})),
+        ("structural_search", "Use for experimental local candidate discovery with structure-shaped queries. Currently returns lexical candidates from the local index rather than guaranteed AST-pattern matches; inspect match_reason on each result.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Structure-shaped query used for lexical candidate discovery; this is not yet a guaranteed AST pattern."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
         ("get_definition", "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."}}})),
         ("get_references", "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to find references for."},"limit":{"type":"integer","description":"Maximum number of references to return. Defaults to 20, capped at 100."}}})),
-        ("get_implementations", "Find all implementations of a given interface, trait, or abstract class in the repository.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the interface or trait."},"limit":{"type":"integer","description":"Maximum number of implementations to return. Defaults to 20, capped at 100."}}})),
+        ("get_implementations", "Use for experimental local candidate discovery of likely implementation sites. Currently returns lexical candidates, not a verified type-hierarchy result; inspect match_reason on each result.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name used to find lexical implementation candidates; this is not yet a verified hierarchy lookup."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
         ("get_callers", "Find all inbound call-sites to a function, method, or callable symbol from the indexed call graph. Returns caller symbol name, file path, and line range for each call-site found.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol whose inbound callers you want to find."},"limit":{"type":"integer","description":"Maximum number of caller entries to return. Defaults to 20, capped at 100."}}})),
         ("get_callees", "Find all functions, methods, or symbols called by the target symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol whose calls you want to trace."},"limit":{"type":"integer","description":"Maximum number of callees to return. Defaults to 20, capped at 100."}}})),
         ("get_symbol_context", "Retrieve a comprehensive context bundle for one symbol, including its full definition body, file location and range, enclosing scope, documentation comments, and surrounding code context from the local index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to retrieve comprehensive context for."}}})),
@@ -2719,6 +2719,22 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"hybrid-search","method":"hybrid_search","params":{"query":"publish invoice","limit":1}}"#,
             ),
             (
+                "explain_search_result_lexical_fallback.json",
+                r#"{"jsonrpc":"2.0","id":"explain-search","method":"explain_search_result","params":{"query":"publish invoice","limit":1}}"#,
+            ),
+            (
+                "structural_search.json",
+                r#"{"jsonrpc":"2.0","id":"structural-search","method":"structural_search","params":{"query":"publish_invoice_event","limit":1}}"#,
+            ),
+            (
+                "get_implementations.json",
+                r#"{"jsonrpc":"2.0","id":"get-implementations","method":"get_implementations","params":{"query":"publish_invoice_event","limit":1}}"#,
+            ),
+            (
+                "explain_flow.json",
+                r#"{"jsonrpc":"2.0","id":"explain-flow","method":"explain_flow","params":{}}"#,
+            ),
+            (
                 "map_stacktrace_to_code_disabled.json",
                 r#"{"jsonrpc":"2.0","id":"map-stacktrace","method":"map_stacktrace_to_code","params":{"stacktrace":"Error at billing::publish_invoice_event"}}"#,
             ),
@@ -3212,6 +3228,24 @@ mod tests {
             .find(|tool| tool["name"] == "reviewer_suggestions")
             .unwrap();
         assert_eq!(reviewer_suggestions["maturity"], "experimental");
+        let structural_search = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "structural_search")
+            .unwrap();
+        assert_eq!(structural_search["maturity"], "experimental");
+        assert!(structural_search["description"]
+            .as_str()
+            .unwrap()
+            .contains("lexical candidates"));
+        let implementations = tools_ro
+            .iter()
+            .find(|tool| tool["name"] == "get_implementations")
+            .unwrap();
+        assert_eq!(implementations["maturity"], "experimental");
+        assert!(implementations["description"]
+            .as_str()
+            .unwrap()
+            .contains("not a verified type-hierarchy result"));
         let remember_fact = tools_ro
             .iter()
             .find(|tool| tool["name"] == "remember_fact")
