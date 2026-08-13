@@ -2706,6 +2706,18 @@ mod tests {
                 "reviewer_suggestions.json",
                 r#"{"jsonrpc":"2.0","id":"reviewer-suggestions","method":"reviewer_suggestions","params":{"path":"src/billing.rs"}}"#,
             ),
+            (
+                "semantic_status.json",
+                r#"{"jsonrpc":"2.0","id":"semantic-status","method":"semantic_status","params":{}}"#,
+            ),
+            (
+                "semantic_search_not_ready.json",
+                r#"{"jsonrpc":"2.0","id":"semantic-search","method":"semantic_search","params":{"query":"publish invoice","limit":1}}"#,
+            ),
+            (
+                "hybrid_search_lexical_fallback.json",
+                r#"{"jsonrpc":"2.0","id":"hybrid-search","method":"hybrid_search","params":{"query":"publish invoice","limit":1}}"#,
+            ),
         ] {
             let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
                 .await
@@ -3000,6 +3012,8 @@ mod tests {
                         *value = json!("<generated_at>");
                     } else if key == "observed_at" {
                         *value = json!("<observed_at>");
+                    } else if key == "current_dir" {
+                        *value = json!("<current_dir>");
                     } else if matches!(
                         key.as_str(),
                         "score"

@@ -1,0 +1,25 @@
+{
+  "id": "semantic-status",
+  "jsonrpc": "2.0",
+  "result": {
+    "backend": "exact-flat",
+    "corrupt": false,
+    "current_dir": "<current_dir>",
+    "dimensions": 384,
+    "disk_usage_bytes": 0,
+    "distance": "cosine",
+    "failed_count": 0,
+    "indexed_count": 0,
+    "manifest": null,
+    "model": "local-hash",
+    "notes": [
+      "semantic search is disabled in ok.toml; `ok semantic index` is explicit local opt-in"
+    ],
+    "provider": "local",
+    "ready": false,
+    "stale": false,
+    "stale_count": 0,
+    "state": "disabled",
+    "vector_count": 0
+  }
+}
