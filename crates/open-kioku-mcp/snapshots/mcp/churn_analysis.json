@@ -1,0 +1,22 @@
+{
+  "id": "churn-analysis",
+  "jsonrpc": "2.0",
+  "result": {
+    "confidence": "exact",
+    "entity_kind": "file",
+    "generated_at": "<generated_at>",
+    "key": "src/billing.rs",
+    "path": "src/billing.rs",
+    "qualified_name": null,
+    "stats": {
+      "all_time": 1,
+      "hotspot_score": "<score>",
+      "last_30d": 1,
+      "last_90d": 1,
+      "recency_weighted": 1.0,
+      "touch_count": 1
+    },
+    "symbol_id": null,
+    "uncertainty": []
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "id": "history-similar-changes",
+  "jsonrpc": "2.0",
+  "result": {
+    "generated_at": "<generated_at>",
+    "hits": [
+      {
+        "change": {
+          "churn_hotspot_score": "<score>",
+          "cochange_paths": [],
+          "commit": {
+            "author": {
+              "email": "billing@example.com",
+              "name": "Billing Developer"
+            },
+            "authored_at": "2026-01-02T12:00:00Z",
+            "committed_at": "2026-01-02T12:00:00Z",
+            "committer": null,
+            "file_count": 1,
+            "id": "publish-invoice",
+            "message": "Publish invoice event from the billing route",
+            "parent_ids": [],
+            "summary": "Publish invoice event"
+          },
+          "touched_paths": [
+            "src/billing.rs"
+          ],
+          "touched_symbols": []
+        },
+        "confidence": "high",
+        "evidence": [
+          {
+            "commit_id": "publish-invoice",
+            "message": "task text matched commit summary/message token(s): invoice, publish",
+            "query": "publish invoice",
+            "score": "<score>",
+            "source_type": "task_text"
+          },
+          {
+            "commit_id": "publish-invoice",
+            "message": "commit summary and message metadata overlap the requested task",
+            "query": "publish invoice",
+            "score": "<score>",
+            "source_type": "commit_metadata"
+          },
+          {
+            "commit_id": "publish-invoice",
+            "message": "commit touched an exact query path",
+            "path": "src/billing.rs",
+            "query": "src/billing.rs",
+            "score": "<score>",
+            "source_type": "path"
+          },
+          {
+            "commit_id": "publish-invoice",
+            "message": "commit touched a query-related historical churn hotspot",
+            "path": "src/billing.rs",
+            "query": "src/billing.rs",
+            "score": "<score>",
+            "source_type": "churn"
+          }
+        ],
+        "score": "<score>",
+        "uncertainty": []
+      }
+    ],
+    "query": {
+      "paths": [
+        "src/billing.rs"
+      ],
+      "symbols": [],
+      "task": "publish invoice"
+    },
+    "truncated": false,
+    "uncertainty": []
+  }
+}
