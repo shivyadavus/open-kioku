@@ -16,7 +16,6 @@
       "history_similar_changes",
       "ownership_lookup",
       "reviewer_suggestions",
-      "explain_flow",
       "map_stacktrace_to_code",
       "find_errors_for_symbol",
       "find_recent_failures"
@@ -1827,13 +1826,18 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Summarize the high-level architecture flows and directory boundaries within the repository. Use for a high-level narrative of repository flows and boundaries. Prefer architecture_policy_check for enforceable violations and summarize_architecture for structured architecture output. This is read-only.",
-        "experimental": true,
+        "description": "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path. Use to retrieve graph-backed flow evidence from indexed endpoint nodes and directed CALLS edges, alongside heuristic architecture components. Each flow starts at an indexed endpoint and contains a bounded directed call path. Do NOT use for enforceable violations (use architecture_policy_check), for a components-only architecture report (use summarize_architecture), or for arbitrary graph traversal (use query_evidence_graph). This is read-only; repositories without persisted endpoint or call evidence return no flow entries.",
+        "experimental": false,
         "inputSchema": {
-          "properties": {},
+          "properties": {
+            "limit": {
+              "description": "Maximum endpoint flows to return. Defaults to 20, capped at 100.",
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
-        "maturity": "experimental",
+        "maturity": "stable",
         "name": "explain_flow",
         "outputSchema": {
           "additionalProperties": true,
