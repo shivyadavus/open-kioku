@@ -172,9 +172,6 @@ ok watch /absolute/path/to/repo
 
 ## Connect Your Agent
 
-<<<<<<< HEAD
-For a configuration snippet for each supported MCP client, use:
-=======
 Claude Code and Cursor have safe repository-scoped onboarding:
 
 ```sh
@@ -187,7 +184,6 @@ verifies the configuration, index, and local MCP response; `--uninstall` removes
 only Open Kioku-managed entries and guidance files while preserving `.ok/` data.
 
 For a manual configuration snippet, or for other supported MCP clients, use:
->>>>>>> c6dfbda (feat: add safe agent onboarding)
 
 ```sh
 ok mcp install cursor --repo /absolute/path/to/repo
