@@ -58,14 +58,14 @@ if [[ "$copy_button_count" != "2" ]]; then
   exit 1
 fi
 
-readme_quickstart=$'npm install -g open-kioku\nok init .\nok index .\nok mcp install cursor --repo .'
+readme_quickstart=$'npm install -g open-kioku\nok setup agent cursor --repo . --apply'
 if ! grep -Fq -- "$readme_quickstart" "$readme"; then
   echo "README.md first-win commands are stale" >&2
   exit 1
 fi
 
 readme_first_win="$(sed -n '/^## First Win:/,/^## /p' "$readme")"
-for unsupported in 'ok setup agent ' 'ok preflight ' 'preflight_change'; do
+for unsupported in 'ok preflight ' 'preflight_change'; do
   if grep -Fq -- "$unsupported" <<<"$readme_first_win"; then
     echo "README.md first-win documentation advertises an unsupported published command: $unsupported" >&2
     exit 1

@@ -2,11 +2,14 @@ use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
     GraphNodeType, ImportResolution, ResolutionStatus, Symbol, SymbolId, SymbolKind,
 };
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const COMMON_NAME_CAP: usize = 32;
 const MAX_TOKENS_PER_CHUNK: usize = 80;
 const MAX_UNRESOLVED_NOTES: usize = 64;
+const MAX_SIMPLE_NAMES_FOR_FUZZY: usize = 5000;
 
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
@@ -16,6 +19,9 @@ pub struct SymbolRegistry {
     pub by_file: HashMap<FileId, Vec<SymbolId>>,
     pub by_module: HashMap<String, Vec<SymbolId>>,
     pub import_resolutions: Vec<ImportResolution>,
+    by_file_imports: HashMap<FileId, Vec<usize>>,
+    by_name_suffix: HashMap<String, Vec<SymbolId>>,
+    qualified_name_normalized: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,13 +50,23 @@ struct TokenUse {
 impl SymbolRegistry {
     pub fn new(symbols: &[Symbol], import_resolutions: &[ImportResolution]) -> Self {
         let mut registry = Self {
-            by_id: HashMap::new(),
+            by_id: HashMap::with_capacity(symbols.len()),
             by_qualified_name: HashMap::new(),
             by_simple_name: HashMap::new(),
             by_file: HashMap::new(),
             by_module: HashMap::new(),
             import_resolutions: import_resolutions.to_vec(),
+            by_file_imports: HashMap::new(),
+            by_name_suffix: HashMap::new(),
+            qualified_name_normalized: HashMap::new(),
         };
+        for (idx, import) in import_resolutions.iter().enumerate() {
+            registry
+                .by_file_imports
+                .entry(import.import.file_id.clone())
+                .or_default()
+                .push(idx);
+        }
         for symbol in symbols {
             registry.by_id.insert(symbol.id.clone(), symbol.clone());
             registry
@@ -73,6 +89,21 @@ impl SymbolRegistry {
                 .entry(module_name(&symbol.qualified_name))
                 .or_default()
                 .push(symbol.id.clone());
+            let suffix = qualified_name_suffix(&symbol.qualified_name);
+            registry
+                .by_name_suffix
+                .entry(suffix)
+                .or_default()
+                .push(symbol.id.clone());
+            if !registry
+                .qualified_name_normalized
+                .contains_key(&symbol.qualified_name)
+            {
+                registry.qualified_name_normalized.insert(
+                    symbol.qualified_name.clone(),
+                    symbol.qualified_name.replace("::", "."),
+                );
+            }
         }
         registry
     }
@@ -105,11 +136,9 @@ impl SymbolRegistry {
 
     fn resolve_import_target(&self, chunk: &CodeChunk, token: &str) -> Option<Resolution> {
         let mut candidates = Vec::new();
-        for import in self
-            .import_resolutions
-            .iter()
-            .filter(|resolution| resolution.import.file_id == chunk.file_id)
-        {
+        let indices = self.by_file_imports.get(&chunk.file_id);
+        for &idx in indices.into_iter().flatten() {
+            let import = &self.import_resolutions[idx];
             if !matches!(import.status, ResolutionStatus::Resolved) {
                 continue;
             }
@@ -193,24 +222,28 @@ impl SymbolRegistry {
         chunk: &CodeChunk,
         token: &str,
     ) -> Option<Resolution> {
-        let imported_suffixes = self
-            .import_resolutions
-            .iter()
-            .filter(|resolution| resolution.import.file_id == chunk.file_id)
-            .map(|resolution| resolution.import.imported.as_str())
+        let import_indices = self.by_file_imports.get(&chunk.file_id);
+        let imported_suffixes = import_indices
+            .into_iter()
+            .flatten()
+            .map(|&idx| self.import_resolutions[idx].import.imported.as_str())
             .collect::<Vec<_>>();
-        let candidates = self
-            .by_qualified_name
-            .iter()
-            .filter(|(qualified_name, _)| {
-                qualified_name.ends_with(token)
-                    && imported_suffixes
-                        .iter()
-                        .any(|imported| qualified_name.replace("::", ".").ends_with(*imported))
+        let suffix_ids = self.by_name_suffix.get(token);
+        let candidates = suffix_ids
+            .into_iter()
+            .flatten()
+            .filter_map(|id| {
+                let symbol = self.by_id.get(id)?;
+                let normalized = self.qualified_name_normalized.get(&symbol.qualified_name)?;
+                if imported_suffixes
+                    .iter()
+                    .any(|imported| normalized.ends_with(*imported))
+                {
+                    Some(symbol.clone())
+                } else {
+                    None
+                }
             })
-            .flat_map(|(_, ids)| ids)
-            .filter_map(|id| self.by_id.get(id))
-            .cloned()
             .collect::<Vec<_>>();
         resolution_from_candidates(
             "suffix-import-reachability",
@@ -221,13 +254,14 @@ impl SymbolRegistry {
     }
 
     fn resolve_fuzzy(&self, token: &str) -> Option<Resolution> {
+        if token.len() <= 3 || self.by_simple_name.len() > MAX_SIMPLE_NAMES_FOR_FUZZY {
+            return None;
+        }
         let candidates = self
             .by_simple_name
             .iter()
             .filter(|(name, _)| {
-                name.len() > 3
-                    && token.len() > 3
-                    && (name.contains(token) || token.contains(name.as_str()))
+                name.len() > 3 && (name.contains(token) || token.contains(name.as_str()))
             })
             .flat_map(|(_, ids)| ids)
             .filter_map(|id| self.by_id.get(id))
@@ -245,52 +279,65 @@ pub fn resolve_symbol_edges(
     scip_available: bool,
 ) -> RegistryReport {
     let registry = SymbolRegistry::new(symbols, import_resolutions);
-    let mut report = RegistryReport::default();
-    let mut seen = HashSet::new();
-    let mut unresolved_notes = 0usize;
+    let unresolved_count = AtomicUsize::new(0);
 
-    for chunk in chunks {
-        for token_use in token_uses(&chunk.text)
-            .into_iter()
-            .take(MAX_TOKENS_PER_CHUNK)
-        {
-            if chunk
-                .symbol_id
-                .as_ref()
-                .and_then(|id| registry.by_id.get(id))
-                .is_some_and(|symbol| symbol.name == token_use.token)
+    let per_chunk_results: Vec<_> = chunks
+        .par_iter()
+        .map(|chunk| {
+            let mut facts = Vec::new();
+            let mut notes = Vec::new();
+            let mut seen = HashSet::new();
+
+            for token_use in token_uses(&chunk.text)
+                .into_iter()
+                .take(MAX_TOKENS_PER_CHUNK)
             {
-                continue;
-            }
-            let resolution = registry.resolve(chunk, &token_use.token);
-            let key = (
-                chunk.id.as_str(),
-                token_use.token.as_str(),
-                token_use.line,
-                resolution
+                if chunk
+                    .symbol_id
+                    .as_ref()
+                    .and_then(|id| registry.by_id.get(id))
+                    .is_some_and(|symbol| symbol.name == token_use.token)
+                {
+                    continue;
+                }
+                let resolution = registry.resolve(chunk, &token_use.token);
+                let resolved_id = resolution
                     .symbol
                     .as_ref()
                     .map(|symbol| symbol.id.0.as_str())
-                    .unwrap_or("<unresolved>"),
-            );
-            if !seen.insert(format!("{}:{}:{}:{}", key.0, key.1, key.2, key.3)) {
-                continue;
-            }
+                    .unwrap_or("<unresolved>");
+                let dedup_key = (
+                    token_use.token.clone(),
+                    token_use.line,
+                    resolved_id.to_owned(),
+                );
+                if !seen.insert(dedup_key) {
+                    continue;
+                }
 
-            if let Some(note) = quality_note(&token_use.token, &resolution) {
-                report.quality_notes.push(note);
+                if let Some(note) = quality_note(&token_use.token, &resolution) {
+                    notes.push(note);
+                }
+                if let Some(fact) =
+                    fact_for_resolution(chunk, &token_use, &resolution, scip_available)
+                {
+                    facts.push(fact);
+                } else if unresolved_count.load(Ordering::Relaxed) < MAX_UNRESOLVED_NOTES {
+                    unresolved_count.fetch_add(1, Ordering::Relaxed);
+                    notes.push(format!(
+                        "symbol registry unresolved `{}` in chunk {}",
+                        token_use.token, chunk.id
+                    ));
+                }
             }
-            if let Some(fact) = fact_for_resolution(chunk, &token_use, &resolution, scip_available)
-            {
-                report.analysis_facts.push(fact);
-            } else if unresolved_notes < MAX_UNRESOLVED_NOTES {
-                unresolved_notes += 1;
-                report.quality_notes.push(format!(
-                    "symbol registry unresolved `{}` in chunk {}",
-                    token_use.token, chunk.id
-                ));
-            }
-        }
+            (facts, notes)
+        })
+        .collect();
+
+    let mut report = RegistryReport::default();
+    for (facts, notes) in per_chunk_results {
+        report.analysis_facts.extend(facts);
+        report.quality_notes.extend(notes);
     }
 
     report.quality_notes.sort();
@@ -434,7 +481,11 @@ fn push_token_use(
 }
 
 fn symbol_matches_token(symbol: &Symbol, token: &str) -> bool {
-    symbol.name == token || symbol.qualified_name.ends_with(&format!("::{token}"))
+    symbol.name == token
+        || (symbol.qualified_name.len() > token.len() + 2
+            && symbol.qualified_name.ends_with(token)
+            && symbol.qualified_name.as_bytes()[symbol.qualified_name.len() - token.len() - 2..]
+                .starts_with(b"::"))
 }
 
 fn import_mentions_token(import: &ImportResolution, token: &str) -> bool {
@@ -451,6 +502,14 @@ fn module_name(qualified_name: &str) -> String {
         .rsplit_once("::")
         .map(|(module, _)| module.to_string())
         .unwrap_or_default()
+}
+
+fn qualified_name_suffix(qualified_name: &str) -> String {
+    qualified_name
+        .rsplit_once("::")
+        .or_else(|| qualified_name.rsplit_once('.'))
+        .map(|(_, suffix)| suffix.to_string())
+        .unwrap_or_else(|| qualified_name.to_string())
 }
 
 fn graph_node_type(symbol: &Symbol) -> GraphNodeType {

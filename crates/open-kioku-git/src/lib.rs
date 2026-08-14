@@ -425,7 +425,7 @@ fn parse_commit_patches(raw: &[u8]) -> Result<Vec<CommitPatch>> {
             ));
         };
         let commit_id = GitCommitId::new(git_text(&record[..metadata_end], "commit id")?);
-        let patch = git_text(&record[metadata_end + 1..], "patch")?;
+        let patch = String::from_utf8_lossy(&record[metadata_end + 1..]).into_owned();
         commits.push(CommitPatch {
             commit_id,
             files: parse_file_patches(&patch)?,
