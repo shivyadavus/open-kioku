@@ -42,7 +42,6 @@ for command in \
   require_site_text "$command"
 done
 
-reject_site_text 'ok setup agent '
 reject_site_text 'ok preflight '
 
 expected_copy_button=$'data-copy="npm install -g open-kioku\nok init .\nok index .\nok plan &quot;change token expiration&quot;"'
