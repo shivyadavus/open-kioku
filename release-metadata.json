@@ -1,6 +1,6 @@
 {
-  "version": "2.3.0",
-  "tag": "v2.3.0",
+  "version": "2.4.0",
+  "tag": "v2.4.0",
   "repository": "https://github.com/shivyadavus/open-kioku",
   "cli_crate": "open-kioku-cli",
   "npm": {
