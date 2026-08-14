@@ -7,8 +7,32 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [2.4.0] — 2026-08-14
+
+### Added
+- Implemented 1-command agent onboarding command (`ok setup agent <agent>`) for Cursor, Claude Code, and Codex.
+
+### Changed
+- Scaled symbol-edge resolution for large codebases by pre-indexing file imports, leveraging Rayon chunk parallelization, zero-allocation matching keys, pre-indexing symbol suffixes, and capping fuzzy name scans.
+- Improved `publish-crates.sh` with a 15-second crates.io index propagation pause between workspace crate publications.
+
 ### Fixed
-- Removed the nonfunctional experimental `apply_patch` MCP tool and its setup hints. Open Kioku now consistently keeps source edits in the user's normal editor while retaining evidence-backed patch planning and verification.
+- Fixed non-UTF8 binary patch parsing in `open-kioku-git`.
+- Removed experimental nonfunctional `apply_patch` MCP tool.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-x86_64`
+- `ok-macos-x86_64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
 
 ---
 
@@ -334,6 +358,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - LICENSE copyright holder updated to Shiv Yadav
 - Added `NOTICE` file as required by Apache License 2.0
 
+[2.4.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.4.0
 [2.3.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.3.0
 [2.2.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.3
 [2.2.2]: https://github.com/shivyadavus/open-kioku/releases/tag/v2.2.2
