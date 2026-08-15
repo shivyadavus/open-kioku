@@ -1,0 +1,93 @@
+name: agent-fix-workflow-context
+
+on:
+  push:
+    branches:
+      - agent/v2-semantic-resolution-pipeline
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v2-semantic-resolution-pipeline
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Normalize natural-language workflow terms
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-context/src/lib.rs')
+          text = path.read_text()
+
+          old_alias = '''fn task_token_alias(token: &str) -> String {
+    match token {
+        "configuration" | "configurations" | "configured" | "configuring" => "config".into(),
+        "defaults" => "default".into(),
+        "histories" => "history".into(),
+        _ => token.into(),
+    }
+}'''
+          new_alias = '''fn task_token_alias(token: &str) -> String {
+    match token {
+        "configuration" | "configurations" | "configured" | "configuring" => "config".into(),
+        "defaults" => "default".into(),
+        "histories" => "history".into(),
+        "verify" | "verifies" | "verified" | "verifying" => "verification".into(),
+        "changed" | "changes" | "changing" => "change".into(),
+        "plans" | "planned" | "planning" => "plan".into(),
+        _ => token.into(),
+    }
+}'''
+          if text.count(old_alias) != 1:
+              raise SystemExit('expected exactly one task_token_alias block; refusing to patch')
+          text = text.replace(old_alias, new_alias, 1)
+
+          anchor = '''    #[test]
+    fn expanded_task_search_terms_include_config_aliases() {
+        let terms = expanded_task_search_terms("add history configuration defaults");
+
+        assert!(terms.iter().any(|term| term == "config"));
+        assert!(terms.iter().any(|term| term == "default"));
+        assert!(terms.iter().any(|term| term == "history config"));
+        assert!(terms.iter().any(|term| term == "config default"));
+    }
+'''
+          addition = anchor + '''
+    #[test]
+    fn expanded_task_search_terms_normalize_verification_workflow_language() {
+        let terms = expanded_task_search_terms("verify changed files against saved plans");
+
+        assert!(terms.iter().any(|term| term == "verification"));
+        assert!(terms.iter().any(|term| term == "change"));
+        assert!(terms.iter().any(|term| term == "plan"));
+        assert!(terms.iter().any(|term| term == "verification change"));
+        assert!(terms.iter().any(|term| term == "saved plan"));
+    }
+'''
+          if text.count(anchor) != 1:
+              raise SystemExit('expected config alias test anchor exactly once; refusing to patch')
+          text = text.replace(anchor, addition, 1)
+          path.write_text(text)
+          PY
+
+          rm .github/workflows/agent-fix-workflow-context.yml
+          cargo fmt --all
+          cargo test -p open-kioku-context
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/open-kioku-context/src/lib.rs .github/workflows/agent-fix-workflow-context.yml
+          git commit -m "fix: normalize verification workflow context terms"
+          git push origin HEAD:agent/v2-semantic-resolution-pipeline
