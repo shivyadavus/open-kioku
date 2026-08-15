@@ -209,52 +209,60 @@ impl InMemoryGraph {
             let from_node = identity::symbol_node_id(from_sym);
             let to_node = identity::symbol_node_id(to_sym);
             let edge_id = identity::edge_id(rel.edge_type.clone(), &from_node, &to_node, None);
-            let file_range = rel.call_site.as_ref().map(|sr| {
-                let p = rel
-                    .evidence
-                    .first()
-                    .and_then(|e| e.file_range.as_ref())
-                    .map(|fr| fr.path.clone())
-                    .unwrap_or_else(|| {
-                        files_by_id
-                            .get(from_sym.file_id.0.as_str())
-                            .map(|f| f.path.clone())
-                            .unwrap_or_default()
-                    });
-                FileRange {
-                    path: p,
-                    line_range: Some(LineRange {
-                        start: sr.start_line,
-                        end: sr.end_line,
-                    }),
-                }
+            let source_path = rel
+                .evidence
+                .first()
+                .and_then(|e| e.file_range.as_ref())
+                .map(|fr| fr.path.clone())
+                .or_else(|| {
+                    files_by_id
+                        .get(from_sym.file_id.0.as_str())
+                        .map(|file| file.path.clone())
+                })
+                .unwrap_or_default();
+            let file_range = rel.call_site.as_ref().map(|sr| FileRange {
+                path: source_path.clone(),
+                line_range: Some(LineRange {
+                    start: sr.start_line,
+                    end: sr.end_line,
+                }),
             });
-            let mut properties = std::collections::BTreeMap::new();
-            let mut call_sites_vec = Vec::new();
-            for ev in &rel.evidence {
-                if let Some(fr) = &ev.file_range {
-                    let s = format!("{}:{:?}", fr.path.display(), fr.line_range);
-                    if !call_sites_vec.contains(&s) {
-                        call_sites_vec.push(s);
-                    }
-                }
-            }
-            if let Some(fr) = &file_range {
-                let s = format!("{}:{:?}", fr.path.display(), fr.line_range);
-                if !call_sites_vec.contains(&s) {
-                    call_sites_vec.push(s);
-                }
-            }
-            if !call_sites_vec.is_empty() {
+
+            let mut properties = BTreeMap::new();
+            if let Some(sr) = &rel.call_site {
                 properties.insert(
                     "call_sites".to_string(),
-                    serde_json::Value::Array(
-                        call_sites_vec
-                            .into_iter()
-                            .map(serde_json::Value::String)
-                            .collect(),
-                    ),
+                    json!([{
+                        "path": source_path.to_string_lossy(),
+                        "start_line": sr.start_line,
+                        "start_column": sr.start_column,
+                        "end_line": sr.end_line,
+                        "end_column": sr.end_column,
+                    }]),
                 );
+            } else {
+                let fallback_sites = rel
+                    .evidence
+                    .iter()
+                    .filter_map(|ev| ev.file_range.as_ref())
+                    .map(|fr| {
+                        let (start_line, end_line) = fr
+                            .line_range
+                            .as_ref()
+                            .map(|range| (Some(range.start), Some(range.end)))
+                            .unwrap_or((None, None));
+                        json!({
+                            "path": fr.path.to_string_lossy(),
+                            "start_line": start_line,
+                            "start_column": serde_json::Value::Null,
+                            "end_line": end_line,
+                            "end_column": serde_json::Value::Null,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !fallback_sites.is_empty() {
+                    properties.insert("call_sites".to_string(), json!(fallback_sites));
+                }
             }
 
             buffer.insert_edge(GraphEdge {
@@ -561,8 +569,8 @@ mod tests {
     use super::*;
     use open_kioku_core::{
         AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdgeType,
-        GraphNodeType, Import, Language, LineRange, RepositoryId, Symbol, SymbolId, SymbolKind,
-        SymbolOccurrence,
+        GraphNodeType, Import, Language, LineRange, RepositoryId, SourceRange, Symbol, SymbolId,
+        SymbolKind, SymbolOccurrence,
     };
     use std::path::PathBuf;
 
@@ -605,7 +613,7 @@ mod tests {
 
         let graph = InMemoryGraph::from_index_with_occurrences(&[file_a], &[sym_a], &[], &[]);
         assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.edges.len(), 1); // file defines symbol
+        assert_eq!(graph.edges.len(), 1);
         assert!(graph.nodes.contains_key("file:a.rs"));
         assert!(graph.nodes.contains_key("symbol:s1"));
         assert!(graph.edges[0].id.0.starts_with("edge:"));
@@ -763,6 +771,65 @@ mod tests {
     }
 
     #[test]
+    fn resolved_relationships_preserve_same_line_call_columns() {
+        let file = make_file("src/service");
+        let caller = make_symbol("caller", "src/service", "run");
+        let callee = make_symbol("callee", "src/service", "save");
+        let relationships = vec![
+            ResolvedRelationship {
+                from: caller.id.clone(),
+                to: callee.id.clone(),
+                edge_type: GraphEdgeType::Calls,
+                confidence: Confidence::Exact,
+                call_site: Some(SourceRange {
+                    start_line: 10,
+                    start_column: 5,
+                    end_line: 10,
+                    end_column: 11,
+                }),
+                evidence: Vec::new(),
+            },
+            ResolvedRelationship {
+                from: caller.id.clone(),
+                to: callee.id.clone(),
+                edge_type: GraphEdgeType::Calls,
+                confidence: Confidence::Exact,
+                call_site: Some(SourceRange {
+                    start_line: 10,
+                    start_column: 20,
+                    end_line: 10,
+                    end_column: 26,
+                }),
+                evidence: Vec::new(),
+            },
+        ];
+
+        let graph = InMemoryGraph::from_index_with_resolved_relationships(
+            &[file],
+            &[caller, callee],
+            &[],
+            &[],
+            &[],
+            &[],
+            &relationships,
+        );
+        let calls = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == GraphEdgeType::Calls)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        let sites = calls[0]
+            .properties
+            .get("call_sites")
+            .and_then(|value| value.as_array())
+            .expect("Calls edge should retain structured call sites");
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0]["start_column"], 5);
+        assert_eq!(sites[1]["start_column"], 20);
+    }
+
+    #[test]
     fn test_duplicate_import_edges_are_collapsed() {
         let file = File {
             id: FileId::new("f1"),
@@ -840,7 +907,6 @@ mod tests {
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
         };
-        // Duplicate reference to same symbol from same file
         let occ2 = SymbolOccurrence {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
@@ -1015,12 +1081,10 @@ mod tests {
             &[fact],
         );
 
-        // Assert files
         assert!(graph
             .nodes
             .values()
             .any(|n| n.node_type == GraphNodeType::File));
-        // Assert symbols
         assert!(graph
             .nodes
             .values()
@@ -1029,12 +1093,10 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.edge_type == GraphEdgeType::Defines));
-        // Assert occurrences
         assert!(graph
             .edges
             .iter()
             .any(|e| e.edge_type == GraphEdgeType::References));
-        // Assert imports
         assert!(graph
             .edges
             .iter()
@@ -1043,7 +1105,6 @@ mod tests {
             .nodes
             .values()
             .any(|n| n.node_type == GraphNodeType::Module));
-        // Assert facts
         assert!(graph
             .edges
             .iter()
