@@ -8,6 +8,7 @@ pub type FileMap = HashMap<String, Vec<FileId>>;
 
 /// Ambiguity-aware module/file lookup used by V2 import resolution.
 /// Implementations must expose all candidates so `unique_file` can fail closed.
+/// Ambiguous keys deliberately remain unresolved instead of relying on insertion order.
 pub trait FileLookup {
     fn candidates(&self, key: &str) -> Vec<FileId>;
 
