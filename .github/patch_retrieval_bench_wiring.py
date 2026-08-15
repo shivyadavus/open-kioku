@@ -109,4 +109,26 @@ new_group = '''        by_task_family: summarize_retrieval_groups(&cases, |case|
         }),'''
 if text.count(old_group) != 1:
     raise SystemExit("retrieval task family grouping changed")
-retrieval.write_text(text.replace(old_group, new_group, 1))
+text = text.replace(old_group, new_group, 1)
+
+old_symbol_key = 'result.symbol.as_deref().unwrap_or("")'
+new_symbol_key = '''result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.qualified_name.as_str())
+                    .unwrap_or("")'''
+if text.count(old_symbol_key) != 1:
+    raise SystemExit("retrieval candidate symbol identity block changed")
+text = text.replace(old_symbol_key, new_symbol_key, 1)
+
+old_symbol_tokens = 'result.symbol.as_deref().map(str::len).unwrap_or(0)'
+new_symbol_tokens = '''result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.chars().count())
+            .unwrap_or(0)'''
+if text.count(old_symbol_tokens) != 1:
+    raise SystemExit("retrieval token estimator symbol block changed")
+text = text.replace(old_symbol_tokens, new_symbol_tokens, 1)
+
+retrieval.write_text(text)
