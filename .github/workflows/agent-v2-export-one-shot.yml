@@ -28,20 +28,16 @@ jobs:
 
           path = Path('crates/open-kioku-ingest/src/lib.rs')
           text = path.read_text()
-          old = '''                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
-                        symbol_index.by_file.get(&exp.file_id).and_then(|syms| {
-                            syms.iter()
-                                .find(|id| {
-                                    symbol_index
-                                        .get(id)
-                                        .map(|s| s.name == *local)
-                                        .unwrap_or(false)
-                                })
-                                .cloned()
-                        })
-                    }),
-          '''
-          new = '''                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
+          start_marker = 'origin_symbol: exp.local_name.as_ref().and_then(|local| {'
+          end_marker = 'source_module: Some(mod_id),'
+          if text.count(start_marker) != 1:
+              raise SystemExit(f'expected exactly one export origin marker, found {text.count(start_marker)}')
+          start = text.index(start_marker)
+          line_start = text.rfind('\n', 0, start) + 1
+          end = text.find(end_marker, start)
+          if end < 0:
+              raise SystemExit('export source_module end marker not found after origin block')
+          replacement = '''                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
                         let candidates = symbol_index
                             .by_file
                             .get(&exp.file_id)
@@ -60,10 +56,8 @@ jobs:
                             _ => None,
                         }
                     }),
-          '''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one export origin first-match block, found {text.count(old)}')
-          path.write_text(text.replace(old, new, 1))
+                    '''
+          path.write_text(text[:line_start] + replacement + text[end:])
           Path('.github/workflows/agent-v2-export-one-shot.yml').unlink()
           PY
 
