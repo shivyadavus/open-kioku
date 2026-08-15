@@ -6,12 +6,32 @@ use std::collections::HashMap;
 
 pub type FileMap = HashMap<String, Vec<FileId>>;
 
-fn unique_file_for_key(file_map: &FileMap, key: &str) -> Option<FileId> {
-    let candidates = file_map.get(key)?;
-    if candidates.len() == 1 {
-        Some(candidates[0].clone())
-    } else {
-        None
+pub trait FileLookup {
+    fn candidates(&self, key: &str) -> Vec<FileId>;
+
+    fn contains_key_candidate(&self, key: &str) -> bool {
+        !self.candidates(key).is_empty()
+    }
+
+    fn unique_file(&self, key: &str) -> Option<FileId> {
+        let candidates = self.candidates(key);
+        if candidates.len() == 1 {
+            Some(candidates[0].clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl FileLookup for FileMap {
+    fn candidates(&self, key: &str) -> Vec<FileId> {
+        self.get(key).cloned().unwrap_or_default()
+    }
+}
+
+impl FileLookup for HashMap<String, FileId> {
+    fn candidates(&self, key: &str) -> Vec<FileId> {
+        self.get(key).cloned().into_iter().collect()
     }
 }
 
@@ -21,15 +41,15 @@ pub struct ImportRegistry {
 }
 
 impl ImportRegistry {
-    pub fn resolve_site(&mut self, site: &ImportSite, file_map: &FileMap) {
+    pub fn resolve_site<M: FileLookup>(&mut self, site: &ImportSite, file_map: &M) {
         let has_relative_prefix = site.source.starts_with("./") || site.source.starts_with("../");
-        let known_internal_key = file_map.contains_key(&site.source);
+        let known_internal_key = file_map.contains_key_candidate(&site.source);
         let origin = if has_relative_prefix || known_internal_key {
             ImportOrigin::Internal
         } else {
             ImportOrigin::Unknown
         };
-        let target_file = unique_file_for_key(file_map, &site.source);
+        let target_file = file_map.unique_file(&site.source);
 
         for binding in &site.bindings {
             let import_binding = ImportBinding {
@@ -53,22 +73,23 @@ impl ImportRegistry {
         }
     }
 
-    pub fn resolve_symbols(
+    pub fn resolve_symbols<M: FileLookup>(
         &mut self,
         symbols: &open_kioku_resolution::SymbolIndex,
-        module_to_file: &FileMap,
+        module_to_file: &M,
     ) {
         for list in self.index.by_file_local_name.values_mut() {
             for binding in list.iter_mut() {
                 let target_file_id = binding
                     .target_file
                     .clone()
-                    .or_else(|| unique_file_for_key(module_to_file, &binding.source_module))
+                    .or_else(|| module_to_file.unique_file(&binding.source_module))
                     .or_else(|| {
                         if binding.source_module.contains('.') {
                             let (pkg, cls) = binding.source_module.rsplit_once('.')?;
-                            unique_file_for_key(module_to_file, &format!("{pkg}.{cls}"))
-                                .or_else(|| unique_file_for_key(module_to_file, pkg))
+                            module_to_file
+                                .unique_file(&format!("{pkg}.{cls}"))
+                                .or_else(|| module_to_file.unique_file(pkg))
                         } else {
                             None
                         }
@@ -176,6 +197,37 @@ mod tests {
             .lookup(&FileId::new("file:consumer.py"), None, "run")[0];
         assert_eq!(binding.origin, ImportOrigin::Internal);
         assert_eq!(binding.target_file, None);
+    }
+
+    #[test]
+    fn legacy_single_value_map_remains_supported_during_indexer_migration() {
+        let mut registry = ImportRegistry::default();
+        let file_map = HashMap::from([("@app/repo".to_string(), FileId::new("file:repo.ts"))]);
+        let site = ImportSite {
+            file_id: FileId::new("file:main.ts"),
+            scope_id: None,
+            source: "@app/repo".into(),
+            bindings: vec![ImportedName {
+                imported: "Repository".into(),
+                local: "Repo".into(),
+            }],
+            is_glob: false,
+            is_type_only: false,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 40,
+            },
+        };
+        registry.resolve_site(&site, &file_map);
+        assert_eq!(
+            registry
+                .index
+                .lookup(&FileId::new("file:main.ts"), None, "Repo")[0]
+                .target_file,
+            Some(FileId::new("file:repo.ts"))
+        );
     }
 
     #[test]
