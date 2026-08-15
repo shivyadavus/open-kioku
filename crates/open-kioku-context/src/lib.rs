@@ -1308,6 +1308,9 @@ fn task_token_alias(token: &str) -> String {
         "configuration" | "configurations" | "configured" | "configuring" => "config".into(),
         "defaults" => "default".into(),
         "histories" => "history".into(),
+        "verify" | "verifies" | "verified" | "verifying" => "verification".into(),
+        "changed" | "changes" | "changing" => "change".into(),
+        "plans" | "planned" | "planning" => "plan".into(),
         _ => token.into(),
     }
 }
