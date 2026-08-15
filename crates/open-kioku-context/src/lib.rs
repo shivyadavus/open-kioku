@@ -199,12 +199,6 @@ impl<'a> ContextPackBuilder<'a> {
             .filter_map(|result| result.symbol.clone())
             .take(10)
             .collect::<Vec<_>>();
-        let mut tests = Vec::new();
-        let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
-        for result in primary.iter().take(3) {
-            tests.extend(selector.for_changed_path_with_evidence(&result.path, 5)?);
-        }
-        tests.truncate(10);
         let impact = if expand_impact {
             if let Some(first) = primary.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
@@ -253,6 +247,27 @@ impl<'a> ContextPackBuilder<'a> {
             task,
             &mut supporting_files,
         )?;
+
+        let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
+        let mut tests_by_id = std::collections::BTreeMap::new();
+        for result in validation_seed_results(&primary_files, &supporting_files, 5) {
+            for test in selector.for_changed_path_with_evidence(&result.path, 5)? {
+                // Validation seeds are ordered by evidence strength. Keep the first observation
+                // of a test so runtime-corroborated selection is not overwritten by a weaker path.
+                tests_by_id.entry(test.id.clone()).or_insert(test);
+            }
+        }
+        let mut tests = tests_by_id.into_values().collect::<Vec<_>>();
+        tests.sort_by(|left, right| {
+            right
+                .confidence
+                .score()
+                .partial_cmp(&left.confidence.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        tests.truncate(10);
+
         let runtime_evidence = runtime_signals
             .iter()
             .map(runtime_signal_evidence)
@@ -350,6 +365,50 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn validation_seed_results<'a>(
+    primary_files: &'a [SearchResult],
+    supporting_files: &'a [SearchResult],
+    limit: usize,
+) -> Vec<&'a SearchResult> {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let ordered = primary_files
+        .iter()
+        .filter(|result| has_runtime_corroboration(result))
+        .chain(
+            supporting_files
+                .iter()
+                .filter(|result| has_runtime_corroboration(result)),
+        )
+        .chain(primary_files.iter())
+        .chain(supporting_files.iter());
+
+    for result in ordered {
+        if is_docs_or_test_path(&result.path.to_string_lossy()) {
+            continue;
+        }
+        let normalized = normalize_path(&result.path);
+        if !seen.insert(normalized) {
+            continue;
+        }
+        selected.push(result);
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    selected
+}
+
+fn has_runtime_corroboration(result: &SearchResult) -> bool {
+    result.score_breakdown.iter().any(|component| {
+        component.signal == "runtime_corroboration" && component.contribution > 0.0
+    }) || result.evidence.iter().any(|evidence| {
+        evidence
+            .to_ascii_lowercase()
+            .contains("runtime corroboration")
+    })
 }
 
 fn negative_evidence_for_context(
