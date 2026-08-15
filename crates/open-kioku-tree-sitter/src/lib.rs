@@ -1,9 +1,42 @@
 use open_kioku_core::{
-    Confidence, EvidenceSourceType, File, Language, LineRange, Symbol, SymbolId, SymbolKind,
+    Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
+    ImportedName, ImportSite, InheritanceKind, InheritanceSite, Language, LineRange,
+    ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind,
+    SyntaxFacts, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language as TsLanguage, Node, Parser, TreeCursor};
+
+pub struct ParseContext {
+    pub scope_stack: Vec<ScopeId>,
+    pub symbol_stack: Vec<SymbolId>,
+    pub next_scope_counter: u32,
+}
+
+impl ParseContext {
+    pub fn new() -> Self {
+        Self {
+            scope_stack: Vec::new(),
+            symbol_stack: Vec::new(),
+            next_scope_counter: 0,
+        }
+    }
+
+    pub fn current_scope(&self) -> Option<ScopeId> {
+        self.scope_stack.last().cloned()
+    }
+
+    pub fn current_symbol(&self) -> Option<SymbolId> {
+        self.symbol_stack.last().cloned()
+    }
+}
+
+impl Default for ParseContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub fn parser_for(language: &Language) -> Result<Parser> {
     let mut parser = Parser::new();
@@ -16,7 +49,7 @@ pub fn parser_for(language: &Language) -> Result<Parser> {
     Ok(parser)
 }
 
-pub fn parse_symbols(file: &File, content: &str) -> Result<Vec<Symbol>> {
+pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
     let mut parser = parser_for(&file.language)?;
     let tree = parser.parse(content, None).ok_or_else(|| OkError::Parse {
         path: file.path.clone(),
@@ -28,11 +61,31 @@ pub fn parse_symbols(file: &File, content: &str) -> Result<Vec<Symbol>> {
             message: "tree-sitter parse contains syntax errors".into(),
         });
     }
-    let mut symbols = Vec::new();
-    walk(file, content, tree.root_node(), &mut symbols);
-    symbols.sort_by_key(|symbol| symbol.range.as_ref().map(|range| range.start).unwrap_or(0));
-    symbols.dedup_by(|a, b| a.id == b.id);
-    Ok(symbols)
+
+    let mut out = SyntaxFacts::default();
+    let mut ctx = ParseContext::new();
+
+    let file_scope_id = ScopeId::new(format!("{}:scope:file:0", file.path.display()));
+    let file_scope = Scope {
+        id: file_scope_id.clone(),
+        file_id: file.id.clone(),
+        parent_id: None,
+        owner_symbol_id: None,
+        kind: ScopeKind::File,
+        range: node_source_range(tree.root_node()),
+    };
+    out.scopes.push(file_scope);
+    ctx.scope_stack.push(file_scope_id);
+
+    walk(file, content, tree.root_node(), &mut ctx, &mut out);
+
+    out.symbols.sort_by_key(|symbol| symbol.range.as_ref().map(|range| range.start).unwrap_or(0));
+    out.symbols.dedup_by(|a, b| a.id == b.id);
+    Ok(out)
+}
+
+pub fn parse_symbols(file: &File, content: &str) -> Result<Vec<Symbol>> {
+    Ok(parse_file(file, content)?.symbols)
 }
 
 pub fn tree_sitter_language(language: &Language) -> Result<TsLanguage> {
@@ -51,8 +104,73 @@ pub fn tree_sitter_language(language: &Language) -> Result<TsLanguage> {
     }
 }
 
-fn walk(file: &File, content: &str, node: Node<'_>, symbols: &mut Vec<Symbol>) {
-    if let Some((name_node, kind)) = symbol_name_node(file, node) {
+fn node_source_range(node: Node<'_>) -> SourceRange {
+    let start = node.start_position();
+    let end = node.end_position();
+    SourceRange {
+        start_line: (start.row + 1) as u32,
+        start_column: (start.column + 1) as u32,
+        end_line: (end.row + 1) as u32,
+        end_column: (end.column + 1) as u32,
+    }
+}
+
+fn is_scope_node(file: &File, node: Node<'_>) -> Option<ScopeKind> {
+    let kind = node.kind();
+    match file.language {
+        Language::Rust => match kind {
+            "mod_item" => Some(ScopeKind::Module),
+            "struct_item" | "enum_item" | "union_item" => Some(ScopeKind::Class),
+            "trait_item" | "impl_item" => Some(ScopeKind::Trait),
+            "function_item" => Some(ScopeKind::Function),
+            "block" => Some(ScopeKind::Block),
+            _ => None,
+        },
+        Language::Python => match kind {
+            "class_definition" => Some(ScopeKind::Class),
+            "function_definition" => Some(ScopeKind::Function),
+            "block" => Some(ScopeKind::Block),
+            _ => None,
+        },
+        Language::JavaScript | Language::TypeScript => match kind {
+            "class_declaration" => Some(ScopeKind::Class),
+            "interface_declaration" => Some(ScopeKind::Interface),
+            "function_declaration" | "generator_function_declaration" | "method_definition" => {
+                Some(ScopeKind::Function)
+            }
+            "arrow_function" => Some(ScopeKind::Closure),
+            "statement_block" => Some(ScopeKind::Block),
+            _ => None,
+        },
+        Language::Java => match kind {
+            "class_declaration" | "record_declaration" | "enum_declaration" => {
+                Some(ScopeKind::Class)
+            }
+            "interface_declaration" => Some(ScopeKind::Interface),
+            "method_declaration" | "constructor_declaration" => Some(ScopeKind::Method),
+            "block" => Some(ScopeKind::Block),
+            _ => None,
+        },
+        Language::Go => match kind {
+            "function_declaration" | "method_declaration" => Some(ScopeKind::Function),
+            "block" => Some(ScopeKind::Block),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn walk(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &mut ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let mut pushed_symbol: Option<SymbolId> = None;
+    let mut pushed_scope: Option<ScopeId> = None;
+
+    if let Some((name_node, symbol_kind)) = symbol_name_node(file, node) {
         if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
             if !name.is_empty() {
                 let line_range = LineRange {
@@ -60,29 +178,74 @@ fn walk(file: &File, content: &str, node: Node<'_>, symbols: &mut Vec<Symbol>) {
                     end: (node.end_position().row + 1) as u32,
                 };
                 let qualified_name = qualified_name(file, name);
-                symbols.push(Symbol {
-                    id: SymbolId::new(stable_id(&format!(
-                        "{}:{}:{}",
-                        file.path.display(),
-                        line_range.start,
-                        qualified_name
-                    ))),
+                let symbol_id = SymbolId::new(stable_id(&format!(
+                    "{}:{}:{}",
+                    file.path.display(),
+                    line_range.start,
+                    qualified_name
+                )));
+
+                let symbol = Symbol {
+                    id: symbol_id.clone(),
                     name: name.to_string(),
                     qualified_name,
-                    kind,
+                    kind: symbol_kind,
                     file_id: file.id.clone(),
                     range: Some(line_range),
                     language: file.language.clone(),
                     confidence: Confidence::High,
                     provenance: EvidenceSourceType::TreeSitter,
-                });
+                    module_id: None,
+                    parent_symbol_id: ctx.current_symbol(),
+                    scope_id: ctx.current_scope(),
+                    signature: None,
+                    visibility: Visibility::Public,
+                };
+
+                out.symbols.push(symbol);
+                ctx.symbol_stack.push(symbol_id.clone());
+                pushed_symbol = Some(symbol_id);
             }
         }
     }
 
+    if let Some(scope_kind) = is_scope_node(file, node) {
+        ctx.next_scope_counter += 1;
+        let scope_id = ScopeId::new(format!(
+            "{}:scope:{}:{}",
+            file.path.display(),
+            node.start_position().row + 1,
+            ctx.next_scope_counter
+        ));
+        let scope = Scope {
+            id: scope_id.clone(),
+            file_id: file.id.clone(),
+            parent_id: ctx.current_scope(),
+            owner_symbol_id: ctx.current_symbol(),
+            kind: scope_kind,
+            range: node_source_range(node),
+        };
+        out.scopes.push(scope);
+        ctx.scope_stack.push(scope_id.clone());
+        pushed_scope = Some(scope_id);
+    }
+
+    extract_import(file, content, node, ctx, out);
+    extract_export(file, content, node, ctx, out);
+    extract_binding(file, content, node, ctx, out);
+    extract_call(file, content, node, ctx, out);
+    extract_inheritance(file, content, node, ctx, out);
+
     let mut cursor = node.walk();
     for child in named_children(&mut cursor) {
-        walk(file, content, child, symbols);
+        walk(file, content, child, ctx, out);
+    }
+
+    if pushed_scope.is_some() {
+        ctx.scope_stack.pop();
+    }
+    if pushed_symbol.is_some() {
+        ctx.symbol_stack.pop();
     }
 }
 
@@ -150,6 +313,511 @@ fn symbol_name_node<'tree>(file: &File, node: Node<'tree>) -> Option<(Node<'tree
     }
 }
 
+fn extract_call(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let kind = node.kind();
+    let is_call = match file.language {
+        Language::Rust => kind == "call_expression" || kind == "macro_invocation",
+        Language::Java => kind == "method_invocation" || kind == "object_creation_expression",
+        Language::JavaScript | Language::TypeScript => {
+            kind == "call_expression" || kind == "new_expression"
+        }
+        Language::Python => kind == "call",
+        Language::Go => kind == "call_expression",
+        _ => false,
+    };
+
+    if !is_call {
+        return;
+    }
+
+    let scope_id = match ctx.current_scope() {
+        Some(id) => id,
+        None => return,
+    };
+
+    let mut callee_name = String::new();
+    let mut receiver_text: Option<String> = None;
+    let mut receiver_kind = ReceiverKind::None;
+
+    let source_bytes = content.as_bytes();
+
+    match file.language {
+        Language::Java => {
+            if kind == "method_invocation" {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    callee_name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+                if let Some(object_node) = node.child_by_field_name("object") {
+                    let recv = object_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    if !recv.is_empty() {
+                        receiver_kind = classify_receiver_string(&recv);
+                        receiver_text = Some(recv);
+                    }
+                }
+            } else if kind == "object_creation_expression" {
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    callee_name = type_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    receiver_kind = ReceiverKind::Type;
+                    receiver_text = Some(callee_name.clone());
+                }
+            }
+        }
+        Language::JavaScript | Language::TypeScript => {
+            if let Some(function_node) = node.child_by_field_name("function") {
+                if function_node.kind() == "member_expression" {
+                    if let Some(property) = function_node.child_by_field_name("property") {
+                        callee_name = property.utf8_text(source_bytes).unwrap_or("").to_string();
+                    }
+                    if let Some(object) = function_node.child_by_field_name("object") {
+                        let recv = object.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !recv.is_empty() {
+                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_text = Some(recv);
+                        }
+                    }
+                } else {
+                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+            }
+        }
+        Language::Python => {
+            if let Some(function_node) = node.child_by_field_name("function") {
+                if function_node.kind() == "attribute" {
+                    if let Some(attribute) = function_node.child_by_field_name("attribute") {
+                        callee_name = attribute.utf8_text(source_bytes).unwrap_or("").to_string();
+                    }
+                    if let Some(object) = function_node.child_by_field_name("object") {
+                        let recv = object.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !recv.is_empty() {
+                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_text = Some(recv);
+                        }
+                    }
+                } else {
+                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+            }
+        }
+        Language::Go => {
+            if let Some(function_node) = node.child_by_field_name("function") {
+                if function_node.kind() == "selector_expression" {
+                    if let Some(field) = function_node.child_by_field_name("field") {
+                        callee_name = field.utf8_text(source_bytes).unwrap_or("").to_string();
+                    }
+                    if let Some(operand) = function_node.child_by_field_name("operand") {
+                        let recv = operand.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !recv.is_empty() {
+                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_text = Some(recv);
+                        }
+                    }
+                } else {
+                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+            }
+        }
+        Language::Rust => {
+            if let Some(function_node) = node.child_by_field_name("function") {
+                if function_node.kind() == "field_expression" {
+                    if let Some(field) = function_node.child_by_field_name("field") {
+                        callee_name = field.utf8_text(source_bytes).unwrap_or("").to_string();
+                    }
+                    if let Some(value) = function_node.child_by_field_name("value") {
+                        let recv = value.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !recv.is_empty() {
+                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_text = Some(recv);
+                        }
+                    }
+                } else if function_node.kind() == "scoped_identifier" {
+                    if let Some(name_node) = function_node.child_by_field_name("name") {
+                        callee_name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    }
+                    if let Some(path_node) = function_node.child_by_field_name("path") {
+                        let recv = path_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                        if !recv.is_empty() {
+                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_text = Some(recv);
+                        }
+                    }
+                } else {
+                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if !callee_name.is_empty() {
+        let range = node_source_range(node);
+        let call_id = CallSiteId::new(format!(
+            "{}:call:{}:{}:{}",
+            file.path.display(),
+            range.start_line,
+            range.start_column,
+            callee_name
+        ));
+        out.calls.push(CallSite {
+            id: call_id,
+            file_id: file.id.clone(),
+            scope_id,
+            caller_symbol_id: ctx.current_symbol(),
+            callee_name,
+            receiver: receiver_text,
+            receiver_kind,
+            range,
+        });
+    }
+}
+
+fn classify_receiver_string(recv: &str) -> ReceiverKind {
+    let recv = recv.trim();
+    if recv == "this" || recv == "self" || recv == "Self" {
+        ReceiverKind::Self_
+    } else if recv == "super" || recv == "Super" {
+        ReceiverKind::Super
+    } else if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        ReceiverKind::Type
+    } else {
+        ReceiverKind::Value
+    }
+}
+
+fn extract_binding(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let kind = node.kind();
+    let scope_id = match ctx.current_scope() {
+        Some(id) => id,
+        None => return,
+    };
+    let source_bytes = content.as_bytes();
+
+    let mut name: Option<String> = None;
+    let mut declared_type: Option<String> = None;
+    let mut inferred_type: Option<String> = None;
+
+    match file.language {
+        Language::Java => {
+            if kind == "local_variable_declaration" {
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(declarator) = node.child_by_field_name("declarator") {
+                    if let Some(name_node) = declarator.child_by_field_name("name") {
+                        name = name_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    }
+                    if let Some(value) = declarator.child_by_field_name("value") {
+                        inferred_type = infer_type_from_expr(file, source_bytes, value);
+                    }
+                }
+            }
+        }
+        Language::JavaScript | Language::TypeScript => {
+            if kind == "variable_declarator" {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    name = name_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(value) = node.child_by_field_name("value") {
+                    inferred_type = infer_type_from_expr(file, source_bytes, value);
+                }
+            }
+        }
+        Language::Python => {
+            if kind == "assignment" {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if left.kind() == "identifier" {
+                        name = left.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    }
+                }
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(right) = node.child_by_field_name("right") {
+                    inferred_type = infer_type_from_expr(file, source_bytes, right);
+                }
+            }
+        }
+        Language::Rust => {
+            if kind == "let_declaration" {
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    name = pattern.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(value) = node.child_by_field_name("value") {
+                    inferred_type = infer_type_from_expr(file, source_bytes, value);
+                }
+            }
+        }
+        Language::Go => {
+            if kind == "short_var_declaration" {
+                if let Some(left) = node.child_by_field_name("left") {
+                    name = left.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                }
+                if let Some(right) = node.child_by_field_name("right") {
+                    inferred_type = infer_type_from_expr(file, source_bytes, right);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(name_str) = name {
+        if !name_str.is_empty() {
+            let range = node_source_range(node);
+            let binding_id = BindingId::new(format!(
+                "{}:binding:{}:{}:{}",
+                file.path.display(),
+                range.start_line,
+                range.start_column,
+                name_str
+            ));
+            out.bindings.push(Binding {
+                id: binding_id,
+                file_id: file.id.clone(),
+                scope_id,
+                name: name_str,
+                declared_type,
+                inferred_type,
+                range,
+            });
+        }
+    }
+}
+
+fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<String> {
+    let kind = expr.kind();
+    match file.language {
+        Language::Java | Language::JavaScript | Language::TypeScript => {
+            if kind == "new_expression" || kind == "object_creation_expression" {
+                if let Some(type_node) = expr.child_by_field_name("type") {
+                    return type_node.utf8_text(source).ok().map(|s| s.to_string());
+                } else if let Some(constructor) = expr.child_by_field_name("constructor") {
+                    return constructor.utf8_text(source).ok().map(|s| s.to_string());
+                }
+            }
+        }
+        Language::Rust => {
+            if kind == "call_expression" {
+                if let Some(function) = expr.child_by_field_name("function") {
+                    if function.kind() == "scoped_identifier" {
+                        if let Some(path) = function.child_by_field_name("path") {
+                            return path.utf8_text(source).ok().map(|s| s.to_string());
+                        }
+                    }
+                }
+            } else if kind == "struct_expression" {
+                if let Some(name) = expr.child_by_field_name("name") {
+                    return name.utf8_text(source).ok().map(|s| s.to_string());
+                }
+            }
+        }
+        Language::Python => {
+            if kind == "call" {
+                if let Some(function) = expr.child_by_field_name("function") {
+                    if function.kind() == "identifier" {
+                        let callee = function.utf8_text(source).ok().unwrap_or("");
+                        if callee.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            return Some(callee.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn extract_import(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let kind = node.kind();
+    let source_bytes = content.as_bytes();
+
+    let is_import = match file.language {
+        Language::Rust => kind == "use_declaration",
+        Language::Java => kind == "import_declaration",
+        Language::JavaScript | Language::TypeScript => kind == "import_statement",
+        Language::Python => kind == "import_statement" || kind == "import_from_statement",
+        Language::Go => kind == "import_spec",
+        _ => false,
+    };
+
+    if !is_import {
+        return;
+    }
+
+    let range = node_source_range(node);
+    let mut module_source = String::new();
+    let mut bindings = Vec::new();
+    let mut is_glob = false;
+
+    match file.language {
+        Language::Java => {
+            if let Ok(text) = node.utf8_text(source_bytes) {
+                let text = text.trim_start_matches("import").trim_end_matches(';').trim();
+                if text.ends_with(".*") {
+                    is_glob = true;
+                    module_source = text.trim_end_matches(".*").to_string();
+                } else {
+                    module_source = text.to_string();
+                    if let Some(last) = text.split('.').last() {
+                        bindings.push(ImportedName {
+                            imported: last.to_string(),
+                            local: last.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Language::Rust => {
+            if let Ok(text) = node.utf8_text(source_bytes) {
+                let text = text.trim_start_matches("pub").trim_start_matches("use").trim_end_matches(';').trim();
+                module_source = text.to_string();
+                if text.ends_with("::*") {
+                    is_glob = true;
+                } else if let Some(last) = text.split("::").last() {
+                    if last.contains(" as ") {
+                        let parts: Vec<&str> = last.split(" as ").collect();
+                        if parts.len() == 2 {
+                            bindings.push(ImportedName {
+                                imported: parts[0].trim().to_string(),
+                                local: parts[1].trim().to_string(),
+                            });
+                        }
+                    } else {
+                        bindings.push(ImportedName {
+                            imported: last.to_string(),
+                            local: last.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Language::Python => {
+            if kind == "import_from_statement" {
+                if let Some(module_node) = node.child_by_field_name("module_name") {
+                    module_source = module_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                }
+                let text = node.utf8_text(source_bytes).unwrap_or("");
+                if text.contains("import *") {
+                    is_glob = true;
+                }
+            } else if kind == "import_statement" {
+                module_source = node.utf8_text(source_bytes).unwrap_or("").trim_start_matches("import ").to_string();
+            }
+        }
+        Language::JavaScript | Language::TypeScript => {
+            if let Some(source_node) = node.child_by_field_name("source") {
+                module_source = source_node.utf8_text(source_bytes).unwrap_or("").trim_matches(&['\'', '"'][..]).to_string();
+            }
+        }
+        Language::Go => {
+            module_source = node.utf8_text(source_bytes).unwrap_or("").trim_matches(&['\'', '"', '`'][..]).to_string();
+        }
+        _ => {}
+    }
+
+    if !module_source.is_empty() || !bindings.is_empty() || is_glob {
+        out.imports.push(ImportSite {
+            file_id: file.id.clone(),
+            scope_id: ctx.current_scope(),
+            source: module_source,
+            bindings,
+            is_glob,
+            is_type_only: false,
+            range,
+        });
+    }
+}
+
+fn extract_export(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    _ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let kind = node.kind();
+    let source_bytes = content.as_bytes();
+
+    if file.language == Language::JavaScript || file.language == Language::TypeScript {
+        if kind == "export_statement" {
+            let range = node_source_range(node);
+            let text = node.utf8_text(source_bytes).unwrap_or("");
+            out.exports.push(ExportSite {
+                file_id: file.id.clone(),
+                exported_name: text.to_string(),
+                local_name: None,
+                source_module: None,
+                is_glob: text.contains('*'),
+                range,
+            });
+        }
+    }
+}
+
+fn extract_inheritance(
+    file: &File,
+    content: &str,
+    node: Node<'_>,
+    ctx: &ParseContext,
+    out: &mut SyntaxFacts,
+) {
+    let kind = node.kind();
+    let source_bytes = content.as_bytes();
+
+    match file.language {
+        Language::Java | Language::JavaScript | Language::TypeScript => {
+            if kind == "extends_clause" || kind == "implements_clause" {
+                if let Some(child_symbol_id) = ctx.current_symbol() {
+                    let inheritance_kind = if kind == "extends_clause" {
+                        InheritanceKind::Extends
+                    } else {
+                        InheritanceKind::Implements
+                    };
+                    let text = node.utf8_text(source_bytes).unwrap_or("");
+                    let parent_name = text
+                        .trim_start_matches("extends")
+                        .trim_start_matches("implements")
+                        .trim()
+                        .to_string();
+                    if !parent_name.is_empty() {
+                        out.inheritance.push(InheritanceSite {
+                            child_symbol_id,
+                            parent_name,
+                            kind: inheritance_kind,
+                            order: 0,
+                            range: node_source_range(node),
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn variable_name<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = node.walk();
     for child in named_children(&mut cursor) {
@@ -197,8 +865,8 @@ fn stable_id(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_symbols;
-    use open_kioku_core::{File, FileId, Language, RepositoryId};
+    use super::{parse_file, parse_symbols};
+    use open_kioku_core::{File, FileId, Language, ReceiverKind, RepositoryId};
 
     #[test]
     fn extracts_rust_symbols_from_tree_sitter() {
@@ -235,4 +903,40 @@ mod tests {
         let symbols = parse_symbols(&file, r#"{"cluster": {"name": "local"}}"#).unwrap();
         assert!(symbols.is_empty());
     }
+
+    #[test]
+    fn extracts_java_contextual_syntax_facts() {
+        let file = File {
+            id: FileId::new("file_java"),
+            repository_id: RepositoryId::new("repo"),
+            path: "com/acme/Service.java".into(),
+            language: Language::Java,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let code = r#"
+            package com.acme;
+            import com.acme.repo.Repository;
+
+            public class Service {
+                private Repository repo;
+
+                public void process() {
+                    Repository localRepo = new Repository();
+                    this.repo.save(x);
+                    Repo.save(x);
+                }
+            }
+        "#;
+        let facts = parse_file(&file, code).unwrap();
+        assert!(!facts.symbols.is_empty());
+        assert!(!facts.scopes.is_empty());
+        assert!(!facts.calls.is_empty());
+        assert!(facts.calls.iter().any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Self_));
+        assert!(facts.calls.iter().any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Type));
+        assert!(facts.calls.iter().all(|c| c.caller_symbol_id.is_some()));
+    }
 }
+

@@ -756,6 +756,11 @@ mod tests {
             language: Language::Java,
             confidence: Confidence::High,
             provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         });
         let test = make_result("src/test/DotPrefixValidatorTests.java", 48.1);
 

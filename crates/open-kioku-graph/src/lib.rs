@@ -479,6 +479,11 @@ mod tests {
             language: Language::Rust,
             confidence: Confidence::High,
             provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         }
     }
 
@@ -710,6 +715,11 @@ mod tests {
             range: Some(LineRange { start: 1, end: 5 }),
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         };
         let occ1 = SymbolOccurrence {
             symbol_id: symbol.id.clone(),
@@ -851,6 +861,11 @@ mod tests {
             range: Some(LineRange { start: 1, end: 5 }),
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         };
         let occ = SymbolOccurrence {
             symbol_id: symbol.id.clone(),

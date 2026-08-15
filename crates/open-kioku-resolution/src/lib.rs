@@ -1,0 +1,102 @@
+pub mod calls;
+pub mod context;
+pub mod evidence;
+pub mod index;
+pub mod inheritance;
+
+pub use calls::resolve_call;
+pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
+pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
+pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
+pub use inheritance::InheritanceIndex;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use open_kioku_core::{
+        Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, FileId, Language,
+        LineRange, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
+        SymbolKind, Visibility,
+    };
+
+    #[test]
+    fn resolves_same_name_method_via_typed_receiver() {
+        let repo_class = Symbol {
+            id: SymbolId::new("symbol:Repo"),
+            name: "Repo".into(),
+            qualified_name: "com.acme.Repo".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("file:Repo.java"),
+            range: Some(LineRange { start: 1, end: 20 }),
+            language: Language::Java,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: Visibility::Public,
+        };
+
+        let repo_save = Symbol {
+            id: SymbolId::new("symbol:Repo.save"),
+            name: "save".into(),
+            qualified_name: "com.acme.Repo.save".into(),
+            kind: SymbolKind::Method,
+            file_id: FileId::new("file:Repo.java"),
+            range: Some(LineRange { start: 5, end: 10 }),
+            language: Language::Java,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: Some(SymbolId::new("symbol:Repo")),
+            scope_id: None,
+            signature: None,
+            visibility: Visibility::Public,
+        };
+
+        let sym_index = SymbolIndex::build(vec![repo_class, repo_save]);
+
+        let file_scope = Scope {
+            id: ScopeId::new("scope:file"),
+            file_id: FileId::new("file:Main.java"),
+            parent_id: None,
+            owner_symbol_id: None,
+            kind: ScopeKind::File,
+            range: SourceRange { start_line: 1, start_column: 1, end_line: 50, end_column: 1 },
+        };
+        let scope_index = ScopeIndex::build(vec![file_scope]);
+
+        let binding = Binding {
+            id: BindingId::new("binding:repo"),
+            file_id: FileId::new("file:Main.java"),
+            scope_id: ScopeId::new("scope:file"),
+            name: "repo".into(),
+            declared_type: Some("Repo".into()),
+            inferred_type: None,
+            range: SourceRange { start_line: 5, start_column: 1, end_line: 5, end_column: 20 },
+        };
+        let binding_index = BindingIndex::build(vec![binding]);
+
+        let ctx = ResolutionContext::new(&sym_index, &scope_index, &binding_index);
+
+        let call = CallSite {
+            id: CallSiteId::new("call:save"),
+            file_id: FileId::new("file:Main.java"),
+            scope_id: ScopeId::new("scope:file"),
+            caller_symbol_id: None,
+            callee_name: "save".into(),
+            receiver: Some("repo".into()),
+            receiver_kind: ReceiverKind::Value,
+            range: SourceRange { start_line: 10, start_column: 5, end_line: 10, end_column: 15 },
+        };
+
+        let res = resolve_call(&call, &ctx);
+        match res {
+            ResolutionResult::Resolved { target, .. } => {
+                assert_eq!(target, SymbolId::new("symbol:Repo.save"));
+            }
+            _ => panic!("Expected resolved call edge"),
+        }
+    }
+}

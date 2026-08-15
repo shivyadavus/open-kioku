@@ -40,6 +40,10 @@ id_type!(MemoryFactId);
 id_type!(ContextHandleId);
 id_type!(GitCommitId);
 id_type!(HistoryRecordId);
+id_type!(ScopeId);
+id_type!(CallSiteId);
+id_type!(BindingId);
+id_type!(ModuleId);
 
 pub const HISTORY_SCHEMA_VERSION: u32 = 1;
 
@@ -750,6 +754,144 @@ pub enum SymbolKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceRange {
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Public,
+    Protected,
+    Package,
+    Crate,
+    Private,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    File,
+    Module,
+    Namespace,
+    Class,
+    Interface,
+    Trait,
+    Function,
+    Method,
+    Closure,
+    Block,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Scope {
+    pub id: ScopeId,
+    pub file_id: FileId,
+    pub parent_id: Option<ScopeId>,
+    pub owner_symbol_id: Option<SymbolId>,
+    pub kind: ScopeKind,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Binding {
+    pub id: BindingId,
+    pub file_id: FileId,
+    pub scope_id: ScopeId,
+    pub name: String,
+    pub declared_type: Option<String>,
+    pub inferred_type: Option<String>,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiverKind {
+    None,
+    Self_,
+    Super,
+    Value,
+    Type,
+    Module,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CallSite {
+    pub id: CallSiteId,
+    pub file_id: FileId,
+    pub scope_id: ScopeId,
+    pub caller_symbol_id: Option<SymbolId>,
+    pub callee_name: String,
+    pub receiver: Option<String>,
+    pub receiver_kind: ReceiverKind,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportedName {
+    pub imported: String,
+    pub local: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportSite {
+    pub file_id: FileId,
+    pub scope_id: Option<ScopeId>,
+    pub source: String,
+    pub bindings: Vec<ImportedName>,
+    pub is_glob: bool,
+    pub is_type_only: bool,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExportSite {
+    pub file_id: FileId,
+    pub exported_name: String,
+    pub local_name: Option<String>,
+    pub source_module: Option<String>,
+    pub is_glob: bool,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InheritanceKind {
+    Extends,
+    Implements,
+    TraitImpl,
+    Embeds,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct InheritanceSite {
+    pub child_symbol_id: SymbolId,
+    pub parent_name: String,
+    pub kind: InheritanceKind,
+    pub order: u16,
+    pub range: SourceRange,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SyntaxFacts {
+    pub symbols: Vec<Symbol>,
+    pub scopes: Vec<Scope>,
+    pub imports: Vec<ImportSite>,
+    pub exports: Vec<ExportSite>,
+    pub calls: Vec<CallSite>,
+    pub bindings: Vec<Binding>,
+    pub inheritance: Vec<InheritanceSite>,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Symbol {
     pub id: SymbolId,
@@ -761,6 +903,17 @@ pub struct Symbol {
     pub language: Language,
     pub confidence: Confidence,
     pub provenance: EvidenceSourceType,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_id: Option<ModuleId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_symbol_id: Option<SymbolId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<ScopeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2513,4 +2666,42 @@ mod tests {
         );
         assert_eq!(decoded_edge.evidence.freshness.as_deref(), Some("fresh"));
     }
+
+    #[test]
+    fn test_pr1_semantic_ir_serde_backwards_compatibility() {
+        let old_symbol_json = r#"{
+            "id": "symbol:123",
+            "name": "cancel",
+            "qualified_name": "com.acme.ReservationService.cancel",
+            "kind": "method",
+            "file_id": "file:src/Service.java",
+            "range": {"start": 10, "end": 20},
+            "language": "java",
+            "confidence": "high",
+            "provenance": "tree_sitter"
+        }"#;
+
+        let symbol: Symbol = serde_json::from_str(old_symbol_json).unwrap();
+        assert_eq!(symbol.id.0, "symbol:123");
+        assert_eq!(symbol.module_id, None);
+        assert_eq!(symbol.parent_symbol_id, None);
+        assert_eq!(symbol.scope_id, None);
+        assert_eq!(symbol.signature, None);
+        assert_eq!(symbol.visibility, Visibility::Unknown);
+
+        let scope_id = ScopeId::new("scope:1");
+        assert_eq!(serde_json::to_string(&scope_id).unwrap(), r#""scope:1""#);
+
+        let range = SourceRange {
+            start_line: 1,
+            start_column: 5,
+            end_line: 2,
+            end_column: 15,
+        };
+        assert_eq!(range.start_line, 1);
+        assert_eq!(range.start_column, 5);
+        assert_eq!(range.end_line, 2);
+        assert_eq!(range.end_column, 15);
+    }
 }
+
