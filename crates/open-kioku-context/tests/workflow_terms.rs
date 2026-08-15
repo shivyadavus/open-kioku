@@ -1,5 +1,7 @@
 use open_kioku_context::expanded_task_search_terms;
 
+// Natural-language anchors should broaden candidate discovery without introducing a
+// benchmark-specific synonym table or promoting grammatical stopwords into search terms.
 #[test]
 fn natural_language_workflow_terms_expand_without_case_specific_aliases() {
     let terms = expanded_task_search_terms("verify changed files against saved plans");
