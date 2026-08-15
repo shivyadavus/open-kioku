@@ -131,4 +131,15 @@ if text.count(old_symbol_tokens) != 1:
     raise SystemExit("retrieval token estimator symbol block changed")
 text = text.replace(old_symbol_tokens, new_symbol_tokens, 1)
 
+old_zero_check = 'budgets.is_empty() || budgets.iter().any(|budget| *budget == 0)'
+if text.count(old_zero_check) != 1:
+    raise SystemExit("retrieval budget zero validation changed")
+text = text.replace(old_zero_check, 'budgets.is_empty() || budgets.contains(&0)', 1)
+
+old_pack_signature = '''fn pack_ranked_results<'a>(ranked: &'a [SearchResult], budget: usize) -> (Vec<&'a SearchResult>, usize) {'''
+new_pack_signature = '''fn pack_ranked_results(ranked: &[SearchResult], budget: usize) -> (Vec<&SearchResult>, usize) {'''
+if text.count(old_pack_signature) != 1:
+    raise SystemExit("retrieval pack signature changed")
+text = text.replace(old_pack_signature, new_pack_signature, 1)
+
 retrieval.write_text(text)
