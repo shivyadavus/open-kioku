@@ -171,7 +171,10 @@ mod tests {
         let mut registry = ImportRegistry::default();
         let file_map = HashMap::from([(
             "service".to_string(),
-            vec![FileId::new("file:a/service.py"), FileId::new("file:b/service.py")],
+            vec![
+                FileId::new("file:a/service.py"),
+                FileId::new("file:b/service.py"),
+            ],
         )]);
         let site = ImportSite {
             file_id: FileId::new("file:consumer.py"),
