@@ -1,0 +1,83 @@
+name: Agent V2 export ambiguity cleanup
+
+on:
+  push:
+    branches:
+      - agent/v2-semantic-resolution-pipeline
+    paths:
+      - .github/workflows/agent-v2-export-one-shot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v2-semantic-resolution-pipeline
+          fetch-depth: 0
+
+      - name: Apply exact export ambiguity patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-ingest/src/lib.rs')
+          text = path.read_text()
+          old = '''                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
+                        symbol_index.by_file.get(&exp.file_id).and_then(|syms| {
+                            syms.iter()
+                                .find(|id| {
+                                    symbol_index
+                                        .get(id)
+                                        .map(|s| s.name == *local)
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                        })
+                    }),
+          '''
+          new = '''                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
+                        let candidates = symbol_index
+                            .by_file
+                            .get(&exp.file_id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| {
+                                symbol_index
+                                    .get(id)
+                                    .map(|s| s.name == *local)
+                                    .unwrap_or(false)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        match candidates.as_slice() {
+                            [candidate] => Some(candidate.clone()),
+                            _ => None,
+                        }
+                    }),
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one export origin first-match block, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          Path('.github/workflows/agent-v2-export-one-shot.yml').unlink()
+          PY
+
+      - name: Format workspace
+        run: cargo fmt --all
+
+      - name: Verify patch shape
+        run: git diff --check
+
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name "open-kioku-agent"
+          git config user.email "open-kioku-agent@users.noreply.github.com"
+          git add crates/open-kioku-ingest/src/lib.rs .github/workflows/agent-v2-export-one-shot.yml
+          git commit -m "fix(intelligence): fail closed on ambiguous export origins"
+          git push origin HEAD:agent/v2-semantic-resolution-pipeline
