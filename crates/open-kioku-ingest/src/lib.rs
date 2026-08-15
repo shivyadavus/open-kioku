@@ -400,16 +400,23 @@ impl Indexer {
                     file_id: exp.file_id.clone(),
                     exported_name: exp.exported_name.clone(),
                     origin_symbol: exp.local_name.as_ref().and_then(|local| {
-                        symbol_index.by_file.get(&exp.file_id).and_then(|syms| {
-                            syms.iter()
-                                .find(|id| {
-                                    symbol_index
-                                        .get(id)
-                                        .map(|s| s.name == *local)
-                                        .unwrap_or(false)
-                                })
-                                .cloned()
-                        })
+                        let candidates = symbol_index
+                            .by_file
+                            .get(&exp.file_id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| {
+                                symbol_index
+                                    .get(id)
+                                    .map(|s| s.name == *local)
+                                    .unwrap_or(false)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        match candidates.as_slice() {
+                            [candidate] => Some(candidate.clone()),
+                            _ => None,
+                        }
                     }),
                     source_module: Some(mod_id),
                     is_type_only: false,
