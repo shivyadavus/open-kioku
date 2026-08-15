@@ -83,45 +83,57 @@ fn merge_messages(a: &str, b: &str) -> String {
     messages.into_iter().take(8).collect::<Vec<_>>().join("\n")
 }
 
+fn push_unique_call_site(call_sites: &mut Vec<serde_json::Value>, site: serde_json::Value) {
+    if !call_sites.contains(&site) {
+        call_sites.push(site);
+    }
+}
+
+fn file_range_call_site(file_range: &open_kioku_core::FileRange) -> serde_json::Value {
+    let (start_line, end_line) = file_range
+        .line_range
+        .as_ref()
+        .map(|range| (Some(range.start), Some(range.end)))
+        .unwrap_or((None, None));
+    serde_json::json!({
+        "path": file_range.path.to_string_lossy(),
+        "start_line": start_line,
+        "start_column": serde_json::Value::Null,
+        "end_line": end_line,
+        "end_column": serde_json::Value::Null,
+    })
+}
+
 fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
-    let mut call_sites: Vec<String> = existing
+    let mut call_sites: Vec<serde_json::Value> = existing
         .properties
         .get("call_sites")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            existing
-                .evidence
-                .file_range
-                .as_ref()
-                .map(|fr| vec![format!("{}:{:?}", fr.path.display(), fr.line_range)])
-                .unwrap_or_default()
-        });
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    if let Some(incoming_fr) = &incoming.evidence.file_range {
-        let site_str = format!(
-            "{}:{:?}",
-            incoming_fr.path.display(),
-            incoming_fr.line_range
-        );
-        if !call_sites.contains(&site_str) {
-            call_sites.push(site_str);
+    if call_sites.is_empty() {
+        if let Some(existing_fr) = &existing.evidence.file_range {
+            push_unique_call_site(&mut call_sites, file_range_call_site(existing_fr));
         }
+    }
+
+    if let Some(incoming_sites) = incoming
+        .properties
+        .get("call_sites")
+        .and_then(|value| value.as_array())
+    {
+        for site in incoming_sites {
+            push_unique_call_site(&mut call_sites, site.clone());
+        }
+    } else if let Some(incoming_fr) = &incoming.evidence.file_range {
+        push_unique_call_site(&mut call_sites, file_range_call_site(incoming_fr));
     }
 
     if !call_sites.is_empty() {
         existing.properties.insert(
             "call_sites".to_string(),
-            serde_json::Value::Array(
-                call_sites
-                    .into_iter()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
+            serde_json::Value::Array(call_sites),
         );
     }
 
@@ -307,7 +319,7 @@ mod tests {
         assert_eq!(id1, id2);
         let (nodes, _) = buffer.into_parts();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].label, "funcA"); // Since existing label was not empty, it's not overwritten
+        assert_eq!(nodes[0].label, "funcA");
     }
 
     #[test]
@@ -353,19 +365,16 @@ mod tests {
         edge1.evidence.id = open_kioku_core::EvidenceId::new("evid_B");
 
         let mut edge2 = edge1.clone();
-        edge2.evidence.id = open_kioku_core::EvidenceId::new("evid_A"); // Lexicographically smaller
+        edge2.evidence.id = open_kioku_core::EvidenceId::new("evid_A");
 
-        // Insert edge1 then edge2
         let mut buffer = GraphBuffer::new();
         buffer.insert_edge(edge1.clone());
         buffer.insert_edge(edge2.clone());
 
         let (_, edges) = buffer.into_parts();
         assert_eq!(edges.len(), 1);
-        // evid_A is smaller, it should be chosen as primary
         assert_eq!(edges[0].evidence.id.0, "evid_A");
 
-        // Insert edge2 then edge1, should yield the same result
         let mut buffer2 = GraphBuffer::new();
         buffer2.insert_edge(edge2.clone());
         buffer2.insert_edge(edge1.clone());
@@ -374,7 +383,6 @@ mod tests {
         assert_eq!(edges2.len(), 1);
         assert_eq!(edges2[0].evidence.id.0, "evid_A");
 
-        // Edge ID itself should be deterministic based on the canonical identity helper.
         assert_eq!(
             edges[0].id,
             identity::edge_id(
@@ -385,6 +393,52 @@ mod tests {
             )
         );
         assert_eq!(edges[0].id.0, edges2[0].id.0);
+    }
+
+    #[test]
+    fn test_edge_dedupe_merges_structured_call_sites() {
+        let mut edge1 = GraphEdge {
+            from: NodeId::new("caller"),
+            to: NodeId::new("callee"),
+            edge_type: GraphEdgeType::Calls,
+            ..Default::default()
+        };
+        edge1.properties.insert(
+            "call_sites".into(),
+            serde_json::json!([{
+                "path": "src/lib.rs",
+                "start_line": 10,
+                "start_column": 5,
+                "end_line": 10,
+                "end_column": 11
+            }]),
+        );
+        let mut edge2 = edge1.clone();
+        edge2.properties.insert(
+            "call_sites".into(),
+            serde_json::json!([{
+                "path": "src/lib.rs",
+                "start_line": 10,
+                "start_column": 20,
+                "end_line": 10,
+                "end_column": 26
+            }]),
+        );
+
+        let mut buffer = GraphBuffer::new();
+        buffer.insert_edge(edge1);
+        buffer.insert_edge(edge2);
+        let (_, edges) = buffer.into_parts();
+
+        assert_eq!(edges.len(), 1);
+        let call_sites = edges[0]
+            .properties
+            .get("call_sites")
+            .and_then(|value| value.as_array())
+            .expect("merged Calls edge should retain call_sites");
+        assert_eq!(call_sites.len(), 2);
+        assert_eq!(call_sites[0]["start_column"], 5);
+        assert_eq!(call_sites[1]["start_column"], 20);
     }
 
     #[test]
