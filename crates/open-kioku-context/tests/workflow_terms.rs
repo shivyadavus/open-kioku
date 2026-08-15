@@ -1,14 +1,14 @@
 use open_kioku_context::expanded_task_search_terms;
 
-// This natural-language task previously missed the patch crate after the V2 index expanded
-// the candidate pool; normalize workflow vocabulary so retrieval remains stable as the index grows.
 #[test]
-fn verification_workflow_language_expands_to_code_vocabulary() {
+fn natural_language_workflow_terms_expand_without_case_specific_aliases() {
     let terms = expanded_task_search_terms("verify changed files against saved plans");
 
-    assert!(terms.iter().any(|term| term == "verification"));
-    assert!(terms.iter().any(|term| term == "change"));
-    assert!(terms.iter().any(|term| term == "plan"));
-    assert!(terms.iter().any(|term| term == "verification change"));
-    assert!(terms.iter().any(|term| term == "saved plan"));
+    assert!(terms.iter().any(|term| term == "verify"));
+    assert!(terms.iter().any(|term| term == "changed"));
+    assert!(terms.iter().any(|term| term == "files"));
+    assert!(terms.iter().any(|term| term == "saved"));
+    assert!(terms.iter().any(|term| term == "plans"));
+    assert!(terms.iter().any(|term| term == "verify changed"));
+    assert!(!terms.iter().any(|term| term == "against"));
 }
