@@ -87,6 +87,18 @@ enum RetrievalTaskFamily {
     EditToRipple,
 }
 
+impl RetrievalTaskFamily {
+    fn label(self) -> &'static str {
+        match self {
+            Self::IssueToCode => "issue_to_code",
+            Self::CodeToTest => "code_to_test",
+            Self::TraceToCode => "trace_to_code",
+            Self::CommentToContext => "comment_to_context",
+            Self::EditToRipple => "edit_to_ripple",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RetrievalSplit {
@@ -352,7 +364,7 @@ fn load_retrieval_corpus(path: &Path) -> anyhow::Result<RetrievalCorpus> {
 }
 
 fn validate_token_budgets(budgets: &[usize], label: &str) -> anyhow::Result<()> {
-    if budgets.is_empty() || budgets.iter().any(|budget| *budget == 0) {
+    if budgets.is_empty() || budgets.contains(&0) {
         anyhow::bail!("retrieval token budgets for `{label}` must be non-empty and positive");
     }
     if budgets.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -497,7 +509,11 @@ fn retrieval_candidate_pool(
                 "{}|{}|{}",
                 normalize_path_fragment(&result.path.to_string_lossy()),
                 range,
-                result.symbol.as_deref().unwrap_or("")
+                result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.qualified_name.as_str())
+                    .unwrap_or("")
             );
             match candidates.get(&key) {
                 Some(existing) if existing.score >= result.score => {}
@@ -599,7 +615,7 @@ fn score_retrieval_case(
     }
 }
 
-fn pack_ranked_results<'a>(ranked: &'a [SearchResult], budget: usize) -> (Vec<&'a SearchResult>, usize) {
+fn pack_ranked_results(ranked: &[SearchResult], budget: usize) -> (Vec<&SearchResult>, usize) {
     let mut selected = Vec::new();
     let mut used = 0usize;
     for result in ranked {
@@ -616,7 +632,11 @@ fn pack_ranked_results<'a>(ranked: &'a [SearchResult], budget: usize) -> (Vec<&'
 fn estimate_retrieval_tokens(result: &SearchResult) -> usize {
     let chars = result.snippet.chars().count()
         + result.path.to_string_lossy().chars().count()
-        + result.symbol.as_deref().map(str::len).unwrap_or(0);
+        + result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.chars().count())
+            .unwrap_or(0);
     chars.div_ceil(4).saturating_add(12).max(1)
 }
 
@@ -629,7 +649,7 @@ fn build_retrieval_strategy_report(
         summary: summarize_retrieval_cases(&cases),
         by_language: summarize_retrieval_groups(&cases, |case| case.language.clone()),
         by_task_family: summarize_retrieval_groups(&cases, |case| {
-            format!("{:?}", case.task_family).to_ascii_lowercase()
+            case.task_family.label().into()
         }),
         by_split: summarize_retrieval_groups(&cases, |case| match case.split {
             RetrievalSplit::Development => "development".into(),
