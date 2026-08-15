@@ -170,6 +170,64 @@ fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolut
     crate::inheritance::resolve_super_member(call, ctx)
 }
 
+fn imported_module_member_candidates(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    receiver: &str,
+) -> Vec<SymbolId> {
+    let mut candidates = Vec::new();
+    let import_bindings =
+        ctx.repository
+            .imports
+            .lookup(ctx.file_id, Some(&call.scope_id), receiver);
+
+    for binding in import_bindings {
+        if let Some(module_id) = &binding.resolved_module {
+            for export in ctx.repository.exports.lookup(module_id, &call.callee_name) {
+                if let Some(target) = &export.origin_symbol {
+                    candidates.push(target.clone());
+                }
+            }
+        }
+
+        if let Some(target_file) = &binding.target_file {
+            for ((_, exported_name), exports) in
+                &ctx.repository.exports.by_module_exported_name
+            {
+                if exported_name != &call.callee_name {
+                    continue;
+                }
+                for export in exports {
+                    if &export.file_id == target_file {
+                        if let Some(target) = &export.origin_symbol {
+                            candidates.push(target.clone());
+                        }
+                    }
+                }
+            }
+
+            // Some language frontends do not yet populate exports for every top-level declaration.
+            // A proven target file is still valid evidence, but ambiguity inside that file fails closed.
+            if let Some(file_syms) = ctx.symbols.by_file.get(target_file) {
+                for id in file_syms {
+                    if ctx
+                        .symbols
+                        .get(id)
+                        .map(|s| s.name == call.callee_name && s.parent_symbol_id.is_none())
+                        .unwrap_or(false)
+                    {
+                        candidates.push(id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.dedup();
+    candidates
+}
+
 fn resolve_static_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionResult {
     let recv = match call.receiver.as_deref() {
         Some(r) => r,
@@ -206,42 +264,25 @@ fn resolve_static_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
             };
         }
     } else {
-        // Also check if recv is an import / module binding (e.g. TS import * as math from "./math"; math.add())
-        let import_bindings =
-            ctx.repository
-                .imports
-                .lookup(ctx.file_id, Some(&call.scope_id), recv);
-
-        if let Some(imp) = import_bindings
-            .iter()
-            .find(|i| i.target_file.is_some() || i.target_symbol.is_some())
-        {
-            if let Some(target_file) = &imp.target_file {
-                if let Some(file_syms) = ctx.symbols.by_file.get(target_file) {
-                    let candidates: Vec<&SymbolId> = file_syms
-                        .iter()
-                        .filter(|id| {
-                            ctx.symbols
-                                .get(id)
-                                .map(|s| s.name == call.callee_name && s.parent_symbol_id.is_none())
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    if candidates.len() == 1 {
-                        return ResolutionResult::Resolved {
-                            target: candidates[0].clone(),
-                            confidence: Confidence::Exact,
-                            evidence: vec![ResolutionEvidence {
-                                kind: ResolutionEvidenceKind::ExplicitImport,
-                                source_type: EvidenceSourceType::TreeSitter,
-                                file_range: call_file_range(call, ctx),
-                                symbol_id: Some(candidates[0].clone()),
-                                message: "resolved static member via module import binding".into(),
-                            }],
-                        };
-                    }
-                }
-            }
+        let candidates = imported_module_member_candidates(call, ctx, recv);
+        if candidates.len() == 1 {
+            return ResolutionResult::Resolved {
+                target: candidates[0].clone(),
+                confidence: Confidence::Exact,
+                evidence: vec![ResolutionEvidence {
+                    kind: ResolutionEvidenceKind::ExplicitImport,
+                    source_type: EvidenceSourceType::TreeSitter,
+                    file_range: call_file_range(call, ctx),
+                    symbol_id: Some(candidates[0].clone()),
+                    message: "resolved static member via exact import/module evidence".into(),
+                }],
+            };
+        } else if candidates.len() > 1 {
+            return ResolutionResult::Ambiguous {
+                candidates,
+                reason: "multiple imported module members match static call".into(),
+                evidence: vec![],
+            };
         }
     }
 
@@ -274,45 +315,25 @@ fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resol
         {
             Some(b) => b,
             None => {
-                // Check if receiver is an import/module binding (e.g. Go fmt.Println, Python utils.load, TS math.add)
-                let import_bindings =
-                    ctx.repository
-                        .imports
-                        .lookup(ctx.file_id, Some(&call.scope_id), lookup_name);
-
-                if let Some(imp) = import_bindings
-                    .iter()
-                    .find(|i| i.target_file.is_some() || i.target_symbol.is_some())
-                {
-                    if let Some(target_file) = &imp.target_file {
-                        if let Some(file_syms) = ctx.symbols.by_file.get(target_file) {
-                            let candidates: Vec<&SymbolId> = file_syms
-                                .iter()
-                                .filter(|id| {
-                                    ctx.symbols
-                                        .get(id)
-                                        .map(|s| {
-                                            s.name == call.callee_name
-                                                && s.parent_symbol_id.is_none()
-                                        })
-                                        .unwrap_or(false)
-                                })
-                                .collect();
-                            if candidates.len() == 1 {
-                                return ResolutionResult::Resolved {
-                                    target: candidates[0].clone(),
-                                    confidence: Confidence::Exact,
-                                    evidence: vec![ResolutionEvidence {
-                                        kind: ResolutionEvidenceKind::ExplicitImport,
-                                        source_type: EvidenceSourceType::TreeSitter,
-                                        file_range: call_file_range(call, ctx),
-                                        symbol_id: Some(candidates[0].clone()),
-                                        message: "resolved method via module import binding".into(),
-                                    }],
-                                };
-                            }
-                        }
-                    }
+                let candidates = imported_module_member_candidates(call, ctx, lookup_name);
+                if candidates.len() == 1 {
+                    return ResolutionResult::Resolved {
+                        target: candidates[0].clone(),
+                        confidence: Confidence::Exact,
+                        evidence: vec![ResolutionEvidence {
+                            kind: ResolutionEvidenceKind::ExplicitImport,
+                            source_type: EvidenceSourceType::TreeSitter,
+                            file_range: call_file_range(call, ctx),
+                            symbol_id: Some(candidates[0].clone()),
+                            message: "resolved receiver via exact import/module evidence".into(),
+                        }],
+                    };
+                } else if candidates.len() > 1 {
+                    return ResolutionResult::Ambiguous {
+                        candidates,
+                        reason: "multiple imported module members match receiver call".into(),
+                        evidence: vec![],
+                    };
                 }
 
                 return ResolutionResult::Unresolved {
@@ -581,27 +602,29 @@ fn resolve_module_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
         }
     };
 
-    // Find export in exports index matching module name and exported function
-    for ((module_id, name), exports) in ctx.repository.exports.by_module_exported_name.iter() {
-        if (module_id.0.ends_with(recv) || module_id.0 == recv) && name == &call.callee_name {
-            for export in exports {
-                if let Some(target) = &export.origin_symbol {
-                    return ResolutionResult::Resolved {
-                        target: target.clone(),
-                        confidence: Confidence::Exact,
-                        evidence: vec![ResolutionEvidence {
-                            kind: ResolutionEvidenceKind::ExplicitImport,
-                            source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call, ctx),
-                            symbol_id: Some(target.clone()),
-                            message: "resolved module member via export index".into(),
-                        }],
-                    };
-                }
-            }
-        }
+    let candidates = imported_module_member_candidates(call, ctx, recv);
+    if candidates.len() == 1 {
+        return ResolutionResult::Resolved {
+            target: candidates[0].clone(),
+            confidence: Confidence::Exact,
+            evidence: vec![ResolutionEvidence {
+                kind: ResolutionEvidenceKind::ExplicitImport,
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: call_file_range(call, ctx),
+                symbol_id: Some(candidates[0].clone()),
+                message: "resolved module member via exact import/export evidence".into(),
+            }],
+        };
+    } else if candidates.len() > 1 {
+        return ResolutionResult::Ambiguous {
+            candidates,
+            reason: "multiple exact module exports match call".into(),
+            evidence: vec![],
+        };
     }
 
+    // A receiver may have been syntactically classified as a module/type but still refer to an
+    // in-scope type. The static resolver is evidence-gated and safe as a final exact fallback.
     resolve_static_member(call, ctx)
 }
 
@@ -647,33 +670,40 @@ fn resolve_type_with_evidence(ctx: &ResolutionContext<'_>, type_name: &str) -> O
         return None;
     }
 
-    // 2b. If target_file is known on import binding, look up matching type in that file
+    // 2b. If target_file is known on import binding, look up matching type in that file.
+    // Collect across all bindings so multiple valid targets fail closed instead of first-match wins.
+    let mut file_candidates = Vec::new();
     for b in &import_bindings {
         if let Some(target_file_id) = &b.target_file {
             if let Some(file_syms) = ctx.symbols.by_file.get(target_file_id) {
-                let candidates: Vec<&SymbolId> = file_syms
-                    .iter()
-                    .filter(|id| {
-                        ctx.symbols
-                            .get(id)
-                            .map(|s| {
-                                s.name == type_name
-                                    && matches!(
-                                        s.kind,
-                                        SymbolKind::Class
-                                            | SymbolKind::Trait
-                                            | SymbolKind::Interface
-                                            | SymbolKind::Module
-                                    )
-                            })
-                            .unwrap_or(false)
-                    })
-                    .collect();
-                if candidates.len() == 1 {
-                    return Some(candidates[0].clone());
+                for id in file_syms {
+                    if ctx
+                        .symbols
+                        .get(id)
+                        .map(|s| {
+                            s.name == type_name
+                                && matches!(
+                                    s.kind,
+                                    SymbolKind::Class
+                                        | SymbolKind::Trait
+                                        | SymbolKind::Interface
+                                        | SymbolKind::Module
+                                )
+                        })
+                        .unwrap_or(false)
+                    {
+                        file_candidates.push(id.clone());
+                    }
                 }
             }
         }
+    }
+    file_candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    file_candidates.dedup();
+    if file_candidates.len() == 1 {
+        return Some(file_candidates[0].clone());
+    } else if file_candidates.len() > 1 {
+        return None;
     }
 
     // 3. Qualified name lookup (exact match, not fuzzy)
