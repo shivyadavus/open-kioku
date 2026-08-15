@@ -2,6 +2,8 @@ use open_kioku_core::{File, FileId, Language, RepositoryId};
 use open_kioku_tree_sitter::parse_file;
 use std::collections::HashSet;
 
+// Nested/chained calls can share the same start position and callee name, so call-site
+// identity must distinguish the complete AST source range rather than only its start.
 #[test]
 fn chained_same_name_calls_have_distinct_ids() {
     let file = File {
