@@ -134,8 +134,15 @@ mod tests {
     #[test]
     fn enforces_relationship_compatibility() {
         let sem = semantics_for(&Language::Rust).unwrap();
-        assert!(sem.compatible_relationship(SymbolKind::Function, SymbolKind::Method, GraphEdgeType::Calls));
-        assert!(!sem.compatible_relationship(SymbolKind::Function, SymbolKind::Field, GraphEdgeType::Calls));
+        assert!(sem.compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Method,
+            GraphEdgeType::Calls
+        ));
+        assert!(!sem.compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Field,
+            GraphEdgeType::Calls
+        ));
     }
 }
-

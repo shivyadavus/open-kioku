@@ -53,6 +53,9 @@ fn index_repo_with_config(
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
         analysis_facts: &snapshot.analysis_facts,
+        scopes: &[],
+        bindings: &[],
+        call_sites: &[],
     })?;
     report_index_stage(
         &reporter,

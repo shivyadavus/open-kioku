@@ -61,6 +61,9 @@ fn provenance_lookup(c: &mut Criterion) {
             imports: &[],
             occurrences: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         })
         .unwrap();
 

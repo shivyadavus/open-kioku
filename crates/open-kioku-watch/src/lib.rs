@@ -233,6 +233,9 @@ pub fn reindex_repo_after_changes<'a>(
                 analysis_facts: &changed_facts,
                 graph_nodes: &affected_nodes,
                 graph_edges: &affected_edges,
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             }) {
                 Ok(()) => partial = true,
                 Err(_) => persist_full_snapshot(&store, &snapshot)?,
@@ -315,6 +318,9 @@ fn persist_full_snapshot(
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
         analysis_facts: &snapshot.analysis_facts,
+        scopes: &[],
+        bindings: &[],
+        call_sites: &[],
     })
 }
 

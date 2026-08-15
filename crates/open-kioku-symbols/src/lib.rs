@@ -205,6 +205,11 @@ mod tests {
             language: Language::Java,
             confidence: open_kioku_core::Confidence::High,
             provenance: open_kioku_core::EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         }
     }
 

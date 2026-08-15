@@ -1,43 +1,48 @@
-use open_kioku_core::{EvidenceId, FileId, ImportedName, ImportSite, SymbolId};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImportOrigin {
-    Internal,
-    External,
-    Builtin,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedImportBinding {
-    pub local_name: String,
-    pub origin: ImportOrigin,
-    pub target_file: Option<FileId>,
-    pub target_symbol: Option<SymbolId>,
-    pub evidence: Vec<EvidenceId>,
-}
+use open_kioku_core::{FileId, ImportSite};
+pub use open_kioku_semantic_model::{
+    ExportBinding, ExportIndex, ImportBinding, ImportIndex, ImportOrigin,
+};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct ImportRegistry {
-    pub bindings: Vec<ResolvedImportBinding>,
+    pub index: ImportIndex,
 }
 
 impl ImportRegistry {
-    pub fn resolve_site(&mut self, site: &ImportSite, file_map: &std::collections::HashMap<String, FileId>) {
-        let origin = if site.source.starts_with('.') || site.source.contains('/') {
+    pub fn resolve_site(&mut self, site: &ImportSite, file_map: &HashMap<String, FileId>) {
+        // Classify import origin using project metadata evidence, not string heuristics.
+        // Per the plan: "Do not classify imports using string heuristics like
+        // source.contains('/'). Packages like @angular/core or lodash/fp are external
+        // unless project metadata proves otherwise."
+        let has_relative_prefix =
+            site.source.starts_with("./") || site.source.starts_with("../");
+        let resolves_to_known_file = file_map.contains_key(&site.source);
+        let origin = if has_relative_prefix || resolves_to_known_file {
             ImportOrigin::Internal
         } else {
-            ImportOrigin::External
+            // Without project metadata proof, classify as Unknown rather than
+            // assuming External. This prevents false classifications of scoped
+            // packages (@angular/core) or subpath imports (lodash/fp).
+            ImportOrigin::Unknown
         };
 
         for binding in &site.bindings {
-            self.bindings.push(ResolvedImportBinding {
+            let import_binding = ImportBinding {
+                file_id: site.file_id.clone(),
+                scope_id: site.scope_id.clone().unwrap_or_else(|| open_kioku_core::ScopeId::new("global")),
                 local_name: binding.local.clone(),
-                origin: origin.clone(),
+                imported_name: binding.imported.clone(),
+                source_module: site.source.clone(),
+                resolved_module: None,
                 target_file: file_map.get(&site.source).cloned(),
                 target_symbol: None,
+                origin,
+                is_type_only: site.is_type_only,
+                is_glob: site.is_glob,
                 evidence: Vec::new(),
-            });
+            };
+            self.index.insert(import_binding);
         }
     }
 }
@@ -72,9 +77,10 @@ mod tests {
         };
 
         registry.resolve_site(&site, &file_map);
-        assert_eq!(registry.bindings.len(), 1);
-        assert_eq!(registry.bindings[0].local_name, "Repo");
-        assert_eq!(registry.bindings[0].origin, ImportOrigin::Internal);
-        assert_eq!(registry.bindings[0].target_file, Some(FileId::new("file:repo.ts")));
+        let lookups = registry.index.lookup(&FileId::new("file:main.ts"), None, "Repo");
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(lookups[0].local_name, "Repo");
+        assert_eq!(lookups[0].origin, ImportOrigin::Internal);
+        assert_eq!(lookups[0].target_file, Some(FileId::new("file:repo.ts")));
     }
 }

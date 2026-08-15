@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct ParsedFile {
+    pub syntax: open_kioku_core::SyntaxFacts,
     pub chunks: Vec<CodeChunk>,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
@@ -29,16 +30,22 @@ pub struct HeuristicParser;
 
 impl Parser for HeuristicParser {
     fn parse_with_hint(&self, file: &File, content: &str, build_hint: Option<&str>) -> ParsedFile {
+        let mut syntax = open_kioku_tree_sitter::parse_file(file, content).unwrap_or_default();
+        if syntax.symbols.is_empty() {
+            syntax.symbols = extract_symbols(file, content);
+        }
+        dedupe_symbols(&mut syntax.symbols);
+
         let imports = extract_imports(file, content);
-        let mut symbols = extract_symbols(file, content);
-        dedupe_symbols(&mut symbols);
-        let analysis_facts = extract_analysis_facts(file, content, &symbols);
-        let mut chunks = extract_chunks(file, content, &symbols);
+        let analysis_facts = extract_analysis_facts(file, content, &syntax.symbols);
+        let mut chunks = extract_chunks(file, content, &syntax.symbols);
         dedupe_chunks(&mut chunks);
-        let tests = extract_tests(file, content, &symbols, build_hint);
+        let tests = extract_tests(file, content, &syntax.symbols, build_hint);
+
         ParsedFile {
+            syntax: syntax.clone(),
             chunks,
-            symbols,
+            symbols: syntax.symbols,
             imports,
             analysis_facts,
             tests,

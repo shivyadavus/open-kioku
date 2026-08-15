@@ -8,7 +8,11 @@ pub enum ResolutionEvidenceKind {
     LexicalScope,
     TypedBinding,
     ExactImport,
+    ExplicitImport,
+    ImplicitSelf,
+    SameFile,
     InheritedMember,
+    InheritanceGraph,
     SCIPOccurrence,
     FallbackHeuristic,
 }

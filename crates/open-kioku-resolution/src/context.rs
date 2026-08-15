@@ -1,6 +1,9 @@
 use crate::evidence::ResolutionEvidence;
 use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
-use open_kioku_core::{Confidence, SymbolId};
+use crate::inheritance::InheritanceIndex;
+use open_kioku_core::{Confidence, FileId, Language, ModuleId, SymbolId};
+use open_kioku_languages::semantics::LanguageSemantics;
+use open_kioku_semantic_model::SemanticRepository;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnresolvedReason {
@@ -37,21 +40,39 @@ pub enum ResolutionResult {
 }
 
 pub struct ResolutionContext<'a> {
+    pub file_id: &'a FileId,
+    pub module_id: Option<&'a ModuleId>,
+    pub language: Language,
+    pub repository: &'a SemanticRepository,
     pub symbols: &'a SymbolIndex,
     pub scopes: &'a ScopeIndex,
     pub bindings: &'a BindingIndex,
+    pub inheritance: &'a InheritanceIndex,
+    pub semantics: &'static dyn LanguageSemantics,
 }
 
 impl<'a> ResolutionContext<'a> {
     pub fn new(
+        file_id: &'a FileId,
+        module_id: Option<&'a ModuleId>,
+        language: Language,
+        repository: &'a SemanticRepository,
         symbols: &'a SymbolIndex,
         scopes: &'a ScopeIndex,
         bindings: &'a BindingIndex,
+        inheritance: &'a InheritanceIndex,
+        semantics: &'static dyn LanguageSemantics,
     ) -> Self {
         Self {
+            file_id,
+            module_id,
+            language,
+            repository,
             symbols,
             scopes,
             bindings,
+            inheritance,
+            semantics,
         }
     }
 }

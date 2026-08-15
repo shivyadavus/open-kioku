@@ -24,7 +24,12 @@ impl LanguageSemantics for RustSemantics {
             ReceiverKind::Super
         } else if trimmed == "crate" {
             ReceiverKind::Module
-        } else if trimmed.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        } else if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+        {
             ReceiverKind::Type
         } else {
             ReceiverKind::Value

@@ -63,7 +63,12 @@ mod tests {
             parent_id: None,
             owner_symbol_id: None,
             kind: ScopeKind::File,
-            range: SourceRange { start_line: 1, start_column: 1, end_line: 50, end_column: 1 },
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 50,
+                end_column: 1,
+            },
         };
         let scope_index = ScopeIndex::build(vec![file_scope]);
 
@@ -74,11 +79,30 @@ mod tests {
             name: "repo".into(),
             declared_type: Some("Repo".into()),
             inferred_type: None,
-            range: SourceRange { start_line: 5, start_column: 1, end_line: 5, end_column: 20 },
+            range: SourceRange {
+                start_line: 5,
+                start_column: 1,
+                end_line: 5,
+                end_column: 20,
+            },
         };
         let binding_index = BindingIndex::build(vec![binding]);
+        let inheritance_index = InheritanceIndex::build(vec![]);
+        let repository = open_kioku_semantic_model::SemanticRepository::new();
+        let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
+        let main_file_id = FileId::new("file:Main.java");
 
-        let ctx = ResolutionContext::new(&sym_index, &scope_index, &binding_index);
+        let ctx = ResolutionContext::new(
+            &main_file_id,
+            None,
+            Language::Java,
+            &repository,
+            &sym_index,
+            &scope_index,
+            &binding_index,
+            &inheritance_index,
+            semantics,
+        );
 
         let call = CallSite {
             id: CallSiteId::new("call:save"),
@@ -88,7 +112,12 @@ mod tests {
             callee_name: "save".into(),
             receiver: Some("repo".into()),
             receiver_kind: ReceiverKind::Value,
-            range: SourceRange { start_line: 10, start_column: 5, end_line: 10, end_column: 15 },
+            range: SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 10,
+                end_column: 15,
+            },
         };
 
         let res = resolve_call(&call, &ctx);

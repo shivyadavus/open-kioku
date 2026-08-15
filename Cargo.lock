@@ -1360,9 +1360,12 @@ dependencies = [
  "open-kioku-git",
  "open-kioku-languages",
  "open-kioku-parse",
+ "open-kioku-resolution",
  "open-kioku-scip",
+ "open-kioku-semantic-model",
  "rayon",
  "roxmltree",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1506,6 +1509,7 @@ dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-languages",
+ "open-kioku-semantic-model",
  "serde",
  "smallvec",
  "tracing",
@@ -1590,6 +1594,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-kioku-semantic-model"
+version = "2.4.0"
+dependencies = [
+ "open-kioku-core",
+ "schemars",
+ "serde",
+]
+
+[[package]]
 name = "open-kioku-sentry"
 version = "2.4.0"
 dependencies = [
@@ -1645,8 +1658,10 @@ name = "open-kioku-tests"
 version = "2.4.0"
 dependencies = [
  "assert_cmd",
+ "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-ingest",
  "open-kioku-storage",
  "predicates",
  "rusqlite",

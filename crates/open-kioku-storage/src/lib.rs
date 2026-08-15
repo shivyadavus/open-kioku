@@ -109,6 +109,9 @@ pub struct IndexData<'a> {
     pub imports: &'a [Import],
     pub occurrences: &'a [SymbolOccurrence],
     pub analysis_facts: &'a [AnalysisFact],
+    pub scopes: &'a [open_kioku_core::Scope],
+    pub bindings: &'a [open_kioku_core::Binding],
+    pub call_sites: &'a [open_kioku_core::CallSite],
 }
 
 pub struct PartialIndexUpdate<'a> {
@@ -123,6 +126,9 @@ pub struct PartialIndexUpdate<'a> {
     pub analysis_facts: &'a [AnalysisFact],
     pub graph_nodes: &'a [GraphNode],
     pub graph_edges: &'a [GraphEdge],
+    pub scopes: &'a [open_kioku_core::Scope],
+    pub bindings: &'a [open_kioku_core::Binding],
+    pub call_sites: &'a [open_kioku_core::CallSite],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

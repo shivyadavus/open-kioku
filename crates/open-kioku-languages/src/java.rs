@@ -26,7 +26,12 @@ impl LanguageSemantics for JavaSemantics {
             ReceiverKind::Self_
         } else if trimmed == "super" {
             ReceiverKind::Super
-        } else if trimmed.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        } else if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+        {
             ReceiverKind::Type
         } else {
             ReceiverKind::Value

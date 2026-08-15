@@ -1,8 +1,7 @@
 use open_kioku_core::{
     Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, ExportSite, File,
-    ImportedName, ImportSite, InheritanceKind, InheritanceSite, Language, LineRange,
-    ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind,
-    SyntaxFacts, Visibility,
+    ImportSite, ImportedName, InheritanceKind, InheritanceSite, Language, LineRange, ReceiverKind,
+    Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId, SymbolKind, SyntaxFacts, Visibility,
 };
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
@@ -11,6 +10,8 @@ use tree_sitter::{Language as TsLanguage, Node, Parser, TreeCursor};
 pub struct ParseContext {
     pub scope_stack: Vec<ScopeId>,
     pub symbol_stack: Vec<SymbolId>,
+    pub callable_stack: Vec<SymbolId>,
+    pub type_stack: Vec<SymbolId>,
     pub next_scope_counter: u32,
 }
 
@@ -19,6 +20,8 @@ impl ParseContext {
         Self {
             scope_stack: Vec::new(),
             symbol_stack: Vec::new(),
+            callable_stack: Vec::new(),
+            type_stack: Vec::new(),
             next_scope_counter: 0,
         }
     }
@@ -29,6 +32,14 @@ impl ParseContext {
 
     pub fn current_symbol(&self) -> Option<SymbolId> {
         self.symbol_stack.last().cloned()
+    }
+
+    pub fn current_callable(&self) -> Option<SymbolId> {
+        self.callable_stack.last().cloned()
+    }
+
+    pub fn current_type(&self) -> Option<SymbolId> {
+        self.type_stack.last().cloned()
     }
 }
 
@@ -79,7 +90,8 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
 
-    out.symbols.sort_by_key(|symbol| symbol.range.as_ref().map(|range| range.start).unwrap_or(0));
+    out.symbols
+        .sort_by_key(|symbol| symbol.range.as_ref().map(|range| range.start).unwrap_or(0));
     out.symbols.dedup_by(|a, b| a.id == b.id);
     Ok(out)
 }
@@ -160,13 +172,7 @@ fn is_scope_node(file: &File, node: Node<'_>) -> Option<ScopeKind> {
     }
 }
 
-fn walk(
-    file: &File,
-    content: &str,
-    node: Node<'_>,
-    ctx: &mut ParseContext,
-    out: &mut SyntaxFacts,
-) {
+fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out: &mut SyntaxFacts) {
     let mut pushed_symbol: Option<SymbolId> = None;
     let mut pushed_scope: Option<ScopeId> = None;
 
@@ -354,7 +360,10 @@ fn extract_call(
                     callee_name = name_node.utf8_text(source_bytes).unwrap_or("").to_string();
                 }
                 if let Some(object_node) = node.child_by_field_name("object") {
-                    let recv = object_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    let recv = object_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                     if !recv.is_empty() {
                         receiver_kind = classify_receiver_string(&recv);
                         receiver_text = Some(recv);
@@ -382,7 +391,10 @@ fn extract_call(
                         }
                     }
                 } else {
-                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    callee_name = function_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                 }
             }
         }
@@ -400,7 +412,10 @@ fn extract_call(
                         }
                     }
                 } else {
-                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    callee_name = function_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                 }
             }
         }
@@ -418,7 +433,10 @@ fn extract_call(
                         }
                     }
                 } else {
-                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    callee_name = function_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                 }
             }
         }
@@ -447,7 +465,10 @@ fn extract_call(
                         }
                     }
                 } else {
-                    callee_name = function_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    callee_name = function_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                 }
             }
         }
@@ -467,7 +488,7 @@ fn extract_call(
             id: call_id,
             file_id: file.id.clone(),
             scope_id,
-            caller_symbol_id: ctx.current_symbol(),
+            caller_symbol_id: ctx.current_callable(),
             callee_name,
             receiver: receiver_text,
             receiver_kind,
@@ -482,7 +503,12 @@ fn classify_receiver_string(recv: &str) -> ReceiverKind {
         ReceiverKind::Self_
     } else if recv == "super" || recv == "Super" {
         ReceiverKind::Super
-    } else if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    } else if recv
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+    {
         ReceiverKind::Type
     } else {
         ReceiverKind::Value
@@ -511,11 +537,17 @@ fn extract_binding(
         Language::Java => {
             if kind == "local_variable_declaration" {
                 if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    declared_type = type_node
+                        .utf8_text(source_bytes)
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 if let Some(declarator) = node.child_by_field_name("declarator") {
                     if let Some(name_node) = declarator.child_by_field_name("name") {
-                        name = name_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                        name = name_node
+                            .utf8_text(source_bytes)
+                            .ok()
+                            .map(|s| s.to_string());
                     }
                     if let Some(value) = declarator.child_by_field_name("value") {
                         inferred_type = infer_type_from_expr(file, source_bytes, value);
@@ -526,10 +558,16 @@ fn extract_binding(
         Language::JavaScript | Language::TypeScript => {
             if kind == "variable_declarator" {
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    name = name_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    name = name_node
+                        .utf8_text(source_bytes)
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    declared_type = type_node
+                        .utf8_text(source_bytes)
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 if let Some(value) = node.child_by_field_name("value") {
                     inferred_type = infer_type_from_expr(file, source_bytes, value);
@@ -544,7 +582,10 @@ fn extract_binding(
                     }
                 }
                 if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    declared_type = type_node
+                        .utf8_text(source_bytes)
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 if let Some(right) = node.child_by_field_name("right") {
                     inferred_type = infer_type_from_expr(file, source_bytes, right);
@@ -557,7 +598,10 @@ fn extract_binding(
                     name = pattern.utf8_text(source_bytes).ok().map(|s| s.to_string());
                 }
                 if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                    declared_type = type_node
+                        .utf8_text(source_bytes)
+                        .ok()
+                        .map(|s| s.to_string());
                 }
                 if let Some(value) = node.child_by_field_name("value") {
                     inferred_type = infer_type_from_expr(file, source_bytes, value);
@@ -632,7 +676,12 @@ fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<St
                 if let Some(function) = expr.child_by_field_name("function") {
                     if function.kind() == "identifier" {
                         let callee = function.utf8_text(source).ok().unwrap_or("");
-                        if callee.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        if callee
+                            .chars()
+                            .next()
+                            .map(|c| c.is_uppercase())
+                            .unwrap_or(false)
+                        {
                             return Some(callee.to_string());
                         }
                     }
@@ -675,7 +724,10 @@ fn extract_import(
     match file.language {
         Language::Java => {
             if let Ok(text) = node.utf8_text(source_bytes) {
-                let text = text.trim_start_matches("import").trim_end_matches(';').trim();
+                let text = text
+                    .trim_start_matches("import")
+                    .trim_end_matches(';')
+                    .trim();
                 if text.ends_with(".*") {
                     is_glob = true;
                     module_source = text.trim_end_matches(".*").to_string();
@@ -692,7 +744,11 @@ fn extract_import(
         }
         Language::Rust => {
             if let Ok(text) = node.utf8_text(source_bytes) {
-                let text = text.trim_start_matches("pub").trim_start_matches("use").trim_end_matches(';').trim();
+                let text = text
+                    .trim_start_matches("pub")
+                    .trim_start_matches("use")
+                    .trim_end_matches(';')
+                    .trim();
                 module_source = text.to_string();
                 if text.ends_with("::*") {
                     is_glob = true;
@@ -717,23 +773,38 @@ fn extract_import(
         Language::Python => {
             if kind == "import_from_statement" {
                 if let Some(module_node) = node.child_by_field_name("module_name") {
-                    module_source = module_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    module_source = module_node
+                        .utf8_text(source_bytes)
+                        .unwrap_or("")
+                        .to_string();
                 }
                 let text = node.utf8_text(source_bytes).unwrap_or("");
                 if text.contains("import *") {
                     is_glob = true;
                 }
             } else if kind == "import_statement" {
-                module_source = node.utf8_text(source_bytes).unwrap_or("").trim_start_matches("import ").to_string();
+                module_source = node
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_start_matches("import ")
+                    .to_string();
             }
         }
         Language::JavaScript | Language::TypeScript => {
             if let Some(source_node) = node.child_by_field_name("source") {
-                module_source = source_node.utf8_text(source_bytes).unwrap_or("").trim_matches(&['\'', '"'][..]).to_string();
+                module_source = source_node
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches(&['\'', '"'][..])
+                    .to_string();
             }
         }
         Language::Go => {
-            module_source = node.utf8_text(source_bytes).unwrap_or("").trim_matches(&['\'', '"', '`'][..]).to_string();
+            module_source = node
+                .utf8_text(source_bytes)
+                .unwrap_or("")
+                .trim_matches(&['\'', '"', '`'][..])
+                .to_string();
         }
         _ => {}
     }
@@ -934,9 +1005,14 @@ mod tests {
         assert!(!facts.symbols.is_empty());
         assert!(!facts.scopes.is_empty());
         assert!(!facts.calls.is_empty());
-        assert!(facts.calls.iter().any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Self_));
-        assert!(facts.calls.iter().any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Type));
+        assert!(facts
+            .calls
+            .iter()
+            .any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Self_));
+        assert!(facts
+            .calls
+            .iter()
+            .any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Type));
         assert!(facts.calls.iter().all(|c| c.caller_symbol_id.is_some()));
     }
 }
-

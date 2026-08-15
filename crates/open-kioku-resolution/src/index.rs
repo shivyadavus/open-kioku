@@ -1,6 +1,4 @@
-use open_kioku_core::{
-    Binding, FileId, ModuleId, Scope, ScopeId, SourceRange, Symbol, SymbolId,
-};
+use open_kioku_core::{Binding, FileId, ModuleId, Scope, ScopeId, SourceRange, Symbol, SymbolId};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
@@ -18,14 +16,34 @@ impl SymbolIndex {
     pub fn build(symbols: Vec<Symbol>) -> Self {
         let mut index = Self::default();
         for sym in symbols {
-            index.by_name.entry(sym.name.clone()).or_default().push(sym.id.clone());
-            index.by_qualified.entry(sym.qualified_name.clone()).or_default().push(sym.id.clone());
-            index.by_file.entry(sym.file_id.clone()).or_default().push(sym.id.clone());
+            index
+                .by_name
+                .entry(sym.name.clone())
+                .or_default()
+                .push(sym.id.clone());
+            index
+                .by_qualified
+                .entry(sym.qualified_name.clone())
+                .or_default()
+                .push(sym.id.clone());
+            index
+                .by_file
+                .entry(sym.file_id.clone())
+                .or_default()
+                .push(sym.id.clone());
             if let Some(mod_id) = &sym.module_id {
-                index.by_module.entry(mod_id.clone()).or_default().push(sym.id.clone());
+                index
+                    .by_module
+                    .entry(mod_id.clone())
+                    .or_default()
+                    .push(sym.id.clone());
             }
             if let Some(parent_id) = &sym.parent_symbol_id {
-                index.by_parent.entry(parent_id.clone()).or_default().push(sym.id.clone());
+                index
+                    .by_parent
+                    .entry(parent_id.clone())
+                    .or_default()
+                    .push(sym.id.clone());
             }
             index.by_id.insert(sym.id.clone(), sym);
         }
@@ -90,8 +108,15 @@ impl BindingIndex {
     ) -> Option<&Binding> {
         let mut current = Some(scope_id.clone());
         while let Some(sid) = current {
-            if let Some(list) = self.bindings_by_scope_name.get(&(sid.clone(), name.to_string())) {
-                if let Some(b) = list.iter().rev().find(|b| b.range.start_line <= call_range.start_line) {
+            if let Some(list) = self
+                .bindings_by_scope_name
+                .get(&(sid.clone(), name.to_string()))
+            {
+                if let Some(b) = list
+                    .iter()
+                    .rev()
+                    .find(|b| b.range.start_line <= call_range.start_line)
+                {
                     return Some(b);
                 }
             }

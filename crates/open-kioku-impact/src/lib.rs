@@ -1122,6 +1122,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -1249,6 +1252,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -1334,6 +1340,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &[history_fact],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -1438,6 +1447,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &facts,
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -1523,6 +1535,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &facts,
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -1584,6 +1599,9 @@ mod tests {
                 imports: &[],
                 tests: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 

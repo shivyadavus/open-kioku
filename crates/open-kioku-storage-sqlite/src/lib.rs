@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
-pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 2;
+pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 3;
 const SQLITE_GRAPH_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 
@@ -382,6 +382,12 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let tx = conn.transaction().map_err(storage_err)?;
+        tx.execute("DELETE FROM call_sites", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM bindings", [])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM scopes", [])
+            .map_err(storage_err)?;
         tx.execute("DELETE FROM occurrences", [])
             .map_err(storage_err)?;
         tx.execute("DELETE FROM analysis_facts", [])
@@ -408,6 +414,9 @@ impl MetadataStore for SqliteStore {
                 imports: data.imports,
                 occurrences: data.occurrences,
                 analysis_facts: data.analysis_facts,
+                scopes: data.scopes,
+                bindings: data.bindings,
+                call_sites: data.call_sites,
             },
         )?;
         tx.commit().map_err(storage_err)?;
@@ -564,6 +573,21 @@ impl MetadataStore for SqliteStore {
             .map_err(storage_err)?;
             tx.execute("DELETE FROM files WHERE id = ?1", params![&file_id.0])
                 .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM scopes WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM bindings WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
+            tx.execute(
+                "DELETE FROM call_sites WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
         }
 
         insert_index_rows(
@@ -576,6 +600,9 @@ impl MetadataStore for SqliteStore {
                 imports: update.imports,
                 occurrences: update.occurrences,
                 analysis_facts: update.analysis_facts,
+                scopes: update.scopes,
+                bindings: update.bindings,
+                call_sites: update.call_sites,
             },
         )?;
         insert_graph_rows(&tx, update.graph_nodes, update.graph_edges)?;
@@ -2148,6 +2175,9 @@ struct IndexRows<'a> {
     imports: &'a [Import],
     occurrences: &'a [SymbolOccurrence],
     analysis_facts: &'a [AnalysisFact],
+    scopes: &'a [open_kioku_core::Scope],
+    bindings: &'a [open_kioku_core::Binding],
+    call_sites: &'a [open_kioku_core::CallSite],
 }
 
 fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
@@ -2244,22 +2274,64 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
         )
         .map_err(storage_err)?;
     }
+    for scope in rows.scopes {
+        tx.execute(
+            "INSERT INTO scopes(id, file_id, parent_id, owner_symbol_id, kind, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                &scope.id.0,
+                &scope.file_id.0,
+                scope.parent_id.as_ref().map(|id| &id.0),
+                scope.owner_symbol_id.as_ref().map(|id| &id.0),
+                format!("{:?}", scope.kind),
+                serde_json::to_string(scope)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for binding in rows.bindings {
+        tx.execute(
+            "INSERT INTO bindings(id, file_id, scope_id, name, json) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                &binding.id.0,
+                &binding.file_id.0,
+                &binding.scope_id.0,
+                &binding.name,
+                serde_json::to_string(binding)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
+    for call_site in rows.call_sites {
+        tx.execute(
+            "INSERT INTO call_sites(id, file_id, caller_symbol_id, callee_name, start_line, start_column, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &call_site.id.0,
+                &call_site.file_id.0,
+                call_site.caller_symbol_id.as_ref().map(|id| &id.0),
+                &call_site.callee_name,
+                call_site.range.start_line,
+                call_site.range.start_column,
+                serde_json::to_string(call_site)?
+            ],
+        )
+        .map_err(storage_err)?;
+    }
     Ok(())
 }
 
 fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
     for node in nodes {
-        let evidence_available = node.file_id.is_some() || node.symbol_id.is_some();
+        let freshness = node.evidence.as_ref().map(|e| e.indexed_at.timestamp()).unwrap_or(0);
         tx.execute(
             "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &node.id.0,
                 &node.label,
                 format!("{:?}", node.node_type),
-                node.file_id.as_ref().map(|f| &f.0),
-                node.symbol_id.as_ref().map(|s| &s.0),
-                evidence_available,
-                0_i64,
+                node.file_id.as_ref().map(|id| &id.0),
+                node.symbol_id.as_ref().map(|id| &id.0),
+                node.evidence.is_some(),
+                freshness,
                 serde_json::to_string(node)?
             ],
         )
@@ -2716,15 +2788,17 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
                  SET node_type = ?1,
                      file_id = ?2,
                      symbol_id = ?3,
-                     evidence_available = ?4
-                 WHERE id = ?5",
+                     evidence_available = ?4,
+                     freshness = ?5
+                 WHERE id = ?6",
                 params![
                     format!("{:?}", node.node_type),
                     node.file_id.as_ref().map(|file_id| file_id.0.as_str()),
                     node.symbol_id
                         .as_ref()
                         .map(|symbol_id| symbol_id.0.as_str()),
-                    node.file_id.is_some() || node.symbol_id.is_some(),
+                    node.evidence.is_some(),
+                    node.evidence.as_ref().map(|e| e.indexed_at.timestamp()).unwrap_or(0),
                     id,
                 ],
             )
@@ -3419,6 +3493,11 @@ mod tests {
             language: Language::Rust,
             confidence: Confidence::High,
             provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         }
     }
 
@@ -4112,6 +4191,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
         store.put_history_snapshot(&history_snapshot()).unwrap();
@@ -4240,6 +4322,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -4286,6 +4371,9 @@ mod tests {
                     provenance: EvidenceSourceType::StaticAnalysis,
                 }],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
         let node1 = GraphNode {
@@ -4371,6 +4459,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
                 graph_nodes: std::slice::from_ref(&updated_node2),
                 graph_edges: &[],
             })
@@ -4418,6 +4509,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -4435,6 +4529,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
                 graph_nodes: &[],
                 graph_edges: &[],
             })
@@ -4524,6 +4621,9 @@ mod tests {
                     git_fact.clone(),
                     implementation_fact.clone(),
                 ],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 
@@ -4581,6 +4681,9 @@ mod tests {
                     imports: &[],
                     tests: &[],
                     analysis_facts: std::slice::from_ref(&git_fact),
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
                 })
                 .unwrap();
         }
@@ -4615,6 +4718,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -4642,6 +4748,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -4698,6 +4807,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -4795,6 +4907,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
 
@@ -4844,6 +4959,9 @@ mod tests {
             imports: &[],
             tests: &[],
             analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
         };
         store.replace_index(data).unwrap();
         store.replace_graph(&[], &[]).unwrap();

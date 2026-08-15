@@ -891,7 +891,6 @@ pub struct SyntaxFacts {
     pub inheritance: Vec<InheritanceSite>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Symbol {
     pub id: SymbolId,
@@ -2336,8 +2335,8 @@ mod tests {
         ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
         FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
         GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
-        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScoreComponent, SymbolId,
-        HISTORY_SCHEMA_VERSION,
+        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId, ScoreComponent,
+        SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -2704,4 +2703,3 @@ mod tests {
         assert_eq!(range.end_column, 15);
     }
 }
-

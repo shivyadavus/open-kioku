@@ -1,0 +1,11 @@
+[package]
+name = "open-kioku-semantic-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+open-kioku-core = { path = "../open-kioku-core" }
+serde = { workspace = true, features = ["derive"] }
+schemars = { workspace = true }

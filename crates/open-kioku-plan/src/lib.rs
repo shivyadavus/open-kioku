@@ -2756,6 +2756,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &analysis_facts,
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
         store

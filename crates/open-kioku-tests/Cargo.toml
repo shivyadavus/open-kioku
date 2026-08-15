@@ -12,8 +12,10 @@ categories.workspace = true
 
 [dependencies]
 assert_cmd = "2.1.2"
+open-kioku-config = { version = "2.0.0", path = "../open-kioku-config" }
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
+open-kioku-ingest = { version = "2.0.0", path = "../open-kioku-ingest" }
 open-kioku-storage = { version = "2.0.0", path = "../open-kioku-storage" }
 predicates = "3.1.4"
 rusqlite.workspace = true
