@@ -1,7 +1,7 @@
 use open_kioku_core::Language;
 pub use open_kioku_semantic_model::{ModuleInfo, PathAlias, ProjectModel, ProjectRoot};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub trait ProjectModelDiscovery {
     fn discover(repo_root: &Path) -> ProjectModel;
@@ -25,17 +25,21 @@ impl ProjectModelDiscovery for ProjectModel {
         let path_without_ext = relative_path.with_extension("");
         let path_str = path_without_ext.to_string_lossy().replace('\\', "/");
 
-        let nearest_root = self.nearest_root_for(relative_path, *language);
+        let nearest_root = self.nearest_root_for(relative_path, language.clone());
 
         match language {
             Language::Java => {
-                let mut stripped = path_str.as_str();
+                let parent_path = relative_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let mut stripped = parent_path.as_str();
                 if let Some(pos) = stripped.find("src/main/java/") {
                     stripped = &stripped[pos + "src/main/java/".len()..];
                 } else if let Some(pos) = stripped.find("src/") {
                     stripped = &stripped[pos + "src/".len()..];
                 }
-                stripped.replace('/', ".")
+                stripped.trim_matches('/').replace('/', ".")
             }
             Language::Python => {
                 let mut stripped = path_str.as_str();
@@ -67,7 +71,10 @@ impl ProjectModelDiscovery for ProjectModel {
                 let pkg_prefix = nearest_root
                     .and_then(|r| r.package_name.as_deref())
                     .unwrap_or("module");
-                let dir_part = relative_path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                let dir_part = relative_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
                 if dir_part.is_empty() || dir_part == "." {
                     pkg_prefix.to_string()
                 } else {
@@ -100,7 +107,11 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "vendor" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "vendor"
+            {
                 continue;
             }
             walk_discover(&path, repo_root, model);
@@ -120,7 +131,8 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
                         if let Ok(content) = fs::read_to_string(&path) {
                             for line in content.lines() {
                                 if line.starts_with("module ") {
-                                    pkg_name = Some(line.trim_start_matches("module ").trim().to_string());
+                                    pkg_name =
+                                        Some(line.trim_start_matches("module ").trim().to_string());
                                     break;
                                 }
                             }
@@ -136,7 +148,10 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
                         let mut pkg_name = None;
                         if let Ok(content) = fs::read_to_string(&path) {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                                pkg_name = json.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+                                pkg_name = json
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string());
                             }
                         }
                         model.roots.push(ProjectRoot {
@@ -181,7 +196,7 @@ mod tests {
         let java_path = Path::new("src/main/java/com/acme/booking/ReservationService.java");
         assert_eq!(
             model.module_path_from_file(java_path, &Language::Java),
-            "com.acme.booking.ReservationService"
+            "com.acme.booking"
         );
 
         let py_path = Path::new("src/app/booking/service.py");

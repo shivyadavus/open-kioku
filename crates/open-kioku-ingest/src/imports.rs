@@ -11,26 +11,21 @@ pub struct ImportRegistry {
 
 impl ImportRegistry {
     pub fn resolve_site(&mut self, site: &ImportSite, file_map: &HashMap<String, FileId>) {
-        // Classify import origin using project metadata evidence, not string heuristics.
-        // Per the plan: "Do not classify imports using string heuristics like
-        // source.contains('/'). Packages like @angular/core or lodash/fp are external
-        // unless project metadata proves otherwise."
-        let has_relative_prefix =
-            site.source.starts_with("./") || site.source.starts_with("../");
+        let has_relative_prefix = site.source.starts_with("./") || site.source.starts_with("../");
         let resolves_to_known_file = file_map.contains_key(&site.source);
         let origin = if has_relative_prefix || resolves_to_known_file {
             ImportOrigin::Internal
         } else {
-            // Without project metadata proof, classify as Unknown rather than
-            // assuming External. This prevents false classifications of scoped
-            // packages (@angular/core) or subpath imports (lodash/fp).
             ImportOrigin::Unknown
         };
 
         for binding in &site.bindings {
             let import_binding = ImportBinding {
                 file_id: site.file_id.clone(),
-                scope_id: site.scope_id.clone().unwrap_or_else(|| open_kioku_core::ScopeId::new("global")),
+                scope_id: site
+                    .scope_id
+                    .clone()
+                    .unwrap_or_else(|| open_kioku_core::ScopeId::new("global")),
                 local_name: binding.local.clone(),
                 imported_name: binding.imported.clone(),
                 source_module: site.source.clone(),
@@ -45,12 +40,49 @@ impl ImportRegistry {
             self.index.insert(import_binding);
         }
     }
+
+    pub fn resolve_symbols(
+        &mut self,
+        symbols: &open_kioku_resolution::SymbolIndex,
+        module_to_file: &HashMap<String, FileId>,
+    ) {
+        for list in self.index.by_file_local_name.values_mut() {
+            for binding in list.iter_mut() {
+                let target_file_id = binding
+                    .target_file
+                    .clone()
+                    .or_else(|| module_to_file.get(&binding.source_module).cloned());
+
+                if let Some(target_fid) = target_file_id {
+                    binding.target_file = Some(target_fid.clone());
+                    if let Some(file_syms) = symbols.by_file.get(&target_fid) {
+                        let candidates: Vec<&open_kioku_core::SymbolId> = file_syms
+                            .iter()
+                            .filter(|id| {
+                                symbols
+                                    .get(id)
+                                    .map(|s| s.name == binding.imported_name)
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        if candidates.len() == 1 {
+                            binding.target_symbol = Some(candidates[0].clone());
+                        }
+                    }
+                } else if let Some(qualified) = symbols.by_qualified.get(&binding.source_module) {
+                    if qualified.len() == 1 {
+                        binding.target_symbol = Some(qualified[0].clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{FileId, ImportedName, ImportSite, SourceRange};
+    use open_kioku_core::{FileId, ImportSite, ImportedName, SourceRange};
     use std::collections::HashMap;
 
     #[test]
@@ -77,7 +109,9 @@ mod tests {
         };
 
         registry.resolve_site(&site, &file_map);
-        let lookups = registry.index.lookup(&FileId::new("file:main.ts"), None, "Repo");
+        let lookups = registry
+            .index
+            .lookup(&FileId::new("file:main.ts"), None, "Repo");
         assert_eq!(lookups.len(), 1);
         assert_eq!(lookups[0].local_name, "Repo");
         assert_eq!(lookups[0].origin, ImportOrigin::Internal);

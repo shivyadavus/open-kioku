@@ -386,8 +386,7 @@ impl MetadataStore for SqliteStore {
             .map_err(storage_err)?;
         tx.execute("DELETE FROM bindings", [])
             .map_err(storage_err)?;
-        tx.execute("DELETE FROM scopes", [])
-            .map_err(storage_err)?;
+        tx.execute("DELETE FROM scopes", []).map_err(storage_err)?;
         tx.execute("DELETE FROM occurrences", [])
             .map_err(storage_err)?;
         tx.execute("DELETE FROM analysis_facts", [])
@@ -573,11 +572,8 @@ impl MetadataStore for SqliteStore {
             .map_err(storage_err)?;
             tx.execute("DELETE FROM files WHERE id = ?1", params![&file_id.0])
                 .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM scopes WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
+            tx.execute("DELETE FROM scopes WHERE file_id = ?1", params![&file_id.0])
+                .map_err(storage_err)?;
             tx.execute(
                 "DELETE FROM bindings WHERE file_id = ?1",
                 params![&file_id.0],
@@ -2321,7 +2317,6 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
 
 fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
     for node in nodes {
-        let freshness = node.evidence.as_ref().map(|e| e.indexed_at.timestamp()).unwrap_or(0);
         tx.execute(
             "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -2330,8 +2325,8 @@ fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEd
                 format!("{:?}", node.node_type),
                 node.file_id.as_ref().map(|id| &id.0),
                 node.symbol_id.as_ref().map(|id| &id.0),
-                node.evidence.is_some(),
-                freshness,
+                false,
+                0,
                 serde_json::to_string(node)?
             ],
         )
@@ -2797,8 +2792,8 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
                     node.symbol_id
                         .as_ref()
                         .map(|symbol_id| symbol_id.0.as_str()),
-                    node.evidence.is_some(),
-                    node.evidence.as_ref().map(|e| e.indexed_at.timestamp()).unwrap_or(0),
+                    false,
+                    0,
                     id,
                 ],
             )

@@ -175,6 +175,8 @@ fn is_scope_node(file: &File, node: Node<'_>) -> Option<ScopeKind> {
 fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out: &mut SyntaxFacts) {
     let mut pushed_symbol: Option<SymbolId> = None;
     let mut pushed_scope: Option<ScopeId> = None;
+    let mut pushed_callable: Option<SymbolId> = None;
+    let mut pushed_type: Option<SymbolId> = None;
 
     if let Some((name_node, symbol_kind)) = symbol_name_node(file, node) {
         if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
@@ -191,26 +193,44 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                     qualified_name
                 )));
 
+                let signature = extract_symbol_signature(file, content, node);
+                let visibility = extract_symbol_visibility(file, content, node);
+
                 let symbol = Symbol {
                     id: symbol_id.clone(),
                     name: name.to_string(),
                     qualified_name,
-                    kind: symbol_kind,
+                    kind: symbol_kind.clone(),
                     file_id: file.id.clone(),
                     range: Some(line_range),
                     language: file.language.clone(),
                     confidence: Confidence::High,
                     provenance: EvidenceSourceType::TreeSitter,
                     module_id: None,
-                    parent_symbol_id: ctx.current_symbol(),
+                    parent_symbol_id: ctx.current_type().or_else(|| ctx.current_symbol()),
                     scope_id: ctx.current_scope(),
-                    signature: None,
-                    visibility: Visibility::Public,
+                    signature,
+                    visibility,
                 };
 
                 out.symbols.push(symbol);
                 ctx.symbol_stack.push(symbol_id.clone());
-                pushed_symbol = Some(symbol_id);
+                pushed_symbol = Some(symbol_id.clone());
+
+                let is_callable = matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method);
+                let is_type = matches!(
+                    symbol_kind,
+                    SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+                );
+
+                if is_callable {
+                    ctx.callable_stack.push(symbol_id.clone());
+                    pushed_callable = Some(symbol_id.clone());
+                }
+                if is_type {
+                    ctx.type_stack.push(symbol_id.clone());
+                    pushed_type = Some(symbol_id);
+                }
             }
         }
     }
@@ -250,8 +270,122 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     if pushed_scope.is_some() {
         ctx.scope_stack.pop();
     }
+    if pushed_type.is_some() {
+        ctx.type_stack.pop();
+    }
+    if pushed_callable.is_some() {
+        ctx.callable_stack.pop();
+    }
     if pushed_symbol.is_some() {
         ctx.symbol_stack.pop();
+    }
+}
+
+fn extract_symbol_signature(file: &File, content: &str, node: Node<'_>) -> Option<String> {
+    let source_bytes = content.as_bytes();
+    match file.language {
+        Language::Java => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let text = params.utf8_text(source_bytes).ok()?;
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+                Some(format!("{name}{text}"))
+            } else {
+                None
+            }
+        }
+        Language::Rust => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let text = params.utf8_text(source_bytes).ok()?;
+                let return_type = node
+                    .child_by_field_name("return_type")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+                Some(format!("fn{text} {return_type}").trim().to_string())
+            } else {
+                None
+            }
+        }
+        Language::TypeScript | Language::JavaScript => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let text = params.utf8_text(source_bytes).ok()?;
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+                Some(format!("{name}{text}"))
+            } else {
+                None
+            }
+        }
+        Language::Python => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let text = params.utf8_text(source_bytes).ok()?;
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+                Some(format!("def {name}{text}"))
+            } else {
+                None
+            }
+        }
+        Language::Go => {
+            if let Some(params) = node.child_by_field_name("parameters") {
+                let text = params.utf8_text(source_bytes).ok()?;
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .unwrap_or("");
+                Some(format!("func {name}{text}"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_symbol_visibility(file: &File, content: &str, node: Node<'_>) -> Visibility {
+    let source_bytes = content.as_bytes();
+    let text = node.utf8_text(source_bytes).unwrap_or("");
+    match file.language {
+        Language::Java => {
+            if text.starts_with("public ") || text.contains(" public ") {
+                Visibility::Public
+            } else if text.starts_with("private ") || text.contains(" private ") {
+                Visibility::Private
+            } else if text.starts_with("protected ") || text.contains(" protected ") {
+                Visibility::Protected
+            } else {
+                Visibility::Package
+            }
+        }
+        Language::Rust => {
+            if text.starts_with("pub ") || text.contains("pub ") {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            }
+        }
+        Language::Go => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source_bytes) {
+                    if name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
+                        return Visibility::Public;
+                    }
+                }
+            }
+            Visibility::Private
+        }
+        _ => Visibility::Public,
     }
 }
 
@@ -499,15 +633,26 @@ fn extract_call(
 
 fn classify_receiver_string(recv: &str) -> ReceiverKind {
     let recv = recv.trim();
-    if recv == "this" || recv == "self" || recv == "Self" {
+    if recv == "this"
+        || recv == "self"
+        || recv == "Self"
+        || recv.starts_with("this.")
+        || recv.starts_with("self.")
+        || recv.starts_with("Self::")
+    {
         ReceiverKind::Self_
-    } else if recv == "super" || recv == "Super" {
+    } else if recv == "super"
+        || recv == "Super"
+        || recv.starts_with("super.")
+        || recv.starts_with("Super::")
+    {
         ReceiverKind::Super
     } else if recv
         .chars()
         .next()
         .map(|c| c.is_uppercase())
         .unwrap_or(false)
+        && !recv.contains('.')
     {
         ReceiverKind::Type
     } else {
@@ -529,99 +674,190 @@ fn extract_binding(
     };
     let source_bytes = content.as_bytes();
 
-    let mut name: Option<String> = None;
-    let mut declared_type: Option<String> = None;
-    let mut inferred_type: Option<String> = None;
+    let mut extracted: Vec<(String, Option<String>, Option<String>)> = Vec::new();
 
     match file.language {
         Language::Java => {
-            if kind == "local_variable_declaration" {
-                if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node
-                        .utf8_text(source_bytes)
-                        .ok()
-                        .map(|s| s.to_string());
-                }
-                if let Some(declarator) = node.child_by_field_name("declarator") {
-                    if let Some(name_node) = declarator.child_by_field_name("name") {
-                        name = name_node
-                            .utf8_text(source_bytes)
-                            .ok()
+            if kind == "local_variable_declaration" || kind == "field_declaration" {
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+
+                let mut cursor = node.walk();
+                for child in named_children(&mut cursor) {
+                    if child.kind() == "variable_declarator" {
+                        let name = child
+                            .child_by_field_name("name")
+                            .and_then(|n| n.utf8_text(source_bytes).ok())
                             .map(|s| s.to_string());
+                        let inferred = child
+                            .child_by_field_name("value")
+                            .and_then(|v| infer_type_from_expr(file, source_bytes, v));
+                        if let Some(n) = name {
+                            extracted.push((n, declared_type.clone(), inferred));
+                        }
                     }
-                    if let Some(value) = declarator.child_by_field_name("value") {
-                        inferred_type = infer_type_from_expr(file, source_bytes, value);
-                    }
+                }
+            } else if kind == "formal_parameter" || kind == "spread_parameter" {
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
                 }
             }
         }
         Language::JavaScript | Language::TypeScript => {
             if kind == "variable_declarator" {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    name = name_node
-                        .utf8_text(source_bytes)
-                        .ok()
-                        .map(|s| s.to_string());
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let inferred_type = node
+                    .child_by_field_name("value")
+                    .and_then(|v| infer_type_from_expr(file, source_bytes, v));
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, inferred_type));
                 }
-                if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node
-                        .utf8_text(source_bytes)
-                        .ok()
-                        .map(|s| s.to_string());
+            } else if kind == "required_parameter" || kind == "optional_parameter" {
+                let name = node
+                    .child_by_field_name("pattern")
+                    .or_else(|| node.child_by_field_name("name"))
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.trim_start_matches(':').trim().to_string());
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
                 }
-                if let Some(value) = node.child_by_field_name("value") {
-                    inferred_type = infer_type_from_expr(file, source_bytes, value);
+            } else if kind == "public_field_definition" || kind == "property_definition" {
+                let name = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.child_by_field_name("property"))
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.trim_start_matches(':').trim().to_string());
+                let inferred_type = node
+                    .child_by_field_name("value")
+                    .and_then(|v| infer_type_from_expr(file, source_bytes, v));
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, inferred_type));
                 }
             }
         }
         Language::Python => {
             if kind == "assignment" {
-                if let Some(left) = node.child_by_field_name("left") {
-                    if left.kind() == "identifier" {
-                        name = left.utf8_text(source_bytes).ok().map(|s| s.to_string());
-                    }
+                let left_name = node
+                    .child_by_field_name("left")
+                    .and_then(|l| {
+                        if l.kind() == "identifier" {
+                            l.utf8_text(source_bytes).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let inferred_type = node
+                    .child_by_field_name("right")
+                    .and_then(|r| infer_type_from_expr(file, source_bytes, r));
+                if let Some(n) = left_name {
+                    extracted.push((n, declared_type, inferred_type));
                 }
-                if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node
-                        .utf8_text(source_bytes)
-                        .ok()
-                        .map(|s| s.to_string());
-                }
-                if let Some(right) = node.child_by_field_name("right") {
-                    inferred_type = infer_type_from_expr(file, source_bytes, right);
+            } else if kind == "typed_parameter" || kind == "default_parameter" {
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
                 }
             }
         }
         Language::Rust => {
             if kind == "let_declaration" {
-                if let Some(pattern) = node.child_by_field_name("pattern") {
-                    name = pattern.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                let name = node
+                    .child_by_field_name("pattern")
+                    .and_then(|p| p.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let inferred_type = node
+                    .child_by_field_name("value")
+                    .and_then(|v| infer_type_from_expr(file, source_bytes, v));
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, inferred_type));
                 }
-                if let Some(type_node) = node.child_by_field_name("type") {
-                    declared_type = type_node
-                        .utf8_text(source_bytes)
-                        .ok()
-                        .map(|s| s.to_string());
+            } else if kind == "parameter" {
+                let name = node
+                    .child_by_field_name("pattern")
+                    .and_then(|p| p.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.trim_start_matches('&').trim().to_string());
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
                 }
-                if let Some(value) = node.child_by_field_name("value") {
-                    inferred_type = infer_type_from_expr(file, source_bytes, value);
-                }
+            } else if kind == "self_parameter" {
+                extracted.push(("self".to_string(), None, None));
             }
         }
         Language::Go => {
             if kind == "short_var_declaration" {
-                if let Some(left) = node.child_by_field_name("left") {
-                    name = left.utf8_text(source_bytes).ok().map(|s| s.to_string());
+                let name = node
+                    .child_by_field_name("left")
+                    .and_then(|l| l.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                let inferred_type = node
+                    .child_by_field_name("right")
+                    .and_then(|r| infer_type_from_expr(file, source_bytes, r));
+                if let Some(n) = name {
+                    extracted.push((n, None, inferred_type));
                 }
-                if let Some(right) = node.child_by_field_name("right") {
-                    inferred_type = infer_type_from_expr(file, source_bytes, right);
+            } else if kind == "parameter_declaration" {
+                let declared_type = node
+                    .child_by_field_name("type")
+                    .and_then(|t| t.utf8_text(source_bytes).ok())
+                    .map(|s| s.trim_start_matches('*').to_string());
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source_bytes).ok())
+                    .map(|s| s.to_string());
+                if let Some(n) = name {
+                    extracted.push((n, declared_type, None));
                 }
             }
         }
         _ => {}
     }
 
-    if let Some(name_str) = name {
+    for (name_str, declared_type, inferred_type) in extracted {
         if !name_str.is_empty() {
             let range = node_source_range(node);
             let binding_id = BindingId::new(format!(
@@ -634,7 +870,7 @@ fn extract_binding(
             out.bindings.push(Binding {
                 id: binding_id,
                 file_id: file.id.clone(),
-                scope_id,
+                scope_id: scope_id.clone(),
                 name: name_str,
                 declared_type,
                 inferred_type,
@@ -726,6 +962,7 @@ fn extract_import(
             if let Ok(text) = node.utf8_text(source_bytes) {
                 let text = text
                     .trim_start_matches("import")
+                    .trim_start_matches("static")
                     .trim_end_matches(';')
                     .trim();
                 if text.ends_with(".*") {
@@ -781,13 +1018,53 @@ fn extract_import(
                 let text = node.utf8_text(source_bytes).unwrap_or("");
                 if text.contains("import *") {
                     is_glob = true;
+                } else {
+                    let mut cursor = node.walk();
+                    for child in named_children(&mut cursor) {
+                        if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
+                            if let Ok(item_text) = child.utf8_text(source_bytes) {
+                                if item_text != module_source {
+                                    if item_text.contains(" as ") {
+                                        let parts: Vec<&str> = item_text.split(" as ").collect();
+                                        if parts.len() == 2 {
+                                            bindings.push(ImportedName {
+                                                imported: parts[0].trim().to_string(),
+                                                local: parts[1].trim().to_string(),
+                                            });
+                                        }
+                                    } else {
+                                        bindings.push(ImportedName {
+                                            imported: item_text.trim().to_string(),
+                                            local: item_text.trim().to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } else if kind == "import_statement" {
-                module_source = node
+                let text = node
                     .utf8_text(source_bytes)
                     .unwrap_or("")
                     .trim_start_matches("import ")
-                    .to_string();
+                    .trim();
+                if text.contains(" as ") {
+                    let parts: Vec<&str> = text.split(" as ").collect();
+                    if parts.len() == 2 {
+                        module_source = parts[0].trim().to_string();
+                        bindings.push(ImportedName {
+                            imported: module_source.clone(),
+                            local: parts[1].trim().to_string(),
+                        });
+                    }
+                } else {
+                    module_source = text.to_string();
+                    bindings.push(ImportedName {
+                        imported: text.to_string(),
+                        local: text.to_string(),
+                    });
+                }
             }
         }
         Language::JavaScript | Language::TypeScript => {
@@ -798,13 +1075,65 @@ fn extract_import(
                     .trim_matches(&['\'', '"'][..])
                     .to_string();
             }
+            let mut cursor = node.walk();
+            for child in named_children(&mut cursor) {
+                if child.kind() == "import_clause" || child.kind() == "named_imports" {
+                    let mut clause_cursor = child.walk();
+                    for spec in named_children(&mut clause_cursor) {
+                        if spec.kind() == "import_specifier" {
+                            let name = spec
+                                .child_by_field_name("name")
+                                .and_then(|n| n.utf8_text(source_bytes).ok());
+                            let alias = spec
+                                .child_by_field_name("alias")
+                                .and_then(|a| a.utf8_text(source_bytes).ok());
+                            if let Some(imported) = name {
+                                bindings.push(ImportedName {
+                                    imported: imported.to_string(),
+                                    local: alias.unwrap_or(imported).to_string(),
+                                });
+                            }
+                        } else if spec.kind() == "identifier" {
+                            if let Ok(name) = spec.utf8_text(source_bytes) {
+                                bindings.push(ImportedName {
+                                    imported: "default".to_string(),
+                                    local: name.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
         Language::Go => {
-            module_source = node
-                .utf8_text(source_bytes)
-                .unwrap_or("")
-                .trim_matches(&['\'', '"', '`'][..])
-                .to_string();
+            if let Some(path_node) = node.child_by_field_name("path") {
+                module_source = path_node
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches(&['\'', '"', '`'][..])
+                    .to_string();
+            } else {
+                module_source = node
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches(&['\'', '"', '`'][..])
+                    .to_string();
+            }
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(alias) = name_node.utf8_text(source_bytes) {
+                    if let Some(pkg) = module_source.split('/').last() {
+                        bindings.push(ImportedName {
+                            imported: pkg.to_string(),
+                            local: alias.to_string(),
+                        });
+                    }
+                }
+            } else if let Some(pkg) = module_source.split('/').last() {
+                bindings.push(ImportedName {
+                    imported: pkg.to_string(),
+                    local: pkg.to_string(),
+                });
+            }
         }
         _ => {}
     }
@@ -835,15 +1164,48 @@ fn extract_export(
     if file.language == Language::JavaScript || file.language == Language::TypeScript {
         if kind == "export_statement" {
             let range = node_source_range(node);
-            let text = node.utf8_text(source_bytes).unwrap_or("");
-            out.exports.push(ExportSite {
-                file_id: file.id.clone(),
-                exported_name: text.to_string(),
-                local_name: None,
-                source_module: None,
-                is_glob: text.contains('*'),
-                range,
-            });
+            let mut cursor = node.walk();
+            for child in named_children(&mut cursor) {
+                if child.kind() == "export_clause" {
+                    let mut clause_cursor = child.walk();
+                    for spec in named_children(&mut clause_cursor) {
+                        if spec.kind() == "export_specifier" {
+                            let name = spec
+                                .child_by_field_name("name")
+                                .and_then(|n| n.utf8_text(source_bytes).ok());
+                            let alias = spec
+                                .child_by_field_name("alias")
+                                .and_then(|a| a.utf8_text(source_bytes).ok());
+                            if let Some(n) = name {
+                                out.exports.push(ExportSite {
+                                    file_id: file.id.clone(),
+                                    exported_name: alias.unwrap_or(n).to_string(),
+                                    local_name: Some(n.to_string()),
+                                    source_module: None,
+                                    is_glob: false,
+                                    range: range.clone(),
+                                });
+                            }
+                        }
+                    }
+                } else if child.kind() == "function_declaration"
+                    || child.kind() == "class_declaration"
+                    || child.kind() == "interface_declaration"
+                {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        if let Ok(name) = name_node.utf8_text(source_bytes) {
+                            out.exports.push(ExportSite {
+                                file_id: file.id.clone(),
+                                exported_name: name.to_string(),
+                                local_name: Some(name.to_string()),
+                                source_module: None,
+                                is_glob: false,
+                                range: range.clone(),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -861,7 +1223,7 @@ fn extract_inheritance(
     match file.language {
         Language::Java | Language::JavaScript | Language::TypeScript => {
             if kind == "extends_clause" || kind == "implements_clause" {
-                if let Some(child_symbol_id) = ctx.current_symbol() {
+                if let Some(child_symbol_id) = ctx.current_type().or_else(|| ctx.current_symbol()) {
                     let inheritance_kind = if kind == "extends_clause" {
                         InheritanceKind::Extends
                     } else {
@@ -1014,5 +1376,9 @@ mod tests {
             .iter()
             .any(|c| c.callee_name == "save" && c.receiver_kind == ReceiverKind::Type));
         assert!(facts.calls.iter().all(|c| c.caller_symbol_id.is_some()));
+        assert!(facts
+            .bindings
+            .iter()
+            .any(|b| b.name == "repo" && b.declared_type == Some("Repository".into())));
     }
 }
