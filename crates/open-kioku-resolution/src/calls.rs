@@ -4,11 +4,10 @@ use open_kioku_core::{
     CallSite, Confidence, EvidenceSourceType, FileRange, Language, LineRange, ReceiverKind,
     SymbolId, SymbolKind,
 };
-use std::path::PathBuf;
 
-fn call_file_range(call: &CallSite) -> Option<FileRange> {
+fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> Option<FileRange> {
     Some(FileRange {
-        path: PathBuf::from(call.file_id.0.as_str()),
+        path: ctx.file_path.to_path_buf(),
         line_range: Some(LineRange {
             start: call.range.start_line,
             end: call.range.end_line,
@@ -66,7 +65,7 @@ fn resolve_self_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resoluti
                                                 evidence: vec![ResolutionEvidence {
                                                     kind: ResolutionEvidenceKind::TypedBinding,
                                                     source_type: EvidenceSourceType::TreeSitter,
-                                                    file_range: call_file_range(call),
+                                                    file_range: call_file_range(call, ctx),
                                                     symbol_id: Some(method_candidates[0].clone()),
                                                     message:
                                                         "resolved method via self field member"
@@ -105,7 +104,7 @@ fn resolve_self_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resoluti
                                             evidence: vec![ResolutionEvidence {
                                                 kind: ResolutionEvidenceKind::TypedBinding,
                                                 source_type: EvidenceSourceType::TreeSitter,
-                                                file_range: call_file_range(call),
+                                                file_range: call_file_range(call, ctx),
                                                 symbol_id: Some(method_candidates[0].clone()),
                                                 message: "resolved method via self field binding"
                                                     .into(),
@@ -127,7 +126,7 @@ fn resolve_self_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resoluti
                         evidence: vec![ResolutionEvidence {
                             kind: ResolutionEvidenceKind::LexicalScope,
                             source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call),
+                            file_range: call_file_range(call, ctx),
                             symbol_id: Some(candidates[0].clone()),
                             message: "resolved via self/this member lookup".into(),
                         }],
@@ -152,7 +151,7 @@ fn resolve_self_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resoluti
                         evidence: vec![ResolutionEvidence {
                             kind: ResolutionEvidenceKind::InheritanceGraph,
                             source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call),
+                            file_range: call_file_range(call, ctx),
                             symbol_id: Some(target),
                             message: "resolved self member via inheritance chain".into(),
                         }],
@@ -194,7 +193,7 @@ fn resolve_static_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
                 evidence: vec![ResolutionEvidence {
                     kind: ResolutionEvidenceKind::TypedBinding,
                     source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call),
+                    file_range: call_file_range(call, ctx),
                     symbol_id: Some(method_candidates[0].clone()),
                     message: "resolved static member call".into(),
                 }],
@@ -270,7 +269,7 @@ fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resol
                 evidence: vec![ResolutionEvidence {
                     kind: ResolutionEvidenceKind::TypedBinding,
                     source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call),
+                    file_range: call_file_range(call, ctx),
                     symbol_id: Some(method_candidates[0].clone()),
                     message: "resolved method via typed local variable binding".into(),
                 }],
@@ -294,7 +293,7 @@ fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resol
                 evidence: vec![ResolutionEvidence {
                     kind: ResolutionEvidenceKind::InheritanceGraph,
                     source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call),
+                    file_range: call_file_range(call, ctx),
                     symbol_id: Some(target),
                     message: "resolved receiver method via inheritance chain".into(),
                 }],
@@ -342,7 +341,7 @@ fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolution
                 evidence: vec![ResolutionEvidence {
                     kind: ResolutionEvidenceKind::LexicalScope,
                     source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call),
+                    file_range: call_file_range(call, ctx),
                     symbol_id: Some(scope_symbols[0].clone()),
                     message: "resolved bare call via lexical scope".into(),
                 }],
@@ -373,7 +372,7 @@ fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolution
                             evidence: vec![ResolutionEvidence {
                                 kind: ResolutionEvidenceKind::ImplicitSelf,
                                 source_type: EvidenceSourceType::TreeSitter,
-                                file_range: call_file_range(call),
+                                file_range: call_file_range(call, ctx),
                                 symbol_id: Some(self_members[0].clone()),
                                 message: "resolved bare call via implicit self dispatch".into(),
                             }],
@@ -398,7 +397,7 @@ fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolution
                             evidence: vec![ResolutionEvidence {
                                 kind: ResolutionEvidenceKind::InheritanceGraph,
                                 source_type: EvidenceSourceType::TreeSitter,
-                                file_range: call_file_range(call),
+                                file_range: call_file_range(call, ctx),
                                 symbol_id: Some(target),
                                 message: "resolved bare call via implicit self inheritance".into(),
                             }],
@@ -428,7 +427,7 @@ fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolution
             evidence: vec![ResolutionEvidence {
                 kind: ResolutionEvidenceKind::ExplicitImport,
                 source_type: EvidenceSourceType::TreeSitter,
-                file_range: call_file_range(call),
+                file_range: call_file_range(call, ctx),
                 symbol_id: Some(target.clone()),
                 message: "resolved bare call via explicit import binding".into(),
             }],
@@ -472,7 +471,7 @@ fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolution
                 evidence: vec![ResolutionEvidence {
                     kind: ResolutionEvidenceKind::SameFile,
                     source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call),
+                    file_range: call_file_range(call, ctx),
                     symbol_id: Some(same_file_candidates[0].clone()),
                     message: "resolved bare call via same file function".into(),
                 }],
@@ -514,7 +513,7 @@ fn resolve_module_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
                         evidence: vec![ResolutionEvidence {
                             kind: ResolutionEvidenceKind::ExplicitImport,
                             source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call),
+                            file_range: call_file_range(call, ctx),
                             symbol_id: Some(target.clone()),
                             message: "resolved module member via export index".into(),
                         }],
@@ -567,6 +566,35 @@ fn resolve_type_with_evidence(ctx: &ResolutionContext<'_>, type_name: &str) -> O
         return Some(matching_targets[0].clone());
     } else if matching_targets.len() > 1 {
         return None;
+    }
+
+    // 2b. If target_file is known on import binding, look up matching type in that file
+    for b in &import_bindings {
+        if let Some(target_file_id) = &b.target_file {
+            if let Some(file_syms) = ctx.symbols.by_file.get(target_file_id) {
+                let candidates: Vec<&SymbolId> = file_syms
+                    .iter()
+                    .filter(|id| {
+                        ctx.symbols
+                            .get(id)
+                            .map(|s| {
+                                s.name == type_name
+                                    && matches!(
+                                        s.kind,
+                                        SymbolKind::Class
+                                            | SymbolKind::Trait
+                                            | SymbolKind::Interface
+                                            | SymbolKind::Module
+                                    )
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if candidates.len() == 1 {
+                    return Some(candidates[0].clone());
+                }
+            }
+        }
     }
 
     // 3. Qualified name lookup (exact match, not fuzzy)

@@ -359,6 +359,13 @@ impl Indexer {
             let mod_path = project_model.module_path_from_file(&file.path, &file.language);
             file_map.insert(mod_path.clone(), file.id.clone());
             file_map.insert(file.path.to_string_lossy().to_string(), file.id.clone());
+            if let Some(stem) = file.path.file_stem().and_then(|s| s.to_str()) {
+                if !mod_path.is_empty() {
+                    file_map.insert(format!("{mod_path}.{stem}"), file.id.clone());
+                    file_map.insert(format!("{mod_path}::{stem}"), file.id.clone());
+                }
+                file_map.insert(stem.to_string(), file.id.clone());
+            }
         }
         for site in &import_sites {
             import_registry.resolve_site(site, &file_map);
@@ -427,11 +434,57 @@ impl Indexer {
         {
             quality_report.call_sites = call_sites.len();
 
+            let symbols_by_qualified: HashMap<&str, &Symbol> = symbols
+                .iter()
+                .map(|s| (s.qualified_name.as_str(), s))
+                .collect();
+            let symbols_by_name: HashMap<&str, Vec<&Symbol>> = {
+                let mut map: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+                for s in &symbols {
+                    map.entry(s.name.as_str()).or_default().push(s);
+                }
+                map
+            };
+
+            let mut legacy_calls_map: HashMap<(&FileId, u32, &str), Option<SymbolId>> =
+                HashMap::new();
+            for fact in &registry_report.analysis_facts {
+                if fact.edge_type == GraphEdgeType::Calls {
+                    if let Some(range) = &fact.range {
+                        let target_id = symbols_by_qualified
+                            .get(fact.target.as_str())
+                            .map(|s| s.id.clone())
+                            .or_else(|| {
+                                let name = fact
+                                    .target
+                                    .rsplit("::")
+                                    .next()
+                                    .unwrap_or(fact.target.as_str());
+                                symbols_by_name.get(name).and_then(|syms| {
+                                    if syms.len() == 1 {
+                                        Some(syms[0].id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        let callee_name = fact
+                            .target
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(fact.target.as_str());
+                        legacy_calls_map
+                            .insert((&fact.file_id, range.start, callee_name), target_id);
+                    }
+                }
+            }
+
             for call in &call_sites {
                 if let Some(file) = file_lookup.get(&call.file_id) {
                     if let Some(semantics) = open_kioku_languages::semantics_for(&file.language) {
                         let ctx = open_kioku_resolution::ResolutionContext::new(
                             &call.file_id,
+                            &file.path,
                             None,
                             file.language.clone(),
                             &semantic_repo,
@@ -479,16 +532,41 @@ impl Indexer {
                             }
                         };
 
-                        let legacy_target = find_legacy_call_target(
-                            &chunks,
-                            &symbols,
-                            &call.range,
-                            &call.callee_name,
-                        );
+                        let legacy_target = legacy_calls_map
+                            .get(&(
+                                &call.file_id,
+                                call.range.start_line,
+                                call.callee_name.as_str(),
+                            ))
+                            .cloned()
+                            .flatten()
+                            .or_else(|| {
+                                registry_report
+                                    .analysis_facts
+                                    .iter()
+                                    .find(|fact| {
+                                        fact.edge_type == GraphEdgeType::Calls
+                                            && fact.file_id == call.file_id
+                                            && fact
+                                                .range
+                                                .as_ref()
+                                                .map(|r| {
+                                                    r.start == call.range.start_line
+                                                        || (r.start >= call.range.start_line
+                                                            && r.end <= call.range.end_line)
+                                                })
+                                                .unwrap_or(false)
+                                            && (fact.target.ends_with(&call.callee_name)
+                                                || fact.target == call.callee_name)
+                                    })
+                                    .and_then(|fact| {
+                                        symbols_by_qualified
+                                            .get(fact.target.as_str())
+                                            .map(|s| s.id.clone())
+                                    })
+                            });
 
-                        let agreement = legacy_target.is_some()
-                            && semantic_target.is_some()
-                            && legacy_target == semantic_target;
+                        let agreement = legacy_target == semantic_target;
 
                         if !agreement {
                             quality_report.disagreement += 1;
@@ -518,39 +596,11 @@ impl Indexer {
                 analysis_facts.extend(registry_report.analysis_facts);
             }
             open_kioku_config::ResolutionMode::V2 => {
-                for rel in &resolved_relationships {
-                    let source_sym = symbol_index.get(&rel.from);
-                    let target_sym = symbol_index.get(&rel.to);
-                    let source_file = source_sym
-                        .map(|s| s.file_id.clone())
-                        .unwrap_or_else(|| FileId::new("unknown"));
-                    let source_range = source_sym.and_then(|s| s.range.clone());
-                    let target_kind = target_sym
-                        .map(|s| match s.kind {
-                            open_kioku_core::SymbolKind::Method => GraphNodeType::Method,
-                            open_kioku_core::SymbolKind::Function => GraphNodeType::Function,
-                            open_kioku_core::SymbolKind::Class => GraphNodeType::Class,
-                            open_kioku_core::SymbolKind::Trait => GraphNodeType::Trait,
-                            open_kioku_core::SymbolKind::Interface => GraphNodeType::Interface,
-                            _ => GraphNodeType::Function,
-                        })
-                        .unwrap_or(GraphNodeType::Function);
-
-                    let fact_id = format!("v2:{}:{}:{:?}", rel.from.0, rel.to.0, rel.edge_type);
-                    analysis_facts.push(AnalysisFact {
-                        id: stable_id(&fact_id),
-                        file_id: source_file,
-                        symbol_id: Some(rel.from.clone()),
-                        target: rel.to.0.clone(),
-                        target_kind,
-                        edge_type: rel.edge_type.clone(),
-                        range: source_range,
-                        confidence: rel.confidence,
-                        source: rel.from.0.clone(),
-                        source_type: EvidenceSourceType::TreeSitter,
-                        message: "resolved via V2 semantic resolution engine".into(),
-                    });
-                }
+                let non_call_facts = registry_report
+                    .analysis_facts
+                    .into_iter()
+                    .filter(|f| f.edge_type != GraphEdgeType::Calls);
+                analysis_facts.extend(non_call_facts);
             }
         }
         let relationship_facts = collect_relationship_analysis_facts(
@@ -1990,23 +2040,6 @@ fn extract_imports_from_syntax(sites: &[open_kioku_core::ImportSite]) -> Vec<Imp
             confidence: Confidence::High,
         })
         .collect()
-}
-
-fn find_legacy_call_target(
-    chunks: &[CodeChunk],
-    symbols: &[Symbol],
-    call_range: &open_kioku_core::SourceRange,
-    callee_name: &str,
-) -> Option<SymbolId> {
-    for chunk in chunks {
-        if chunk.range.start <= call_range.start_line && chunk.range.end >= call_range.end_line {
-            if chunk.text.contains(callee_name) {
-                let matching = symbols.iter().find(|s| s.name == callee_name);
-                return matching.map(|s| s.id.clone());
-            }
-        }
-    }
-    None
 }
 
 fn dedupe_symbols(symbols: &mut Vec<Symbol>) {

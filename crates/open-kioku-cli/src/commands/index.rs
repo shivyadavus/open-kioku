@@ -69,13 +69,14 @@ fn index_repo_with_config(
     );
     store.put_history_snapshot(&history)?;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
-    let graph = InMemoryGraph::from_index_with_analysis(
+    let graph = InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
         &snapshot.imports,
         &snapshot.analysis_facts,
+        &snapshot.resolved_relationships,
     );
     report_index_stage(
         &reporter,

@@ -51,7 +51,18 @@ impl ImportRegistry {
                 let target_file_id = binding
                     .target_file
                     .clone()
-                    .or_else(|| module_to_file.get(&binding.source_module).cloned());
+                    .or_else(|| module_to_file.get(&binding.source_module).cloned())
+                    .or_else(|| {
+                        if binding.source_module.contains('.') {
+                            let (pkg, cls) = binding.source_module.rsplit_once('.')?;
+                            if let Some(fid) = module_to_file.get(pkg) {
+                                return Some(fid.clone());
+                            }
+                            module_to_file.get(&format!("{pkg}.{cls}")).cloned()
+                        } else {
+                            None
+                        }
+                    });
 
                 if let Some(target_fid) = target_file_id {
                     binding.target_file = Some(target_fid.clone());
@@ -72,6 +83,17 @@ impl ImportRegistry {
                 } else if let Some(qualified) = symbols.by_qualified.get(&binding.source_module) {
                     if qualified.len() == 1 {
                         binding.target_symbol = Some(qualified[0].clone());
+                    }
+                }
+
+                if binding.target_symbol.is_none() {
+                    if let Some(syms) = symbols.by_name.get(&binding.imported_name) {
+                        if syms.len() == 1 {
+                            binding.target_symbol = Some(syms[0].clone());
+                            if let Some(sym) = symbols.get(&syms[0]) {
+                                binding.target_file = Some(sym.file_id.clone());
+                            }
+                        }
                     }
                 }
             }

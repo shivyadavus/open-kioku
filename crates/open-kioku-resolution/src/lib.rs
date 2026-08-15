@@ -92,8 +92,10 @@ mod tests {
         let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
         let main_file_id = FileId::new("file:Main.java");
 
+        let file_path = std::path::Path::new("src/Main.java");
         let ctx = ResolutionContext::new(
             &main_file_id,
+            file_path,
             None,
             Language::Java,
             &repository,

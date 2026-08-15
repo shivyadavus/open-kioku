@@ -1661,6 +1661,7 @@ dependencies = [
  "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-graph",
  "open-kioku-ingest",
  "open-kioku-storage",
  "predicates",

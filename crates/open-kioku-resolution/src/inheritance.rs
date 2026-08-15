@@ -7,11 +7,10 @@ use open_kioku_core::{
 };
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 
-fn call_file_range(call: &CallSite) -> Option<FileRange> {
+fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> Option<FileRange> {
     Some(FileRange {
-        path: PathBuf::from(call.file_id.0.as_str()),
+        path: ctx.file_path.to_path_buf(),
         line_range: Some(LineRange {
             start: call.range.start_line,
             end: call.range.end_line,
@@ -206,7 +205,7 @@ pub fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Res
                         evidence: vec![ResolutionEvidence {
                             kind: ResolutionEvidenceKind::InheritanceGraph,
                             source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call),
+                            file_range: call_file_range(call, ctx),
                             symbol_id: Some(target),
                             message: "resolved super call via inheritance graph traversal".into(),
                         }],

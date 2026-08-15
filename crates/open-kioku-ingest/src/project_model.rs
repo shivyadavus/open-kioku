@@ -97,7 +97,7 @@ impl ProjectModelDiscovery for ProjectModel {
     }
 }
 
-fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
+fn walk_discover(current: &Path, _repo_root: &Path, model: &mut ProjectModel) {
     let entries = match fs::read_dir(current) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -114,7 +114,7 @@ fn walk_discover(current: &Path, repo_root: &Path, model: &mut ProjectModel) {
             {
                 continue;
             }
-            walk_discover(&path, repo_root, model);
+            walk_discover(&path, _repo_root, model);
         } else if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 match file_name {

@@ -178,7 +178,7 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
     let mut pushed_callable: Option<SymbolId> = None;
     let mut pushed_type: Option<SymbolId> = None;
 
-    if let Some((name_node, symbol_kind)) = symbol_name_node(file, node) {
+    if let Some((name_node, symbol_kind)) = symbol_name_node(file, node, ctx) {
         if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
             if !name.is_empty() {
                 let line_range = LineRange {
@@ -231,6 +231,48 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
                     ctx.type_stack.push(symbol_id.clone());
                     pushed_type = Some(symbol_id);
                 }
+            }
+        }
+    }
+
+    if file.language == Language::Rust && node.kind() == "impl_item" && pushed_type.is_none() {
+        let source_bytes = content.as_bytes();
+        if let Some(type_node) = node.child_by_field_name("type") {
+            if let Ok(type_name) = type_node.utf8_text(source_bytes) {
+                let type_name = type_name.trim().to_string();
+                let existing_type = out.symbols.iter().find(|s| {
+                    s.name == type_name
+                        && matches!(
+                            s.kind,
+                            SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
+                        )
+                });
+                let type_sym_id = existing_type.map(|s| s.id.clone()).unwrap_or_else(|| {
+                    SymbolId::new(format!(
+                        "{}:{}:{}",
+                        file.path.display(),
+                        type_node.start_position().row + 1,
+                        type_name
+                    ))
+                });
+
+                if let Some(trait_node) = node.child_by_field_name("trait") {
+                    if let Ok(trait_name) = trait_node.utf8_text(source_bytes) {
+                        let trait_name = trait_name.trim().to_string();
+                        if !trait_name.is_empty() {
+                            out.inheritance.push(InheritanceSite {
+                                child_symbol_id: type_sym_id.clone(),
+                                parent_name: trait_name,
+                                kind: InheritanceKind::TraitImpl,
+                                order: 0,
+                                range: node_source_range(node),
+                            });
+                        }
+                    }
+                }
+
+                ctx.type_stack.push(type_sym_id.clone());
+                pushed_type = Some(type_sym_id);
             }
         }
     }
@@ -389,12 +431,23 @@ fn extract_symbol_visibility(file: &File, content: &str, node: Node<'_>) -> Visi
     }
 }
 
-fn symbol_name_node<'tree>(file: &File, node: Node<'tree>) -> Option<(Node<'tree>, SymbolKind)> {
+fn symbol_name_node<'tree>(
+    file: &File,
+    node: Node<'tree>,
+    ctx: &ParseContext,
+) -> Option<(Node<'tree>, SymbolKind)> {
     let kind = node.kind();
     let name = node.child_by_field_name("name");
     match file.language {
         Language::Rust => match kind {
-            "function_item" => name.map(|node| (node, SymbolKind::Function)),
+            "function_item" => {
+                let sym_kind = if ctx.current_type().is_some() {
+                    SymbolKind::Method
+                } else {
+                    SymbolKind::Function
+                };
+                name.map(|node| (node, sym_kind))
+            }
             "struct_item" | "enum_item" | "union_item" => {
                 name.map(|node| (node, SymbolKind::Class))
             }
@@ -825,7 +878,11 @@ fn extract_binding(
                     extracted.push((n, declared_type, None));
                 }
             } else if kind == "self_parameter" {
-                extracted.push(("self".to_string(), None, None));
+                let inferred = ctx
+                    .type_stack
+                    .last()
+                    .and_then(|tid| tid.0.split(':').next_back().map(|s| s.to_string()));
+                extracted.push(("self".to_string(), None, inferred));
             }
         }
         Language::Go => {
@@ -883,13 +940,13 @@ fn extract_binding(
 fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<String> {
     let kind = expr.kind();
     match file.language {
-        Language::Java | Language::JavaScript | Language::TypeScript => {
-            if kind == "new_expression" || kind == "object_creation_expression" {
-                if let Some(type_node) = expr.child_by_field_name("type") {
-                    return type_node.utf8_text(source).ok().map(|s| s.to_string());
-                } else if let Some(constructor) = expr.child_by_field_name("constructor") {
-                    return constructor.utf8_text(source).ok().map(|s| s.to_string());
-                }
+        Language::Java | Language::JavaScript | Language::TypeScript
+            if kind == "new_expression" || kind == "object_creation_expression" =>
+        {
+            if let Some(type_node) = expr.child_by_field_name("type") {
+                return type_node.utf8_text(source).ok().map(|s| s.to_string());
+            } else if let Some(constructor) = expr.child_by_field_name("constructor") {
+                return constructor.utf8_text(source).ok().map(|s| s.to_string());
             }
         }
         Language::Rust => {
@@ -907,19 +964,17 @@ fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<St
                 }
             }
         }
-        Language::Python => {
-            if kind == "call" {
-                if let Some(function) = expr.child_by_field_name("function") {
-                    if function.kind() == "identifier" {
-                        let callee = function.utf8_text(source).ok().unwrap_or("");
-                        if callee
-                            .chars()
-                            .next()
-                            .map(|c| c.is_uppercase())
-                            .unwrap_or(false)
-                        {
-                            return Some(callee.to_string());
-                        }
+        Language::Python if kind == "call" => {
+            if let Some(function) = expr.child_by_field_name("function") {
+                if function.kind() == "identifier" {
+                    let callee = function.utf8_text(source).ok().unwrap_or("");
+                    if callee
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
+                        return Some(callee.to_string());
                     }
                 }
             }
@@ -970,7 +1025,7 @@ fn extract_import(
                     module_source = text.trim_end_matches(".*").to_string();
                 } else {
                     module_source = text.to_string();
-                    if let Some(last) = text.split('.').last() {
+                    if let Some(last) = text.split('.').next_back() {
                         bindings.push(ImportedName {
                             imported: last.to_string(),
                             local: last.to_string(),
@@ -1121,14 +1176,14 @@ fn extract_import(
             }
             if let Some(name_node) = node.child_by_field_name("name") {
                 if let Ok(alias) = name_node.utf8_text(source_bytes) {
-                    if let Some(pkg) = module_source.split('/').last() {
+                    if let Some(pkg) = module_source.split('/').next_back() {
                         bindings.push(ImportedName {
                             imported: pkg.to_string(),
                             local: alias.to_string(),
                         });
                     }
                 }
-            } else if let Some(pkg) = module_source.split('/').last() {
+            } else if let Some(pkg) = module_source.split('/').next_back() {
                 bindings.push(ImportedName {
                     imported: pkg.to_string(),
                     local: pkg.to_string(),
@@ -1161,48 +1216,48 @@ fn extract_export(
     let kind = node.kind();
     let source_bytes = content.as_bytes();
 
-    if file.language == Language::JavaScript || file.language == Language::TypeScript {
-        if kind == "export_statement" {
-            let range = node_source_range(node);
-            let mut cursor = node.walk();
-            for child in named_children(&mut cursor) {
-                if child.kind() == "export_clause" {
-                    let mut clause_cursor = child.walk();
-                    for spec in named_children(&mut clause_cursor) {
-                        if spec.kind() == "export_specifier" {
-                            let name = spec
-                                .child_by_field_name("name")
-                                .and_then(|n| n.utf8_text(source_bytes).ok());
-                            let alias = spec
-                                .child_by_field_name("alias")
-                                .and_then(|a| a.utf8_text(source_bytes).ok());
-                            if let Some(n) = name {
-                                out.exports.push(ExportSite {
-                                    file_id: file.id.clone(),
-                                    exported_name: alias.unwrap_or(n).to_string(),
-                                    local_name: Some(n.to_string()),
-                                    source_module: None,
-                                    is_glob: false,
-                                    range: range.clone(),
-                                });
-                            }
-                        }
-                    }
-                } else if child.kind() == "function_declaration"
-                    || child.kind() == "class_declaration"
-                    || child.kind() == "interface_declaration"
-                {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        if let Ok(name) = name_node.utf8_text(source_bytes) {
+    if (file.language == Language::JavaScript || file.language == Language::TypeScript)
+        && kind == "export_statement"
+    {
+        let range = node_source_range(node);
+        let mut cursor = node.walk();
+        for child in named_children(&mut cursor) {
+            if child.kind() == "export_clause" {
+                let mut clause_cursor = child.walk();
+                for spec in named_children(&mut clause_cursor) {
+                    if spec.kind() == "export_specifier" {
+                        let name = spec
+                            .child_by_field_name("name")
+                            .and_then(|n| n.utf8_text(source_bytes).ok());
+                        let alias = spec
+                            .child_by_field_name("alias")
+                            .and_then(|a| a.utf8_text(source_bytes).ok());
+                        if let Some(n) = name {
                             out.exports.push(ExportSite {
                                 file_id: file.id.clone(),
-                                exported_name: name.to_string(),
-                                local_name: Some(name.to_string()),
+                                exported_name: alias.unwrap_or(n).to_string(),
+                                local_name: Some(n.to_string()),
                                 source_module: None,
                                 is_glob: false,
                                 range: range.clone(),
                             });
                         }
+                    }
+                }
+            } else if child.kind() == "function_declaration"
+                || child.kind() == "class_declaration"
+                || child.kind() == "interface_declaration"
+            {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(source_bytes) {
+                        out.exports.push(ExportSite {
+                            file_id: file.id.clone(),
+                            exported_name: name.to_string(),
+                            local_name: Some(name.to_string()),
+                            source_module: None,
+                            is_glob: false,
+                            range: range.clone(),
+                        });
                     }
                 }
             }
@@ -1221,29 +1276,29 @@ fn extract_inheritance(
     let source_bytes = content.as_bytes();
 
     match file.language {
-        Language::Java | Language::JavaScript | Language::TypeScript => {
-            if kind == "extends_clause" || kind == "implements_clause" {
-                if let Some(child_symbol_id) = ctx.current_type().or_else(|| ctx.current_symbol()) {
-                    let inheritance_kind = if kind == "extends_clause" {
-                        InheritanceKind::Extends
-                    } else {
-                        InheritanceKind::Implements
-                    };
-                    let text = node.utf8_text(source_bytes).unwrap_or("");
-                    let parent_name = text
-                        .trim_start_matches("extends")
-                        .trim_start_matches("implements")
-                        .trim()
-                        .to_string();
-                    if !parent_name.is_empty() {
-                        out.inheritance.push(InheritanceSite {
-                            child_symbol_id,
-                            parent_name,
-                            kind: inheritance_kind,
-                            order: 0,
-                            range: node_source_range(node),
-                        });
-                    }
+        Language::Java | Language::JavaScript | Language::TypeScript
+            if kind == "extends_clause" || kind == "implements_clause" =>
+        {
+            if let Some(child_symbol_id) = ctx.current_type().or_else(|| ctx.current_symbol()) {
+                let inheritance_kind = if kind == "extends_clause" {
+                    InheritanceKind::Extends
+                } else {
+                    InheritanceKind::Implements
+                };
+                let text = node.utf8_text(source_bytes).unwrap_or("");
+                let parent_name = text
+                    .trim_start_matches("extends")
+                    .trim_start_matches("implements")
+                    .trim()
+                    .to_string();
+                if !parent_name.is_empty() {
+                    out.inheritance.push(InheritanceSite {
+                        child_symbol_id,
+                        parent_name,
+                        kind: inheritance_kind,
+                        order: 0,
+                        range: node_source_range(node),
+                    });
                 }
             }
         }

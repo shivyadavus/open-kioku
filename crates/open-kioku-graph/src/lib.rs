@@ -1,7 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, NodeId, Symbol, SymbolOccurrence,
+    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
+    ResolvedRelationship, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -36,10 +37,30 @@ impl InMemoryGraph {
     pub fn from_index_with_analysis(
         files: &[File],
         symbols: &[Symbol],
+        chunks: &[CodeChunk],
+        occurrences: &[SymbolOccurrence],
+        imports: &[Import],
+        analysis_facts: &[AnalysisFact],
+    ) -> Self {
+        Self::from_index_with_resolved_relationships(
+            files,
+            symbols,
+            chunks,
+            occurrences,
+            imports,
+            analysis_facts,
+            &[],
+        )
+    }
+
+    pub fn from_index_with_resolved_relationships(
+        files: &[File],
+        symbols: &[Symbol],
         _chunks: &[CodeChunk],
         occurrences: &[SymbolOccurrence],
         imports: &[Import],
         analysis_facts: &[AnalysisFact],
+        resolved_relationships: &[ResolvedRelationship],
     ) -> Self {
         let mut buffer = GraphBuffer::new();
         let files_by_id = files
@@ -172,6 +193,68 @@ impl InMemoryGraph {
                     symbol_id: None,
                     confidence: import.confidence,
                     message: format!("{} imports {}", file.path.display(), import.imported),
+                    indexed_at: Utc::now(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        for rel in resolved_relationships {
+            let Some(from_sym) = symbols_by_id.get(rel.from.0.as_str()) else {
+                continue;
+            };
+            let Some(to_sym) = symbols_by_id.get(rel.to.0.as_str()) else {
+                continue;
+            };
+            let from_node = identity::symbol_node_id(from_sym);
+            let to_node = identity::symbol_node_id(to_sym);
+            let edge_id = identity::edge_id(rel.edge_type.clone(), &from_node, &to_node, None);
+            let file_range = rel.call_site.as_ref().map(|sr| {
+                let p = rel
+                    .evidence
+                    .first()
+                    .and_then(|e| e.file_range.as_ref())
+                    .map(|fr| fr.path.clone())
+                    .unwrap_or_else(|| {
+                        files_by_id
+                            .get(from_sym.file_id.0.as_str())
+                            .map(|f| f.path.clone())
+                            .unwrap_or_default()
+                    });
+                FileRange {
+                    path: p,
+                    line_range: Some(LineRange {
+                        start: sr.start_line,
+                        end: sr.end_line,
+                    }),
+                }
+            });
+            buffer.insert_edge(GraphEdge {
+                id: edge_id.clone(),
+                from: from_node,
+                to: to_node,
+                edge_type: rel.edge_type.clone(),
+                properties: Default::default(),
+                source_pass: Some("open-kioku-resolution".into()),
+                ambiguity: Vec::new(),
+                evidence: Evidence {
+                    id: EvidenceId::new(stable_id(&format!("resolved-rel-evidence:{}", edge_id.0))),
+                    source: "open-kioku-resolution".into(),
+                    source_type: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.source_type.clone())
+                        .unwrap_or(EvidenceSourceType::TreeSitter),
+                    file_range,
+                    symbol_id: Some(rel.from.clone()),
+                    confidence: rel.confidence,
+                    message: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_else(|| {
+                            format!("resolved call from {} to {}", from_sym.name, to_sym.name)
+                        }),
                     indexed_at: Utc::now(),
                     ..Default::default()
                 },
