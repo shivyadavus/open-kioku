@@ -15,7 +15,7 @@ fn verifies_multi_language_semantic_resolution_pipeline() {
     let src_dir = temp_dir.path().join("src");
     std::fs::create_dir_all(&src_dir).unwrap();
 
-    // 1. Java cross-file package and class import fixture
+    // 1. Java cross-file package and class import fixture + external unresolved import
     let java_repo_dir = src_dir.join("com/acme/repo");
     let java_svc_dir = src_dir.join("com/acme/service");
     std::fs::create_dir_all(&java_repo_dir).unwrap();
@@ -38,6 +38,7 @@ public class Repository {
 package com.acme.service;
 
 import com.acme.repo.Repository;
+import com.vendor.external.UnresolvedClient;
 
 public class Service {
     public void execute() {}
@@ -77,28 +78,32 @@ def process():
     )
     .unwrap();
 
-    // 4. Rust fixture with struct and impl methods, plus two types with same-name methods
+    // 4. Rust fixture with impl-before-struct layout, multiple same-caller same-callee calls,
+    //    and disambiguation across multiple types with same-name methods
     std::fs::write(
         src_dir.join("worker.rs"),
         r#"
-pub struct Repo;
-
+// impl block placed BEFORE struct definition to test ordering resilience
 impl Repo {
     pub fn save(&self) -> u32 {
         42
     }
     pub fn run(&self) -> u32 {
-        self.save()
+        let first = self.save();
+        let second = self.save();
+        first + second
     }
 }
 
-pub struct Other;
+pub struct Repo;
 
 impl Other {
     pub fn save(&self) -> u32 {
         99
     }
 }
+
+pub struct Other;
 
 pub fn standalone_step() -> u32 {
     100
@@ -167,7 +172,6 @@ func Handle() int {
                 ev.file_range.is_some(),
                 "expected evidence to carry exact call-site source range"
             );
-            // Verify path is a real file path and not a raw hash
             let path_str = ev.file_range.as_ref().unwrap().path.to_string_lossy();
             assert!(
                 path_str.contains("src/"),
@@ -176,7 +180,7 @@ func Handle() int {
         }
     }
 
-    // Verify Java specific call resolution: Service.run -> Service.execute
+    // 1. Assert Java resolution: Service.run -> Service.execute and Service.run -> Repository.save
     let java_svc_file = snapshot
         .files
         .iter()
@@ -227,7 +231,94 @@ func Handle() int {
         "expected cross-file resolved Calls edge from Service.run to Repository.save"
     );
 
-    // Verify Rust method resolution inside impl Repo: Repo.run -> Repo.save (NOT Other.save!)
+    // 2. Assert TypeScript resolution: calculate -> add
+    let ts_file = snapshot
+        .files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("math.ts"))
+        .expect("expected math.ts file in snapshot");
+
+    let ts_add_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "add" && s.file_id == ts_file.id)
+        .expect("expected add symbol in math.ts");
+
+    let ts_calc_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "calculate" && s.file_id == ts_file.id)
+        .expect("expected calculate symbol in math.ts");
+
+    let ts_edge = snapshot
+        .resolved_relationships
+        .iter()
+        .find(|r| r.from == ts_calc_sym.id && r.to == ts_add_sym.id);
+
+    assert!(
+        ts_edge.is_some(),
+        "expected resolved Calls edge from TS calculate to add"
+    );
+
+    // 3. Assert Python resolution: process -> compute
+    let py_file = snapshot
+        .files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("app.py"))
+        .expect("expected app.py file in snapshot");
+
+    let py_compute_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "compute" && s.file_id == py_file.id)
+        .expect("expected compute symbol in app.py");
+
+    let py_process_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "process" && s.file_id == py_file.id)
+        .expect("expected process symbol in app.py");
+
+    let py_edge = snapshot
+        .resolved_relationships
+        .iter()
+        .find(|r| r.from == py_process_sym.id && r.to == py_compute_sym.id);
+
+    assert!(
+        py_edge.is_some(),
+        "expected resolved Calls edge from Python process to compute"
+    );
+
+    // 4. Assert Go resolution: Handle -> helper
+    let go_file = snapshot
+        .files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("handler.go"))
+        .expect("expected handler.go file in snapshot");
+
+    let go_helper_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "helper" && s.file_id == go_file.id)
+        .expect("expected helper symbol in handler.go");
+
+    let go_handle_sym = snapshot
+        .symbols
+        .iter()
+        .find(|s| s.name == "Handle" && s.file_id == go_file.id)
+        .expect("expected Handle symbol in handler.go");
+
+    let go_edge = snapshot
+        .resolved_relationships
+        .iter()
+        .find(|r| r.from == go_handle_sym.id && r.to == go_helper_sym.id);
+
+    assert!(
+        go_edge.is_some(),
+        "expected resolved Calls edge from Go Handle to helper"
+    );
+
+    // 5. Assert Rust method resolution with impl-before-struct layout: Repo.run -> Repo.save (NOT Other.save!)
     let rust_file = snapshot
         .files
         .iter()
@@ -254,7 +345,7 @@ func Handle() int {
                 && s.file_id == rust_file.id
                 && s.parent_symbol_id.as_ref() == Some(&rust_repo_struct.id)
         })
-        .expect("expected Repo.save method symbol");
+        .expect("expected Repo.save method symbol properly parented to Repo struct");
 
     let rust_repo_run = snapshot
         .symbols
@@ -264,7 +355,7 @@ func Handle() int {
                 && s.file_id == rust_file.id
                 && s.parent_symbol_id.as_ref() == Some(&rust_repo_struct.id)
         })
-        .expect("expected Repo.run method symbol");
+        .expect("expected Repo.run method symbol properly parented to Repo struct");
 
     let rust_other_save = snapshot
         .symbols
@@ -274,7 +365,7 @@ func Handle() int {
                 && s.file_id == rust_file.id
                 && s.parent_symbol_id.as_ref() == Some(&rust_other_struct.id)
         })
-        .expect("expected Other.save method symbol");
+        .expect("expected Other.save method symbol properly parented to Other struct");
 
     let rust_impl_edge = snapshot
         .resolved_relationships
@@ -296,7 +387,7 @@ func Handle() int {
         "Repo.run must NOT resolve to Other.save"
     );
 
-    // Verify InMemoryGraph contains real direct symbol->symbol Calls edges
+    // Verify InMemoryGraph contains real direct symbol->symbol Calls edges and preserves multi-call site evidence
     let graph = InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,
         &snapshot.symbols,
@@ -318,6 +409,18 @@ func Handle() int {
     assert!(
         graph_edge.is_some(),
         "expected direct symbol-to-symbol Calls graph edge from Repo.run to Repo.save"
+    );
+
+    let edge = graph_edge.unwrap();
+    let call_sites = edge
+        .properties
+        .get("call_sites")
+        .and_then(|v| v.as_array())
+        .expect("expected call_sites property on edge");
+    assert!(
+        call_sites.len() >= 2,
+        "expected all call-site evidence ranges to be preserved for deduplicated edge, found: {:?}",
+        call_sites
     );
 
     // Verify Shadow diffs and quality report

@@ -85,17 +85,6 @@ impl ImportRegistry {
                         binding.target_symbol = Some(qualified[0].clone());
                     }
                 }
-
-                if binding.target_symbol.is_none() {
-                    if let Some(syms) = symbols.by_name.get(&binding.imported_name) {
-                        if syms.len() == 1 {
-                            binding.target_symbol = Some(syms[0].clone());
-                            if let Some(sym) = symbols.get(&syms[0]) {
-                                binding.target_file = Some(sym.file_id.clone());
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -104,7 +93,10 @@ impl ImportRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{FileId, ImportSite, ImportedName, SourceRange};
+    use open_kioku_core::{
+        Confidence, EvidenceSourceType, FileId, ImportSite, ImportedName, Language, SourceRange,
+        Symbol, SymbolId, SymbolKind,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -138,5 +130,61 @@ mod tests {
         assert_eq!(lookups[0].local_name, "Repo");
         assert_eq!(lookups[0].origin, ImportOrigin::Internal);
         assert_eq!(lookups[0].target_file, Some(FileId::new("file:repo.ts")));
+    }
+
+    #[test]
+    fn unresolved_external_import_with_unique_internal_type_remains_unresolved() {
+        let mut registry = ImportRegistry::default();
+        let file_map = HashMap::new(); // External package not in file_map
+
+        let site = ImportSite {
+            file_id: FileId::new("file:app.ts"),
+            scope_id: None,
+            source: "@vendor/unrelated-pkg".into(),
+            bindings: vec![ImportedName {
+                imported: "Repository".into(),
+                local: "Repository".into(),
+            }],
+            is_glob: false,
+            is_type_only: false,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 50,
+            },
+        };
+
+        registry.resolve_site(&site, &file_map);
+
+        // Suppose the repo happens to have an unrelated internal symbol named "Repository"
+        let internal_sym = Symbol {
+            id: SymbolId::new("sym:internal:repo"),
+            name: "Repository".into(),
+            qualified_name: "src/internal::Repository".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("file:internal/repo.ts"),
+            range: None,
+            language: Language::TypeScript,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Public,
+        };
+
+        let symbol_index = open_kioku_resolution::SymbolIndex::build(vec![internal_sym]);
+        registry.resolve_symbols(&symbol_index, &file_map);
+
+        let lookups = registry
+            .index
+            .lookup(&FileId::new("file:app.ts"), None, "Repository");
+        assert_eq!(lookups.len(), 1);
+        assert_eq!(
+            lookups[0].target_symbol, None,
+            "External import must NOT resolve to unrelated unique internal symbol"
+        );
     }
 }

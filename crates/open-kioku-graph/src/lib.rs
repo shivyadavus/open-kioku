@@ -229,12 +229,40 @@ impl InMemoryGraph {
                     }),
                 }
             });
+            let mut properties = std::collections::BTreeMap::new();
+            let mut call_sites_vec = Vec::new();
+            for ev in &rel.evidence {
+                if let Some(fr) = &ev.file_range {
+                    let s = format!("{}:{:?}", fr.path.display(), fr.line_range);
+                    if !call_sites_vec.contains(&s) {
+                        call_sites_vec.push(s);
+                    }
+                }
+            }
+            if let Some(fr) = &file_range {
+                let s = format!("{}:{:?}", fr.path.display(), fr.line_range);
+                if !call_sites_vec.contains(&s) {
+                    call_sites_vec.push(s);
+                }
+            }
+            if !call_sites_vec.is_empty() {
+                properties.insert(
+                    "call_sites".to_string(),
+                    serde_json::Value::Array(
+                        call_sites_vec
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+
             buffer.insert_edge(GraphEdge {
                 id: edge_id.clone(),
                 from: from_node,
                 to: to_node,
                 edge_type: rel.edge_type.clone(),
-                properties: Default::default(),
+                properties,
                 source_pass: Some("open-kioku-resolution".into()),
                 ambiguity: Vec::new(),
                 evidence: Evidence {

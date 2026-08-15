@@ -88,7 +88,23 @@ mod tests {
         };
         let binding_index = BindingIndex::build(vec![binding]);
         let inheritance_index = InheritanceIndex::build(vec![]);
-        let repository = open_kioku_semantic_model::SemanticRepository::new();
+        let mut repository = open_kioku_semantic_model::SemanticRepository::new();
+        repository
+            .imports
+            .insert(open_kioku_semantic_model::ImportBinding {
+                file_id: FileId::new("file:Main.java"),
+                scope_id: ScopeId::new("scope:file"),
+                local_name: "Repo".into(),
+                imported_name: "Repo".into(),
+                source_module: "com.acme.Repo".into(),
+                resolved_module: None,
+                target_file: Some(FileId::new("file:Repo.java")),
+                target_symbol: Some(SymbolId::new("symbol:Repo")),
+                origin: open_kioku_semantic_model::ImportOrigin::Internal,
+                is_type_only: false,
+                is_glob: false,
+                evidence: Vec::new(),
+            });
         let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
         let main_file_id = FileId::new("file:Main.java");
 

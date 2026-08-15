@@ -205,6 +205,44 @@ fn resolve_static_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
                 evidence: vec![],
             };
         }
+    } else {
+        // Also check if recv is an import / module binding (e.g. TS import * as math from "./math"; math.add())
+        let import_bindings =
+            ctx.repository
+                .imports
+                .lookup(ctx.file_id, Some(&call.scope_id), recv);
+
+        if let Some(imp) = import_bindings
+            .iter()
+            .find(|i| i.target_file.is_some() || i.target_symbol.is_some())
+        {
+            if let Some(target_file) = &imp.target_file {
+                if let Some(file_syms) = ctx.symbols.by_file.get(target_file) {
+                    let candidates: Vec<&SymbolId> = file_syms
+                        .iter()
+                        .filter(|id| {
+                            ctx.symbols
+                                .get(id)
+                                .map(|s| s.name == call.callee_name && s.parent_symbol_id.is_none())
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    if candidates.len() == 1 {
+                        return ResolutionResult::Resolved {
+                            target: candidates[0].clone(),
+                            confidence: Confidence::Exact,
+                            evidence: vec![ResolutionEvidence {
+                                kind: ResolutionEvidenceKind::ExplicitImport,
+                                source_type: EvidenceSourceType::TreeSitter,
+                                file_range: call_file_range(call, ctx),
+                                symbol_id: Some(candidates[0].clone()),
+                                message: "resolved static member via module import binding".into(),
+                            }],
+                        };
+                    }
+                }
+            }
+        }
     }
 
     ResolutionResult::Unresolved {
@@ -236,10 +274,51 @@ fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resol
         {
             Some(b) => b,
             None => {
+                // Check if receiver is an import/module binding (e.g. Go fmt.Println, Python utils.load, TS math.add)
+                let import_bindings =
+                    ctx.repository
+                        .imports
+                        .lookup(ctx.file_id, Some(&call.scope_id), lookup_name);
+
+                if let Some(imp) = import_bindings
+                    .iter()
+                    .find(|i| i.target_file.is_some() || i.target_symbol.is_some())
+                {
+                    if let Some(target_file) = &imp.target_file {
+                        if let Some(file_syms) = ctx.symbols.by_file.get(target_file) {
+                            let candidates: Vec<&SymbolId> = file_syms
+                                .iter()
+                                .filter(|id| {
+                                    ctx.symbols
+                                        .get(id)
+                                        .map(|s| {
+                                            s.name == call.callee_name
+                                                && s.parent_symbol_id.is_none()
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .collect();
+                            if candidates.len() == 1 {
+                                return ResolutionResult::Resolved {
+                                    target: candidates[0].clone(),
+                                    confidence: Confidence::Exact,
+                                    evidence: vec![ResolutionEvidence {
+                                        kind: ResolutionEvidenceKind::ExplicitImport,
+                                        source_type: EvidenceSourceType::TreeSitter,
+                                        file_range: call_file_range(call, ctx),
+                                        symbol_id: Some(candidates[0].clone()),
+                                        message: "resolved method via module import binding".into(),
+                                    }],
+                                };
+                            }
+                        }
+                    }
+                }
+
                 return ResolutionResult::Unresolved {
                     reason: UnresolvedReason::UnknownReceiverType,
                     evidence: vec![],
-                }
+                };
             }
         };
 

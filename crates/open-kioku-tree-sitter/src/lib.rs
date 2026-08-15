@@ -90,6 +90,50 @@ pub fn parse_file(file: &File, content: &str) -> Result<SyntaxFacts> {
 
     walk(file, content, tree.root_node(), &mut ctx, &mut out);
 
+    // Reconcile Rust impl method parent_symbol_id and inheritance sites to the actual struct/trait symbol
+    if file.language == Language::Rust {
+        let type_symbols_by_name: std::collections::HashMap<String, SymbolId> = out
+            .symbols
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
+                )
+            })
+            .map(|s| (s.name.clone(), s.id.clone()))
+            .collect();
+
+        for sym in &mut out.symbols {
+            if let Some(parent_id) = &sym.parent_symbol_id {
+                if parent_id.0.contains(":impl_owner:") {
+                    let type_name = parent_id
+                        .0
+                        .rsplit(":impl_owner:")
+                        .next()
+                        .unwrap_or(parent_id.0.as_str());
+                    if let Some(actual_id) = type_symbols_by_name.get(type_name) {
+                        sym.parent_symbol_id = Some((*actual_id).clone());
+                    }
+                }
+            }
+        }
+
+        for inh in &mut out.inheritance {
+            if inh.child_symbol_id.0.contains(":impl_owner:") {
+                let type_name = inh
+                    .child_symbol_id
+                    .0
+                    .rsplit(":impl_owner:")
+                    .next()
+                    .unwrap_or(inh.child_symbol_id.0.as_str());
+                if let Some(actual_id) = type_symbols_by_name.get(type_name) {
+                    inh.child_symbol_id = (*actual_id).clone();
+                }
+            }
+        }
+    }
+
     out.symbols
         .sort_by_key(|symbol| symbol.range.as_ref().map(|range| range.start).unwrap_or(0));
     out.symbols.dedup_by(|a, b| a.id == b.id);
@@ -240,21 +284,8 @@ fn walk(file: &File, content: &str, node: Node<'_>, ctx: &mut ParseContext, out:
         if let Some(type_node) = node.child_by_field_name("type") {
             if let Ok(type_name) = type_node.utf8_text(source_bytes) {
                 let type_name = type_name.trim().to_string();
-                let existing_type = out.symbols.iter().find(|s| {
-                    s.name == type_name
-                        && matches!(
-                            s.kind,
-                            SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
-                        )
-                });
-                let type_sym_id = existing_type.map(|s| s.id.clone()).unwrap_or_else(|| {
-                    SymbolId::new(format!(
-                        "{}:{}:{}",
-                        file.path.display(),
-                        type_node.start_position().row + 1,
-                        type_name
-                    ))
-                });
+                let type_sym_id =
+                    SymbolId::new(format!("{}:impl_owner:{}", file.path.display(), type_name));
 
                 if let Some(trait_node) = node.child_by_field_name("trait") {
                     if let Ok(trait_name) = trait_node.utf8_text(source_bytes) {

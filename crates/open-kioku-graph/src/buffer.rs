@@ -84,8 +84,51 @@ fn merge_messages(a: &str, b: &str) -> String {
 }
 
 fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
+    let mut call_sites: Vec<String> = existing
+        .properties
+        .get("call_sites")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            existing
+                .evidence
+                .file_range
+                .as_ref()
+                .map(|fr| vec![format!("{}:{:?}", fr.path.display(), fr.line_range)])
+                .unwrap_or_default()
+        });
+
+    if let Some(incoming_fr) = &incoming.evidence.file_range {
+        let site_str = format!(
+            "{}:{:?}",
+            incoming_fr.path.display(),
+            incoming_fr.line_range
+        );
+        if !call_sites.contains(&site_str) {
+            call_sites.push(site_str);
+        }
+    }
+
+    if !call_sites.is_empty() {
+        existing.properties.insert(
+            "call_sites".to_string(),
+            serde_json::Value::Array(
+                call_sites
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+
     for (k, v) in incoming.properties {
-        existing.properties.entry(k).or_insert(v);
+        if k != "call_sites" {
+            existing.properties.entry(k).or_insert(v);
+        }
     }
 
     existing.ambiguity.extend(incoming.ambiguity);
