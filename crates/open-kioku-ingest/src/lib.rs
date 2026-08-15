@@ -354,17 +354,27 @@ impl Indexer {
         use crate::project_model::ProjectModelDiscovery;
         let project_model = open_kioku_semantic_model::ProjectModel::discover(&root);
         let mut import_registry = imports::ImportRegistry::default();
-        let mut file_map = HashMap::new();
+        let mut file_map: imports::FileMap = HashMap::new();
+        fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
+            let candidates = map.entry(key).or_default();
+            if !candidates.contains(file_id) {
+                candidates.push(file_id.clone());
+            }
+        }
         for file in &files {
             let mod_path = project_model.module_path_from_file(&file.path, &file.language);
-            file_map.insert(mod_path.clone(), file.id.clone());
-            file_map.insert(file.path.to_string_lossy().to_string(), file.id.clone());
+            register_file_key(&mut file_map, mod_path.clone(), &file.id);
+            register_file_key(
+                &mut file_map,
+                file.path.to_string_lossy().to_string(),
+                &file.id,
+            );
             if let Some(stem) = file.path.file_stem().and_then(|s| s.to_str()) {
                 if !mod_path.is_empty() {
-                    file_map.insert(format!("{mod_path}.{stem}"), file.id.clone());
-                    file_map.insert(format!("{mod_path}::{stem}"), file.id.clone());
+                    register_file_key(&mut file_map, format!("{mod_path}.{stem}"), &file.id);
+                    register_file_key(&mut file_map, format!("{mod_path}::{stem}"), &file.id);
                 }
-                file_map.insert(stem.to_string(), file.id.clone());
+                register_file_key(&mut file_map, stem.to_string(), &file.id);
             }
         }
         for site in &import_sites {

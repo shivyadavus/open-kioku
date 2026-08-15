@@ -3442,7 +3442,7 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION};
+    use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION};
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
         AnalysisFact, ChurnEntityKind, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId,
@@ -3849,13 +3849,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("future.sqlite");
         let future = Connection::open(&path).unwrap();
+        let future_version = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION + 1;
         future
-            .execute_batch(
-                r#"
-                PRAGMA user_version = 3;
-                CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);
-                "#,
-            )
+            .pragma_update(None, "user_version", future_version)
+            .unwrap();
+        future
+            .execute_batch("CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);")
             .unwrap();
         drop(future);
 
@@ -3863,7 +3862,10 @@ mod tests {
             Ok(_) => panic!("newer schema should be rejected"),
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("newer than supported version 2"));
+        assert!(error.contains(&format!(
+            "newer than supported version {}",
+            SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
+        )));
 
         let conn = Connection::open(&path).unwrap();
         let current_table_count: i64 = conn
