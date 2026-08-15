@@ -191,9 +191,7 @@ fn imported_module_member_candidates(
         }
 
         if let Some(target_file) = &binding.target_file {
-            for ((_, exported_name), exports) in
-                &ctx.repository.exports.by_module_exported_name
-            {
+            for ((_, exported_name), exports) in &ctx.repository.exports.by_module_exported_name {
                 if exported_name != &call.callee_name {
                     continue;
                 }
