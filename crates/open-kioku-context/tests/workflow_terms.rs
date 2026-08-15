@@ -13,5 +13,8 @@ fn natural_language_workflow_terms_expand_without_case_specific_aliases() {
     assert!(terms.iter().any(|term| term == "plans"));
     assert!(terms.iter().any(|term| term == "verify changed"));
     assert!(!terms.iter().any(|term| term == "against"));
-    assert!(terms.len() <= 16, "natural-language expansion must stay bounded");
+    assert!(
+        terms.len() <= 16,
+        "natural-language expansion must stay bounded"
+    );
 }
