@@ -4,20 +4,32 @@ pub use open_kioku_semantic_model::{
 };
 use std::collections::HashMap;
 
+pub type FileMap = HashMap<String, Vec<FileId>>;
+
+fn unique_file_for_key(file_map: &FileMap, key: &str) -> Option<FileId> {
+    let candidates = file_map.get(key)?;
+    if candidates.len() == 1 {
+        Some(candidates[0].clone())
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ImportRegistry {
     pub index: ImportIndex,
 }
 
 impl ImportRegistry {
-    pub fn resolve_site(&mut self, site: &ImportSite, file_map: &HashMap<String, FileId>) {
+    pub fn resolve_site(&mut self, site: &ImportSite, file_map: &FileMap) {
         let has_relative_prefix = site.source.starts_with("./") || site.source.starts_with("../");
-        let resolves_to_known_file = file_map.contains_key(&site.source);
-        let origin = if has_relative_prefix || resolves_to_known_file {
+        let known_internal_key = file_map.contains_key(&site.source);
+        let origin = if has_relative_prefix || known_internal_key {
             ImportOrigin::Internal
         } else {
             ImportOrigin::Unknown
         };
+        let target_file = unique_file_for_key(file_map, &site.source);
 
         for binding in &site.bindings {
             let import_binding = ImportBinding {
@@ -30,7 +42,7 @@ impl ImportRegistry {
                 imported_name: binding.imported.clone(),
                 source_module: site.source.clone(),
                 resolved_module: None,
-                target_file: file_map.get(&site.source).cloned(),
+                target_file: target_file.clone(),
                 target_symbol: None,
                 origin,
                 is_type_only: site.is_type_only,
@@ -44,21 +56,19 @@ impl ImportRegistry {
     pub fn resolve_symbols(
         &mut self,
         symbols: &open_kioku_resolution::SymbolIndex,
-        module_to_file: &HashMap<String, FileId>,
+        module_to_file: &FileMap,
     ) {
         for list in self.index.by_file_local_name.values_mut() {
             for binding in list.iter_mut() {
                 let target_file_id = binding
                     .target_file
                     .clone()
-                    .or_else(|| module_to_file.get(&binding.source_module).cloned())
+                    .or_else(|| unique_file_for_key(module_to_file, &binding.source_module))
                     .or_else(|| {
                         if binding.source_module.contains('.') {
                             let (pkg, cls) = binding.source_module.rsplit_once('.')?;
-                            if let Some(fid) = module_to_file.get(pkg) {
-                                return Some(fid.clone());
-                            }
-                            module_to_file.get(&format!("{pkg}.{cls}")).cloned()
+                            unique_file_for_key(module_to_file, &format!("{pkg}.{cls}"))
+                                .or_else(|| unique_file_for_key(module_to_file, pkg))
                         } else {
                             None
                         }
@@ -97,12 +107,15 @@ mod tests {
         Confidence, EvidenceSourceType, FileId, ImportSite, ImportedName, Language, SourceRange,
         Symbol, SymbolId, SymbolKind,
     };
-    use std::collections::HashMap;
+
+    fn one_file_map(key: &str, file_id: &str) -> FileMap {
+        HashMap::from([(key.to_string(), vec![FileId::new(file_id)])])
+    }
 
     #[test]
     fn resolves_internal_and_external_imports() {
         let mut registry = ImportRegistry::default();
-        let file_map = HashMap::from([("@app/repo".to_string(), FileId::new("file:repo.ts"))]);
+        let file_map = one_file_map("@app/repo", "file:repo.ts");
 
         let site = ImportSite {
             file_id: FileId::new("file:main.ts"),
@@ -133,9 +146,42 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_internal_module_key_fails_closed() {
+        let mut registry = ImportRegistry::default();
+        let file_map = HashMap::from([(
+            "service".to_string(),
+            vec![FileId::new("file:a/service.py"), FileId::new("file:b/service.py")],
+        )]);
+        let site = ImportSite {
+            file_id: FileId::new("file:consumer.py"),
+            scope_id: None,
+            source: "service".into(),
+            bindings: vec![ImportedName {
+                imported: "run".into(),
+                local: "run".into(),
+            }],
+            is_glob: false,
+            is_type_only: false,
+            range: SourceRange {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 24,
+            },
+        };
+
+        registry.resolve_site(&site, &file_map);
+        let binding = registry
+            .index
+            .lookup(&FileId::new("file:consumer.py"), None, "run")[0];
+        assert_eq!(binding.origin, ImportOrigin::Internal);
+        assert_eq!(binding.target_file, None);
+    }
+
+    #[test]
     fn unresolved_external_import_with_unique_internal_type_remains_unresolved() {
         let mut registry = ImportRegistry::default();
-        let file_map = HashMap::new(); // External package not in file_map
+        let file_map = FileMap::new(); // External package not in file_map
 
         let site = ImportSite {
             file_id: FileId::new("file:app.ts"),
