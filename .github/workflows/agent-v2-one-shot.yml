@@ -1,0 +1,155 @@
+name: Agent V2 one-shot cleanup
+
+on:
+  push:
+    branches:
+      - agent/v2-semantic-resolution-pipeline
+    paths:
+      - .github/workflows/agent-v2-one-shot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/v2-semantic-resolution-pipeline
+          fetch-depth: 0
+
+      - name: Apply exact V2 cleanup patches
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          storage = Path('crates/open-kioku-storage-sqlite/src/lib.rs')
+          text = storage.read_text()
+          old_import = 'use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION};'
+          new_import = 'use super::{\n        SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,\n    };'
+          if text.count(old_import) != 1:
+              raise SystemExit(f'expected exactly one SQLite test import block, found {text.count(old_import)}')
+          text = text.replace(old_import, new_import, 1)
+
+          old_test = '''    #[test]
+              fn newer_sqlite_schema_is_rejected_without_mutation() {
+                  let dir = tempfile::tempdir().unwrap();
+                  let path = dir.path().join("future.sqlite");
+                  let future = Connection::open(&path).unwrap();
+                  future
+                      .execute_batch(
+                          r#"
+                          PRAGMA user_version = 3;
+                          CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);
+                          "#,
+                      )
+                      .unwrap();
+                  drop(future);
+
+                  let error = match SqliteStore::open(&path) {
+                      Ok(_) => panic!("newer schema should be rejected"),
+                      Err(error) => error.to_string(),
+                  };
+                  assert!(error.contains("newer than supported version 2"));
+          '''
+          new_test = '''    #[test]
+              fn newer_sqlite_schema_is_rejected_without_mutation() {
+                  let dir = tempfile::tempdir().unwrap();
+                  let path = dir.path().join("future.sqlite");
+                  let future = Connection::open(&path).unwrap();
+                  let future_version = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION + 1;
+                  future
+                      .pragma_update(None, "user_version", future_version)
+                      .unwrap();
+                  future
+                      .execute_batch("CREATE TABLE future_history_marker (id INTEGER PRIMARY KEY);")
+                      .unwrap();
+                  drop(future);
+
+                  let error = match SqliteStore::open(&path) {
+                      Ok(_) => panic!("newer schema should be rejected"),
+                      Err(error) => error.to_string(),
+                  };
+                  assert!(error.contains(&format!(
+                      "newer than supported version {}",
+                      SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
+                  )));
+          '''
+          if text.count(old_test) != 1:
+              raise SystemExit(f'expected exactly one stale SQLite future-schema test block, found {text.count(old_test)}')
+          storage.write_text(text.replace(old_test, new_test, 1))
+
+          ingest = Path('crates/open-kioku-ingest/src/lib.rs')
+          text = ingest.read_text()
+          old_map = '''        let mut import_registry = imports::ImportRegistry::default();
+                  let mut file_map = HashMap::new();
+                  for file in &files {
+                      let mod_path = project_model.module_path_from_file(&file.path, &file.language);
+                      file_map.insert(mod_path.clone(), file.id.clone());
+                      file_map.insert(file.path.to_string_lossy().to_string(), file.id.clone());
+                      if let Some(stem) = file.path.file_stem().and_then(|s| s.to_str()) {
+                          if !mod_path.is_empty() {
+                              file_map.insert(format!("{mod_path}.{stem}"), file.id.clone());
+                              file_map.insert(format!("{mod_path}::{stem}"), file.id.clone());
+                          }
+                          file_map.insert(stem.to_string(), file.id.clone());
+                      }
+                  }
+          '''
+          new_map = '''        let mut import_registry = imports::ImportRegistry::default();
+                  let mut file_map: imports::FileMap = HashMap::new();
+                  fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
+                      let candidates = map.entry(key).or_default();
+                      if !candidates.contains(file_id) {
+                          candidates.push(file_id.clone());
+                      }
+                  }
+                  for file in &files {
+                      let mod_path = project_model.module_path_from_file(&file.path, &file.language);
+                      register_file_key(&mut file_map, mod_path.clone(), &file.id);
+                      register_file_key(
+                          &mut file_map,
+                          file.path.to_string_lossy().to_string(),
+                          &file.id,
+                      );
+                      if let Some(stem) = file.path.file_stem().and_then(|s| s.to_str()) {
+                          if !mod_path.is_empty() {
+                              register_file_key(
+                                  &mut file_map,
+                                  format!("{mod_path}.{stem}"),
+                                  &file.id,
+                              );
+                              register_file_key(
+                                  &mut file_map,
+                                  format!("{mod_path}::{stem}"),
+                                  &file.id,
+                              );
+                          }
+                          register_file_key(&mut file_map, stem.to_string(), &file.id);
+                      }
+                  }
+          '''
+          if text.count(old_map) != 1:
+              raise SystemExit(f'expected exactly one legacy file-map block, found {text.count(old_map)}')
+          ingest.write_text(text.replace(old_map, new_map, 1))
+
+          Path('.github/workflows/agent-v2-one-shot.yml').unlink()
+          PY
+
+      - name: Format workspace
+        run: cargo fmt --all
+
+      - name: Verify patch shape
+        run: git diff --check
+
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name "open-kioku-agent"
+          git config user.email "open-kioku-agent@users.noreply.github.com"
+          git add crates/open-kioku-storage-sqlite/src/lib.rs crates/open-kioku-ingest/src/lib.rs .github/workflows/agent-v2-one-shot.yml
+          git commit -m "fix(intelligence): complete fail-closed V2 cleanup"
+          git push origin HEAD:agent/v2-semantic-resolution-pipeline
