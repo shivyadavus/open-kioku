@@ -1,0 +1,68 @@
+name: agent-wire-retrieval-bench
+
+on:
+  push:
+    branches:
+      - agent/context-retrieval-benchmark
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-measure:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/context-retrieval-benchmark
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply retrieval benchmark wiring
+        run: |
+          python3 .github/patch_retrieval_bench_wiring.py
+          rm .github/patch_retrieval_bench_wiring.py
+          rm .github/workflows/agent-wire-retrieval-bench.yml
+          cargo fmt --all
+      - name: Validate benchmark engine
+        run: |
+          cargo test -p open-kioku-cli retrieval_bench_tests
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+      - name: Measure frozen corpus and write deterministic baseline
+        run: |
+          cargo run -p open-kioku-cli -- \
+            --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 20 \
+            --write-json /tmp/retrieval-report.json \
+            --write-markdown /tmp/retrieval-report.md \
+            --write-baseline benchmarks/retrieval-baseline.json \
+            > /tmp/retrieval-stdout.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          baseline = json.loads(Path('benchmarks/retrieval-baseline.json').read_text())
+          assert baseline['schema_version'] == '1.0.0'
+          assert baseline['case_count'] == 20
+          assert {s['strategy'] for s in baseline['strategies']} == {'lexical', 'fusion'}
+          for strategy in baseline['strategies']:
+              assert set(strategy['by_split']) == {'development', 'holdout'}
+              assert len(strategy['by_language']) == 5
+          print(json.dumps(baseline, indent=2))
+          PY
+      - name: Commit benchmark implementation and baseline
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            crates/open-kioku-cli/src/lib.rs \
+            crates/open-kioku-cli/src/types.rs \
+            crates/open-kioku-cli/src/commands/mod.rs \
+            crates/open-kioku-cli/src/bench/retrieval.rs \
+            benchmarks/retrieval-baseline.json \
+            .github/patch_retrieval_bench_wiring.py \
+            .github/workflows/agent-wire-retrieval-bench.yml
+          git commit -m "feat(bench): wire frozen repository retrieval benchmark"
+          git push origin HEAD:agent/context-retrieval-benchmark
