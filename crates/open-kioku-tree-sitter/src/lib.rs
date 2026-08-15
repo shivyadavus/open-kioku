@@ -696,10 +696,12 @@ fn extract_call(
     if !callee_name.is_empty() {
         let range = node_source_range(node);
         let call_id = CallSiteId::new(format!(
-            "{}:call:{}:{}:{}",
+            "{}:call:{}:{}:{}:{}:{}",
             file.path.display(),
             range.start_line,
             range.start_column,
+            range.end_line,
+            range.end_column,
             callee_name
         ));
         out.calls.push(CallSite {
