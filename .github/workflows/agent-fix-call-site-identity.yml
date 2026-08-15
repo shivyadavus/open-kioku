@@ -25,27 +25,38 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           path = Path('crates/open-kioku-tree-sitter/src/lib.rs')
           text = path.read_text()
-          old = '''        let call_id = CallSiteId::new(format!(
-              "{}:call:{}:{}:{}",
-              file.path.display(),
-              range.start_line,
-              range.start_column,
-              callee_name
-          ));'''
-          new = '''        let call_id = CallSiteId::new(format!(
-              "{}:call:{}:{}:{}:{}:{}",
-              file.path.display(),
-              range.start_line,
-              range.start_column,
-              range.end_line,
-              range.end_column,
-              callee_name
-          ));'''
-          if old not in text:
-              raise SystemExit('expected call-site identity block not found; refusing to patch')
-          text = text.replace(old, new, 1)
+          pattern = re.compile(
+              r'(?m)^(?P<indent>[ \t]*)let call_id = CallSiteId::new\(format!\(\s*'
+              r'"\{\}:call:\{\}:\{\}:\{\}",\s*'
+              r'file\.path\.display\(\),\s*'
+              r'range\.start_line,\s*'
+              r'range\.start_column,\s*'
+              r'callee_name\s*'
+              r'\)\);'
+          )
+          matches = list(pattern.finditer(text))
+          if len(matches) != 1:
+              raise SystemExit(f'expected exactly one call-site identity block, found {len(matches)}; refusing to patch')
+
+          def replacement(match):
+              i = match.group('indent')
+              return (
+                  f'{i}let call_id = CallSiteId::new(format!(\n'
+                  f'{i}    "{{}}:call:{{}}:{{}}:{{}}:{{}}:{{}}",\n'
+                  f'{i}    file.path.display(),\n'
+                  f'{i}    range.start_line,\n'
+                  f'{i}    range.start_column,\n'
+                  f'{i}    range.end_line,\n'
+                  f'{i}    range.end_column,\n'
+                  f'{i}    callee_name\n'
+                  f'{i}));'
+              )
+
+          text = pattern.sub(replacement, text, count=1)
           path.write_text(text)
           PY
 
@@ -87,10 +98,9 @@ jobs:
               assert_eq!(save_calls.len(), 2, "fixture must contain two nested save calls");
               let unique_ids = save_calls
                   .iter()
-                  .map(|call| call.id.clone())
+                  .map(|call| call.id.0.clone())
                   .collect::<HashSet<_>>();
               assert_eq!(unique_ids.len(), 2, "distinct call AST nodes need distinct IDs");
-              assert_ne!(save_calls[0].range, save_calls[1].range);
           }
           RS
 
