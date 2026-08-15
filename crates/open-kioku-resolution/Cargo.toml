@@ -9,6 +9,7 @@ repository.workspace = true
 open-kioku-core = { path = "../open-kioku-core" }
 open-kioku-errors = { path = "../open-kioku-errors" }
 open-kioku-languages = { path = "../open-kioku-languages" }
+open-kioku-semantic-model = { path = "../open-kioku-semantic-model" }
 serde = { workspace = true, features = ["derive"] }
 smallvec = "1"
 tracing = { workspace = true }

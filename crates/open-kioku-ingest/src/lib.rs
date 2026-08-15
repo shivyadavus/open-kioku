@@ -7,8 +7,8 @@ use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
     GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot,
     Import, IndexManifest, IndexMode, IndexPhaseReport, IndexQuality, LineRange, Repository,
-    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolOccurrence, TestTarget,
-    HISTORY_SCHEMA_VERSION,
+    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence,
+    TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -17,6 +17,7 @@ use open_kioku_languages::{
 use open_kioku_parse::{HeuristicParser, Parser};
 use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -46,6 +47,29 @@ pub struct IndexSnapshot {
     pub scip: Option<ScipIndexReport>,
     pub phase_reports: Vec<IndexPhaseReport>,
     pub skipped_paths: Vec<SkippedPath>,
+    pub resolution_diffs: Vec<ResolutionDiff>,
+    pub resolution_quality: Option<ResolutionQualityReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionDiff {
+    pub call_site_id: open_kioku_core::CallSiteId,
+    pub legacy_target: Option<SymbolId>,
+    pub semantic_target: Option<SymbolId>,
+    pub agreement: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolutionQualityReport {
+    pub call_sites: usize,
+    pub resolved_exact: usize,
+    pub resolved_high: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub legacy_only: usize,
+    pub semantic_only: usize,
+    pub disagreement: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +228,8 @@ impl Indexer {
                     scip: None,
                     phase_reports,
                     skipped_paths: Vec::new(),
+                    resolution_diffs: Vec::new(),
+                    resolution_quality: None,
                 },
                 HistorySnapshot::empty(),
             ));
@@ -462,6 +488,8 @@ impl Indexer {
                 scip: scip_report,
                 phase_reports,
                 skipped_paths: scan.skipped_paths,
+                resolution_diffs: Vec::new(),
+                resolution_quality: None,
             },
             git_history.snapshot,
         ))
@@ -2321,10 +2349,6 @@ class Util {
                 scope_id: None,
                 signature: None,
                 visibility: open_kioku_core::Visibility::Unknown,
-            },
-                language: Language::Rust,
-                confidence: Confidence::High,
-                provenance: EvidenceSourceType::TreeSitter,
             },
         ];
         let newer_at = Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap();

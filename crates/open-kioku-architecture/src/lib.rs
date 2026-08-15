@@ -846,6 +846,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .expect("replace index");
         store.replace_graph(nodes, edges).expect("replace graph");

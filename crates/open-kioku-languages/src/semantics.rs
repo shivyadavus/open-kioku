@@ -14,7 +14,12 @@ pub trait LanguageSemantics: Send + Sync {
             ReceiverKind::Self_
         } else if trimmed == "super" || trimmed == "Super" {
             ReceiverKind::Super
-        } else if trimmed.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        } else if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
+        {
             ReceiverKind::Type
         } else {
             ReceiverKind::Value

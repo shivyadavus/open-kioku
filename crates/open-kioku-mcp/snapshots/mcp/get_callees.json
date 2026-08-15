@@ -44,7 +44,8 @@
       "range": {
         "end": 7,
         "start": 7
-      }
+      },
+      "visibility": "unknown"
     }
   }
 }

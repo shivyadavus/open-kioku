@@ -3031,6 +3031,9 @@ paths = ["src/**"]
                     imports: &[],
                     occurrences: &[],
                     analysis_facts: &analysis_facts,
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
                 })
                 .unwrap();
 
@@ -3220,7 +3223,7 @@ paths = ["src/**"]
         let snapshot_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots/mcp");
         fs::create_dir_all(&snapshot_dir).unwrap();
         let snapshot_file = snapshot_dir.join(name);
-        if snapshot_file.exists() {
+        if snapshot_file.exists() && std::env::var("UPDATE_GOLDEN_SNAPSHOTS").is_err() {
             let expected = fs::read_to_string(&snapshot_file).unwrap();
             assert_eq!(
                 expected.trim(),

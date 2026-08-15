@@ -66,6 +66,7 @@ impl Default for OkConfig {
                     "bun.lockb".into(),
                     "**/bun.lockb".into(),
                 ],
+                resolution_mode: ResolutionMode::Legacy,
             },
             languages: LanguagesConfig {
                 enabled: vec![
@@ -159,11 +160,27 @@ pub struct RepoConfig {
     pub root: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMode {
+    Legacy,
+    Shadow,
+    V2,
+}
+
+impl Default for ResolutionMode {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
     pub incremental: bool,
     pub max_file_size: String,
     pub exclude: Vec<String>,
+    #[serde(default)]
+    pub resolution_mode: ResolutionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

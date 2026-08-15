@@ -799,6 +799,9 @@ mod tests {
                 imports: &[],
                 occurrences: &[],
                 analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
             })
             .unwrap();
 

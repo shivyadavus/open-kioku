@@ -21,9 +21,12 @@ open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 open-kioku-git = { version = "2.0.0", path = "../open-kioku-git" }
 open-kioku-languages = { version = "2.0.0", path = "../open-kioku-languages" }
 open-kioku-parse = { version = "2.0.0", path = "../open-kioku-parse" }
+open-kioku-resolution = { version = "2.0.0", path = "../open-kioku-resolution" }
 open-kioku-scip = { version = "2.0.0", path = "../open-kioku-scip" }
+open-kioku-semantic-model = { version = "2.0.0", path = "../open-kioku-semantic-model" }
 rayon.workspace = true
 roxmltree.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true

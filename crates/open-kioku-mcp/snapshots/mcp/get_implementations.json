@@ -36,7 +36,8 @@
           "range": {
             "end": 15,
             "start": 15
-          }
+          },
+          "visibility": "unknown"
         }
       }
     ],

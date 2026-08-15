@@ -407,13 +407,14 @@ Operational security notes: [`SECURITY.md`](SECURITY.md). Agent-specific threat 
 
 ## Repository Layout
 
-This is a 41-crate Cargo workspace. Important crates:
+This is a 42-crate Cargo workspace. Important crates:
 
 - `open-kioku-cli`: the `ok` binary (33 subcommands).
 - `open-kioku-mcp`: JSON-RPC MCP server over stdio (58 tools).
 - `open-kioku-core`: shared types, evidence data model, and report schemas.
 - `open-kioku-ingest`: repository indexing pipeline with static analysis and runtime evidence ingestion.
 - `open-kioku-tree-sitter`: syntax parsing and symbol extraction.
+- `open-kioku-resolution`: scope-aware, receiver- and type-aware semantic resolution engine.
 - `open-kioku-git`: local git history analysis, co-change evidence, rename tracking, and ownership resolution.
 - `open-kioku-graph`: evidence graph storage, buffered writes, query DSL, and versioned schema.
 - `open-kioku-architecture`: architecture detection, boundary analysis, and policy edge evaluation.

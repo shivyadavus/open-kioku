@@ -3,6 +3,7 @@ use open_kioku_core::{
     GraphNodeType, ImportResolution, ResolutionStatus, Symbol, SymbolId, SymbolKind,
 };
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,6 +29,15 @@ pub struct SymbolRegistry {
 pub struct RegistryReport {
     pub analysis_facts: Vec<AnalysisFact>,
     pub quality_notes: Vec<String>,
+    pub heuristic_hints: Vec<HeuristicRelationshipHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeuristicRelationshipHint {
+    pub from: SymbolId,
+    pub to: SymbolId,
+    pub hint_type: GraphEdgeType,
+    pub confidence: Confidence,
 }
 
 #[derive(Debug, Clone)]
