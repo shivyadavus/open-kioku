@@ -2,10 +2,21 @@ use crate::context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::index::SymbolIndex;
 use open_kioku_core::{
-    CallSite, Confidence, EvidenceId, EvidenceSourceType, InheritanceKind, InheritanceSite,
-    SymbolId,
+    CallSite, Confidence, EvidenceId, EvidenceSourceType, FileRange, InheritanceKind,
+    InheritanceSite, LineRange, SymbolId, SymbolKind,
 };
-use std::collections::{HashMap, HashSet};
+use open_kioku_semantic_model::SemanticRepository;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> Option<FileRange> {
+    Some(FileRange {
+        path: ctx.file_path.to_path_buf(),
+        line_range: Some(LineRange {
+            start: call.range.start_line,
+            end: call.range.end_line,
+        }),
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct InheritanceEdge {
@@ -39,16 +50,81 @@ impl InheritanceIndex {
                     evidence: Vec::new(),
                 });
         }
+        for edges in index.edges_by_child.values_mut() {
+            edges.sort_by_key(|e| {
+                let kind_order = match e.kind {
+                    InheritanceKind::Extends => 0,
+                    InheritanceKind::Implements => 1,
+                    InheritanceKind::TraitImpl => 2,
+                    InheritanceKind::Embeds => 3,
+                };
+                (kind_order, e.order)
+            });
+        }
         index
     }
 
-    /// Resolves string parent names into SymbolIds against the SymbolIndex.
-    pub fn bind_parents(&mut self, symbols: &SymbolIndex) {
-        for edges in self.edges_by_child.values_mut() {
+    /// Resolves string parent names into SymbolIds with evidence (same file, imports, qualified name),
+    /// not project-global unique matching.
+    pub fn bind_parents_with_repository(
+        &mut self,
+        symbols: &SymbolIndex,
+        repository: &SemanticRepository,
+    ) {
+        for (child_id, edges) in self.edges_by_child.iter_mut() {
+            let child_sym = match symbols.get(child_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
             for edge in edges {
-                let candidates = symbols.lookup_name(&edge.parent_name);
-                if candidates.len() == 1 {
-                    edge.parent_id = Some(candidates[0].clone());
+                let parent_name = &edge.parent_name;
+
+                // 1. Same-file class/trait/interface match
+                if let Some(file_symbols) = symbols.by_file.get(&child_sym.file_id) {
+                    let matching: Vec<&SymbolId> = file_symbols
+                        .iter()
+                        .filter(|id| {
+                            symbols
+                                .get(id)
+                                .map(|s| {
+                                    s.name == *parent_name
+                                        && matches!(
+                                            s.kind,
+                                            SymbolKind::Class
+                                                | SymbolKind::Trait
+                                                | SymbolKind::Interface
+                                        )
+                                })
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    if matching.len() == 1 {
+                        edge.parent_id = Some(matching[0].clone());
+                        continue;
+                    }
+                }
+
+                // 2. Import binding lookup
+                let import_bindings =
+                    repository
+                        .imports
+                        .lookup(&child_sym.file_id, None, parent_name);
+                for binding in import_bindings {
+                    if let Some(target) = &binding.target_symbol {
+                        edge.parent_id = Some(target.clone());
+                        break;
+                    }
+                }
+                if edge.parent_id.is_some() {
+                    continue;
+                }
+
+                // 3. Qualified name match
+                if let Some(qualified) = symbols.by_qualified.get(parent_name) {
+                    if qualified.len() == 1 {
+                        edge.parent_id = Some(qualified[0].clone());
+                    }
                 }
             }
         }
@@ -62,17 +138,17 @@ impl InheritanceIndex {
         symbols: &SymbolIndex,
     ) -> Option<SymbolId> {
         let mut visited = HashSet::new();
-        let mut queue = Vec::new();
+        let mut queue = VecDeque::new();
 
         if let Some(edges) = self.edges_by_child.get(child_type_id) {
             for edge in edges {
                 if let Some(pid) = &edge.parent_id {
-                    queue.push(pid.clone());
+                    queue.push_back(pid.clone());
                 }
             }
         }
 
-        while let Some(current_parent_id) = queue.pop() {
+        while let Some(current_parent_id) = queue.pop_front() {
             if !visited.insert(current_parent_id.clone()) {
                 continue;
             }
@@ -86,7 +162,13 @@ impl InheritanceIndex {
                 .filter(|id| {
                     symbols
                         .get(id)
-                        .map(|s| s.name == member_name)
+                        .map(|s| {
+                            s.name == member_name
+                                && matches!(
+                                    s.kind,
+                                    SymbolKind::Method | SymbolKind::Function | SymbolKind::Field
+                                )
+                        })
                         .unwrap_or(false)
                 })
                 .collect();
@@ -98,7 +180,7 @@ impl InheritanceIndex {
             if let Some(parent_edges) = self.edges_by_child.get(&current_parent_id) {
                 for edge in parent_edges {
                     if let Some(pid) = &edge.parent_id {
-                        queue.push(pid.clone());
+                        queue.push_back(pid.clone());
                     }
                 }
             }
@@ -123,7 +205,7 @@ pub fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Res
                         evidence: vec![ResolutionEvidence {
                             kind: ResolutionEvidenceKind::InheritanceGraph,
                             source_type: EvidenceSourceType::TreeSitter,
-                            file_range: None,
+                            file_range: call_file_range(call, ctx),
                             symbol_id: Some(target),
                             message: "resolved super call via inheritance graph traversal".into(),
                         }],

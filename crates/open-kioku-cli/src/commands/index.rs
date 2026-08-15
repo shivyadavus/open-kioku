@@ -53,9 +53,9 @@ fn index_repo_with_config(
         imports: &snapshot.imports,
         occurrences: &snapshot.occurrences,
         analysis_facts: &snapshot.analysis_facts,
-        scopes: &[],
-        bindings: &[],
-        call_sites: &[],
+        scopes: &snapshot.scopes,
+        bindings: &snapshot.bindings,
+        call_sites: &snapshot.call_sites,
     })?;
     report_index_stage(
         &reporter,
@@ -69,13 +69,14 @@ fn index_repo_with_config(
     );
     store.put_history_snapshot(&history)?;
     report_index_stage(&reporter, "graph", "building dependency graph".to_string());
-    let graph = InMemoryGraph::from_index_with_analysis(
+    let graph = InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
         &snapshot.imports,
         &snapshot.analysis_facts,
+        &snapshot.resolved_relationships,
     );
     report_index_stage(
         &reporter,
