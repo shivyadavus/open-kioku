@@ -1178,6 +1178,11 @@ mod tests {
             language: Language::Rust,
             confidence: Confidence::High,
             provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
         };
         let chunks = vec![
             CodeChunk {

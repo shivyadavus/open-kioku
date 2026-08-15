@@ -2955,6 +2955,11 @@ paths = ["src/**"]
                 language: Language::Rust,
                 confidence: Confidence::Exact,
                 provenance: EvidenceSourceType::Scip,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             };
             let secondary_symbol = Symbol {
                 id: SymbolId::new("symbol-archive"),
@@ -2966,6 +2971,11 @@ paths = ["src/**"]
                 language: Language::Rust,
                 confidence: Confidence::High,
                 provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             };
             let implementation_symbol = Symbol {
                 id: SymbolId::new("symbol-invoice-publisher-impl"),
@@ -2977,6 +2987,11 @@ paths = ["src/**"]
                 language: Language::Java,
                 confidence: Confidence::High,
                 provenance: EvidenceSourceType::StaticAnalysis,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             };
             let chunk = CodeChunk {
                 id: "chunk-publish".into(),

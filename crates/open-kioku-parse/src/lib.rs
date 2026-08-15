@@ -232,6 +232,11 @@ fn extract_with_patterns(
                         language: file.language.clone(),
                         confidence: Confidence::Medium,
                         provenance: EvidenceSourceType::Heuristic,
+                        module_id: None,
+                        parent_symbol_id: None,
+                        scope_id: None,
+                        signature: None,
+                        visibility: open_kioku_core::Visibility::Unknown,
                     });
                 }
             }
@@ -1584,6 +1589,11 @@ endpoint = "https://orders.example.com/v1/orders"
                 language: Language::TypeScript,
                 confidence: Confidence::High,
                 provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             },
             Symbol {
                 id: SymbolId::new("call"),
@@ -1595,6 +1605,11 @@ endpoint = "https://orders.example.com/v1/orders"
                 language: Language::TypeScript,
                 confidence: Confidence::High,
                 provenance: EvidenceSourceType::TreeSitter,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             },
         ];
 

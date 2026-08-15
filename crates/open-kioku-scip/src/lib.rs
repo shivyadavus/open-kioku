@@ -364,6 +364,11 @@ fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
                 language: language.clone(),
                 confidence: Confidence::Exact,
                 provenance: EvidenceSourceType::Scip,
+                module_id: None,
+                parent_symbol_id: None,
+                scope_id: None,
+                signature: None,
+                visibility: open_kioku_core::Visibility::Unknown,
             });
         }
         for occurrence in document.occurrences {

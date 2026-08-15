@@ -1500,6 +1500,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-kioku-resolution"
+version = "2.4.0"
+dependencies = [
+ "open-kioku-core",
+ "open-kioku-errors",
+ "open-kioku-languages",
+ "serde",
+ "smallvec",
+ "tracing",
+]
+
+[[package]]
 name = "open-kioku-sandbox"
 version = "2.4.0"
 dependencies = [

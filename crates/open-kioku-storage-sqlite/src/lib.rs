@@ -300,6 +300,45 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_id);
             CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_id);
+
+            CREATE TABLE IF NOT EXISTS scopes (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              parent_id TEXT,
+              owner_symbol_id TEXT,
+              kind TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scopes_file ON scopes(file_id);
+
+            CREATE TABLE IF NOT EXISTS bindings (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              scope_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
+
+            CREATE TABLE IF NOT EXISTS call_sites (
+              id TEXT PRIMARY KEY,
+              file_id TEXT NOT NULL,
+              caller_symbol_id TEXT,
+              callee_name TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              start_column INTEGER NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_symbol_id);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_name);
+
+            CREATE TABLE IF NOT EXISTS relationship_evidence (
+              id TEXT PRIMARY KEY,
+              edge_id TEXT NOT NULL,
+              source_type TEXT NOT NULL,
+              json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_relationship_evidence_edge ON relationship_evidence(edge_id);
             "#,
         )
         .map_err(storage_err)?;

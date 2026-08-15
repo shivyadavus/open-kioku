@@ -10,6 +10,7 @@ members = [
   "crates/open-kioku-parse",
   "crates/open-kioku-tree-sitter",
   "crates/open-kioku-languages",
+  "crates/open-kioku-resolution",
   "crates/open-kioku-symbols",
   "crates/open-kioku-scip",
   "crates/open-kioku-lsp",
