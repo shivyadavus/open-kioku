@@ -2167,27 +2167,66 @@ impl Default for ContextBudget {
             max_tokens: 8_000,
             reserve_for_instructions: 1_000,
             reserve_for_validation: 1_000,
-            max_per_file: 2_500,
+            max_per_file: 2,
             max_primary_files: 8,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSelectedUnit {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<LineRange>,
+    pub estimated_tokens: usize,
+    pub authority: RetrievalAuthority,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextSelectionDiagnostics {
     pub budget: ContextBudget,
     pub available_context_tokens: usize,
     pub estimated_tokens_selected: usize,
     #[serde(default)]
+    pub selected_units: Vec<ContextSelectedUnit>,
+    #[serde(default)]
     pub per_file_tokens: BTreeMap<PathBuf, usize>,
     #[serde(default)]
     pub omitted_due_to_budget: Vec<String>,
+    #[serde(default)]
+    pub omitted_due_to_caps: Vec<String>,
     #[serde(default)]
     pub omitted_high_value: Vec<String>,
     #[serde(default)]
     pub redundancy_omissions: Vec<String>,
     #[serde(default)]
     pub caveats: Vec<String>,
+}
+
+impl Default for ContextSelectionDiagnostics {
+    fn default() -> Self {
+        Self {
+            budget: ContextBudget {
+                max_tokens: 0,
+                reserve_for_instructions: 0,
+                reserve_for_validation: 0,
+                max_per_file: 0,
+                max_primary_files: 0,
+            },
+            available_context_tokens: 0,
+            estimated_tokens_selected: 0,
+            selected_units: Vec::new(),
+            per_file_tokens: BTreeMap::new(),
+            omitted_due_to_budget: Vec::new(),
+            omitted_due_to_caps: Vec::new(),
+            omitted_high_value: Vec::new(),
+            redundancy_omissions: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
