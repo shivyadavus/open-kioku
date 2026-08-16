@@ -2125,9 +2125,51 @@ pub struct RetrievalContribution {
     pub rationale: String,
 }
 
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RetrievalUnitKey {
+    pub path: String,
+    #[serde(default)]
+    pub line_start: Option<u32>,
+    #[serde(default)]
+    pub line_end: Option<u32>,
+    #[serde(default)]
+    pub symbol_id: Option<SymbolId>,
+}
+
+impl RetrievalUnitKey {
+    pub fn from_result(result: &SearchResult) -> Self {
+        Self::from_parts(
+            &result.path,
+            result.line_range.as_ref(),
+            result.symbol.as_ref().map(|symbol| &symbol.id),
+        )
+    }
+
+    pub fn from_parts(
+        path: &Path,
+        line_range: Option<&LineRange>,
+        symbol_id: Option<&SymbolId>,
+    ) -> Self {
+        Self {
+            path: path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches("./")
+                .to_string(),
+            line_start: line_range.map(|range| range.start),
+            line_end: line_range.map(|range| range.end),
+            symbol_id: symbol_id.cloned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RetrievalTrace {
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_key: Option<RetrievalUnitKey>,
     pub fused_score: f32,
     pub authority: RetrievalAuthority,
     #[serde(default)]
