@@ -60,6 +60,67 @@ jobs:
           --min-verification-accuracy 1.0 \
           --no-index \
           | tee artifacts/benchmarks/workflow-bench.txt
+        ./target/release/ok --json retrieval-bench . \
+          --cases-file benchmarks/retrieval-cases.json \
+          --min-cases 30 \
+          --write-json artifacts/benchmarks/retrieval-report.json \
+          --write-markdown artifacts/benchmarks/retrieval-report.md \
+          --write-baseline /tmp/retrieval-baseline-first.json \
+          > artifacts/benchmarks/retrieval-stdout.json
+        ./target/release/ok --json retrieval-bench . \
+          --cases-file benchmarks/retrieval-cases.json \
+          --no-index \
+          --min-cases 30 \
+          --write-baseline /tmp/retrieval-baseline-second.json \
+          > /tmp/retrieval-second.json
+        python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        expected = json.loads(Path('benchmarks/retrieval-baseline.json').read_text())
+        first = json.loads(Path('/tmp/retrieval-baseline-first.json').read_text())
+        second = json.loads(Path('/tmp/retrieval-baseline-second.json').read_text())
+        thresholds = json.loads(Path('benchmarks/retrieval-thresholds.json').read_text())
+
+        if first != second:
+            raise SystemExit('retrieval quality baseline is nondeterministic across identical runs')
+        if first != expected:
+            raise SystemExit(
+                'retrieval quality baseline changed; inspect the report and update the checked-in '
+                'baseline explicitly if the change is intentional'
+            )
+        if thresholds['schema_version'] != first['schema_version']:
+            raise SystemExit('retrieval threshold schema does not match benchmark schema')
+        if thresholds['corpus_id'] != first['corpus_id']:
+            raise SystemExit('retrieval thresholds target a different corpus')
+
+        strategy = next(
+            item for item in first['strategies']
+            if item['strategy'] == thresholds['strategy']
+        )
+        quality = strategy['by_split'][thresholds['split']]
+        minimums = thresholds['minimums']
+        maximums = thresholds['maximums']
+        observed = {
+            'recall_at_5': quality['recall_at_5'],
+            'recall_at_10': quality['recall_at_10'],
+            'mean_reciprocal_rank': quality['mean_reciprocal_rank'],
+            'file_f1_at_10': quality['file_f1_at_10'],
+            'token_budget_gold_yield_2000': quality['token_budget_gold_yield']['2000'],
+            'no_gold_false_positive_rate': quality['no_gold_false_positive_rate'],
+        }
+        for metric, minimum in minimums.items():
+            if observed[metric] < minimum:
+                raise SystemExit(
+                    f'retrieval holdout {metric} {observed[metric]:.6f} is below {minimum:.6f}'
+                )
+        for metric, maximum in maximums.items():
+            if observed[metric] > maximum:
+                raise SystemExit(
+                    f'retrieval holdout {metric} {observed[metric]:.6f} exceeds {maximum:.6f}'
+                )
+        print('retrieval benchmark deterministic baseline and holdout thresholds passed')
+        PY
         ./target/release/ok architecture bench benchmarks/architecture-policy-fixture \
           --cases-file benchmarks/architecture-policy-cases.json \
           --min-precision 0.95 \
