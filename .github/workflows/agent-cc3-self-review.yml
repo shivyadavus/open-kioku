@@ -1,0 +1,45 @@
+name: agent-cc3-self-review
+
+on:
+  push:
+    branches:
+      - agent/cc3-token-budget
+    paths:
+      - .github/scripts/agent_cc3_self_review.py
+      - .github/workflows/agent-cc3-self-review.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc3-token-budget
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply self-review hardening
+        run: python3 .github/scripts/agent_cc3_self_review.py
+      - name: Format and validate targeted packages
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-core -p open-kioku-context --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-core
+          cargo test -p open-kioku-context
+      - name: Validate full workspace
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit hardened product tree and remove temporary tooling
+        run: |
+          rm .github/scripts/agent_cc3_self_review.py .github/workflows/agent-cc3-self-review.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(context): harden token-budget selection semantics [skip ci]"
+          git push origin HEAD:agent/cc3-token-budget
