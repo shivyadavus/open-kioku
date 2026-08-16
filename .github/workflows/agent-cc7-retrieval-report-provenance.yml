@@ -1,0 +1,56 @@
+name: agent-cc7-retrieval-report-provenance
+on:
+  push:
+    branches: [agent/cc7-retrieval-report-provenance]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc7-retrieval-report-provenance
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC7 patch
+        run: python3 .github/scripts/agent_cc7_report_patch.py
+      - name: Validate focused and workspace contracts
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-cli --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-cli retrieval_bench_tests
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+          ./target/debug/ok --json retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30 --write-json /tmp/retrieval-report.json --write-markdown /tmp/retrieval-report.md --write-baseline /tmp/retrieval-baseline.json > /tmp/retrieval-stdout.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('/tmp/retrieval-report.json').read_text())
+          assert report['report_version'] == '1.2.0'
+          assert len(report['provenance']['source_revision']) == 40
+          assert report['provenance']['cases_sha256'].startswith('sha256:')
+          assert report['provenance']['frozen_fixture_revisions_verified'] is True
+          semantic = report['strategy_identities']['cc2:semantic_vector_local_hash']
+          assert semantic == {'algorithm':'semantic_vector','provider':'local','model':'local-hash','backend':'exact-flat'}
+          assert report['baseline_deltas']
+          assert all('query' not in d for d in report['baseline_deltas'])
+          markdown = Path('/tmp/retrieval-report.md').read_text()
+          assert 'Regression deltas vs checked-in baseline' in markdown
+          assert 'Open Kioku revision:' in markdown
+          assert 'abstention precision/recall is not reported' in markdown
+          expected = json.loads(Path('benchmarks/retrieval-baseline.json').read_text())
+          actual = json.loads(Path('/tmp/retrieval-baseline.json').read_text())
+          assert actual == expected, 'frozen quality baseline changed'
+          PY
+      - name: Commit product change and remove temporary tooling
+        run: |
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-cli/src/bench/retrieval.rs
+          git commit -m "feat(bench): add reproducible retrieval report provenance"
+          git rm .github/scripts/agent_cc7_report_patch.py .github/workflows/agent-cc7-retrieval-report-provenance.yml
+          git commit -m "chore: remove temporary CC7 validation tooling"
+          git push origin HEAD:agent/cc7-retrieval-report-provenance
