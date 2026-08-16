@@ -469,10 +469,16 @@ enum SemanticCommand {
     Index {
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// Explicitly permit downloading a configured local neural model into .ok/models.
+        #[arg(long, default_value_t = false)]
+        allow_model_download: bool,
     },
     Rebuild {
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// Explicitly permit downloading a configured local neural model into .ok/models.
+        #[arg(long, default_value_t = false)]
+        allow_model_download: bool,
     },
     Clean {
         #[arg(default_value = ".")]

@@ -20,6 +20,7 @@ open-kioku-vector = { version = "2.0.0", path = "../open-kioku-vector" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 open-kioku-storage-sqlite = { version = "2.0.0", path = "../open-kioku-storage-sqlite" }

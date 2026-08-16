@@ -467,13 +467,25 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 let status = manager.status();
                 output(cli.json, &status, || print_semantic_status(&status))?;
             }
-            SemanticCommand::Index { repo: command_repo } => {
+            SemanticCommand::Index {
+                repo: command_repo,
+                allow_model_download,
+            } => {
                 let repo = absolutize(&resolve_repo(&repo, command_repo))?;
                 let store = open_store(&repo)?;
                 let mut config = OkConfig::load_from_repo(&repo)?;
                 config.semantic.enabled = true;
+                if allow_model_download && config.security.deny_network {
+                    anyhow::bail!(
+                        "model download is blocked by security.deny_network; set security.deny_network = false and rerun with --allow-model-download"
+                    );
+                }
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
-                let report = manager.index()?;
+                let report = if allow_model_download {
+                    manager.index_with_model_download()?
+                } else {
+                    manager.index()?
+                };
                 output(cli.json, &report, || {
                     println!(
                         "Semantic index ready: {} vectors, {} reused, {} embedded",
@@ -481,13 +493,25 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     );
                 })?;
             }
-            SemanticCommand::Rebuild { repo: command_repo } => {
+            SemanticCommand::Rebuild {
+                repo: command_repo,
+                allow_model_download,
+            } => {
                 let repo = absolutize(&resolve_repo(&repo, command_repo))?;
                 let store = open_store(&repo)?;
                 let mut config = OkConfig::load_from_repo(&repo)?;
                 config.semantic.enabled = true;
+                if allow_model_download && config.security.deny_network {
+                    anyhow::bail!(
+                        "model download is blocked by security.deny_network; set security.deny_network = false and rerun with --allow-model-download"
+                    );
+                }
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
-                let report = manager.rebuild()?;
+                let report = if allow_model_download {
+                    manager.rebuild_with_model_download()?
+                } else {
+                    manager.rebuild()?
+                };
                 output(cli.json, &report, || {
                     println!(
                         "Semantic index rebuilt: {} vectors, {} embedded",

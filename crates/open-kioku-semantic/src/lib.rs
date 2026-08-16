@@ -3,11 +3,15 @@ use open_kioku_config::SemanticConfig;
 use open_kioku_core::{
     search_result_evidence_ids, CodeChunk, File, LineRange, ScoreComponent, SearchResult, Symbol,
 };
-use open_kioku_embeddings::{EmbeddingProvider, LocalHashEmbeddingProvider};
+use open_kioku_embeddings::{
+    neural_model_cache_dir, EmbeddingProvider, FastEmbedEmbeddingProvider,
+    LocalHashEmbeddingProvider, LocalNeuralModel, QWEN3_MAX_LENGTH,
+};
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
 use open_kioku_vector::{ExactFlatVectorIndex, VectorId, VectorRecord, VectorSearchOptions};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +26,10 @@ pub struct SemanticManifest {
     pub backend: String,
     pub embedding_provider: String,
     pub embedding_model: String,
+    #[serde(default)]
+    pub embedding_implementation: String,
+    #[serde(default)]
+    pub model_artifact_sha256: Option<String>,
     pub dimensions: usize,
     pub distance_metric: String,
     pub chunker_version: String,
@@ -52,6 +60,8 @@ pub struct SemanticStatus {
     pub provider: String,
     pub backend: String,
     pub model: String,
+    pub embedding_implementation: String,
+    pub model_artifact_sha256: Option<String>,
     pub dimensions: usize,
     pub distance: String,
     pub vector_count: usize,
@@ -91,6 +101,10 @@ struct EmbeddingCacheEntry {
     target_id: String,
     content_hash: String,
     model: String,
+    #[serde(default)]
+    embedding_implementation: String,
+    #[serde(default)]
+    model_artifact_sha256: Option<String>,
     dimensions: usize,
     vector: Vec<f32>,
 }
@@ -141,6 +155,8 @@ impl<'a> SemanticIndexManager<'a> {
                 provider: self.config.provider.clone(),
                 backend: self.config.backend.clone(),
                 model: self.config.model.clone(),
+                embedding_implementation: expected_embedding_implementation(&self.config),
+                model_artifact_sha256: None,
                 dimensions: self.config.dimensions,
                 distance: self.config.distance.clone(),
                 vector_count: 0,
@@ -191,6 +207,13 @@ impl<'a> SemanticIndexManager<'a> {
             provider: self.config.provider.clone(),
             backend: self.config.backend.clone(),
             model: self.config.model.clone(),
+            embedding_implementation: manifest
+                .as_ref()
+                .map(|value| value.embedding_implementation.clone())
+                .unwrap_or_else(|| expected_embedding_implementation(&self.config)),
+            model_artifact_sha256: manifest
+                .as_ref()
+                .and_then(|value| value.model_artifact_sha256.clone()),
             dimensions: self.config.dimensions,
             distance: self.config.distance.clone(),
             vector_count: stats.vector_count,
@@ -205,18 +228,28 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     pub fn index(&self) -> Result<SemanticIndexReport> {
-        self.build_and_promote()
+        self.build_and_promote(false)
+    }
+
+    pub fn index_with_model_download(&self) -> Result<SemanticIndexReport> {
+        self.build_and_promote(true)
     }
 
     pub fn rebuild(&self) -> Result<SemanticIndexReport> {
         let _ = fs::remove_dir_all(self.builds_dir());
-        self.build_and_promote()
+        self.build_and_promote(false)
+    }
+
+    pub fn rebuild_with_model_download(&self) -> Result<SemanticIndexReport> {
+        let _ = fs::remove_dir_all(self.builds_dir());
+        self.build_and_promote(true)
     }
 
     pub fn clean(&self, include_cache: bool) -> Result<()> {
         let vectors = self.vectors_dir();
         if include_cache {
             let _ = fs::remove_dir_all(&vectors);
+            let _ = fs::remove_dir_all(self.models_dir());
         } else {
             let _ = fs::remove_dir_all(self.current_dir());
             let _ = fs::remove_dir_all(self.builds_dir());
@@ -241,10 +274,10 @@ impl<'a> SemanticIndexManager<'a> {
                 status.state
             )));
         }
-        let provider = provider_for_config(&self.config)?;
+        let provider = provider_for_config(&self.config, false, &self.models_dir())?;
         let index = ExactFlatVectorIndex::load(&self.current_dir().join("index.json"))?;
         let targets = read_targets(&self.current_dir().join("ids.json"))?;
-        let query_vector = provider.embed(query)?;
+        let query_vector = provider.embed_query(query)?;
         let hits = index.search(
             &query_vector,
             VectorSearchOptions {
@@ -256,14 +289,22 @@ impl<'a> SemanticIndexManager<'a> {
         hydrate_hits(self.store, &targets, hits)
     }
 
-    fn build_and_promote(&self) -> Result<SemanticIndexReport> {
+    fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
         if self.config.backend != "exact-flat" {
             return Err(OkError::Unsupported(format!(
                 "semantic backend `{}` is not supported; use exact-flat",
                 self.config.backend
             )));
         }
-        let provider = provider_for_config(&self.config)?;
+        let provider = provider_for_config(&self.config, allow_model_download, &self.models_dir())?;
+        let descriptor = provider.descriptor();
+        if descriptor.dimensions != self.config.dimensions {
+            return Err(OkError::Config(format!(
+                "semantic model {} requires {} dimensions, but ok.toml configures {}",
+                descriptor.model, descriptor.dimensions, self.config.dimensions
+            )));
+        }
+        let model_artifact_sha256 = model_artifact_digest(&self.config, &self.models_dir())?;
         let targets = collect_targets(self.store, &self.config)?;
         let current_cache =
             read_json::<EmbeddingCache>(&self.current_dir().join("embeddings.cache"))
@@ -279,24 +320,50 @@ impl<'a> SemanticIndexManager<'a> {
         let mut cache_misses = 0usize;
         let mut failed = 0usize;
         let mut counts = BTreeMap::<String, usize>::new();
+        let mut vectors = vec![None::<Vec<f32>>; targets.len()];
+        let mut missing_indexes = Vec::new();
 
-        for target in &targets {
+        for (index, target) in targets.iter().enumerate() {
             *counts.entry(target.kind.clone()).or_default() += 1;
-            let cache_key = cache_key(target, &self.config);
-            let vector = if let Some(entry) = current_cache.entries.get(&cache_key) {
+            let key = cache_key(target, &self.config);
+            if let Some(entry) = current_cache.entries.get(&key) {
                 if entry.content_hash == target.content_hash
-                    && entry.model == self.config.model
+                    && entry.model == descriptor.model
+                    && entry.embedding_implementation == descriptor.implementation
+                    && entry.model_artifact_sha256 == model_artifact_sha256
                     && entry.dimensions == self.config.dimensions
                 {
                     cache_hits += 1;
-                    entry.vector.clone()
-                } else {
-                    cache_misses += 1;
-                    provider.embed(&target.text)?
+                    vectors[index] = Some(entry.vector.clone());
+                    continue;
                 }
-            } else {
-                cache_misses += 1;
-                provider.embed(&target.text)?
+            }
+            cache_misses += 1;
+            missing_indexes.push(index);
+        }
+
+        if !missing_indexes.is_empty() {
+            let missing_texts = missing_indexes
+                .iter()
+                .map(|index| targets[*index].text.clone())
+                .collect::<Vec<_>>();
+            let embedded = provider.embed_document_batch(&missing_texts, self.config.batch_size)?;
+            if embedded.len() != missing_indexes.len() {
+                return Err(OkError::Storage(format!(
+                    "embedding provider returned {} vectors for {} inputs",
+                    embedded.len(),
+                    missing_indexes.len()
+                )));
+            }
+            for (index, vector) in missing_indexes.into_iter().zip(embedded) {
+                vectors[index] = Some(vector);
+            }
+        }
+
+        for (target, vector) in targets.iter().zip(vectors) {
+            let Some(vector) = vector else {
+                failed += 1;
+                continue;
             };
             if vector.len() != self.config.dimensions {
                 failed += 1;
@@ -309,11 +376,13 @@ impl<'a> SemanticIndexManager<'a> {
                 vector: vector.clone(),
             })?;
             cache.entries.insert(
-                cache_key,
+                cache_key(target, &self.config),
                 EmbeddingCacheEntry {
                     target_id: target.stable_id.clone(),
                     content_hash: target.content_hash.clone(),
-                    model: self.config.model.clone(),
+                    model: descriptor.model.clone(),
+                    embedding_implementation: descriptor.implementation.clone(),
+                    model_artifact_sha256: model_artifact_sha256.clone(),
                     dimensions: self.config.dimensions,
                     vector,
                 },
@@ -324,7 +393,9 @@ impl<'a> SemanticIndexManager<'a> {
             schema_version: SCHEMA_VERSION,
             backend: self.config.backend.clone(),
             embedding_provider: self.config.provider.clone(),
-            embedding_model: self.config.model.clone(),
+            embedding_model: descriptor.model.clone(),
+            embedding_implementation: descriptor.implementation.clone(),
+            model_artifact_sha256: model_artifact_sha256.clone(),
             dimensions: self.config.dimensions,
             distance_metric: self.config.distance.clone(),
             chunker_version: CHUNKER_VERSION.into(),
@@ -384,7 +455,12 @@ impl<'a> SemanticIndexManager<'a> {
         manifest.schema_version == SCHEMA_VERSION
             && manifest.backend == self.config.backend
             && manifest.embedding_provider == self.config.provider
-            && manifest.embedding_model == self.config.model
+            && manifest.embedding_model == canonical_model_name(&self.config)
+            && manifest.embedding_implementation == expected_embedding_implementation(&self.config)
+            && manifest.model_artifact_sha256
+                == model_artifact_digest(&self.config, &self.models_dir())
+                    .ok()
+                    .flatten()
             && manifest.dimensions == self.config.dimensions
             && manifest.distance_metric == self.config.distance
             && manifest.chunker_version == CHUNKER_VERSION
@@ -401,6 +477,10 @@ impl<'a> SemanticIndexManager<'a> {
 
     fn builds_dir(&self) -> PathBuf {
         self.vectors_dir().join("builds")
+    }
+
+    fn models_dir(&self) -> PathBuf {
+        self.repo.join(".ok/models/fastembed")
     }
 }
 
@@ -443,7 +523,11 @@ pub fn provider_from_config(config: &SemanticConfig) -> Result<Option<Box<dyn Em
     if !config.enabled {
         return Ok(None);
     }
-    Ok(Some(provider_for_config(config)?))
+    Ok(Some(provider_for_config(
+        config,
+        false,
+        Path::new(".ok/models/fastembed"),
+    )?))
 }
 
 pub fn ensure_enabled(config: &SemanticConfig) -> Result<()> {
@@ -454,11 +538,47 @@ pub fn ensure_enabled(config: &SemanticConfig) -> Result<()> {
     })
 }
 
-fn provider_for_config(config: &SemanticConfig) -> Result<Box<dyn EmbeddingProvider>> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelReadyFile {
+    path: PathBuf,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelReadyMarker {
+    model: String,
+    implementation: String,
+    artifact_sha256: String,
+    files: Vec<ModelReadyFile>,
+}
+
+fn provider_for_config(
+    config: &SemanticConfig,
+    allow_model_download: bool,
+    models_root: &Path,
+) -> Result<Box<dyn EmbeddingProvider>> {
     match config.provider.as_str() {
         "local" | "local-hash" | "hash" => Ok(Box::new(LocalHashEmbeddingProvider::new(
             config.dimensions,
         )?)),
+        "fastembed" | "local-neural" => {
+            let model = LocalNeuralModel::parse(&config.model)?;
+            let cache_dir = neural_model_cache_dir(models_root, model);
+            if !allow_model_download {
+                validate_model_ready_marker(config, &cache_dir)?;
+            }
+            fs::create_dir_all(&cache_dir)?;
+            let provider = FastEmbedEmbeddingProvider::new(
+                model,
+                config.dimensions,
+                config.batch_size,
+                &cache_dir,
+            )?;
+            if allow_model_download {
+                write_model_ready_marker(&cache_dir, &provider.descriptor())?;
+            }
+            Ok(Box::new(provider))
+        }
         "disabled" => Err(OkError::Unsupported(
             "semantic embedding provider is disabled".into(),
         )),
@@ -466,9 +586,152 @@ fn provider_for_config(config: &SemanticConfig) -> Result<Box<dyn EmbeddingProvi
             "external semantic providers require explicit opt-in".into(),
         )),
         other => Err(OkError::Unsupported(format!(
-            "semantic provider `{other}` is not available; supported offline provider: local"
+            "semantic provider `{other}` is not available; supported local providers: local, fastembed"
         ))),
     }
+}
+
+fn canonical_model_name(config: &SemanticConfig) -> String {
+    if matches!(config.provider.as_str(), "fastembed" | "local-neural") {
+        LocalNeuralModel::parse(&config.model)
+            .map(|model| model.canonical_name().to_string())
+            .unwrap_or_else(|_| config.model.clone())
+    } else {
+        config.model.clone()
+    }
+}
+
+fn expected_embedding_implementation(config: &SemanticConfig) -> String {
+    if matches!(config.provider.as_str(), "fastembed" | "local-neural") {
+        let suffix = match LocalNeuralModel::parse(&config.model) {
+            Ok(LocalNeuralModel::JinaEmbeddingsV2BaseCode) => "onnx".to_string(),
+            Ok(_) => format!("qwen3-candle:maxlen-{QWEN3_MAX_LENGTH}"),
+            Err(_) => "unknown".to_string(),
+        };
+        format!(
+            "{}:{suffix}",
+            open_kioku_embeddings::FASTEMBED_PROVIDER_VERSION
+        )
+    } else {
+        "open-kioku-local-hash-v1".into()
+    }
+}
+
+fn model_ready_marker_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(".open-kioku-model-ready.json")
+}
+
+fn validate_model_ready_marker(config: &SemanticConfig, cache_dir: &Path) -> Result<()> {
+    let marker_path = model_ready_marker_path(cache_dir);
+    let marker = read_json::<ModelReadyMarker>(&marker_path).ok_or_else(|| {
+        OkError::Unsupported(format!(
+            "local neural model {} is not installed; run `ok semantic index --allow-model-download` to explicitly download it",
+            canonical_model_name(config)
+        ))
+    })?;
+    if marker.model != canonical_model_name(config)
+        || marker.implementation != expected_embedding_implementation(config)
+    {
+        return Err(OkError::Unsupported(
+            "local neural model cache provenance does not match the configured model; rerun `ok semantic index --allow-model-download`".into(),
+        ));
+    }
+    for file in &marker.files {
+        let path = cache_dir.join(&file.path);
+        let size = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if size != file.size || !path.is_file() {
+            return Err(OkError::Unsupported(format!(
+                "local neural model cache is incomplete at {}; rerun `ok semantic index --allow-model-download`",
+                file.path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn write_model_ready_marker(
+    cache_dir: &Path,
+    descriptor: &open_kioku_embeddings::EmbeddingProviderDescriptor,
+) -> Result<()> {
+    let (artifact_sha256, files) = fingerprint_model_cache(cache_dir)?;
+    let marker = ModelReadyMarker {
+        model: descriptor.model.clone(),
+        implementation: descriptor.implementation.clone(),
+        artifact_sha256,
+        files,
+    };
+    write_json(&model_ready_marker_path(cache_dir), &marker)
+}
+
+fn model_artifact_digest(config: &SemanticConfig, models_root: &Path) -> Result<Option<String>> {
+    if !matches!(config.provider.as_str(), "fastembed" | "local-neural") {
+        return Ok(None);
+    }
+    let model = LocalNeuralModel::parse(&config.model)?;
+    let cache_dir = neural_model_cache_dir(models_root, model);
+    let marker = read_json::<ModelReadyMarker>(&model_ready_marker_path(&cache_dir));
+    Ok(marker
+        .filter(|marker| {
+            marker.model == canonical_model_name(config)
+                && marker.implementation == expected_embedding_implementation(config)
+        })
+        .map(|marker| marker.artifact_sha256))
+}
+
+fn fingerprint_model_cache(cache_dir: &Path) -> Result<(String, Vec<ModelReadyFile>)> {
+    let mut paths = Vec::new();
+    collect_model_files(cache_dir, cache_dir, &mut paths)?;
+    paths.sort();
+    let mut files = Vec::new();
+    let mut hasher = Sha256::new();
+    hasher.update(b"open-kioku-local-neural-model-v2\0");
+    for relative in paths {
+        if ignored_model_cache_file(&relative) {
+            continue;
+        }
+        let absolute = cache_dir.join(&relative);
+        let metadata = fs::metadata(&absolute)?;
+        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(fs::read(&absolute)?);
+        hasher.update(b"\0");
+        files.push(ModelReadyFile {
+            path: relative,
+            size: metadata.len(),
+        });
+    }
+    if files.is_empty() {
+        return Err(OkError::Unsupported(
+            "local neural model initialization completed without cache artifacts".into(),
+        ));
+    }
+    Ok((format!("sha256:{:x}", hasher.finalize()), files))
+}
+
+fn ignored_model_cache_file(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized == ".open-kioku-model-ready.json"
+        || normalized.contains("/.locks/")
+        || normalized.starts_with(".locks/")
+        || normalized.ends_with(".lock")
+        || normalized.ends_with(".tmp")
+        || normalized.ends_with(".part")
+        || normalized.ends_with(".incomplete")
+}
+
+fn collect_model_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_model_files(root, &path, files)?;
+        } else if path.is_file() {
+            files.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+        }
+    }
+    Ok(())
 }
 
 fn collect_targets(
@@ -655,8 +918,12 @@ fn excluded_path(file: &File) -> bool {
 
 fn cache_key(target: &SemanticTarget, config: &SemanticConfig) -> String {
     format!(
-        "{}:{}:{}:{}",
-        target.stable_id, target.content_hash, config.model, config.dimensions
+        "{}:{}:{}:{}:{}",
+        target.stable_id,
+        target.content_hash,
+        config.model,
+        config.dimensions,
+        expected_embedding_implementation(config)
     )
 }
 
@@ -757,6 +1024,22 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("not available"));
+    }
+
+    #[test]
+    fn neural_provider_requires_explicit_download_before_model_initialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
+        let mut config = semantic_config();
+        config.provider = "fastembed".into();
+        config.model = "Qwen/Qwen3-Embedding-0.6B".into();
+        config.dimensions = 1_024;
+        let manager = SemanticIndexManager::new(temp.path(), &store, &config);
+        let err = manager.index().unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not installed"));
+        assert!(message.contains("--allow-model-download"));
+        assert!(!temp.path().join(".ok/models/fastembed").exists());
     }
 
     #[test]

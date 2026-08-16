@@ -8,10 +8,12 @@
     "dimensions": 384,
     "disk_usage_bytes": 0,
     "distance": "cosine",
+    "embedding_implementation": "open-kioku-local-hash-v1",
     "failed_count": 0,
     "indexed_count": 0,
     "manifest": null,
     "model": "local-hash",
+    "model_artifact_sha256": null,
     "notes": [
       "semantic search is disabled in ok.toml; `ok semantic index` is explicit local opt-in"
     ],
