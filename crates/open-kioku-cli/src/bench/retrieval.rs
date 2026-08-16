@@ -594,9 +594,10 @@ fn cc2_semantic_benchmark_config() -> open_kioku_config::SemanticConfig {
     config
 }
 
-fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 6] {
+fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 7] {
     [
         open_kioku_core::RetrievalSourceKind::Lexical,
+        open_kioku_core::RetrievalSourceKind::Document,
         open_kioku_core::RetrievalSourceKind::ExactSemantic,
         open_kioku_core::RetrievalSourceKind::Graph,
         open_kioku_core::RetrievalSourceKind::Validation,
@@ -608,6 +609,7 @@ fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 6] {
 fn retrieval_source_label(source: open_kioku_core::RetrievalSourceKind) -> &'static str {
     match source {
         open_kioku_core::RetrievalSourceKind::Lexical => "lexical",
+        open_kioku_core::RetrievalSourceKind::Document => "document",
         open_kioku_core::RetrievalSourceKind::ExactSemantic => "exact_semantic",
         open_kioku_core::RetrievalSourceKind::Graph => "graph",
         open_kioku_core::RetrievalSourceKind::SemanticVector => "semantic_vector",

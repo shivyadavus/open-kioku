@@ -61,6 +61,7 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                 .index
                 .search(term, request.limit)?
                 .into_iter()
+                .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
                 .enumerate()
             {
                 let rank = index + 1;
@@ -240,6 +241,7 @@ impl FusionConfig {
             rrf_k: DEFAULT_RRF_K,
             source_weights: BTreeMap::from([
                 (RetrievalSourceKind::Lexical, 1.00),
+                (RetrievalSourceKind::Document, 0.90),
                 (RetrievalSourceKind::ExactSemantic, 1.50),
                 (RetrievalSourceKind::Graph, 1.20),
                 (RetrievalSourceKind::SemanticVector, 0.80),
@@ -271,6 +273,11 @@ impl FusionConfig {
         for (source, configured, baseline) in [
             (
                 RetrievalSourceKind::Lexical,
+                options.weights.text_relevance,
+                defaults.text_relevance,
+            ),
+            (
+                RetrievalSourceKind::Document,
                 options.weights.text_relevance,
                 defaults.text_relevance,
             ),
@@ -314,6 +321,11 @@ impl FusionConfig {
             if let Some(source) = source_for_ranking_signal(signal) {
                 config.source_weights.insert(source, 0.0);
             }
+            if matches!(signal, RankingSignal::TextRelevance) {
+                config
+                    .source_weights
+                    .insert(RetrievalSourceKind::Document, 0.0);
+            }
         }
         config
     }
@@ -347,9 +359,10 @@ impl Default for FusionConfig {
     }
 }
 
-fn all_retrieval_sources() -> [RetrievalSourceKind; 7] {
+fn all_retrieval_sources() -> [RetrievalSourceKind; 8] {
     [
         RetrievalSourceKind::Lexical,
+        RetrievalSourceKind::Document,
         RetrievalSourceKind::ExactSemantic,
         RetrievalSourceKind::Graph,
         RetrievalSourceKind::SemanticVector,
@@ -372,7 +385,7 @@ pub fn fuse_candidate_streams(
 ) -> FusedCandidates {
     let limit = limit.clamp(1, 200);
     let rrf_k = config.rrf_k.max(1.0);
-    let mut by_path = BTreeMap::<String, FusedEntry>::new();
+    let mut by_unit = BTreeMap::<String, FusedEntry>::new();
     let mut caveats = Vec::new();
     let mut attempted = BTreeSet::new();
     let mut succeeded = BTreeSet::new();
@@ -396,9 +409,9 @@ pub fn fuse_candidate_streams(
             ));
             continue;
         }
-        let deduped = dedupe_stream_candidates(&stream.candidates);
+        let deduped = dedupe_stream_candidates(stream.source, &stream.candidates);
         for (index, candidate) in deduped.iter().enumerate() {
-            let key = normalize_candidate_path(&candidate.result.path.to_string_lossy());
+            let key = candidate_fusion_key(stream.source, &candidate.result);
             let rank = index + 1;
             let rrf_contribution = weight / (rrf_k + rank as f32);
             let contribution = RetrievalContribution {
@@ -415,7 +428,7 @@ pub fn fuse_candidate_streams(
                 evidence_refs: dedup_strings(candidate.evidence_refs.clone()),
                 rationale: candidate.rationale.clone(),
             };
-            let entry = by_path.entry(key).or_insert_with(|| FusedEntry {
+            let entry = by_unit.entry(key).or_insert_with(|| FusedEntry {
                 representative: candidate.result.clone(),
                 fused_score: 0.0,
                 authority: candidate.authority,
@@ -444,7 +457,7 @@ pub fn fuse_candidate_streams(
         }
     }
 
-    let mut entries = by_path.into_values().collect::<Vec<_>>();
+    let mut entries = by_unit.into_values().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         right
             .authority
@@ -459,6 +472,19 @@ pub fn fuse_candidate_streams(
                 normalize_candidate_path(&left.representative.path.to_string_lossy()).cmp(
                     &normalize_candidate_path(&right.representative.path.to_string_lossy()),
                 )
+            })
+            .then_with(|| {
+                left.representative
+                    .line_range
+                    .as_ref()
+                    .map(|range| (range.start, range.end))
+                    .cmp(
+                        &right
+                            .representative
+                            .line_range
+                            .as_ref()
+                            .map(|range| (range.start, range.end)),
+                    )
             })
     });
     entries.truncate(limit);
@@ -575,6 +601,7 @@ pub fn retrieve_and_fuse_candidate_streams(
 pub(crate) fn retrieval_source_label(source: RetrievalSourceKind) -> &'static str {
     match source {
         RetrievalSourceKind::Lexical => "lexical",
+        RetrievalSourceKind::Document => "document",
         RetrievalSourceKind::ExactSemantic => "exact_semantic",
         RetrievalSourceKind::Graph => "graph",
         RetrievalSourceKind::SemanticVector => "semantic_vector",
@@ -595,12 +622,15 @@ struct FusedEntry {
     best_authority: RetrievalAuthority,
 }
 
-fn dedupe_stream_candidates(candidates: &[StreamCandidate]) -> Vec<StreamCandidate> {
+fn dedupe_stream_candidates(
+    source: RetrievalSourceKind,
+    candidates: &[StreamCandidate],
+) -> Vec<StreamCandidate> {
     let mut deduped: Vec<StreamCandidate> = Vec::new();
     let mut positions = BTreeMap::<String, usize>::new();
 
     for candidate in candidates {
-        let key = normalize_candidate_path(&candidate.result.path.to_string_lossy());
+        let key = candidate_fusion_key(source, &candidate.result);
         if let Some(index) = positions.get(&key).copied() {
             let existing = &mut deduped[index];
             merge_evidence_refs(&mut existing.evidence_refs, &candidate.evidence_refs);
@@ -672,6 +702,35 @@ fn dedup_strings(mut values: Vec<String>) -> Vec<String> {
 
 fn normalize_candidate_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn candidate_fusion_key(source: RetrievalSourceKind, result: &SearchResult) -> String {
+    let path = normalize_candidate_path(&result.path.to_string_lossy());
+    let section_identity =
+        source == RetrievalSourceKind::Document || is_document_candidate_path(&path);
+    if !section_identity {
+        return path;
+    }
+    match result.line_range.as_ref() {
+        Some(range) => format!("{path}|{}:{}", range.start, range.end),
+        None => format!("{path}|-"),
+    }
+}
+
+pub(crate) fn is_document_candidate_path(path: &str) -> bool {
+    let normalized = normalize_candidate_path(path).to_ascii_lowercase();
+    if normalized.ends_with(".md") || normalized.ends_with(".mdx") {
+        return true;
+    }
+    if !normalized.ends_with(".txt") {
+        return false;
+    }
+    normalized.starts_with("docs/")
+        || normalized.contains("/docs/")
+        || normalized
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("readme"))
 }
 
 #[cfg(test)]
@@ -1275,5 +1334,50 @@ mod tests {
             .diagnostics
             .sources_succeeded
             .contains(&RetrievalSourceKind::SemanticVector));
+    }
+
+    #[test]
+    fn document_sections_from_the_same_file_remain_distinct_fusion_units() {
+        let mut first = result("docs/guide.md", 3.0, None);
+        first.line_range = Some(LineRange { start: 1, end: 8 });
+        first.evidence_refs = vec!["document:docs/guide.md:1-8".into()];
+        let mut second = result("docs/guide.md", 2.0, None);
+        second.line_range = Some(LineRange { start: 9, end: 20 });
+        second.evidence_refs = vec!["document:docs/guide.md:9-20".into()];
+        let stream = CandidateStream::success(
+            RetrievalSourceKind::Document,
+            vec![
+                StreamCandidate::from_result(
+                    first,
+                    RetrievalAuthority::Heuristic,
+                    "first document section",
+                ),
+                StreamCandidate::from_result(
+                    second,
+                    RetrievalAuthority::Heuristic,
+                    "second document section",
+                ),
+            ],
+        );
+
+        let fused = fuse_candidate_streams(&[stream], 10, &FusionConfig::default());
+        assert_eq!(fused.results.len(), 2);
+        assert_eq!(
+            fused.results[0].line_range,
+            Some(LineRange { start: 1, end: 8 })
+        );
+        assert_eq!(
+            fused.results[1].line_range,
+            Some(LineRange { start: 9, end: 20 })
+        );
+    }
+
+    #[test]
+    fn document_classifier_does_not_capture_code_only_because_it_is_under_docs() {
+        assert!(is_document_candidate_path("docs/guide.md"));
+        assert!(is_document_candidate_path("docs/notes.txt"));
+        assert!(is_document_candidate_path("README.mdx"));
+        assert!(!is_document_candidate_path("docs/examples/client.rs"));
+        assert!(!is_document_candidate_path("docs/examples/client.py"));
     }
 }
