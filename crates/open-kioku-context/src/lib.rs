@@ -2,8 +2,9 @@ use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
     ConfidenceSignalInput, ContextPack, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence, RiskReport,
-    RuntimeSignal, ScoreComponent, SearchResult, Symbol, ValidationPlan,
+    GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
+    RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceKind, RiskReport, RuntimeSignal,
+    ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -11,6 +12,8 @@ use open_kioku_ranking::{rerank_with_options, RankingOptions};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::{HistoryStore, OkStore};
 use open_kioku_tests::TestSelector;
+
+pub mod candidates;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ContextPackFormat {
@@ -34,6 +37,7 @@ impl ContextPackFormat {
                     pack.confidence_breakdown.overall_enum, pack.confidence_breakdown.overall_score
                 ));
                 write_markdown_confidence_breakdown(&mut out, &pack.confidence_breakdown);
+                write_markdown_retrieval_diagnostics(&mut out, &pack.retrieval_diagnostics);
                 out.push('\n');
                 out.push_str("## Primary Context\n\n");
                 for result in &pack.primary_files {
@@ -87,6 +91,7 @@ impl ContextPackFormat {
             Self::PromptText => {
                 let mut out = String::new();
                 out.push_str(&format!("TASK: {}\n", pack.task));
+                write_prompt_retrieval_diagnostics(&mut out, &pack.retrieval_diagnostics);
                 for result in &pack.primary_files {
                     out.push_str(&format!("[FILE: {}]\n", result.path.display()));
                     if let Some(range) = &result.line_range {
@@ -104,6 +109,63 @@ impl ContextPackFormat {
                 Ok(out)
             }
         }
+    }
+}
+
+fn retrieval_source_label(source: RetrievalSourceKind) -> &'static str {
+    candidates::retrieval_source_label(source)
+}
+
+fn retrieval_source_list(sources: &[RetrievalSourceKind]) -> String {
+    sources
+        .iter()
+        .copied()
+        .map(retrieval_source_label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+    if diagnostics.sources_attempted.is_empty() && diagnostics.caveats.is_empty() {
+        return;
+    }
+    out.push_str("## Retrieval\n\n");
+    if !diagnostics.sources_attempted.is_empty() {
+        out.push_str(&format!(
+            "- Attempted: `{}`\n",
+            retrieval_source_list(&diagnostics.sources_attempted)
+        ));
+    }
+    if !diagnostics.sources_succeeded.is_empty() {
+        out.push_str(&format!(
+            "- Succeeded: `{}`\n",
+            retrieval_source_list(&diagnostics.sources_succeeded)
+        ));
+    }
+    if !diagnostics.caveats.is_empty() {
+        out.push_str("- Caveats:\n");
+        for caveat in &diagnostics.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
+    out.push('\n');
+}
+
+fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+    if !diagnostics.sources_attempted.is_empty() {
+        out.push_str(&format!(
+            "RETRIEVAL_SOURCES_ATTEMPTED: {}\n",
+            retrieval_source_list(&diagnostics.sources_attempted)
+        ));
+    }
+    if !diagnostics.sources_succeeded.is_empty() {
+        out.push_str(&format!(
+            "RETRIEVAL_SOURCES_SUCCEEDED: {}\n",
+            retrieval_source_list(&diagnostics.sources_succeeded)
+        ));
+    }
+    for caveat in &diagnostics.caveats {
+        out.push_str(&format!("RETRIEVAL_CAVEAT: {caveat}\n"));
     }
 }
 
@@ -159,16 +221,47 @@ impl<'a> ContextPackBuilder<'a> {
     }
 
     pub fn build(&self, task: &str, limit: usize) -> Result<ContextPack> {
+        self.build_with_sources(task, limit, &[])
+    }
+
+    pub fn build_with_sources(
+        &self,
+        task: &str,
+        limit: usize,
+        external_sources: &[&dyn candidates::ContextCandidateSource],
+    ) -> Result<ContextPack> {
         let files = self.store.list_files(usize::MAX, 0)?;
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let intent = TaskSearchIntent::parse(task);
-        let primary = rerank_for_task(
-            search_candidates(&chunks, &files, &symbols, task, limit, &intent)?,
+        let candidate_limit = limit.saturating_mul(4).clamp(20, 200);
+        let request =
+            candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit);
+        let external_streams = candidates::retrieve_candidate_streams(external_sources, &request);
+        let overridden_sources = external_streams
+            .iter()
+            .filter(|stream| stream.available)
+            .map(|stream| stream.source)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut streams = candidates::builtins::BuiltinCandidateContext {
+            store: self.store,
+            history_store: self.history_store,
+            files: &files,
+            chunks: &chunks,
+            symbols: &symbols,
+        }
+        .collect_excluding(&request, &overridden_sources);
+        streams.extend(external_streams);
+        let fusion_config = candidates::FusionConfig::from_ranking_options(&self.ranking_options);
+        let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
+        let diagnostics = fused.diagnostics;
+        let primary = rerank_fused_for_task_with_options(
+            fused.results,
             &intent,
+            &diagnostics,
             &self.ranking_options,
         );
-        self.build_from_primary_with_impact(task, limit, primary, true)
+        self.build_from_primary_with_impact(task, limit, primary, true, false, diagnostics)
     }
 
     pub fn build_from_primary(
@@ -182,6 +275,8 @@ impl<'a> ContextPackBuilder<'a> {
             limit,
             rerank_with_options(primary, &self.ranking_options),
             false,
+            true,
+            open_kioku_core::RetrievalDiagnostics::default(),
         )
     }
 
@@ -191,9 +286,13 @@ impl<'a> ContextPackBuilder<'a> {
         limit: usize,
         primary: Vec<SearchResult>,
         expand_impact: bool,
+        augment_runtime_candidates: bool,
+        retrieval_diagnostics: open_kioku_core::RetrievalDiagnostics,
     ) -> Result<ContextPack> {
         let mut primary = primary;
-        augment_primary_with_runtime(self.store, task, &mut primary, limit)?;
+        if augment_runtime_candidates {
+            augment_primary_with_runtime(self.store, task, &mut primary, limit)?;
+        }
         let primary_symbols = primary
             .iter()
             .filter_map(|result| result.symbol.clone())
@@ -330,6 +429,7 @@ impl<'a> ContextPackBuilder<'a> {
         Ok(ContextPack {
             task: task.into(),
             intent: classify_intent(task).into(),
+            retrieval_diagnostics,
             primary_files,
             primary_symbols,
             supporting_files,
@@ -1170,12 +1270,35 @@ fn search_candidates(
     Ok(merged.into_values().collect())
 }
 
+#[cfg(test)]
 fn rerank_for_task(
     results: Vec<SearchResult>,
     intent: &TaskSearchIntent,
     ranking_options: &RankingOptions,
 ) -> Vec<SearchResult> {
-    let mut results = rerank_with_options(results, ranking_options);
+    let ranked = rerank_with_options(results, ranking_options);
+    rerank_fused_for_task(ranked, intent, &RetrievalDiagnostics::default())
+}
+
+#[cfg(test)]
+fn rerank_fused_for_task(
+    results: Vec<SearchResult>,
+    intent: &TaskSearchIntent,
+    diagnostics: &RetrievalDiagnostics,
+) -> Vec<SearchResult> {
+    rerank_fused_for_task_with_options(results, intent, diagnostics, &RankingOptions::default())
+}
+
+fn rerank_fused_for_task_with_options(
+    results: Vec<SearchResult>,
+    intent: &TaskSearchIntent,
+    diagnostics: &RetrievalDiagnostics,
+    ranking_options: &RankingOptions,
+) -> Vec<SearchResult> {
+    // Candidate streams have already been fused by rank. Only apply deterministic task-anchor
+    // adjustments here; running the legacy weighted fusion again would reinterpret RRF as text
+    // relevance and erase source provenance from score_breakdown.
+    let mut results = results;
     for result in &mut results {
         let haystack = searchable_result_text(result);
         for anchor in &intent.primary_anchors {
@@ -1229,13 +1352,111 @@ fn rerank_for_task(
         }
         result.reconcile_score_breakdown();
     }
+    let authority_by_path = diagnostics
+        .traces
+        .iter()
+        .map(|trace| (normalize_path(&trace.path), trace.authority))
+        .collect::<std::collections::BTreeMap<_, _>>();
     results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let a_haystack = searchable_result_text(a);
+        let b_haystack = searchable_result_text(b);
+        task_relevance_tier(&b_haystack, intent)
+            .cmp(&task_relevance_tier(&a_haystack, intent))
+            .then_with(|| {
+                authority_by_path
+                    .get(&normalize_path(&b.path))
+                    .copied()
+                    .unwrap_or(RetrievalAuthority::Heuristic)
+                    .cmp(
+                        &authority_by_path
+                            .get(&normalize_path(&a.path))
+                            .copied()
+                            .unwrap_or(RetrievalAuthority::Heuristic),
+                    )
+            })
+            .then_with(|| {
+                context_quality_tier(&b.path, ranking_options)
+                    .cmp(&context_quality_tier(&a.path, ranking_options))
+            })
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.path.cmp(&b.path))
     });
     results
+}
+
+fn context_quality_tier(path: &std::path::Path, options: &RankingOptions) -> u8 {
+    let normalized = normalize_path(path).to_ascii_lowercase();
+    let boundary_fit_enabled = ranking_signal_enabled(
+        options,
+        open_kioku_ranking::RankingSignal::BoundaryFit,
+        options.weights.boundary_fit,
+    );
+    let path_quality_enabled = ranking_signal_enabled(
+        options,
+        open_kioku_ranking::RankingSignal::PathQuality,
+        options.weights.path_quality,
+    );
+
+    if path_quality_enabled && is_generated_or_vendor_path(&normalized) {
+        return 0;
+    }
+    if boundary_fit_enabled && is_docs_or_test_path(&normalized) {
+        return 1;
+    }
+    2
+}
+
+fn ranking_signal_enabled(
+    options: &RankingOptions,
+    signal: open_kioku_ranking::RankingSignal,
+    weight: f32,
+) -> bool {
+    if weight.abs() <= f32::EPSILON
+        || matches!(options.mode, open_kioku_ranking::RankingMode::Baseline)
+    {
+        return false;
+    }
+    !matches!(
+        options.mode,
+        open_kioku_ranking::RankingMode::WithoutSignal(disabled) if disabled == signal
+    )
+}
+
+fn is_generated_or_vendor_path(path: &str) -> bool {
+    path.contains("vendor")
+        || path.contains("generated")
+        || path.contains("_pb.rs")
+        || path.contains(".pb.go")
+        || path.contains("schema.json")
+}
+
+fn task_relevance_tier(haystack: &str, intent: &TaskSearchIntent) -> u8 {
+    if intent
+        .primary_anchors
+        .iter()
+        .any(|anchor| contains_anchor(haystack, anchor))
+    {
+        3
+    } else if intent
+        .ticket_anchors
+        .iter()
+        .chain(intent.path_anchors.iter())
+        .any(|anchor| contains_anchor(haystack, anchor))
+    {
+        2
+    } else if intent
+        .reference_anchors
+        .iter()
+        .any(|anchor| contains_anchor(haystack, anchor))
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn result_key(result: &SearchResult) -> String {
@@ -1623,6 +1844,172 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("primary task anchor")));
+    }
+
+    #[test]
+    fn equal_task_relevance_prefers_exact_authority_over_higher_rrf_score() {
+        let exact = SearchResult {
+            path: "src/ExactTarget.rs".into(),
+            line_range: None,
+            snippet: "fn target() {}".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "authority-ordering fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let heuristic = SearchResult {
+            path: "src/HeuristicTarget.rs".into(),
+            line_range: None,
+            snippet: "fn target() {}".into(),
+            symbol: None,
+            score: 10.0,
+            match_reason: "authority-ordering fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                open_kioku_core::RetrievalTrace {
+                    path: exact.path.clone(),
+                    fused_score: exact.score,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                },
+                open_kioku_core::RetrievalTrace {
+                    path: heuristic.path.clone(),
+                    fused_score: heuristic.score,
+                    authority: RetrievalAuthority::Heuristic,
+                    contributions: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let intent = TaskSearchIntent::parse("change target");
+        let ranked = rerank_fused_for_task(vec![heuristic, exact], &intent, &diagnostics);
+        assert_eq!(ranked[0].path, Path::new("src/ExactTarget.rs"));
+    }
+
+    #[test]
+    fn primary_task_relevance_beats_reference_only_exact_evidence() {
+        let primary = SearchResult {
+            path: "src/PublishRestrictionsMutation.java".into(),
+            line_range: None,
+            snippet: "class PublishRestrictionsMutation {}".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "primary-task fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let reference = SearchResult {
+            path: "src/EnterpriseRateValidator.java".into(),
+            line_range: None,
+            snippet: "class EnterpriseRateValidator {}".into(),
+            symbol: None,
+            score: 10.0,
+            match_reason: "reference fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                open_kioku_core::RetrievalTrace {
+                    path: primary.path.clone(),
+                    fused_score: primary.score,
+                    authority: RetrievalAuthority::Heuristic,
+                    contributions: Vec::new(),
+                },
+                open_kioku_core::RetrievalTrace {
+                    path: reference.path.clone(),
+                    fused_score: reference.score,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let intent = TaskSearchIntent::parse(
+            "add validation in PublishRestrictionsMutation similar to EnterpriseRateValidator",
+        );
+        let ranked = rerank_fused_for_task(vec![reference, primary], &intent, &diagnostics);
+        assert_eq!(
+            ranked[0].path,
+            Path::new("src/PublishRestrictionsMutation.java")
+        );
+    }
+
+    #[test]
+    fn compact_retrieval_diagnostics_surface_sources_and_caveats() {
+        let diagnostics = RetrievalDiagnostics {
+            sources_attempted: vec![
+                RetrievalSourceKind::Lexical,
+                RetrievalSourceKind::SemanticVector,
+            ],
+            sources_succeeded: vec![RetrievalSourceKind::Lexical],
+            caveats: vec!["semantic index is stale".into()],
+            traces: Vec::new(),
+        };
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("## Retrieval"));
+        assert!(markdown.contains("lexical, semantic_vector"));
+        assert!(markdown.contains("semantic index is stale"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("RETRIEVAL_SOURCES_ATTEMPTED: lexical, semantic_vector"));
+        assert!(prompt.contains("RETRIEVAL_CAVEAT: semantic index is stale"));
+        assert!(!prompt.contains("fused_score"));
+    }
+
+    #[test]
+    fn post_fusion_quality_tier_preserves_boundary_and_path_quality_policy() {
+        let options = RankingOptions::default();
+        assert_eq!(
+            context_quality_tier(Path::new("src/service.rs"), &options),
+            2
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("tests/service_test.rs"), &options),
+            1
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("src/generated/service.rs"), &options),
+            0
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("vendor/service.rs"), &options),
+            0
+        );
+
+        let baseline = RankingOptions {
+            mode: open_kioku_ranking::RankingMode::Baseline,
+            ..RankingOptions::default()
+        };
+        assert_eq!(
+            context_quality_tier(Path::new("src/generated/service.rs"), &baseline),
+            2
+        );
+
+        let without_path_quality = RankingOptions {
+            mode: open_kioku_ranking::RankingMode::WithoutSignal(
+                open_kioku_ranking::RankingSignal::PathQuality,
+            ),
+            ..RankingOptions::default()
+        };
+        assert_eq!(
+            context_quality_tier(Path::new("src/generated/service.rs"), &without_path_quality,),
+            2
+        );
     }
 
     #[test]
