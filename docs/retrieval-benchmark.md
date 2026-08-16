@@ -18,6 +18,8 @@ The corpus includes 20 development cases and 10 holdout cases. Five cases are na
 
 Every case points to the same bundled fixture revision by a SHA-256 digest. The benchmark recomputes the digest before scoring; a source change to the fixture therefore invalidates the corpus until the revision is deliberately re-frozen.
 
+Corpus loading is intentionally strict: unknown JSON fields are rejected, every case must use a syntactically valid SHA-256 revision, duplicate gold paths are invalid, and every declared gold file must exist under its fixture. Benchmark-data mistakes therefore fail setup rather than silently degrading a score.
+
 The fixture contains live implementations, tests, and deliberately difficult same-domain distractors such as migration and reporting code. Distractors share vocabulary with the live path so exact keyword overlap alone is not sufficient for consistently strong ranking.
 
 ## Development and holdout discipline
