@@ -217,21 +217,23 @@ fn refresh_context_pack_retrieval_telemetry(
         })
         .count();
     diagnostics.selection.retrieval_confidence = Some(confidence.overall_enum);
-    diagnostics.selection.abstention_reason = if selected.is_empty() {
-        Some(
-            if diagnostics.selection.budget.max_tokens > 0
-                && diagnostics.selection.available_context_tokens == 0
-            {
-                "context_budget_exhausted".into()
-            } else if diagnostics.traces.is_empty() {
-                "no_task_relevant_candidates".into()
-            } else {
-                "no_candidate_fit_context_selection".into()
-            },
-        )
-    } else {
-        None
-    };
+    if diagnostics.selection.abstention_reason.is_none() {
+        diagnostics.selection.abstention_reason = if selected.is_empty() {
+            Some(
+                if diagnostics.selection.budget.max_tokens > 0
+                    && diagnostics.selection.available_context_tokens == 0
+                {
+                    "context_budget_exhausted".into()
+                } else if diagnostics.traces.is_empty() {
+                    "no_task_relevant_candidates".into()
+                } else {
+                    "no_candidate_fit_context_selection".into()
+                },
+            )
+        } else {
+            None
+        };
+    }
 }
 
 fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
@@ -507,32 +509,18 @@ impl<'a> ContextPackBuilder<'a> {
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
         let mut diagnostics = fused.diagnostics;
         diagnostics.routing = routing.diagnostics();
-        for required in &diagnostics.routing.required_evidence {
-            let contributed = diagnostics.traces.iter().any(|trace| {
-                trace
-                    .contributions
-                    .iter()
-                    .any(|contribution| contribution.source == *required)
-            });
-            if !contributed {
-                let requirement = if routing.policy.missing_required_evidence_is_blocker {
-                    "blocking requirement"
-                } else {
-                    "required evidence"
-                };
-                diagnostics.caveats.push(format!(
-                    "task-family {requirement}: {} did not contribute task-relevant evidence",
-                    retrieval_source_label(*required)
-                ));
-            }
-        }
-        let primary = rerank_fused_for_task_with_options(
-            fused.results,
-            &intent,
-            &diagnostics,
-            &self.ranking_options,
-        );
-        let primary = select_context_units(primary, &budget, &mut diagnostics);
+        let blocked = apply_required_evidence_policy(&routing.policy, &budget, &mut diagnostics);
+        let primary = if blocked {
+            Vec::new()
+        } else {
+            let primary = rerank_fused_for_task_with_options(
+                fused.results,
+                &intent,
+                &diagnostics,
+                &self.ranking_options,
+            );
+            select_context_units(primary, &budget, &mut diagnostics)
+        };
         self.build_from_primary_with_impact(task, limit, primary, true, false, diagnostics)
     }
 
@@ -680,7 +668,7 @@ impl<'a> ContextPackBuilder<'a> {
             .take(8)
             .map(|result| result.path.clone())
             .collect::<Vec<_>>();
-        let confidence_breakdown = confidence_for_context(
+        let mut confidence_breakdown = confidence_for_context(
             &primary_files,
             &supporting_files,
             &tests,
@@ -689,6 +677,16 @@ impl<'a> ContextPackBuilder<'a> {
             evidence.len(),
             runtime_signals.len(),
         );
+        if let Some(missing) = retrieval_diagnostics
+            .selection
+            .abstention_reason
+            .as_deref()
+            .and_then(|reason| reason.strip_prefix("missing_required_evidence:"))
+        {
+            confidence_breakdown.blockers.push(format!(
+                "context retrieval blocked because task-family required evidence was missing: {missing}"
+            ));
+        }
         let negative_evidence = negative_evidence_for_context(
             task,
             &primary_files,
@@ -746,6 +744,57 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn apply_required_evidence_policy(
+    policy: &routing::RetrievalPolicy,
+    budget: &ContextBudget,
+    diagnostics: &mut RetrievalDiagnostics,
+) -> bool {
+    let missing = diagnostics
+        .routing
+        .required_evidence
+        .iter()
+        .copied()
+        .filter(|required| {
+            !diagnostics.traces.iter().any(|trace| {
+                trace
+                    .contributions
+                    .iter()
+                    .any(|contribution| contribution.source == *required)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for required in &missing {
+        let requirement = if policy.missing_required_evidence_is_blocker {
+            "blocking requirement"
+        } else {
+            "required evidence"
+        };
+        diagnostics.caveats.push(format!(
+            "task-family {requirement}: {} did not contribute task-relevant evidence",
+            retrieval_source_label(*required)
+        ));
+    }
+
+    if !policy.missing_required_evidence_is_blocker || missing.is_empty() {
+        return false;
+    }
+
+    // Initialize selection accounting without selecting heuristic substitutes. This is a
+    // deterministic routing-contract blocker, not calibrated CC6 abstention.
+    let _ = select_context_units(Vec::new(), budget, diagnostics);
+    diagnostics.selection.abstention_reason = Some(format!(
+        "missing_required_evidence:{}",
+        missing
+            .iter()
+            .copied()
+            .map(retrieval_source_label)
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    true
 }
 
 fn select_context_units(
@@ -2930,6 +2979,77 @@ mod tests {
             retrieval_authority_for_result(&diagnostics, &result),
             RetrievalAuthority::Heuristic
         );
+    }
+
+    #[test]
+    fn trace_to_code_missing_runtime_evidence_blocks_without_heuristic_substitution() {
+        let routing = routing::classify_task("investigate runtime error stack trace in checkout");
+        assert_eq!(routing.family, open_kioku_core::TaskFamily::TraceToCode);
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.routing = routing.diagnostics();
+        let budget = ContextBudget::from_file_limit(10);
+
+        assert!(apply_required_evidence_policy(
+            &routing.policy,
+            &budget,
+            &mut diagnostics
+        ));
+        assert_eq!(
+            diagnostics.selection.abstention_reason.as_deref(),
+            Some("missing_required_evidence:runtime")
+        );
+        assert!(diagnostics
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("blocking requirement") && caveat.contains("runtime")));
+
+        let confidence = ConfidenceBreakdown::default();
+        refresh_context_pack_retrieval_telemetry(&mut diagnostics, &[], &confidence);
+        assert_eq!(
+            diagnostics.selection.abstention_reason.as_deref(),
+            Some("missing_required_evidence:runtime")
+        );
+    }
+
+    #[test]
+    fn edit_to_ripple_missing_exact_and_graph_evidence_blocks_deterministically() {
+        let routing =
+            routing::classify_task("show dependency ripple across callers and public API boundary");
+        assert_eq!(routing.family, open_kioku_core::TaskFamily::EditToRipple);
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.routing = routing.diagnostics();
+        let budget = ContextBudget::from_file_limit(10);
+
+        assert!(apply_required_evidence_policy(
+            &routing.policy,
+            &budget,
+            &mut diagnostics
+        ));
+        assert_eq!(
+            diagnostics.selection.abstention_reason.as_deref(),
+            Some("missing_required_evidence:exact_semantic,graph")
+        );
+    }
+
+    #[test]
+    fn non_blocking_issue_to_code_missing_lexical_evidence_remains_a_caveat() {
+        let routing = routing::classify_task("fix issue with frobnication behavior");
+        assert_eq!(routing.family, open_kioku_core::TaskFamily::IssueToCode);
+        assert!(!routing.policy.missing_required_evidence_is_blocker);
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.routing = routing.diagnostics();
+        let budget = ContextBudget::from_file_limit(10);
+
+        assert!(!apply_required_evidence_policy(
+            &routing.policy,
+            &budget,
+            &mut diagnostics
+        ));
+        assert!(diagnostics.selection.abstention_reason.is_none());
+        assert!(diagnostics
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("required evidence") && caveat.contains("lexical")));
     }
 
     #[test]
