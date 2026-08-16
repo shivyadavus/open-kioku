@@ -197,14 +197,15 @@ impl Indexer {
                 ProgressEvent::new("cross_project")
                     .warning("cross-project mode records repository status without parsing source"),
             );
-            emit_progress(
-                &on_progress,
-                &mut phase_reports,
-                started,
+            let document_event = if config.documents.enabled {
                 ProgressEvent::new("document_corpus").warning(
                     "document corpus unavailable in cross-project mode; source was not scanned",
-                ),
-            );
+                )
+            } else {
+                ProgressEvent::new("document_corpus")
+                    .warning("document corpus disabled by configuration")
+            };
+            emit_progress(&on_progress, &mut phase_reports, started, document_event);
             if let Some(report) = phase_reports.last_mut() {
                 report.duration_ms = Some(0);
                 report.document_files = Some(0);
@@ -280,15 +281,16 @@ impl Indexer {
         };
         let files = scan.files;
         let document_sections = scan.document_sections;
-        emit_progress(
-            &on_progress,
-            &mut phase_reports,
-            started,
+        let document_event = if config.documents.enabled {
             ProgressEvent::new("document_corpus")
                 .scanned(scan.document_file_count)
                 .indexed(scan.document_file_count)
-                .total(Some(scan.document_file_count)),
-        );
+                .total(Some(scan.document_file_count))
+        } else {
+            ProgressEvent::new("document_corpus")
+                .warning("document corpus disabled by configuration")
+        };
+        emit_progress(&on_progress, &mut phase_reports, started, document_event);
         if let Some(report) = phase_reports.last_mut() {
             report.duration_ms = Some(scan.document_elapsed_ms);
             report.document_files = Some(scan.document_file_count);
@@ -838,6 +840,7 @@ impl Indexer {
         let max_size = config.max_file_size_bytes()?;
         let excludes = compile_globs(&config.index.exclude)?;
         let denied = compile_globs(&config.paths.deny)?;
+        let document_plain_text = compile_globs(&config.documents.plain_text)?;
         let git_ignores = build_ignore_matcher(root, ".gitignore")?;
         let ok_ignores = build_ignore_matcher(root, ".okignore")?;
         let mut builder = WalkBuilder::new(root);
@@ -990,44 +993,52 @@ impl Indexer {
                 );
                 continue;
             }
-            if let Some(document_type) = document_type_for_path(&rel) {
-                let document_started = Instant::now();
-                let bytes = fs::read(path)?;
-                if bytes.contains(&0) {
+            if config.documents.enabled {
+                if let Some(document_type) = document_type_for_path(&rel, &document_plain_text) {
+                    let document_started = Instant::now();
+                    let bytes = fs::read(path)?;
+                    if bytes.contains(&0) {
+                        document_elapsed_ms = document_elapsed_ms.saturating_add(
+                            u64::try_from(document_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        );
+                        push_skip(
+                            root,
+                            path,
+                            SkipReason::Binary,
+                            SkipSource::Detector,
+                            true,
+                            &mut skipped_paths,
+                        );
+                        continue;
+                    }
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    if likely_generated(&content) {
+                        document_elapsed_ms = document_elapsed_ms.saturating_add(
+                            u64::try_from(document_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        );
+                        push_skip(
+                            root,
+                            path,
+                            SkipReason::Generated,
+                            SkipSource::Detector,
+                            true,
+                            &mut skipped_paths,
+                        );
+                        continue;
+                    }
+                    document_paths.insert(rel.clone());
+                    document_sections.extend(build_document_sections(
+                        &rel,
+                        &content,
+                        document_type,
+                    ));
                     document_elapsed_ms = document_elapsed_ms.saturating_add(
                         u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     );
-                    push_skip(
-                        root,
-                        path,
-                        SkipReason::Binary,
-                        SkipSource::Detector,
-                        true,
-                        &mut skipped_paths,
-                    );
                     continue;
                 }
-                let content = String::from_utf8_lossy(&bytes).into_owned();
-                if likely_generated(&content) {
-                    document_elapsed_ms = document_elapsed_ms.saturating_add(
-                        u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    );
-                    push_skip(
-                        root,
-                        path,
-                        SkipReason::Generated,
-                        SkipSource::Detector,
-                        true,
-                        &mut skipped_paths,
-                    );
-                    continue;
-                }
-                document_paths.insert(rel.clone());
-                document_sections.extend(build_document_sections(&rel, &content, document_type));
-                document_elapsed_ms = document_elapsed_ms.saturating_add(
-                    u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                );
-                continue;
             }
             if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
                 push_skip(
@@ -1988,7 +1999,7 @@ fn mode_quality_notes(mode: IndexMode) -> Vec<String> {
 
 const MAX_DOCUMENT_SECTION_LINES: usize = 120;
 
-fn document_type_for_path(path: &Path) -> Option<DocumentType> {
+fn document_type_for_path(path: &Path, plain_text_paths: &GlobSet) -> Option<DocumentType> {
     let normalized = path
         .to_string_lossy()
         .replace('\\', "/")
@@ -1998,11 +2009,14 @@ fn document_type_for_path(path: &Path) -> Option<DocumentType> {
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase);
-    let readme = name == "readme" || name.starts_with("readme.");
+    let readme = matches!(
+        name.as_str(),
+        "readme" | "readme.md" | "readme.mdx" | "readme.txt" | "readme.rst" | "readme.adoc"
+    );
     let markdown = matches!(extension.as_deref(), Some("md"));
     let mdx = matches!(extension.as_deref(), Some("mdx"));
-    let plain_text = matches!(extension.as_deref(), Some("txt"))
-        && (readme || normalized.starts_with("docs/") || normalized.contains("/docs/"));
+    let plain_text =
+        matches!(extension.as_deref(), Some("txt")) && (readme || plain_text_paths.is_match(path));
     if !(readme || markdown || mdx || plain_text) {
         return None;
     }
@@ -2076,10 +2090,17 @@ fn build_markdown_document_sections(
     let mut current_heading_path = Vec::<String>::new();
     let mut current_start = 1u32;
     let mut current_lines = Vec::<String>::new();
+    let mut fence: Option<(char, usize)> = None;
 
     for (index, line) in content.lines().enumerate() {
         let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        if let Some((level, title)) = document_markdown_heading(line) {
+        let fence_boundary = document_fence_boundary(line);
+        let heading = if fence.is_none() && fence_boundary.is_none() {
+            document_markdown_heading(line)
+        } else {
+            None
+        };
+        if let Some((level, title)) = heading {
             if !current_lines.is_empty() {
                 push_bounded_document_sections(
                     &mut sections,
@@ -2099,6 +2120,15 @@ fn build_markdown_document_sections(
             current_start = line_number;
         }
         current_lines.push(line.to_string());
+        if let Some((marker, width)) = fence_boundary {
+            match fence {
+                Some((open_marker, open_width)) if marker == open_marker && width >= open_width => {
+                    fence = None;
+                }
+                None => fence = Some((marker, width)),
+                _ => {}
+            }
+        }
     }
 
     if !current_lines.is_empty() {
@@ -2141,6 +2171,16 @@ fn push_bounded_document_sections(
             document_type,
         });
     }
+}
+
+fn document_fence_boundary(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let width = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (width >= 3).then_some((marker, width))
 }
 
 fn document_markdown_heading(line: &str) -> Option<(usize, &str)> {
@@ -3022,21 +3062,24 @@ mod document_corpus_tests {
     use std::fs;
 
     #[test]
-    fn document_classifier_does_not_capture_code_examples_under_docs() {
+    fn document_classifier_requires_plain_text_opt_in_and_rejects_readme_code() {
+        let none = compile_globs(&[]).unwrap();
+        let configured = compile_globs(&["docs/*.txt".into(), "docs/**/*.txt".into()]).unwrap();
         assert_eq!(
-            document_type_for_path(Path::new("docs/guide.md")),
+            document_type_for_path(Path::new("docs/guide.md"), &none),
             Some(DocumentType::Markdown)
         );
+        assert!(document_type_for_path(Path::new("docs/notes.txt"), &none).is_none());
         assert_eq!(
-            document_type_for_path(Path::new("docs/notes.txt")),
+            document_type_for_path(Path::new("docs/notes.txt"), &configured),
             Some(DocumentType::PlainText)
         );
         assert_eq!(
-            document_type_for_path(Path::new("README")),
+            document_type_for_path(Path::new("README"), &none),
             Some(DocumentType::Readme)
         );
-        assert!(document_type_for_path(Path::new("notes.txt")).is_none());
-        assert!(document_type_for_path(Path::new("docs/examples/client.rs")).is_none());
+        assert!(document_type_for_path(Path::new("README.rs"), &none).is_none());
+        assert!(document_type_for_path(Path::new("docs/examples/client.rs"), &none).is_none());
     }
 
     #[test]
@@ -3095,5 +3138,89 @@ mod document_corpus_tests {
         assert_eq!(report.document_files, Some(1));
         assert!(report.document_sections.is_some_and(|count| count >= 1));
         assert!(report.duration_ms.is_some());
+    }
+}
+
+#[cfg(test)]
+mod document_corpus_acceptance_hardening_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn plain_text_is_opt_in_and_readme_code_is_not_a_document() {
+        let none = compile_globs(&[]).unwrap();
+        let configured = compile_globs(&["docs/*.txt".into(), "docs/**/*.txt".into()]).unwrap();
+        assert_eq!(
+            document_type_for_path(Path::new("docs/guide.md"), &none),
+            Some(DocumentType::Markdown)
+        );
+        assert!(document_type_for_path(Path::new("docs/notes.txt"), &none).is_none());
+        assert_eq!(
+            document_type_for_path(Path::new("docs/notes.txt"), &configured),
+            Some(DocumentType::PlainText)
+        );
+        assert_eq!(
+            document_type_for_path(Path::new("README.txt"), &none),
+            Some(DocumentType::Readme)
+        );
+        assert!(document_type_for_path(Path::new("README.rs"), &none).is_none());
+        assert!(document_type_for_path(Path::new("docs/examples/client.rs"), &none).is_none());
+    }
+
+    #[test]
+    fn fenced_markdown_heading_is_not_document_structure() {
+        let content =
+            "# Root\nintro\n```text\n## Fake heading\nbody\n```\n## Real heading\nreal body\n";
+        let sections =
+            build_document_sections(Path::new("docs/guide.md"), content, DocumentType::Markdown);
+        assert!(!sections.iter().any(|section| {
+            section
+                .heading_path
+                .iter()
+                .any(|heading| heading == "Fake heading")
+        }));
+        assert!(sections.iter().any(|section| {
+            section.heading_path == ["Root", "Real heading"]
+                && section.line_range == LineRange { start: 7, end: 8 }
+        }));
+    }
+
+    #[test]
+    fn corpus_inherits_okignore_and_can_be_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/visible.md"), "# Visible\nkept\n").unwrap();
+        fs::write(root.join("docs/ignored.md"), "# Ignored\nsecret\n").unwrap();
+        fs::write(root.join(".okignore"), "docs/ignored.md\n").unwrap();
+
+        let mut config = OkConfig::default();
+        config.history.enabled = false;
+        let enabled = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert!(enabled
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/visible.md")));
+        assert!(!enabled
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/ignored.md")));
+
+        config.documents.enabled = false;
+        let disabled = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert!(disabled.document_sections.is_empty());
+        let report = disabled
+            .phase_reports
+            .iter()
+            .find(|report| report.phase == "document_corpus")
+            .unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("disabled by configuration")));
     }
 }

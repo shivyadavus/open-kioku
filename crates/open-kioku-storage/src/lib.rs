@@ -19,8 +19,13 @@ pub trait MetadataStore: Send + Sync {
         data: IndexData<'_>,
         document_sections: &[DocumentSection],
     ) -> Result<()> {
-        self.replace_index(data)?;
-        self.replace_document_corpus(document_sections)
+        if !document_sections.is_empty() {
+            return Err(OkError::Unsupported(
+                "atomic document corpus replacement is not implemented by this metadata store"
+                    .into(),
+            ));
+        }
+        self.replace_index(data)
     }
     fn replace_files_index(&self, _update: PartialIndexUpdate<'_>) -> Result<()> {
         Err(OkError::Unsupported(

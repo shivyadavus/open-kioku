@@ -103,11 +103,23 @@ impl<'a> BuiltinCandidateContext<'a> {
         match self.store.document_sections() {
             Ok(sections) if !sections.is_empty() => indexed_document_stream(request, &sections),
             Ok(_) => {
-                if self
-                    .store
-                    .manifest()
-                    .ok()
-                    .flatten()
+                let manifest = self.store.manifest().ok().flatten();
+                if manifest.as_ref().is_some_and(|manifest| {
+                    manifest.phase_reports.iter().any(|report| {
+                        report.phase == "document_corpus"
+                            && report
+                                .warnings
+                                .iter()
+                                .any(|warning| warning.contains("disabled by configuration"))
+                    })
+                }) {
+                    return CandidateStream::unavailable(
+                        RetrievalSourceKind::Document,
+                        "document corpus disabled by configuration",
+                    );
+                }
+                if manifest
+                    .as_ref()
                     .is_some_and(|manifest| manifest.index_mode == IndexMode::CrossProject)
                 {
                     return CandidateStream::unavailable(
