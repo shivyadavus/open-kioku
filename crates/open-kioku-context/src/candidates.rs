@@ -547,6 +547,7 @@ pub fn fuse_candidate_streams(
             caveats,
             sources_attempted: attempted.into_iter().collect(),
             sources_succeeded: succeeded.into_iter().collect(),
+            selection: Default::default(),
         },
     }
 }

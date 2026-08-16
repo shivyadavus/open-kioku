@@ -1,10 +1,11 @@
 use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
-    ConfidenceSignalInput, ContextPack, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
-    RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceKind, RiskReport, RuntimeSignal,
-    ScoreComponent, SearchResult, Symbol, ValidationPlan,
+    ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit, Evidence, EvidenceId,
+    EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType, GraphNodeType,
+    HistorySignalQuery, NegativeEvidence, RetrievalAuthority, RetrievalDiagnostics,
+    RetrievalSourceKind, RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol,
+    ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -142,6 +143,20 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
     }
+    if diagnostics.selection.budget.max_tokens > 0 {
+        out.push_str(&format!(
+            "- Context budget: `{}` tokens (`{}` available after reserves); selected estimate `{}`\n",
+            diagnostics.selection.budget.max_tokens,
+            diagnostics.selection.available_context_tokens,
+            diagnostics.selection.estimated_tokens_selected
+        ));
+        if !diagnostics.selection.omitted_high_value.is_empty() {
+            out.push_str("- High-value omissions:\n");
+            for omission in &diagnostics.selection.omitted_high_value {
+                out.push_str(&format!("  - {omission}\n"));
+            }
+        }
+    }
     if !diagnostics.caveats.is_empty() {
         out.push_str("- Caveats:\n");
         for caveat in &diagnostics.caveats {
@@ -163,6 +178,17 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
             "RETRIEVAL_SOURCES_SUCCEEDED: {}\n",
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
+    }
+    if diagnostics.selection.budget.max_tokens > 0 {
+        out.push_str(&format!(
+            "CONTEXT_BUDGET: max={} available={} selected_estimate={}\n",
+            diagnostics.selection.budget.max_tokens,
+            diagnostics.selection.available_context_tokens,
+            diagnostics.selection.estimated_tokens_selected
+        ));
+        for omission in &diagnostics.selection.omitted_high_value {
+            out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
+        }
     }
     for caveat in &diagnostics.caveats {
         out.push_str(&format!("RETRIEVAL_CAVEAT: {caveat}\n"));
@@ -221,7 +247,11 @@ impl<'a> ContextPackBuilder<'a> {
     }
 
     pub fn build(&self, task: &str, limit: usize) -> Result<ContextPack> {
-        self.build_with_sources(task, limit, &[])
+        self.build_with_budget_and_sources(task, ContextBudget::from_file_limit(limit), &[])
+    }
+
+    pub fn build_with_budget(&self, task: &str, budget: ContextBudget) -> Result<ContextPack> {
+        self.build_with_budget_and_sources(task, budget, &[])
     }
 
     pub fn build_with_sources(
@@ -230,6 +260,20 @@ impl<'a> ContextPackBuilder<'a> {
         limit: usize,
         external_sources: &[&dyn candidates::ContextCandidateSource],
     ) -> Result<ContextPack> {
+        self.build_with_budget_and_sources(
+            task,
+            ContextBudget::from_file_limit(limit),
+            external_sources,
+        )
+    }
+
+    pub fn build_with_budget_and_sources(
+        &self,
+        task: &str,
+        budget: ContextBudget,
+        external_sources: &[&dyn candidates::ContextCandidateSource],
+    ) -> Result<ContextPack> {
+        let limit = budget.max_primary_files;
         let files = self.store.list_files(usize::MAX, 0)?;
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
@@ -254,13 +298,14 @@ impl<'a> ContextPackBuilder<'a> {
         streams.extend(external_streams);
         let fusion_config = candidates::FusionConfig::from_ranking_options(&self.ranking_options);
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
-        let diagnostics = fused.diagnostics;
+        let mut diagnostics = fused.diagnostics;
         let primary = rerank_fused_for_task_with_options(
             fused.results,
             &intent,
             &diagnostics,
             &self.ranking_options,
         );
+        let primary = select_context_units(primary, &budget, &mut diagnostics);
         self.build_from_primary_with_impact(task, limit, primary, true, false, diagnostics)
     }
 
@@ -465,6 +510,317 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn select_context_units(
+    ranked: Vec<SearchResult>,
+    budget: &ContextBudget,
+    diagnostics: &mut RetrievalDiagnostics,
+) -> Vec<SearchResult> {
+    let available = budget.available_context_tokens();
+    diagnostics.selection = Default::default();
+    diagnostics.selection.budget = *budget;
+    diagnostics.selection.available_context_tokens = available;
+
+    if budget.max_primary_files == 0 || available == 0 {
+        diagnostics.selection.omitted_due_to_budget.extend(
+            ranked
+                .iter()
+                .map(|result| format!("{}: no context budget available", result.path.display())),
+        );
+        return Vec::new();
+    }
+
+    // File-count callers historically select the reranked prefix. Preserve that behavior exactly;
+    // the compatibility budget only routes the old API through the new accounting model.
+    if is_file_limit_compatibility_budget(budget) {
+        let selected = ranked
+            .into_iter()
+            .take(budget.max_primary_files)
+            .collect::<Vec<_>>();
+        record_selected_units(&selected, diagnostics);
+        return selected;
+    }
+
+    let mut selected_indices = std::collections::BTreeSet::new();
+    let mut terminally_rejected = std::collections::BTreeSet::new();
+    let mut selected_token_sets = Vec::<std::collections::BTreeSet<String>>::new();
+    let mut selected_sources = std::collections::BTreeSet::<RetrievalSourceKind>::new();
+    let mut selected_tokens = 0usize;
+    let mut per_file_units = std::collections::BTreeMap::<std::path::PathBuf, usize>::new();
+
+    while selected_indices.len() < budget.max_primary_files {
+        let remaining_tokens = available.saturating_sub(selected_tokens);
+        let mut best: Option<(usize, u8, f32, usize, std::collections::BTreeSet<String>)> = None;
+
+        for (index, result) in ranked.iter().enumerate() {
+            if selected_indices.contains(&index) || terminally_rejected.contains(&index) {
+                continue;
+            }
+            let authority = retrieval_authority_for_result(diagnostics, result);
+            let sources = retrieval_sources_for_result(diagnostics, result);
+            let high_value = is_high_value_context(authority, &sources);
+            let tokens = estimate_search_result_tokens(result);
+            let units_for_file = per_file_units
+                .get(&result.path)
+                .copied()
+                .unwrap_or_default();
+
+            if units_for_file >= budget.max_per_file {
+                let message = format!(
+                    "{}: per-file context unit cap {} reached",
+                    result.path.display(),
+                    budget.max_per_file
+                );
+                diagnostics
+                    .selection
+                    .omitted_due_to_caps
+                    .push(message.clone());
+                if high_value {
+                    record_high_value_omission(
+                        diagnostics,
+                        result,
+                        &format!("high-value evidence omitted by per-file cap: {message}"),
+                    );
+                }
+                terminally_rejected.insert(index);
+                continue;
+            }
+
+            if tokens > remaining_tokens {
+                let message = format!(
+                    "{}: estimated {} tokens exceeds remaining context budget {}",
+                    result.path.display(),
+                    tokens,
+                    remaining_tokens
+                );
+                diagnostics
+                    .selection
+                    .omitted_due_to_budget
+                    .push(message.clone());
+                if high_value {
+                    record_high_value_omission(
+                        diagnostics,
+                        result,
+                        &format!("high-value evidence omitted by hard context budget: {message}"),
+                    );
+                }
+                terminally_rejected.insert(index);
+                continue;
+            }
+
+            let token_set = context_unit_tokens(result);
+            let redundancy = selected_token_sets
+                .iter()
+                .map(|selected| token_set_overlap(&token_set, selected))
+                .fold(0.0_f32, f32::max);
+            if redundancy >= 0.90 && !high_value {
+                diagnostics.selection.redundancy_omissions.push(format!(
+                    "{}: near-duplicate context unit omitted ({redundancy:.2} overlap)",
+                    result.path.display()
+                ));
+                terminally_rejected.insert(index);
+                continue;
+            }
+
+            let utility = context_value_per_token(
+                index,
+                tokens,
+                authority,
+                &sources,
+                &selected_sources,
+                redundancy,
+            );
+            let safety_priority = if authority == RetrievalAuthority::Exact {
+                2
+            } else if sources.contains(&RetrievalSourceKind::Validation)
+                || sources.contains(&RetrievalSourceKind::Graph)
+            {
+                1
+            } else {
+                0
+            };
+            match &best {
+                Some((best_index, best_priority, best_utility, _, _))
+                    if *best_priority > safety_priority
+                        || (*best_priority == safety_priority
+                            && (*best_utility > utility
+                                || (*best_utility == utility && *best_index < index))) => {}
+                _ => best = Some((index, safety_priority, utility, tokens, token_set)),
+            }
+        }
+
+        let Some((index, _priority, _utility, tokens, token_set)) = best else {
+            break;
+        };
+        let result = &ranked[index];
+        selected_indices.insert(index);
+        selected_tokens = selected_tokens.saturating_add(tokens);
+        *per_file_units.entry(result.path.clone()).or_default() += 1;
+        selected_token_sets.push(token_set);
+        selected_sources.extend(retrieval_sources_for_result(diagnostics, result));
+    }
+
+    let selected = ranked
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, result)| selected_indices.contains(&index).then_some(result))
+        .collect::<Vec<_>>();
+    record_selected_units(&selected, diagnostics);
+    for caveat in &diagnostics.selection.caveats {
+        if !diagnostics.caveats.contains(caveat) {
+            diagnostics.caveats.push(caveat.clone());
+        }
+    }
+    selected
+}
+
+fn is_file_limit_compatibility_budget(budget: &ContextBudget) -> bool {
+    budget.max_tokens >= usize::MAX / 8 && budget.max_per_file >= usize::MAX / 8
+}
+
+fn retrieval_authority_for_result(
+    diagnostics: &RetrievalDiagnostics,
+    result: &SearchResult,
+) -> RetrievalAuthority {
+    diagnostics
+        .traces
+        .iter()
+        .find(|trace| normalize_path(&trace.path) == normalize_path(&result.path))
+        .map(|trace| trace.authority)
+        .unwrap_or(RetrievalAuthority::Heuristic)
+}
+
+fn retrieval_sources_for_result(
+    diagnostics: &RetrievalDiagnostics,
+    result: &SearchResult,
+) -> std::collections::BTreeSet<RetrievalSourceKind> {
+    diagnostics
+        .traces
+        .iter()
+        .find(|trace| normalize_path(&trace.path) == normalize_path(&result.path))
+        .map(|trace| {
+            trace
+                .contributions
+                .iter()
+                .map(|contribution| contribution.source)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_high_value_context(
+    authority: RetrievalAuthority,
+    sources: &std::collections::BTreeSet<RetrievalSourceKind>,
+) -> bool {
+    authority == RetrievalAuthority::Exact
+        || sources.contains(&RetrievalSourceKind::Validation)
+        || sources.contains(&RetrievalSourceKind::Graph)
+}
+
+fn record_high_value_omission(
+    diagnostics: &mut RetrievalDiagnostics,
+    result: &SearchResult,
+    message: &str,
+) {
+    diagnostics.selection.omitted_high_value.push(format!(
+        "{}{}: {message}",
+        result.path.display(),
+        result
+            .line_range
+            .as_ref()
+            .map(|range| format!(":{}-{}", range.start, range.end))
+            .unwrap_or_default()
+    ));
+    diagnostics.selection.caveats.push(message.to_string());
+}
+
+fn context_value_per_token(
+    rank_index: usize,
+    tokens: usize,
+    authority: RetrievalAuthority,
+    sources: &std::collections::BTreeSet<RetrievalSourceKind>,
+    selected_sources: &std::collections::BTreeSet<RetrievalSourceKind>,
+    redundancy: f32,
+) -> f32 {
+    let rank_value = 1.0 / (rank_index.saturating_add(1) as f32);
+    let authority_weight = match authority {
+        RetrievalAuthority::Exact => 3.0,
+        RetrievalAuthority::Corroborating => 1.35,
+        RetrievalAuthority::Heuristic => 1.0,
+    };
+    let source_diversity = if sources
+        .iter()
+        .any(|source| !selected_sources.contains(source))
+    {
+        1.10
+    } else {
+        1.0
+    };
+    let redundancy_discount = 1.0 - redundancy.min(0.85) * 0.50;
+    // sqrt(cost) avoids pathological preference for tiny fragments while still rewarding useful
+    // compact context. The upstream task-aware rank remains the dominant relevance prior.
+    rank_value * authority_weight * source_diversity * redundancy_discount
+        / (tokens.max(1) as f32).sqrt()
+}
+
+fn record_selected_units(selected: &[SearchResult], diagnostics: &mut RetrievalDiagnostics) {
+    diagnostics.selection.selected_units.clear();
+    diagnostics.selection.per_file_tokens.clear();
+    diagnostics.selection.estimated_tokens_selected = 0;
+    for result in selected {
+        let estimated_tokens = estimate_search_result_tokens(result);
+        let authority = retrieval_authority_for_result(diagnostics, result);
+        diagnostics.selection.estimated_tokens_selected = diagnostics
+            .selection
+            .estimated_tokens_selected
+            .saturating_add(estimated_tokens);
+        *diagnostics
+            .selection
+            .per_file_tokens
+            .entry(result.path.clone())
+            .or_default() += estimated_tokens;
+        diagnostics.selection.selected_units.push(ContextSelectedUnit {
+            path: result.path.clone(),
+            line_range: result.line_range.clone(),
+            estimated_tokens,
+            authority,
+            evidence_refs: result.derived_evidence_ids(),
+            rationale: format!(
+                "selected under context budget after task-aware retrieval ranking ({authority:?} authority)"
+            ),
+        });
+    }
+}
+
+fn estimate_search_result_tokens(result: &SearchResult) -> usize {
+    // Deliberately model-independent and deterministic. Four UTF-8 chars/token is a conservative
+    // local estimate for mixed source/code prose, with fixed metadata overhead.
+    let content = result.snippet.chars().count()
+        + result.path.to_string_lossy().chars().count()
+        + result.match_reason.chars().count();
+    content.saturating_add(3) / 4 + 12
+}
+
+fn context_unit_tokens(result: &SearchResult) -> std::collections::BTreeSet<String> {
+    result
+        .snippet
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn token_set_overlap(
+    left: &std::collections::BTreeSet<String>,
+    right: &std::collections::BTreeSet<String>,
+) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count() as f32;
+    let smaller = left.len().min(right.len()) as f32;
+    intersection / smaller
 }
 
 fn validation_seed_results<'a>(
@@ -2080,6 +2436,7 @@ mod tests {
             sources_succeeded: vec![RetrievalSourceKind::Lexical],
             caveats: vec!["semantic index is stale".into()],
             traces: Vec::new(),
+            selection: Default::default(),
         };
         let mut markdown = String::new();
         write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
@@ -2133,6 +2490,250 @@ mod tests {
             context_quality_tier(Path::new("src/generated/service.rs"), &without_path_quality,),
             2
         );
+    }
+
+    #[test]
+    fn token_budget_prevents_one_large_heuristic_unit_from_monopolizing_context() {
+        let huge = SearchResult {
+            path: "src/huge.rs".into(),
+            line_range: Some(LineRange { start: 1, end: 400 }),
+            snippet: "large implementation block ".repeat(500),
+            symbol: None,
+            score: 10.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let compact = SearchResult {
+            path: "src/compact.rs".into(),
+            line_range: Some(LineRange { start: 10, end: 20 }),
+            snippet: "fn compact_target() { validate(); }".into(),
+            symbol: None,
+            score: 5.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 800,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![huge, compact.clone()], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, compact.path);
+        assert!(!diagnostics.selection.omitted_due_to_budget.is_empty());
+        assert!(diagnostics.selection.estimated_tokens_selected <= 600);
+    }
+
+    #[test]
+    fn exact_evidence_is_considered_before_cheaper_heuristics_under_budget() {
+        let heuristic = SearchResult {
+            path: "src/cheap.rs".into(),
+            line_range: None,
+            snippet: "cheap candidate".into(),
+            symbol: None,
+            score: 100.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let exact = SearchResult {
+            path: "src/exact.rs".into(),
+            line_range: Some(LineRange { start: 20, end: 24 }),
+            snippet: "fn exact_target() {}".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "exact".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![open_kioku_core::RetrievalTrace {
+                path: exact.path.clone(),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 300,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 1,
+        };
+
+        let selected =
+            select_context_units(vec![heuristic, exact.clone()], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, exact.path);
+    }
+
+    #[test]
+    fn exact_evidence_cannot_be_displaced_by_many_cheaper_heuristics() {
+        let exact = SearchResult {
+            path: "src/exact_target.rs".into(),
+            line_range: Some(LineRange { start: 20, end: 24 }),
+            snippet: "fn exact_target() { validate_boundary(); }".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "exact symbol evidence".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact-target".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut ranked = (0..8)
+            .map(|index| SearchResult {
+                path: format!("src/cheap_{index}.rs").into(),
+                line_range: None,
+                snippet: "tiny semantic candidate".into(),
+                symbol: None,
+                score: 100.0 - index as f32,
+                match_reason: "heuristic semantic similarity".into(),
+                evidence: Vec::new(),
+                evidence_refs: Vec::new(),
+                confidence: 0.5,
+                score_breakdown: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        ranked.push(exact.clone());
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![open_kioku_core::RetrievalTrace {
+                path: exact.path.clone(),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 300,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 1,
+        };
+        let selected = select_context_units(ranked, &budget, &mut diagnostics);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, exact.path);
+    }
+
+    #[test]
+    fn token_selection_preserves_document_section_range_and_dedupes_redundant_units() {
+        let first = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(LineRange { start: 40, end: 55 }),
+            snippet: "configure agent workflow validation boundary evidence".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "document section".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["document:guide:section".into()],
+            confidence: 0.7,
+            score_breakdown: Vec::new(),
+        };
+        let duplicate = SearchResult {
+            path: "docs/copy.md".into(),
+            line_range: Some(LineRange { start: 1, end: 8 }),
+            snippet: first.snippet.clone(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "document section".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["document:copy:section".into()],
+            confidence: 0.6,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 1_000,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected =
+            select_context_units(vec![first.clone(), duplicate], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, first.path);
+        assert_eq!(selected[0].line_range, first.line_range);
+        assert_eq!(diagnostics.selection.redundancy_omissions.len(), 1);
+        assert_eq!(diagnostics.selection.selected_units.len(), 1);
+        assert_eq!(
+            diagnostics.selection.selected_units[0].line_range,
+            first.line_range
+        );
+        assert_eq!(
+            diagnostics.selection.selected_units[0].evidence_refs,
+            first.evidence_refs
+        );
+    }
+
+    #[test]
+    fn default_retrieval_diagnostics_do_not_claim_a_budget_was_applied() {
+        let diagnostics = RetrievalDiagnostics::default();
+        assert_eq!(diagnostics.selection.budget.max_tokens, 0);
+        assert_eq!(diagnostics.selection.available_context_tokens, 0);
+        assert!(diagnostics.selection.selected_units.is_empty());
+    }
+
+    #[test]
+    fn explicit_budget_enforces_context_unit_cap_per_file() {
+        let first = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(LineRange { start: 1, end: 10 }),
+            snippet: "first distinct section about setup".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "section one".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["doc:first".into()],
+            confidence: 0.7,
+            score_breakdown: Vec::new(),
+        };
+        let second = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(LineRange { start: 40, end: 50 }),
+            snippet: "second distinct section about deployment".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "section two".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["doc:second".into()],
+            confidence: 0.6,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 1_000,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 1,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![first, second], &budget, &mut diagnostics);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(diagnostics.selection.omitted_due_to_caps.len(), 1);
     }
 
     #[test]

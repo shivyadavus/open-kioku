@@ -2134,6 +2134,101 @@ pub struct RetrievalTrace {
     pub contributions: Vec<RetrievalContribution>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextBudget {
+    pub max_tokens: usize,
+    pub reserve_for_instructions: usize,
+    pub reserve_for_validation: usize,
+    pub max_per_file: usize,
+    pub max_primary_files: usize,
+}
+
+impl ContextBudget {
+    pub fn available_context_tokens(&self) -> usize {
+        self.max_tokens
+            .saturating_sub(self.reserve_for_instructions)
+            .saturating_sub(self.reserve_for_validation)
+    }
+
+    pub fn from_file_limit(limit: usize) -> Self {
+        Self {
+            max_tokens: usize::MAX / 4,
+            reserve_for_instructions: 0,
+            reserve_for_validation: 0,
+            max_per_file: usize::MAX / 4,
+            max_primary_files: limit,
+        }
+    }
+}
+
+impl Default for ContextBudget {
+    fn default() -> Self {
+        Self {
+            max_tokens: 8_000,
+            reserve_for_instructions: 1_000,
+            reserve_for_validation: 1_000,
+            max_per_file: 2,
+            max_primary_files: 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSelectedUnit {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<LineRange>,
+    pub estimated_tokens: usize,
+    pub authority: RetrievalAuthority,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSelectionDiagnostics {
+    pub budget: ContextBudget,
+    pub available_context_tokens: usize,
+    pub estimated_tokens_selected: usize,
+    #[serde(default)]
+    pub selected_units: Vec<ContextSelectedUnit>,
+    #[serde(default)]
+    pub per_file_tokens: BTreeMap<PathBuf, usize>,
+    #[serde(default)]
+    pub omitted_due_to_budget: Vec<String>,
+    #[serde(default)]
+    pub omitted_due_to_caps: Vec<String>,
+    #[serde(default)]
+    pub omitted_high_value: Vec<String>,
+    #[serde(default)]
+    pub redundancy_omissions: Vec<String>,
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
+impl Default for ContextSelectionDiagnostics {
+    fn default() -> Self {
+        Self {
+            budget: ContextBudget {
+                max_tokens: 0,
+                reserve_for_instructions: 0,
+                reserve_for_validation: 0,
+                max_per_file: 0,
+                max_primary_files: 0,
+            },
+            available_context_tokens: 0,
+            estimated_tokens_selected: 0,
+            selected_units: Vec::new(),
+            per_file_tokens: BTreeMap::new(),
+            omitted_due_to_budget: Vec::new(),
+            omitted_due_to_caps: Vec::new(),
+            omitted_high_value: Vec::new(),
+            redundancy_omissions: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RetrievalDiagnostics {
     #[serde(default)]
@@ -2144,6 +2239,8 @@ pub struct RetrievalDiagnostics {
     pub sources_attempted: Vec<RetrievalSourceKind>,
     #[serde(default)]
     pub sources_succeeded: Vec<RetrievalSourceKind>,
+    #[serde(default)]
+    pub selection: ContextSelectionDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
