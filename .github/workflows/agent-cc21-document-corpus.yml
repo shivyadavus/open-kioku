@@ -1,0 +1,85 @@
+name: CC2.1 document corpus validation
+
+on:
+  push:
+    branches:
+      - agent/cc2-document-corpus
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply asserted product patch
+        run: python3 .github/scripts/agent_cc21_document_corpus.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Targeted document corpus tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p open-kioku-storage document_change_tests
+          cargo test -p open-kioku-storage-sqlite document_corpus_tests
+          cargo test -p open-kioku-ingest document_corpus_tests
+          cargo test -p open-kioku-context indexed_document_stream_tests
+          cargo test -p open-kioku-cli document_corpus_mode_benchmark_preserves_context_provenance
+
+      - name: Validate workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo build --release -p open-kioku-cli
+          git diff --check
+
+      - name: Validate frozen retrieval contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-baseline /tmp/cc21-first.json \
+            > /tmp/cc21-first-out.json
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --no-index \
+            --min-cases 30 \
+            --write-baseline /tmp/cc21-second.json \
+            > /tmp/cc21-second-out.json
+          cmp /tmp/cc21-first.json /tmp/cc21-second.json
+          cmp benchmarks/retrieval-baseline.json /tmp/cc21-first.json
+
+      - name: Commit validated product tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            crates/open-kioku-core/src/lib.rs \
+            crates/open-kioku-storage/src/lib.rs \
+            crates/open-kioku-storage-sqlite/src/lib.rs \
+            crates/open-kioku-ingest/src/lib.rs \
+            crates/open-kioku-context/src/candidates/builtins.rs \
+            crates/open-kioku-cli/src/commands/index.rs \
+            crates/open-kioku-cli/src/lib.rs \
+            crates/open-kioku-watch/src/lib.rs
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m "feat(index): add mode-independent document corpus [skip ci]"
+          git push origin HEAD:agent/cc2-document-corpus
