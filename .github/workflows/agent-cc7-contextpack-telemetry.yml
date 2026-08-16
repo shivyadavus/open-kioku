@@ -1,0 +1,40 @@
+name: agent-cc7-contextpack-telemetry
+
+on:
+  push:
+    branches: [agent/cc7-contextpack-telemetry]
+    paths:
+      - '.github/scripts/agent_cc7_contextpack_telemetry.py'
+      - '.github/workflows/agent-cc7-contextpack-telemetry.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC7 telemetry patch
+        run: python3 .github/scripts/agent_cc7_contextpack_telemetry.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Validate full workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product change and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/agent_cc7_contextpack_telemetry.py .github/workflows/agent-cc7-contextpack-telemetry.yml
+          git add crates/open-kioku-core/src/lib.rs crates/open-kioku-context/src/lib.rs
+          git commit -m "feat(context): expose ContextPack retrieval telemetry"
+          git push origin HEAD:agent/cc7-contextpack-telemetry
