@@ -294,9 +294,7 @@ impl<'a> ContextPackBuilder<'a> {
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let intent = TaskSearchIntent::parse(task);
         let routing = routing::classify_task(task);
-        let candidate_limit = limit
-            .saturating_mul(routing.policy.candidate_multiplier)
-            .clamp(20, 200);
+        let candidate_limit = routing.policy.request_limit(limit).clamp(20, 200);
         let request =
             candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit);
         let routed_external_sources = external_sources
@@ -321,6 +319,11 @@ impl<'a> ContextPackBuilder<'a> {
         .collect_excluding(&request, &overridden_sources);
         streams.retain(|stream| routing.policy.allows(stream.source));
         streams.extend(external_streams);
+        for stream in &mut streams {
+            stream
+                .candidates
+                .truncate(routing.policy.candidate_cap(stream.source, limit));
+        }
         // Task routing changes which evidence families run and how much candidate headroom they
         // receive. It deliberately does not introduce uncalibrated fusion weights: the measured
         // product default remains unweighted RRF unless repository ranking configuration says otherwise.
@@ -336,8 +339,13 @@ impl<'a> ContextPackBuilder<'a> {
                     .any(|contribution| contribution.source == *required)
             });
             if !contributed {
+                let requirement = if routing.policy.missing_required_evidence_is_blocker {
+                    "blocking requirement"
+                } else {
+                    "required evidence"
+                };
                 diagnostics.caveats.push(format!(
-                    "task-family policy requires {} evidence, but it did not contribute task-relevant evidence",
+                    "task-family {requirement}: {} did not contribute task-relevant evidence",
                     retrieval_source_label(*required)
                 ));
             }

@@ -41,9 +41,7 @@ impl RetrievalPolicy {
         let factor = self
             .candidate_factors
             .iter()
-            .find_map(|(candidate_source, factor)| {
-                (*candidate_source == source).then_some(*factor)
-            })
+            .find_map(|(candidate_source, factor)| (*candidate_source == source).then_some(*factor))
             .unwrap_or(1);
         requested_limit.saturating_mul(factor).clamp(1, 200)
     }
@@ -362,7 +360,10 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
         TaskFamily::IssueToCode => RetrievalPolicy {
             enabled_sources: all_sources().to_vec(),
             required_evidence: vec![S::Lexical],
-            candidate_factors: all_sources().into_iter().map(|source| (source, 4)).collect(),
+            candidate_factors: all_sources()
+                .into_iter()
+                .map(|source| (source, 4))
+                .collect(),
             preferred_context_shape: "implementation_boundaries_and_tests",
             fusion_profile: "existing_repository_rrf",
             missing_required_evidence_is_blocker: false,
@@ -370,7 +371,10 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
         TaskFamily::General => RetrievalPolicy {
             enabled_sources: all_sources().to_vec(),
             required_evidence: Vec::new(),
-            candidate_factors: all_sources().into_iter().map(|source| (source, 4)).collect(),
+            candidate_factors: all_sources()
+                .into_iter()
+                .map(|source| (source, 4))
+                .collect(),
             preferred_context_shape: "diverse_general_context",
             fusion_profile: "existing_repository_rrf",
             missing_required_evidence_is_blocker: false,
@@ -410,7 +414,9 @@ mod tests {
             vec![RetrievalSourceKind::Validation]
         );
         assert!(
-            route.policy.candidate_cap(RetrievalSourceKind::Validation, 10)
+            route
+                .policy
+                .candidate_cap(RetrievalSourceKind::Validation, 10)
                 > route.policy.candidate_cap(RetrievalSourceKind::Lexical, 10)
         );
     }
@@ -429,7 +435,12 @@ mod tests {
             ]
         );
         let lexical = route.policy.candidate_cap(RetrievalSourceKind::Lexical, 10);
-        assert!(route.policy.candidate_cap(RetrievalSourceKind::ExactSemantic, 10) > lexical);
+        assert!(
+            route
+                .policy
+                .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+                > lexical
+        );
         assert!(route.policy.candidate_cap(RetrievalSourceKind::Graph, 10) > lexical);
     }
 
@@ -441,7 +452,9 @@ mod tests {
         assert!(!docs.policy.allows(RetrievalSourceKind::Lexical));
         assert!(
             docs.policy.candidate_cap(RetrievalSourceKind::Document, 10)
-                > docs.policy.candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+                > docs
+                    .policy
+                    .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
         );
 
         let api_docs = classify_task("update the API guide with authentication examples");
@@ -457,7 +470,10 @@ mod tests {
     fn ambiguous_specialized_task_falls_back_to_conservative_general_policy() {
         let route = classify_task("fix panic and add regression tests for dependency impact");
         assert_eq!(route.family, TaskFamily::General);
-        assert!(route.reasons.iter().any(|reason| reason.contains("multiple")));
+        assert!(route
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("multiple")));
         for source in all_sources() {
             assert!(route.policy.allows(source));
         }
@@ -480,6 +496,9 @@ mod tests {
         assert_eq!(route.family, TaskFamily::TraceToCode);
         assert_eq!(route.policy.fusion_profile, "existing_repository_rrf");
         assert!(route.policy.allows(RetrievalSourceKind::Runtime));
-        assert!(route.policy.required_evidence.contains(&RetrievalSourceKind::Runtime));
+        assert!(route
+            .policy
+            .required_evidence
+            .contains(&RetrievalSourceKind::Runtime));
     }
 }
