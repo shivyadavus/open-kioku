@@ -1,0 +1,363 @@
+name: CC2.1 acceptance repair v2
+
+on:
+  push:
+    branches: [agent/cc2-document-corpus]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc2-document-corpus
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply root-cause fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one marker, found {count}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          def regex_once(path, pattern, replacement, flags=0):
+              p = Path(path)
+              text = p.read_text()
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+              if count != 1:
+                  raise SystemExit(f"{path}: regex marker not unique/present: {pattern[:100]!r}")
+              p.write_text(updated)
+
+          storage = 'crates/open-kioku-storage/src/lib.rs'
+          regex_once(
+              storage,
+              r"    fn replace_index_with_documents\(\n        &self,\n        data: IndexData<'_>,\n        document_sections: &\[DocumentSection\],\n    \) -> Result<\(\)> \{\n        self\.replace_index\(data\)\?;\n        self\.replace_document_corpus\(document_sections\)\n    \}\n",
+              '''    fn replace_index_with_documents(
+                  &self,
+                  data: IndexData<'_>,
+                  document_sections: &[DocumentSection],
+              ) -> Result<()> {
+                  if !document_sections.is_empty() {
+                      return Err(OkError::Unsupported(
+                          "atomic document corpus replacement is not implemented by this metadata store"
+                              .into(),
+                      ));
+                  }
+                  self.replace_index(data)
+              }
+          ''',
+          )
+
+          config = 'crates/open-kioku-config/src/lib.rs'
+          replace_once(
+              config,
+              '    pub index: IndexConfig,\n    pub languages: LanguagesConfig,',
+              '    pub index: IndexConfig,\n    #[serde(default)]\n    pub documents: DocumentsConfig,\n    pub languages: LanguagesConfig,',
+          )
+          replace_once(
+              config,
+              '            languages: LanguagesConfig {',
+              '            documents: DocumentsConfig::default(),\n            languages: LanguagesConfig {',
+          )
+          replace_once(
+              config,
+              '#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct LanguagesConfig {',
+              '''#[derive(Debug, Clone, Serialize, Deserialize)]
+          pub struct DocumentsConfig {
+              #[serde(default = "default_true")]
+              pub enabled: bool,
+              #[serde(default)]
+              pub plain_text: Vec<String>,
+          }
+
+          impl Default for DocumentsConfig {
+              fn default() -> Self {
+                  Self {
+                      enabled: true,
+                      plain_text: Vec::new(),
+                  }
+              }
+          }
+
+          #[derive(Debug, Clone, Serialize, Deserialize)]
+          pub struct LanguagesConfig {''',
+          )
+
+          ingest = 'crates/open-kioku-ingest/src/lib.rs'
+          replace_once(
+              ingest,
+              '        let denied = compile_globs(&config.paths.deny)?;\n        let git_ignores = build_ignore_matcher(root, ".gitignore")?;',
+              '        let denied = compile_globs(&config.paths.deny)?;\n        let document_plain_text = compile_globs(&config.documents.plain_text)?;\n        let git_ignores = build_ignore_matcher(root, ".gitignore")?;',
+          )
+          replace_once(
+              ingest,
+              '            if let Some(document_type) = document_type_for_path(&rel) {\n                let document_started = Instant::now();',
+              '            if config.documents.enabled {\n                if let Some(document_type) = document_type_for_path(&rel, &document_plain_text) {\n                    let document_started = Instant::now();',
+          )
+          replace_once(
+              ingest,
+              '''                document_paths.insert(rel.clone());
+                  document_sections.extend(build_document_sections(&rel, &content, document_type));
+                  document_elapsed_ms = document_elapsed_ms.saturating_add(
+                      u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                  );
+                  continue;
+              }
+              if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {''',
+              '''                    document_paths.insert(rel.clone());
+                      document_sections.extend(build_document_sections(&rel, &content, document_type));
+                      document_elapsed_ms = document_elapsed_ms.saturating_add(
+                          u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                      );
+                      continue;
+                  }
+              }
+              if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {''',
+          )
+          regex_once(
+              ingest,
+              r'''fn document_type_for_path\(path: &Path\) -> Option<DocumentType> \{\n(?P<body>.*?)    if readme \{''',
+              '''fn document_type_for_path(path: &Path, plain_text_paths: &GlobSet) -> Option<DocumentType> {
+              let normalized = path
+                  .to_string_lossy()
+                  .replace('\\\\', "/")
+                  .to_ascii_lowercase();
+              let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+              let extension = path
+                  .extension()
+                  .and_then(|value| value.to_str())
+                  .map(str::to_ascii_lowercase);
+              let readme = matches!(
+                  name.as_str(),
+                  "readme" | "readme.md" | "readme.mdx" | "readme.txt" | "readme.rst" | "readme.adoc"
+              );
+              let markdown = matches!(extension.as_deref(), Some("md"));
+              let mdx = matches!(extension.as_deref(), Some("mdx"));
+              let plain_text = matches!(extension.as_deref(), Some("txt"))
+                  && plain_text_paths.is_match(path);
+              if !(readme || markdown || mdx || plain_text) {
+                  return None;
+              }
+
+              if readme {''',
+              re.S,
+          )
+
+          # Fence-aware heading parsing, scoped to the markdown section builder.
+          p = Path(ingest)
+          text = p.read_text()
+          start = text.index('fn build_markdown_document_sections(')
+          end = text.index('\nfn push_bounded_document_sections(', start)
+          block = text[start:end]
+          old = '''    let mut current_start = 1u32;
+              let mut current_lines = Vec::<String>::new();
+
+              for (index, line) in content.lines().enumerate() {
+                  let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                  if let Some((level, title)) = document_markdown_heading(line) {'''
+          new = '''    let mut current_start = 1u32;
+              let mut current_lines = Vec::<String>::new();
+              let mut fence: Option<(char, usize)> = None;
+
+              for (index, line) in content.lines().enumerate() {
+                  let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                  let fence_boundary = document_fence_boundary(line);
+                  let heading = if fence.is_none() && fence_boundary.is_none() {
+                      document_markdown_heading(line)
+                  } else {
+                      None
+                  };
+                  if let Some((level, title)) = heading {'''
+          if block.count(old) != 1:
+              raise SystemExit('markdown builder start marker mismatch')
+          block = block.replace(old, new, 1)
+          old_tail = '''        current_lines.push(line.to_string());
+              }
+
+              if !current_lines.is_empty() {'''
+          new_tail = '''        current_lines.push(line.to_string());
+                  if let Some((marker, width)) = fence_boundary {
+                      match fence {
+                          Some((open_marker, open_width)) if marker == open_marker && width >= open_width => {
+                              fence = None;
+                          }
+                          None => fence = Some((marker, width)),
+                          _ => {}
+                      }
+                  }
+              }
+
+              if !current_lines.is_empty() {'''
+          if block.count(old_tail) != 1:
+              raise SystemExit('markdown builder tail marker mismatch')
+          block = block.replace(old_tail, new_tail, 1)
+          p.write_text(text[:start] + block + text[end:])
+          replace_once(
+              ingest,
+              'fn document_markdown_heading(line: &str) -> Option<(usize, &str)> {',
+              '''fn document_fence_boundary(line: &str) -> Option<(char, usize)> {
+              let trimmed = line.trim_start();
+              let marker = trimmed.chars().next()?;
+              if !matches!(marker, '`' | '~') {
+                  return None;
+              }
+              let width = trimmed.chars().take_while(|ch| *ch == marker).count();
+              (width >= 3).then_some((marker, width))
+          }
+
+          fn document_markdown_heading(line: &str) -> Option<(usize, &str)> {''',
+          )
+
+          # Replace the classifier regression with explicit opt-in and README-code safety.
+          regex_once(
+              ingest,
+              r'''    \#\[test\]\n    fn document_classifier_does_not_capture_code_examples_under_docs\(\) \{.*?\n    \}\n\n''',
+              '''    #[test]
+              fn document_classifier_requires_plain_text_opt_in_and_rejects_readme_code() {
+                  let none = compile_globs(&[]).unwrap();
+                  let configured = compile_globs(&["docs/*.txt".into(), "docs/**/*.txt".into()]).unwrap();
+                  assert_eq!(document_type_for_path(Path::new("docs/guide.md"), &none), Some(DocumentType::Markdown));
+                  assert!(document_type_for_path(Path::new("docs/notes.txt"), &none).is_none());
+                  assert_eq!(document_type_for_path(Path::new("docs/notes.txt"), &configured), Some(DocumentType::PlainText));
+                  assert_eq!(document_type_for_path(Path::new("README"), &none), Some(DocumentType::Readme));
+                  assert!(document_type_for_path(Path::new("README.rs"), &none).is_none());
+                  assert!(document_type_for_path(Path::new("docs/examples/client.rs"), &none).is_none());
+              }
+
+          ''',
+              re.S,
+          )
+          replace_once(
+              ingest,
+              '''    #[test]
+              fn fast_mode_document_corpus_uses_common_security_and_ignore_policy() {''',
+              '''    #[test]
+              fn markdown_fenced_code_does_not_create_fake_heading_sections() {
+                  let content = "# Root\\nintro\\n```text\\n## Fake heading\\nbody\\n```\\n## Real heading\\nreal body\\n";
+                  let sections = build_document_sections(Path::new("docs/guide.md"), content, DocumentType::Markdown);
+                  assert!(!sections.iter().any(|s| s.heading_path.iter().any(|h| h == "Fake heading")));
+                  assert!(sections.iter().any(|s| s.heading_path == ["Root", "Real heading"] && s.line_range == LineRange { start: 7, end: 8 }));
+              }
+
+              #[test]
+              fn document_corpus_respects_okignore_and_disable_switch() {
+                  let temp = tempfile::tempdir().unwrap();
+                  let root = temp.path();
+                  fs::create_dir_all(root.join("docs")).unwrap();
+                  fs::write(root.join("docs/visible.md"), "# Visible\\nkept\\n").unwrap();
+                  fs::write(root.join("docs/ignored.md"), "# Ignored\\nsecret\\n").unwrap();
+                  fs::write(root.join(".okignore"), "docs/ignored.md\\n").unwrap();
+                  let mut config = OkConfig::default();
+                  config.history.enabled = false;
+                  let snapshot = Indexer::default().index_repo_with_mode(root, &config, IndexMode::Fast).unwrap();
+                  assert!(snapshot.document_sections.iter().any(|s| s.path == Path::new("docs/visible.md")));
+                  assert!(!snapshot.document_sections.iter().any(|s| s.path == Path::new("docs/ignored.md")));
+                  config.documents.enabled = false;
+                  let disabled = Indexer::default().index_repo_with_mode(root, &config, IndexMode::Fast).unwrap();
+                  assert!(disabled.document_sections.is_empty());
+              }
+
+              #[test]
+              fn fast_mode_document_corpus_uses_common_security_and_ignore_policy() {''',
+          )
+
+          # Prove the default store contract fails before mutating the code index.
+          replace_once(
+              storage,
+              '#[cfg(test)]\nmod document_change_tests {',
+              '''#[cfg(test)]
+          mod document_atomicity_tests {
+              use super::*;
+              use open_kioku_core::{DocumentSection, DocumentType, IndexManifest, LineRange};
+              use std::sync::atomic::{AtomicBool, Ordering};
+
+              struct UnsupportedDocumentStore { replace_called: AtomicBool }
+
+              impl MetadataStore for UnsupportedDocumentStore {
+                  fn initialize(&self) -> Result<()> { Ok(()) }
+                  fn put_manifest(&self, _manifest: &IndexManifest) -> Result<()> { Ok(()) }
+                  fn manifest(&self) -> Result<Option<IndexManifest>> { Ok(None) }
+                  fn replace_index(&self, _data: IndexData<'_>) -> Result<()> {
+                      self.replace_called.store(true, Ordering::SeqCst);
+                      Ok(())
+                  }
+                  fn list_files(&self, _limit: usize, _offset: usize) -> Result<Vec<File>> { Ok(Vec::new()) }
+                  fn get_file_by_path(&self, _path: &Path) -> Result<Option<File>> { Ok(None) }
+                  fn list_symbols(&self, _query: Option<&str>, _limit: usize, _offset: usize) -> Result<Vec<Symbol>> { Ok(Vec::new()) }
+                  fn symbol_by_id(&self, _id: &SymbolId) -> Result<Option<Symbol>> { Ok(None) }
+                  fn chunks_for_file(&self, _file_id: &FileId) -> Result<Vec<CodeChunk>> { Ok(Vec::new()) }
+                  fn all_chunks(&self) -> Result<Vec<CodeChunk>> { Ok(Vec::new()) }
+                  fn tests(&self) -> Result<Vec<TestTarget>> { Ok(Vec::new()) }
+                  fn imports(&self) -> Result<Vec<Import>> { Ok(Vec::new()) }
+              }
+
+              #[test]
+              fn unsupported_document_store_fails_before_mutating_code_index() {
+                  let store = UnsupportedDocumentStore { replace_called: AtomicBool::new(false) };
+                  let manifest: IndexManifest = serde_json::from_str(include_str!("../../../fixtures/index_manifest.json")).unwrap();
+                  let data = IndexData {
+                      manifest: &manifest,
+                      files: &[], symbols: &[], chunks: &[], tests: &[], imports: &[],
+                      occurrences: &[], analysis_facts: &[], scopes: &[], bindings: &[], call_sites: &[],
+                  };
+                  let section = DocumentSection {
+                      path: PathBuf::from("docs/guide.md"),
+                      heading_path: vec!["Guide".into()],
+                      line_range: LineRange { start: 1, end: 2 },
+                      content_hash: "hash".into(),
+                      content: "# Guide\\ntext".into(),
+                      document_type: DocumentType::Markdown,
+                  };
+                  let err = store.replace_index_with_documents(data, &[section]).unwrap_err();
+                  assert!(matches!(err, OkError::Unsupported(_)));
+                  assert!(!store.replace_called.load(Ordering::SeqCst));
+              }
+          }
+
+          #[cfg(test)]
+          mod document_change_tests {''',
+          )
+          PY
+      - name: Format and regression gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-storage document_atomicity_tests
+          cargo test -p open-kioku-ingest document_corpus_tests
+          cargo test -p open-kioku-context indexed_document_stream_tests
+          cargo check --workspace
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo build --release -p open-kioku-cli
+          ./target/release/ok --json retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30 --write-baseline /tmp/cc21-first.json >/tmp/cc21-first-out.json
+          ./target/release/ok --json retrieval-bench . --cases-file benchmarks/retrieval-cases.json --no-index --min-cases 30 --write-baseline /tmp/cc21-second.json >/tmp/cc21-second-out.json
+          cmp /tmp/cc21-first.json /tmp/cc21-second.json
+          cmp benchmarks/retrieval-baseline.json /tmp/cc21-first.json
+          git diff --check
+      - name: Commit product fixes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-storage/src/lib.rs crates/open-kioku-config/src/lib.rs crates/open-kioku-ingest/src/lib.rs
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m "fix(index): harden document corpus acceptance semantics [skip ci]"
+          git push origin HEAD:agent/cc2-document-corpus
