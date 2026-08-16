@@ -114,6 +114,7 @@ impl Default for OkConfig {
                 dimensions: 384,
                 distance: "cosine".into(),
                 batch_size: 64,
+                ann_min_rows: 10_000,
                 index_symbols: true,
                 index_chunks: true,
                 index_docs: true,
@@ -306,6 +307,9 @@ pub struct SemanticConfig {
     pub distance: String,
     #[serde(default = "default_semantic_batch_size")]
     pub batch_size: usize,
+    /// Minimum vector count at which the `auto` backend selects local HNSW.
+    #[serde(default = "default_semantic_ann_min_rows")]
+    pub ann_min_rows: usize,
     #[serde(default = "default_true")]
     pub index_symbols: bool,
     #[serde(default = "default_true")]
@@ -406,6 +410,11 @@ impl OkConfig {
         if self.semantic.dimensions == 0 {
             return Err(OkError::Config(
                 "semantic.dimensions must be greater than zero".into(),
+            ));
+        }
+        if self.semantic.ann_min_rows == 0 {
+            return Err(OkError::Config(
+                "semantic.ann_min_rows must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -515,6 +524,10 @@ fn default_semantic_batch_size() -> usize {
     64
 }
 
+fn default_semantic_ann_min_rows() -> usize {
+    10_000
+}
+
 fn default_architecture_rules() -> PathBuf {
     ".ok/architecture-rules.yml".into()
 }
@@ -558,6 +571,7 @@ mod tests {
         let config = OkConfig::default();
         assert!(config.validate().is_ok());
         assert_eq!(config.scip.mode, ScipMode::Consume);
+        assert_eq!(config.semantic.ann_min_rows, 10_000);
         assert!(config
             .scip
             .paths

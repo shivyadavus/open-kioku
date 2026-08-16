@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "backend": "usearch-hnsw-f32",
+  "parameters": {
+    "connectivity": 32,
+    "expansion_add": 256,
+    "expansion_search": 1024
+  },
+  "recall_floor": 0.98,
+  "minimum_p95_speedup": 1.5,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "logical_cpus": 4,
+    "total_memory_bytes": 16770744320,
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "profile_label": "github-actions-ubuntu-x64-usearch-2.21.1"
+  },
+  "measurements": [
+    {
+      "dimensions": 384,
+      "vector_count": 10000,
+      "query_count": 64,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "exact_build_ms": 10.809528,
+      "ann_build_ms": 8308.342084,
+      "exact_query_p95_us": 6144.638,
+      "ann_query_p95_us": 2729.524,
+      "p95_query_speedup": 2.251175662862829,
+      "exact_index_bytes": 80561949,
+      "ann_index_bytes": 18114960,
+      "ann_memory_bytes": 37880512,
+      "process_peak_rss_bytes": 141942784
+    },
+    {
+      "dimensions": 384,
+      "vector_count": 25000,
+      "query_count": 64,
+      "recall_at_10": 0.996875,
+      "mrr": 0.984375,
+      "exact_build_ms": 27.49101,
+      "ann_build_ms": 44017.951212,
+      "exact_query_p95_us": 16583.765,
+      "ann_query_p95_us": 6043.499,
+      "p95_query_speedup": 2.7440668063318947,
+      "exact_index_bytes": 201460208,
+      "ann_index_bytes": 45306240,
+      "ann_memory_bytes": 71828160,
+      "process_peak_rss_bytes": 345317376
+    },
+    {
+      "dimensions": 768,
+      "vector_count": 10000,
+      "query_count": 64,
+      "recall_at_10": 1.0,
+      "mrr": 1.0,
+      "exact_build_ms": 4.85643,
+      "ann_build_ms": 17326.439751,
+      "exact_query_p95_us": 10068.122,
+      "ann_query_p95_us": 4149.307,
+      "p95_query_speedup": 2.42645868334158,
+      "exact_index_bytes": 161292220,
+      "ann_index_bytes": 33474960,
+      "ann_memory_bytes": 71434944,
+      "process_peak_rss_bytes": 345317376
+    },
+    {
+      "dimensions": 768,
+      "vector_count": 25000,
+      "query_count": 64,
+      "recall_at_10": 0.9984375,
+      "mrr": 1.0,
+      "exact_build_ms": 47.427687,
+      "ann_build_ms": 92986.209733,
+      "exact_query_p95_us": 25149.847,
+      "ann_query_p95_us": 7525.598,
+      "p95_query_speedup": 3.341906782690226,
+      "exact_index_bytes": 403287547,
+      "ann_index_bytes": 83706240,
+      "ann_memory_bytes": 138937024,
+      "process_peak_rss_bytes": 665366528
+    }
+  ],
+  "recommended_auto_min_rows": 10000
+}
