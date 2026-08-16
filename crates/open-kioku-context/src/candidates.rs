@@ -1,6 +1,6 @@
 use open_kioku_core::{
     RetrievalAuthority, RetrievalContribution, RetrievalDiagnostics, RetrievalSourceKind,
-    RetrievalTrace, ScoreComponent, SearchResult,
+    RetrievalTrace, RetrievalUnitKey, ScoreComponent, SearchResult,
 };
 use open_kioku_errors::Result;
 use open_kioku_ranking::{RankingMode, RankingOptions, RankingSignal, RankingWeights};
@@ -531,6 +531,7 @@ pub fn fuse_candidate_streams(
         }
         traces.push(RetrievalTrace {
             path: entry.representative.path.clone(),
+            unit_key: Some(RetrievalUnitKey::from_result(&entry.representative)),
             fused_score: entry.fused_score,
             authority: entry.authority,
             contributions: entry.contributions,
