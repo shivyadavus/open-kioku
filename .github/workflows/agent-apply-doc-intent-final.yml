@@ -1,0 +1,60 @@
+name: agent-apply-doc-intent-final
+
+on:
+  push:
+    branches:
+      - agent/context-candidate-streams
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted product patch
+        run: python3 .github/scripts/agent_apply_doc_intent_final.py
+      - name: Validate product behavior
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo fmt --all
+          cargo check --workspace
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo run -p open-kioku-cli -- workflow-bench . \
+            --cases-file benchmarks/workflow-cases.json \
+            --limit 10 \
+            --min-cases 20 \
+            --min-context-recall 1.0 \
+            --min-verification-accuracy 1.0
+          cargo run -p open-kioku-cli -- retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline.json
+          diff -u benchmarks/retrieval-baseline.json /tmp/retrieval-baseline.json
+      - name: Commit exact validated tree and self-clean
+        shell: bash
+        run: |
+          set -euxo pipefail
+          validated_base=$(git rev-parse HEAD)
+          rm .github/scripts/agent_apply_doc_intent_final.py
+          rm .github/workflows/agent-apply-doc-intent-final.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(context): rank requested documentation as task-relevant"
+          git fetch origin agent/context-candidate-streams
+          remote_head=$(git rev-parse origin/agent/context-candidate-streams)
+          if [ "$remote_head" != "$validated_base" ]; then
+            echo "branch moved during validation: validated=$validated_base remote=$remote_head" >&2
+            exit 1
+          fi
+          git push origin HEAD:agent/context-candidate-streams
