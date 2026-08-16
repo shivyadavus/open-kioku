@@ -88,6 +88,13 @@ Each entry lists the crate name, version used, license, and upstream URL.
   — https://github.com/dtolnay/unicode-ident
   — Unicode License v3: https://www.unicode.org/license.txt
 
+## Certificate root data used by local model download TLS
+
+- webpki-root-certs v1.0.9 (CDLA-Permissive-2.0)
+- webpki-roots v0.26.11 and v1.0.9 (CDLA-Permissive-2.0)
+  — upstream: https://github.com/rustls/webpki-roots
+  — CDLA-Permissive-2.0 license text: https://cdla.dev/permissive-2-0/
+
 ## Proc-macro infrastructure (compile-time only)
 
 - proc-macro2 v1.0.106 (MIT OR Apache-2.0) — https://github.com/dtolnay/proc-macro2
@@ -96,6 +103,7 @@ Each entry lists the crate name, version used, license, and upstream URL.
 
 ---
 
-All licenses listed above are OSI-approved permissive licenses.
+The software licenses listed above are permissive licenses accepted by this project's dependency policy.
+Certificate root data is separately licensed under CDLA-Permissive-2.0 as noted above.
 No GPL, LGPL, or AGPL dependencies are present; this is enforced
 automatically by `cargo-deny` in CI on every push.
