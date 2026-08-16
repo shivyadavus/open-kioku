@@ -1,19 +1,32 @@
 use open_kioku_core::{
-    AnalysisFact, ChurnSummary, CodeChunk, EvidenceSourceType, File, FileId, FileProvenance,
-    GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-    HistorySignalQuery, HistorySignalSummary, HistorySnapshot, HistorySummary, ImpactReport,
-    Import, IndexManifest, ScoreComponent, SearchResult, SimilarChangeQuery, SimilarChangeReport,
-    Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    AnalysisFact, ChurnSummary, CodeChunk, DocumentSection, EvidenceSourceType, File, FileId,
+    FileProvenance, GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode,
+    GraphNodeType, HistorySignalQuery, HistorySignalSummary, HistorySnapshot, HistorySummary,
+    ImpactReport, Import, IndexManifest, ScoreComponent, SearchResult, SimilarChangeQuery,
+    SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub trait MetadataStore: Send + Sync {
     fn initialize(&self) -> Result<()>;
     fn put_manifest(&self, manifest: &IndexManifest) -> Result<()>;
     fn manifest(&self) -> Result<Option<IndexManifest>>;
     fn replace_index(&self, data: IndexData<'_>) -> Result<()>;
+    fn replace_index_with_documents(
+        &self,
+        data: IndexData<'_>,
+        document_sections: &[DocumentSection],
+    ) -> Result<()> {
+        if !document_sections.is_empty() {
+            return Err(OkError::Unsupported(
+                "atomic document corpus replacement is not implemented by this metadata store"
+                    .into(),
+            ));
+        }
+        self.replace_index(data)
+    }
     fn replace_files_index(&self, _update: PartialIndexUpdate<'_>) -> Result<()> {
         Err(OkError::Unsupported(
             "partial index replacement is not implemented by this metadata store".into(),
@@ -26,6 +39,24 @@ pub trait MetadataStore: Send + Sync {
     fn symbol_by_id(&self, id: &SymbolId) -> Result<Option<Symbol>>;
     fn chunks_for_file(&self, file_id: &FileId) -> Result<Vec<CodeChunk>>;
     fn all_chunks(&self) -> Result<Vec<CodeChunk>>;
+    fn document_sections(&self) -> Result<Vec<DocumentSection>> {
+        Ok(Vec::new())
+    }
+    fn replace_document_corpus(&self, _sections: &[DocumentSection]) -> Result<()> {
+        Err(OkError::Unsupported(
+            "document corpus replacement is not implemented by this metadata store".into(),
+        ))
+    }
+    fn replace_document_sections_for_paths(
+        &self,
+        _paths: &[PathBuf],
+        _sections: &[DocumentSection],
+    ) -> Result<()> {
+        Err(OkError::Unsupported(
+            "incremental document corpus replacement is not implemented by this metadata store"
+                .into(),
+        ))
+    }
     fn tests(&self) -> Result<Vec<TestTarget>>;
     fn imports(&self) -> Result<Vec<Import>>;
     fn analysis_facts(
@@ -276,6 +307,37 @@ pub fn partial_index_supported_for_versions(
             .zip(next_parser_version)
             .map(|(previous, next)| previous == next)
             .unwrap_or(true)
+}
+
+pub fn changed_document_paths(
+    previous: &[DocumentSection],
+    next: &[DocumentSection],
+) -> BTreeSet<PathBuf> {
+    fn fingerprints(
+        sections: &[DocumentSection],
+    ) -> std::collections::BTreeMap<PathBuf, Vec<(u32, u32, String)>> {
+        let mut grouped = std::collections::BTreeMap::<PathBuf, Vec<(u32, u32, String)>>::new();
+        for section in sections {
+            grouped.entry(section.path.clone()).or_default().push((
+                section.line_range.start,
+                section.line_range.end,
+                section.content_hash.clone(),
+            ));
+        }
+        for values in grouped.values_mut() {
+            values.sort();
+        }
+        grouped
+    }
+
+    let previous = fingerprints(previous);
+    let next = fingerprints(next);
+    previous
+        .keys()
+        .chain(next.keys())
+        .filter(|path| previous.get(*path) != next.get(*path))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -749,3 +811,46 @@ pub trait ImpactStore: Send + Sync {
 /// Combined store trait for types that implement both metadata and graph storage.
 pub trait OkStore: MetadataStore + GraphStore {}
 impl<T: MetadataStore + GraphStore> OkStore for T {}
+
+#[cfg(test)]
+mod document_change_tests {
+    use super::changed_document_paths;
+    use open_kioku_core::{DocumentSection, DocumentType, LineRange};
+    use std::path::PathBuf;
+
+    fn section(path: &str, hash: &str) -> DocumentSection {
+        DocumentSection {
+            path: PathBuf::from(path),
+            heading_path: vec!["Guide".into()],
+            line_range: LineRange { start: 1, end: 3 },
+            content_hash: hash.into(),
+            content: format!("content-{hash}"),
+            document_type: DocumentType::Markdown,
+        }
+    }
+
+    #[test]
+    fn document_delta_reports_only_changed_added_and_deleted_paths() {
+        let previous = vec![
+            section("docs/stable.md", "same"),
+            section("docs/changed.md", "old"),
+            section("docs/deleted.md", "gone"),
+        ];
+        let next = vec![
+            section("docs/stable.md", "same"),
+            section("docs/changed.md", "new"),
+            section("docs/added.md", "fresh"),
+        ];
+        let changed = changed_document_paths(&previous, &next);
+        assert_eq!(
+            changed,
+            [
+                PathBuf::from("docs/added.md"),
+                PathBuf::from("docs/changed.md"),
+                PathBuf::from("docs/deleted.md"),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+}

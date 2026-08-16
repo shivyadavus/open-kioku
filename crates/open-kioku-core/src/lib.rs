@@ -203,7 +203,7 @@ impl EvidenceQuality {
         }
         match self.index_mode.as_str() {
             "fast" => caveats.push(
-                "fast index mode may skip docs, examples, testdata, generated, vendor, unsupported, and oversized paths".into(),
+                "fast index mode may skip expensive code analysis for examples, testdata, generated, vendor, unsupported, and oversized paths; documentation is handled by the lightweight document corpus when available".into(),
             ),
             "balanced" => caveats.push(
                 "balanced index mode may skip expensive optional evidence passes".into(),
@@ -511,6 +511,30 @@ impl LineRange {
             end: line,
         }
     }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentType {
+    Markdown,
+    Mdx,
+    Readme,
+    Adr,
+    Architecture,
+    Guide,
+    PlainText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentSection {
+    pub path: PathBuf,
+    pub heading_path: Vec<String>,
+    pub line_range: LineRange,
+    pub content_hash: String,
+    pub content: String,
+    pub document_type: DocumentType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1751,8 +1775,14 @@ impl fmt::Display for IndexMode {
 pub struct IndexPhaseReport {
     pub phase: String,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub scanned_files: usize,
     pub indexed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_files: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_sections: Option<usize>,
     pub nodes_added: usize,
     pub edges_added: usize,
     pub skipped: usize,

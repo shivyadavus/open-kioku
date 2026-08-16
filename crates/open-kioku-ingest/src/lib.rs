@@ -4,11 +4,11 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 use open_kioku_config::OkConfig;
 use open_kioku_core::{
-    AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitCochangeEdge,
-    GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType, HistoryRecordId, HistorySnapshot,
-    Import, IndexManifest, IndexMode, IndexPhaseReport, IndexQuality, LineRange, Repository,
-    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence,
-    TestTarget, HISTORY_SCHEMA_VERSION,
+    AnalysisFact, CodeChunk, Confidence, DocumentSection, DocumentType, EvidenceSourceType, File,
+    FileId, GitCochangeEdge, GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType,
+    HistoryRecordId, HistorySnapshot, Import, IndexManifest, IndexMode, IndexPhaseReport,
+    IndexQuality, LineRange, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol,
+    SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -19,7 +19,7 @@ use open_kioku_scip::ScipIndexReport;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,6 +41,7 @@ pub struct IndexSnapshot {
     pub files: Vec<File>,
     pub symbols: Vec<Symbol>,
     pub chunks: Vec<CodeChunk>,
+    pub document_sections: Vec<DocumentSection>,
     pub tests: Vec<TestTarget>,
     pub imports: Vec<Import>,
     pub import_resolutions: Vec<open_kioku_core::ImportResolution>,
@@ -196,6 +197,20 @@ impl Indexer {
                 ProgressEvent::new("cross_project")
                     .warning("cross-project mode records repository status without parsing source"),
             );
+            let document_event = if config.documents.enabled {
+                ProgressEvent::new("document_corpus").warning(
+                    "document corpus unavailable in cross-project mode; source was not scanned",
+                )
+            } else {
+                ProgressEvent::new("document_corpus")
+                    .warning("document corpus disabled by configuration")
+            };
+            emit_progress(&on_progress, &mut phase_reports, started, document_event);
+            if let Some(report) = phase_reports.last_mut() {
+                report.duration_ms = Some(0);
+                report.document_files = Some(0);
+                report.document_sections = Some(0);
+            }
             let quality = index_quality(IndexQualityInput {
                 root: &root,
                 config,
@@ -228,6 +243,7 @@ impl Indexer {
                     files: Vec::new(),
                     symbols: Vec::new(),
                     chunks: Vec::new(),
+                    document_sections: Vec::new(),
                     tests: Vec::new(),
                     imports: Vec::new(),
                     import_resolutions: Vec::new(),
@@ -264,6 +280,22 @@ impl Indexer {
             self.scan_files(&root, config, &repo_id, mode, &mut progress)?
         };
         let files = scan.files;
+        let document_sections = scan.document_sections;
+        let document_event = if config.documents.enabled {
+            ProgressEvent::new("document_corpus")
+                .scanned(scan.document_file_count)
+                .indexed(scan.document_file_count)
+                .total(Some(scan.document_file_count))
+        } else {
+            ProgressEvent::new("document_corpus")
+                .warning("document corpus disabled by configuration")
+        };
+        emit_progress(&on_progress, &mut phase_reports, started, document_event);
+        if let Some(report) = phase_reports.last_mut() {
+            report.duration_ms = Some(scan.document_elapsed_ms);
+            report.document_files = Some(scan.document_file_count);
+            report.document_sections = Some(document_sections.len());
+        }
         emit_progress(
             &on_progress,
             &mut phase_reports,
@@ -772,6 +804,7 @@ impl Indexer {
                 files,
                 symbols,
                 chunks,
+                document_sections,
                 tests,
                 imports,
                 import_resolutions: resolver_report.resolutions,
@@ -807,6 +840,7 @@ impl Indexer {
         let max_size = config.max_file_size_bytes()?;
         let excludes = compile_globs(&config.index.exclude)?;
         let denied = compile_globs(&config.paths.deny)?;
+        let document_plain_text = compile_globs(&config.documents.plain_text)?;
         let git_ignores = build_ignore_matcher(root, ".gitignore")?;
         let ok_ignores = build_ignore_matcher(root, ".okignore")?;
         let mut builder = WalkBuilder::new(root);
@@ -816,6 +850,9 @@ impl Indexer {
         builder.follow_links(false);
         builder.filter_entry(|entry| !is_heavy_discovery_dir(entry.path()));
         let mut files = Vec::new();
+        let mut document_sections = Vec::new();
+        let mut document_paths = BTreeSet::<PathBuf>::new();
+        let mut document_elapsed_ms = 0u64;
         let mut skipped_paths = Vec::new();
         let mut warnings = Vec::new();
         let mut scanned_files = 0;
@@ -942,17 +979,6 @@ impl Indexer {
                 );
                 continue;
             }
-            if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
-                push_skip(
-                    root,
-                    path,
-                    SkipReason::FastMode,
-                    SkipSource::FastMode,
-                    true,
-                    &mut skipped_paths,
-                );
-                continue;
-            }
             let metadata = entry
                 .metadata()
                 .map_err(|err| OkError::Index(err.to_string()))?;
@@ -962,6 +988,64 @@ impl Indexer {
                     path,
                     SkipReason::TooLarge,
                     SkipSource::SizeLimit,
+                    true,
+                    &mut skipped_paths,
+                );
+                continue;
+            }
+            if config.documents.enabled {
+                if let Some(document_type) = document_type_for_path(&rel, &document_plain_text) {
+                    let document_started = Instant::now();
+                    let bytes = fs::read(path)?;
+                    if bytes.contains(&0) {
+                        document_elapsed_ms = document_elapsed_ms.saturating_add(
+                            u64::try_from(document_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        );
+                        push_skip(
+                            root,
+                            path,
+                            SkipReason::Binary,
+                            SkipSource::Detector,
+                            true,
+                            &mut skipped_paths,
+                        );
+                        continue;
+                    }
+                    let content = String::from_utf8_lossy(&bytes).into_owned();
+                    if likely_generated(&content) {
+                        document_elapsed_ms = document_elapsed_ms.saturating_add(
+                            u64::try_from(document_started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        );
+                        push_skip(
+                            root,
+                            path,
+                            SkipReason::Generated,
+                            SkipSource::Detector,
+                            true,
+                            &mut skipped_paths,
+                        );
+                        continue;
+                    }
+                    document_paths.insert(rel.clone());
+                    document_sections.extend(build_document_sections(
+                        &rel,
+                        &content,
+                        document_type,
+                    ));
+                    document_elapsed_ms = document_elapsed_ms.saturating_add(
+                        u64::try_from(document_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    );
+                    continue;
+                }
+            }
+            if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
+                push_skip(
+                    root,
+                    path,
+                    SkipReason::FastMode,
+                    SkipSource::FastMode,
                     true,
                     &mut skipped_paths,
                 );
@@ -1030,7 +1114,7 @@ impl Indexer {
             .count();
         if fast_skipped > 0 {
             warnings.push(format!(
-                "fast mode skipped {fast_skipped} docs/examples/testdata/sample path(s)"
+                "fast mode skipped {fast_skipped} code/example/testdata/sample path(s) from code analysis"
             ));
         }
         progress.emit(
@@ -1044,6 +1128,9 @@ impl Indexer {
         let skipped = skipped_paths.len();
         Ok(ScanResult {
             files,
+            document_sections,
+            document_file_count: document_paths.len(),
+            document_elapsed_ms,
             skipped,
             warnings,
             skipped_paths,
@@ -1054,6 +1141,9 @@ impl Indexer {
 #[derive(Debug, Clone)]
 struct ScanResult {
     files: Vec<File>,
+    document_sections: Vec<DocumentSection>,
+    document_file_count: usize,
+    document_elapsed_ms: u64,
     skipped: usize,
     warnings: Vec<String>,
     skipped_paths: Vec<SkippedPath>,
@@ -1145,8 +1235,11 @@ impl IndexProgress {
         IndexPhaseReport {
             phase: self.phase.to_string(),
             elapsed_ms: self.elapsed_ms,
+            duration_ms: None,
             scanned_files: self.scanned_files,
             indexed_files: self.indexed_files,
+            document_files: None,
+            document_sections: None,
             nodes_added: self.nodes_added,
             edges_added: self.edges_added,
             skipped: self.skipped,
@@ -1895,13 +1988,221 @@ fn mode_quality_notes(mode: IndexMode) -> Vec<String> {
                 .into(),
         ],
         IndexMode::Fast => vec![
-            "fast mode: docs, examples, generated files, vendor paths, testdata, unsupported files, and oversized files may be skipped"
+            "fast mode: code analysis may skip docs/examples/generated/vendor/testdata/unsupported/oversized paths; allowed documentation is indexed separately in the lightweight document corpus"
                 .into(),
         ],
         IndexMode::CrossProject => vec![
             "cross-project mode: source parsing skipped; link already-indexed projects only".into(),
         ],
     }
+}
+
+const MAX_DOCUMENT_SECTION_LINES: usize = 120;
+
+fn document_type_for_path(path: &Path, plain_text_paths: &GlobSet) -> Option<DocumentType> {
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    let readme = matches!(
+        name.as_str(),
+        "readme" | "readme.md" | "readme.mdx" | "readme.txt" | "readme.rst" | "readme.adoc"
+    );
+    let markdown = matches!(extension.as_deref(), Some("md"));
+    let mdx = matches!(extension.as_deref(), Some("mdx"));
+    let plain_text =
+        matches!(extension.as_deref(), Some("txt")) && (readme || plain_text_paths.is_match(path));
+    if !(readme || markdown || mdx || plain_text) {
+        return None;
+    }
+
+    if readme {
+        return Some(DocumentType::Readme);
+    }
+    if normalized
+        .split('/')
+        .any(|component| matches!(component, "adr" | "adrs" | "decisions"))
+        || name.starts_with("adr-")
+        || name.starts_with("adr_")
+    {
+        return Some(DocumentType::Adr);
+    }
+    if normalized.contains("architecture")
+        || name.contains("architecture")
+        || name.contains("design")
+    {
+        return Some(DocumentType::Architecture);
+    }
+    if name.starts_with("contributing")
+        || name.contains("developer")
+        || name.contains("development")
+    {
+        return Some(DocumentType::Guide);
+    }
+    if markdown {
+        Some(DocumentType::Markdown)
+    } else if mdx {
+        Some(DocumentType::Mdx)
+    } else {
+        Some(DocumentType::PlainText)
+    }
+}
+
+fn build_document_sections(
+    path: &Path,
+    content: &str,
+    document_type: DocumentType,
+) -> Vec<DocumentSection> {
+    if is_markdown_like_document(path) {
+        build_markdown_document_sections(path, content, document_type)
+    } else {
+        let lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+        let mut sections = Vec::new();
+        push_bounded_document_sections(&mut sections, path, Vec::new(), 1, &lines, document_type);
+        sections
+    }
+}
+
+fn is_markdown_like_document(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    matches!(extension.as_deref(), Some("md" | "mdx"))
+        || path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("readme"))
+}
+
+fn build_markdown_document_sections(
+    path: &Path,
+    content: &str,
+    document_type: DocumentType,
+) -> Vec<DocumentSection> {
+    let mut sections = Vec::new();
+    let mut heading_stack = Vec::<String>::new();
+    let mut current_heading_path = Vec::<String>::new();
+    let mut current_start = 1u32;
+    let mut current_lines = Vec::<String>::new();
+    let mut fence: Option<(char, usize)> = None;
+
+    for (index, line) in content.lines().enumerate() {
+        let line_number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        let fence_boundary = document_fence_boundary(line);
+        let heading = if fence.is_none() && fence_boundary.is_none() {
+            document_markdown_heading(line)
+        } else {
+            None
+        };
+        if let Some((level, title)) = heading {
+            if !current_lines.is_empty() {
+                push_bounded_document_sections(
+                    &mut sections,
+                    path,
+                    current_heading_path.clone(),
+                    current_start,
+                    &current_lines,
+                    document_type,
+                );
+                current_lines.clear();
+            }
+            update_document_heading_stack(&mut heading_stack, level, title);
+            current_heading_path = heading_stack.clone();
+            current_start = line_number;
+        } else if current_lines.is_empty() {
+            current_heading_path = heading_stack.clone();
+            current_start = line_number;
+        }
+        current_lines.push(line.to_string());
+        if let Some((marker, width)) = fence_boundary {
+            match fence {
+                Some((open_marker, open_width)) if marker == open_marker && width >= open_width => {
+                    fence = None;
+                }
+                None => fence = Some((marker, width)),
+                _ => {}
+            }
+        }
+    }
+
+    if !current_lines.is_empty() {
+        push_bounded_document_sections(
+            &mut sections,
+            path,
+            current_heading_path,
+            current_start,
+            &current_lines,
+            document_type,
+        );
+    }
+    sections
+}
+
+fn push_bounded_document_sections(
+    sections: &mut Vec<DocumentSection>,
+    path: &Path,
+    heading_path: Vec<String>,
+    start_line: u32,
+    lines: &[String],
+    document_type: DocumentType,
+) {
+    for (index, window) in lines.chunks(MAX_DOCUMENT_SECTION_LINES).enumerate() {
+        let text = window.join("\n");
+        if text.trim().is_empty() {
+            continue;
+        }
+        let offset =
+            u32::try_from(index.saturating_mul(MAX_DOCUMENT_SECTION_LINES)).unwrap_or(u32::MAX);
+        let start = start_line.saturating_add(offset);
+        let end =
+            start.saturating_add(u32::try_from(window.len().saturating_sub(1)).unwrap_or(u32::MAX));
+        sections.push(DocumentSection {
+            path: path.to_path_buf(),
+            heading_path: heading_path.clone(),
+            line_range: LineRange { start, end },
+            content_hash: hash_bytes(text.as_bytes()),
+            content: text,
+            document_type,
+        });
+    }
+}
+
+fn document_fence_boundary(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let width = trimmed.chars().take_while(|ch| *ch == marker).count();
+    (width >= 3).then_some((marker, width))
+}
+
+fn document_markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let remainder = &trimmed[level..];
+    if !remainder.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let title = remainder.trim();
+    (!title.is_empty()).then_some((level, title))
+}
+
+fn update_document_heading_stack(headings: &mut Vec<String>, level: usize, title: &str) {
+    let parent_count = level.saturating_sub(1);
+    if headings.len() > parent_count {
+        headings.truncate(parent_count);
+    }
+    headings.push(title.to_string());
 }
 
 fn fast_mode_skip_path(path: &Path) -> bool {
@@ -2752,5 +3053,174 @@ class Util {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+    }
+}
+
+#[cfg(test)]
+mod document_corpus_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn document_classifier_requires_plain_text_opt_in_and_rejects_readme_code() {
+        let none = compile_globs(&[]).unwrap();
+        let configured = compile_globs(&["docs/*.txt".into(), "docs/**/*.txt".into()]).unwrap();
+        assert_eq!(
+            document_type_for_path(Path::new("docs/guide.md"), &none),
+            Some(DocumentType::Markdown)
+        );
+        assert!(document_type_for_path(Path::new("docs/notes.txt"), &none).is_none());
+        assert_eq!(
+            document_type_for_path(Path::new("docs/notes.txt"), &configured),
+            Some(DocumentType::PlainText)
+        );
+        assert_eq!(
+            document_type_for_path(Path::new("README"), &none),
+            Some(DocumentType::Readme)
+        );
+        assert!(document_type_for_path(Path::new("README.rs"), &none).is_none());
+        assert!(document_type_for_path(Path::new("docs/examples/client.rs"), &none).is_none());
+    }
+
+    #[test]
+    fn markdown_sections_preserve_heading_paths_and_are_bounded() {
+        let mut content = String::from("# Root\nintro\n## Rotation\n");
+        for index in 0..250 {
+            content.push_str(&format!("rotation line {index}\n"));
+        }
+        let sections =
+            build_document_sections(Path::new("docs/guide.md"), &content, DocumentType::Markdown);
+        let rotation = sections
+            .iter()
+            .filter(|section| section.heading_path == ["Root", "Rotation"])
+            .collect::<Vec<_>>();
+        assert_eq!(rotation.len(), 3);
+        assert!(rotation
+            .iter()
+            .all(|section| section.line_range.end - section.line_range.start < 120));
+        assert_eq!(rotation[0].line_range.start, 3);
+        assert!(!rotation[0].content_hash.is_empty());
+    }
+
+    #[test]
+    fn fast_mode_document_corpus_uses_common_security_and_ignore_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+        fs::write(root.join("docs/visible.md"), "# Visible\nquasar protocol\n").unwrap();
+        fs::write(root.join("docs/blocked.md"), "# Blocked\nsecret design\n").unwrap();
+        let mut config = OkConfig::default();
+        config.history.enabled = false;
+        config.paths.deny = vec!["docs/blocked.md".into()];
+
+        let snapshot = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert!(snapshot
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/visible.md")));
+        assert!(!snapshot
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/blocked.md")));
+        assert!(!snapshot
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("docs/visible.md")));
+        let report = snapshot
+            .phase_reports
+            .iter()
+            .find(|report| report.phase == "document_corpus")
+            .unwrap();
+        assert_eq!(report.document_files, Some(1));
+        assert!(report.document_sections.is_some_and(|count| count >= 1));
+        assert!(report.duration_ms.is_some());
+    }
+}
+
+#[cfg(test)]
+mod document_corpus_acceptance_hardening_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn plain_text_is_opt_in_and_readme_code_is_not_a_document() {
+        let none = compile_globs(&[]).unwrap();
+        let configured = compile_globs(&["docs/*.txt".into(), "docs/**/*.txt".into()]).unwrap();
+        assert_eq!(
+            document_type_for_path(Path::new("docs/guide.md"), &none),
+            Some(DocumentType::Markdown)
+        );
+        assert!(document_type_for_path(Path::new("docs/notes.txt"), &none).is_none());
+        assert_eq!(
+            document_type_for_path(Path::new("docs/notes.txt"), &configured),
+            Some(DocumentType::PlainText)
+        );
+        assert_eq!(
+            document_type_for_path(Path::new("README.txt"), &none),
+            Some(DocumentType::Readme)
+        );
+        assert!(document_type_for_path(Path::new("README.rs"), &none).is_none());
+        assert!(document_type_for_path(Path::new("docs/examples/client.rs"), &none).is_none());
+    }
+
+    #[test]
+    fn fenced_markdown_heading_is_not_document_structure() {
+        let content =
+            "# Root\nintro\n```text\n## Fake heading\nbody\n```\n## Real heading\nreal body\n";
+        let sections =
+            build_document_sections(Path::new("docs/guide.md"), content, DocumentType::Markdown);
+        assert!(!sections.iter().any(|section| {
+            section
+                .heading_path
+                .iter()
+                .any(|heading| heading == "Fake heading")
+        }));
+        assert!(sections.iter().any(|section| {
+            section.heading_path == ["Root", "Real heading"]
+                && section.line_range == LineRange { start: 7, end: 8 }
+        }));
+    }
+
+    #[test]
+    fn corpus_inherits_okignore_and_can_be_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/visible.md"), "# Visible\nkept\n").unwrap();
+        fs::write(root.join("docs/ignored.md"), "# Ignored\nsecret\n").unwrap();
+        fs::write(root.join(".okignore"), "docs/ignored.md\n").unwrap();
+
+        let mut config = OkConfig::default();
+        config.history.enabled = false;
+        let enabled = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert!(enabled
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/visible.md")));
+        assert!(!enabled
+            .document_sections
+            .iter()
+            .any(|section| section.path == Path::new("docs/ignored.md")));
+
+        config.documents.enabled = false;
+        let disabled = Indexer::default()
+            .index_repo_with_mode(root, &config, IndexMode::Fast)
+            .unwrap();
+        assert!(disabled.document_sections.is_empty());
+        let report = disabled
+            .phase_reports
+            .iter()
+            .find(|report| report.phase == "document_corpus")
+            .unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("disabled by configuration")));
     }
 }
