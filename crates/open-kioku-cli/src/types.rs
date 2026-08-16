@@ -714,6 +714,13 @@ struct ProveArgs {
     #[arg(long, default_value_t = false)]
     reveal_paths: bool,
 
+    /// Summarize a previously generated frozen retrieval benchmark report.
+    ///
+    /// These metrics remain explicitly separate from measurements of the repository passed to
+    /// `ok prove`; the report is treated as benchmark evidence, not private-repository quality.
+    #[arg(long, value_name = "RETRIEVAL_REPORT_JSON")]
+    retrieval_report: Option<PathBuf>,
+
     /// Shorthand for --format html.
     #[arg(long, default_value_t = false)]
     html: bool,
@@ -1815,6 +1822,7 @@ struct ProofReport {
     generated_by: &'static str,
     privacy: ProofPrivacy,
     summary: ProofSummary,
+    retrieval_quality: ProofRetrievalQuality,
     languages: BTreeMap<String, usize>,
     tasks: Vec<ProofTaskReport>,
     reproduce: Vec<String>,
@@ -1838,6 +1846,38 @@ struct ProofSummary {
     min_score: u32,
     max_score: u32,
     pass_rate_70: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProofRetrievalQuality {
+    available: bool,
+    scope: &'static str,
+    applies_to_repository: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpus_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpus_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cases_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strategy_algorithm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recall_at_10: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mean_reciprocal_rank: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_f1_at_10: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_gold_false_positive_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_budget_gold_yield_2000: Option<f64>,
+    caveats: Vec<String>,
 }
 
 #[derive(Serialize)]
