@@ -39,8 +39,8 @@ jobs:
               raise SystemExit(f'expected one watch replacement call in staging script, found {text.count(marker)}')
           text = text.replace(marker, "replace_first(\n    WATCH,\n    '''    rebuild_disk_index(", 1)
 
-          old_caveat = '"fast mode limits expensive code semantic relationships and deep validation evidence; lightweight document corpus indexing remains enabled".to_string(),'
-          new_caveat = '"fast index mode limits expensive code semantic relationships and deep validation evidence; lightweight document corpus indexing remains enabled".to_string(),'
+          old_caveat = '"fast code-analysis mode may skip examples, testdata, generated, vendor, unsupported, and oversized paths; documentation is handled by the lightweight document corpus when available".into(),'
+          new_caveat = '"fast index mode may skip expensive code analysis for examples, testdata, generated, vendor, unsupported, and oversized paths; documentation is handled by the lightweight document corpus when available".into(),'
           if text.count(old_caveat) != 1:
               raise SystemExit(f'expected one fast-mode caveat in staging script, found {text.count(old_caveat)}')
           text = text.replace(old_caveat, new_caveat, 1)
