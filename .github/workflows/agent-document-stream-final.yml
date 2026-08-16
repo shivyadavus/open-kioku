@@ -1,0 +1,76 @@
+name: agent-document-stream-final
+
+on:
+  push:
+    branches:
+      - agent/context-document-stream
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted document stream patch
+        run: |
+          python3 .github/scripts/agent_add_document_stream_final.py
+          python3 .github/scripts/agent_repair_document_stream_final.py
+      - name: Validate exact product behavior
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo fmt --all
+          cargo check --workspace
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+          cargo build --release -p open-kioku-cli
+          ./target/release/ok init .
+          ./target/release/ok index .
+          ./target/release/ok workflow-bench . \
+            --cases-file benchmarks/workflow-cases.json \
+            --limit 10 \
+            --min-cases 20 \
+            --min-context-recall 1.0 \
+            --min-verification-accuracy 1.0 \
+            --no-index
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline-first.json \
+            > /tmp/retrieval-first.json
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --no-index \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline-second.json \
+            > /tmp/retrieval-second.json
+          cmp /tmp/retrieval-baseline-first.json /tmp/retrieval-baseline-second.json
+          cmp /tmp/retrieval-baseline-first.json benchmarks/retrieval-baseline.json
+      - name: Commit validated product tree and self-clean
+        shell: bash
+        run: |
+          set -euxo pipefail
+          validated_base=$(git rev-parse HEAD)
+          rm .github/scripts/agent_add_document_stream_final.py
+          rm .github/scripts/agent_repair_document_stream_final.py
+          rm .github/workflows/agent-document-stream-final.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(context): add independent heading-aware document stream"
+          git fetch origin agent/context-document-stream
+          remote_head=$(git rev-parse origin/agent/context-document-stream)
+          if [ "$remote_head" != "$validated_base" ]; then
+            echo "branch moved during validation: validated=$validated_base remote=$remote_head" >&2
+            exit 1
+          fi
+          git push origin HEAD:agent/context-document-stream
