@@ -1,0 +1,517 @@
+name: agent-finalize-cc2-document-stream
+
+on:
+  push:
+    branches:
+      - agent/context-candidate-streams
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-finalize-cc2-document-stream
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/context-candidate-streams
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply document candidate stream completion
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str, label: str):
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one marker, found {count}")
+              path.write_text(text.replace(old, new, 1))
+
+          # Core retrieval taxonomy.
+          path = Path('crates/open-kioku-core/src/lib.rs')
+          replace_once(
+              path,
+              '''pub enum RetrievalSourceKind {
+              Lexical,
+              ExactSemantic,
+          ''',
+              '''pub enum RetrievalSourceKind {
+              Lexical,
+              Document,
+              ExactSemantic,
+          ''',
+              'core document retrieval source',
+          )
+
+          # Shared source/fusion plumbing and lexical/document separation.
+          path = Path('crates/open-kioku-context/src/candidates.rs')
+          replace_once(
+              path,
+              '''            for (index, mut result) in self
+                  .index
+                  .search(term, request.limit)?
+                  .into_iter()
+                  .enumerate()
+              {
+          ''',
+              '''            for (index, mut result) in self
+                  .index
+                  .search(term, request.limit)?
+                  .into_iter()
+                  .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
+                  .enumerate()
+              {
+          ''',
+              'external lexical excludes documents',
+          )
+          replace_once(
+              path,
+              '''                (RetrievalSourceKind::Lexical, 1.00),
+                  (RetrievalSourceKind::ExactSemantic, 1.50),
+          ''',
+              '''                (RetrievalSourceKind::Lexical, 1.00),
+                  (RetrievalSourceKind::Document, 0.90),
+                  (RetrievalSourceKind::ExactSemantic, 1.50),
+          ''',
+              'evidence prior document source',
+          )
+          replace_once(
+              path,
+              '''            (
+                  RetrievalSourceKind::Lexical,
+                  options.weights.text_relevance,
+                  defaults.text_relevance,
+              ),
+              (
+                  RetrievalSourceKind::ExactSemantic,
+          ''',
+              '''            (
+                  RetrievalSourceKind::Lexical,
+                  options.weights.text_relevance,
+                  defaults.text_relevance,
+              ),
+              (
+                  RetrievalSourceKind::Document,
+                  options.weights.text_relevance,
+                  defaults.text_relevance,
+              ),
+              (
+                  RetrievalSourceKind::ExactSemantic,
+          ''',
+              'ranking options document source',
+          )
+          replace_once(
+              path,
+              '''        if let RankingMode::WithoutSignal(signal) = options.mode {
+              if let Some(source) = source_for_ranking_signal(signal) {
+                  config.source_weights.insert(source, 0.0);
+              }
+          }
+          ''',
+              '''        if let RankingMode::WithoutSignal(signal) = options.mode {
+              if let Some(source) = source_for_ranking_signal(signal) {
+                  config.source_weights.insert(source, 0.0);
+              }
+              if matches!(signal, RankingSignal::TextRelevance) {
+                  config.source_weights.insert(RetrievalSourceKind::Document, 0.0);
+              }
+          }
+          ''',
+              'text relevance ablation disables documents',
+          )
+          replace_once(
+              path,
+              '''fn all_retrieval_sources() -> [RetrievalSourceKind; 7] {
+              [
+                  RetrievalSourceKind::Lexical,
+                  RetrievalSourceKind::ExactSemantic,
+          ''',
+              '''fn all_retrieval_sources() -> [RetrievalSourceKind; 8] {
+              [
+                  RetrievalSourceKind::Lexical,
+                  RetrievalSourceKind::Document,
+                  RetrievalSourceKind::ExactSemantic,
+          ''',
+              'all retrieval sources include documents',
+          )
+          replace_once(
+              path,
+              '''    match source {
+              RetrievalSourceKind::Lexical => "lexical",
+              RetrievalSourceKind::ExactSemantic => "exact_semantic",
+          ''',
+              '''    match source {
+              RetrievalSourceKind::Lexical => "lexical",
+              RetrievalSourceKind::Document => "document",
+              RetrievalSourceKind::ExactSemantic => "exact_semantic",
+          ''',
+              'document source label',
+          )
+          replace_once(
+              path,
+              '''fn normalize_candidate_path(path: &str) -> String {
+              path.replace('\\\\', "/").trim_start_matches("./").to_string()
+          }
+          ''',
+              '''fn normalize_candidate_path(path: &str) -> String {
+              path.replace('\\\\', "/").trim_start_matches("./").to_string()
+          }
+
+          fn is_document_candidate_path(path: &str) -> bool {
+              let path = normalize_candidate_path(path).to_ascii_lowercase();
+              path.starts_with("docs/")
+                  || path.contains("/docs/")
+                  || path.ends_with("readme.md")
+                  || path.ends_with("readme.mdx")
+                  || path.ends_with(".md")
+                  || path.ends_with(".mdx")
+          }
+          ''',
+              'document path classifier',
+          )
+          text = path.read_text()
+          old = '''        let index = FixtureSearchIndex {
+              results: vec![
+                  result("src/a.rs", 0.9, Some("a")),
+                  result("src/a.rs", 0.8, Some("a2")),
+                  result("src/b.rs", 0.7, Some("b")),
+              ],
+          };
+          '''
+          if text.count(old) == 1:
+              text = text.replace(
+                  old,
+                  '''        let index = FixtureSearchIndex {
+              results: vec![
+                  result("docs/guide.md", 1.0, None),
+                  result("src/a.rs", 0.9, Some("a")),
+                  result("src/a.rs", 0.8, Some("a2")),
+                  result("src/b.rs", 0.7, Some("b")),
+              ],
+          };
+          ''',
+                  1,
+              )
+              path.write_text(text)
+
+          # Built-in independent document stream. Documents remain heuristic retrieval evidence;
+          # task intent may make them primary edit context without granting code authority.
+          path = Path('crates/open-kioku-context/src/candidates/builtins.rs')
+          replace_once(
+              path,
+              '''        if !excluded.contains(&RetrievalSourceKind::Lexical) {
+              streams.push(self.lexical_stream(request));
+          }
+          if !excluded.contains(&RetrievalSourceKind::ExactSemantic) {
+          ''',
+              '''        if !excluded.contains(&RetrievalSourceKind::Lexical) {
+              streams.push(self.lexical_stream(request));
+          }
+          if !excluded.contains(&RetrievalSourceKind::Document) {
+              streams.push(self.document_stream(request));
+          }
+          if !excluded.contains(&RetrievalSourceKind::ExactSemantic) {
+          ''',
+              'collect document stream',
+          )
+          replace_once(
+              path,
+              '''            Ok(results) => CandidateStream::success(
+                  RetrievalSourceKind::Lexical,
+                  rerank_baseline(results)
+                      .into_iter()
+          ''',
+              '''            Ok(results) => CandidateStream::success(
+                  RetrievalSourceKind::Lexical,
+                  rerank_baseline(
+                      results
+                          .into_iter()
+                          .filter(|result| !is_document_path(&result.path))
+                          .collect(),
+                  )
+                  .into_iter()
+          ''',
+              'builtin lexical excludes documents',
+          )
+          replace_once(
+              path,
+              '''    fn exact_symbol_stream(&self, request: &CandidateRequest) -> CandidateStream {
+          ''',
+              '''    fn document_stream(&self, request: &CandidateRequest) -> CandidateStream {
+              let terms = retrieval_terms(request);
+              let files_by_id = self
+                  .files
+                  .iter()
+                  .map(|file| (file.id.clone(), file))
+                  .collect::<BTreeMap<_, _>>();
+              let mut chunks = self
+                  .chunks
+                  .iter()
+                  .filter_map(|chunk| {
+                      let file = files_by_id.get(&chunk.file_id).copied()?;
+                      is_document_path(&file.path).then_some((file, chunk))
+                  })
+                  .collect::<Vec<_>>();
+              chunks.sort_by(|left, right| {
+                  left.0
+                      .path
+                      .cmp(&right.0.path)
+                      .then_with(|| left.1.range.start.cmp(&right.1.range.start))
+                      .then_with(|| left.1.range.end.cmp(&right.1.range.end))
+              });
+
+              let mut headings_by_path = BTreeMap::<String, Vec<String>>::new();
+              let mut scored = Vec::new();
+              for (file, chunk) in chunks {
+                  let path_key = normalized_path(&file.path);
+                  let headings = headings_by_path.entry(path_key.clone()).or_default();
+                  update_document_heading_path(headings, &chunk.text);
+                  let heading_path = headings.join(" > ");
+                  let haystack = format!(
+                      "{} {} {}",
+                      path_key,
+                      heading_path,
+                      chunk.text
+                  )
+                  .to_ascii_lowercase();
+                  let overlap = term_overlap(&terms, &haystack);
+                  if overlap == 0 {
+                      continue;
+                  }
+                  let heading_label = if heading_path.is_empty() {
+                      "document root".to_string()
+                  } else {
+                      heading_path
+                  };
+                  let evidence_ref = format!(
+                      "document:{}:{}-{}",
+                      path_key,
+                      chunk.range.start,
+                      chunk.range.end
+                  );
+                  let reason = format!(
+                      "document section `{heading_label}` matched task vocabulary"
+                  );
+                  let result = SearchResult {
+                      path: file.path.clone(),
+                      line_range: Some(chunk.range.clone()),
+                      snippet: chunk.text.clone(),
+                      symbol: None,
+                      score: overlap as f32,
+                      match_reason: reason.clone(),
+                      evidence: vec![reason, format!("document heading path: {heading_label}")],
+                      evidence_refs: vec![evidence_ref],
+                      confidence: 0.65,
+                      score_breakdown: Vec::new(),
+                  };
+                  scored.push((
+                      overlap,
+                      StreamCandidate::from_result(
+                          result,
+                          RetrievalAuthority::Heuristic,
+                          "heading-aware documentation candidate",
+                      ),
+                  ));
+              }
+              scored.sort_by(|left, right| {
+                  right
+                      .0
+                      .cmp(&left.0)
+                      .then_with(|| left.1.result.path.cmp(&right.1.result.path))
+                      .then_with(|| {
+                          left.1
+                              .result
+                              .line_range
+                              .as_ref()
+                              .map(|range| range.start)
+                              .unwrap_or_default()
+                              .cmp(
+                                  &right
+                                      .1
+                                      .result
+                                      .line_range
+                                      .as_ref()
+                                      .map(|range| range.start)
+                                      .unwrap_or_default(),
+                              )
+                      })
+              });
+              CandidateStream::success(
+                  RetrievalSourceKind::Document,
+                  scored
+                      .into_iter()
+                      .map(|(_, candidate)| candidate)
+                      .take(request.limit)
+                      .collect(),
+              )
+          }
+
+          fn exact_symbol_stream(&self, request: &CandidateRequest) -> CandidateStream {
+          ''',
+              'document stream implementation',
+          )
+          replace_once(
+              path,
+              '''fn normalized_path(path: &Path) -> String {
+              path.to_string_lossy()
+                  .replace('\\\\', "/")
+                  .trim_start_matches("./")
+                  .to_string()
+          }
+          ''',
+              '''fn normalized_path(path: &Path) -> String {
+              path.to_string_lossy()
+                  .replace('\\\\', "/")
+                  .trim_start_matches("./")
+                  .to_string()
+          }
+
+          fn is_document_path(path: &Path) -> bool {
+              let path = normalized_path(path).to_ascii_lowercase();
+              path.starts_with("docs/")
+                  || path.contains("/docs/")
+                  || path.ends_with("readme.md")
+                  || path.ends_with("readme.mdx")
+                  || path.ends_with(".md")
+                  || path.ends_with(".mdx")
+          }
+
+          fn update_document_heading_path(headings: &mut Vec<String>, text: &str) {
+              for line in text.lines() {
+                  let trimmed = line.trim_start();
+                  let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+                  if !(1..=6).contains(&level) {
+                      continue;
+                  }
+                  let remainder = &trimmed[level..];
+                  if !remainder.starts_with(char::is_whitespace) {
+                      continue;
+                  }
+                  let title = remainder.trim();
+                  if title.is_empty() {
+                      continue;
+                  }
+                  headings.truncate(level.saturating_sub(1));
+                  while headings.len() < level.saturating_sub(1) {
+                      headings.push(String::new());
+                  }
+                  headings.push(title.to_string());
+              }
+              headings.retain(|heading| !heading.is_empty());
+          }
+          ''',
+              'document helpers',
+          )
+          replace_once(
+              path,
+              '''    #[test]
+              fn source_paths_are_not_promoted_to_exact_symbol_anchors() {
+                  let anchors = symbol_anchor_keys("change src/Foo.java and config.json", &[]);
+                  assert!(!anchors.contains("src::Foo::java"));
+                  assert!(!anchors.contains("config::json"));
+              }
+          ''',
+              '''    #[test]
+              fn source_paths_are_not_promoted_to_exact_symbol_anchors() {
+                  let anchors = symbol_anchor_keys("change src/Foo.java and config.json", &[]);
+                  assert!(!anchors.contains("src::Foo::java"));
+                  assert!(!anchors.contains("config::json"));
+              }
+
+              #[test]
+              fn document_paths_are_classified_without_claiming_code_authority() {
+                  assert!(is_document_path(Path::new("docs/guides/agent-workflows.md")));
+                  assert!(is_document_path(Path::new("README.md")));
+                  assert!(!is_document_path(Path::new("src/lib.rs")));
+              }
+
+              #[test]
+              fn document_heading_path_tracks_nested_sections_deterministically() {
+                  let mut headings = Vec::new();
+                  update_document_heading_path(
+                      &mut headings,
+                      "# Context\nintro\n## Retrieval\ntext\n### Documents\nmore",
+                  );
+                  assert_eq!(headings, vec!["Context", "Retrieval", "Documents"]);
+              }
+          ''',
+              'document helper tests',
+          )
+
+          # Benchmark documents as an independent CC2 source without changing the frozen CC1 gate.
+          path = Path('crates/open-kioku-cli/src/bench/retrieval.rs')
+          replace_once(
+              path,
+              '''fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 6] {
+              [
+                  open_kioku_core::RetrievalSourceKind::Lexical,
+                  open_kioku_core::RetrievalSourceKind::ExactSemantic,
+          ''',
+              '''fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 7] {
+              [
+                  open_kioku_core::RetrievalSourceKind::Lexical,
+                  open_kioku_core::RetrievalSourceKind::Document,
+                  open_kioku_core::RetrievalSourceKind::ExactSemantic,
+          ''',
+              'benchmark document source',
+          )
+          replace_once(
+              path,
+              '''    match source {
+              open_kioku_core::RetrievalSourceKind::Lexical => "lexical",
+              open_kioku_core::RetrievalSourceKind::ExactSemantic => "exact_semantic",
+          ''',
+              '''    match source {
+              open_kioku_core::RetrievalSourceKind::Lexical => "lexical",
+              open_kioku_core::RetrievalSourceKind::Document => "document",
+              open_kioku_core::RetrievalSourceKind::ExactSemantic => "exact_semantic",
+          ''',
+              'benchmark document source label',
+          )
+          PY
+      - name: Format and validate targeted workspace
+        shell: bash
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo check --workspace
+          cargo clippy -p open-kioku-core -p open-kioku-context -p open-kioku-cli -p open-kioku-mcp --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-context
+          cargo test -p open-kioku-cli
+          cargo test -p open-kioku-mcp
+      - name: Commit product-only result
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'crates/open-kioku-core/src/lib.rs',
+              'crates/open-kioku-context/src/candidates.rs',
+              'crates/open-kioku-context/src/candidates/builtins.rs',
+              'crates/open-kioku-cli/src/bench/retrieval.rs',
+              '.github/workflows/agent-finalize-cc2-document-stream.yml',
+          }
+          changed = set(subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines())
+          paths = {line[3:] for line in changed if len(line) > 3}
+          unexpected = paths - allowed
+          if unexpected:
+              raise SystemExit(f'unexpected files changed: {sorted(unexpected)}')
+          PY
+          git add crates/open-kioku-core/src/lib.rs \
+            crates/open-kioku-context/src/candidates.rs \
+            crates/open-kioku-context/src/candidates/builtins.rs \
+            crates/open-kioku-cli/src/bench/retrieval.rs
+          git rm .github/workflows/agent-finalize-cc2-document-stream.yml
+          git commit -m "feat(context): complete independent document retrieval stream"
+          git push origin HEAD:agent/context-candidate-streams
