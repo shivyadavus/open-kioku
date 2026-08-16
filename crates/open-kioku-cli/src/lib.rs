@@ -61,6 +61,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+include!("bench/retrieval.rs");
 include!("types.rs");
 include!("commands/mod.rs");
 include!("commands/architecture.rs");

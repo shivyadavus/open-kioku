@@ -172,6 +172,7 @@ enum Command {
     },
     Bench(BenchArgs),
     WorkflowBench(WorkflowBenchArgs),
+    RetrievalBench(RetrievalBenchArgs),
     ContractBench(ContractBenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),

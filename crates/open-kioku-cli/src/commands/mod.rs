@@ -929,6 +929,47 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::RetrievalBench(args) => {
+            let min_cases = args.min_cases;
+            let min_fusion_recall_at_10 = args.min_fusion_recall_at_10;
+            let min_fusion_mrr = args.min_fusion_mrr;
+            let max_no_gold_false_positive_rate = args.max_no_gold_false_positive_rate;
+            let report = run_retrieval_bench(args)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_retrieval_bench_report(&report);
+            }
+            if report.case_count < min_cases {
+                anyhow::bail!(
+                    "retrieval benchmark loaded {} cases, below required {}",
+                    report.case_count,
+                    min_cases
+                );
+            }
+            let gate = retrieval_gate_quality(&report)?;
+            if gate.recall_at_10 < min_fusion_recall_at_10 {
+                anyhow::bail!(
+                    "retrieval Fusion holdout recall@10 {:.3} is below required {:.3}",
+                    gate.recall_at_10,
+                    min_fusion_recall_at_10
+                );
+            }
+            if gate.mean_reciprocal_rank < min_fusion_mrr {
+                anyhow::bail!(
+                    "retrieval Fusion holdout MRR {:.3} is below required {:.3}",
+                    gate.mean_reciprocal_rank,
+                    min_fusion_mrr
+                );
+            }
+            if gate.no_gold_false_positive_rate > max_no_gold_false_positive_rate {
+                anyhow::bail!(
+                    "retrieval Fusion holdout no-gold false-positive rate {:.3} exceeds required {:.3}",
+                    gate.no_gold_false_positive_rate,
+                    max_no_gold_false_positive_rate
+                );
+            }
+        }
         Command::ContractBench(args) => {
             let min_cases = args.min_cases;
             let min_verdict_accuracy = args.min_verdict_accuracy;
