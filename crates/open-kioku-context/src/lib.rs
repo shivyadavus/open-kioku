@@ -4,8 +4,8 @@ use open_kioku_core::{
     ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit, Evidence, EvidenceId,
     EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType, GraphNodeType,
     HistorySignalQuery, NegativeEvidence, RetrievalAuthority, RetrievalDiagnostics,
-    RetrievalSourceCount, RetrievalSourceKind, RiskReport, RuntimeSignal, ScoreComponent,
-    SearchResult, Symbol, ValidationPlan,
+    RetrievalSourceCount, RetrievalSourceKind, RetrievalTrace, RetrievalUnitKey, RiskReport,
+    RuntimeSignal, ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -127,30 +127,60 @@ fn retrieval_source_list(sources: &[RetrievalSourceKind]) -> String {
         .join(", ")
 }
 
+fn retrieval_trace_for_result<'a>(
+    diagnostics: &'a RetrievalDiagnostics,
+    result: &SearchResult,
+) -> Option<&'a RetrievalTrace> {
+    let expected = RetrievalUnitKey::from_result(result);
+    if let Some(trace) = diagnostics
+        .traces
+        .iter()
+        .find(|trace| trace.unit_key.as_ref() == Some(&expected))
+    {
+        return Some(trace);
+    }
+
+    // Backward compatibility for serialized diagnostics created before unit identities existed:
+    // path-only fallback is safe only when exactly one legacy trace exists for that path. If two
+    // sections share a path, fail closed rather than borrowing authority from an arbitrary section.
+    let path = normalize_path(&result.path);
+    let mut legacy = diagnostics
+        .traces
+        .iter()
+        .filter(|trace| trace.unit_key.is_none() && normalize_path(&trace.path) == path);
+    let first = legacy.next()?;
+    if legacy.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
 fn refresh_context_pack_retrieval_telemetry(
     diagnostics: &mut RetrievalDiagnostics,
     selected: &[SearchResult],
     confidence: &ConfidenceBreakdown,
 ) {
-    let selected_paths = selected
+    let selected_units = selected
         .iter()
-        .map(|result| normalize_path(&result.path))
+        .map(RetrievalUnitKey::from_result)
         .collect::<std::collections::BTreeSet<_>>();
     let mut source_paths =
         std::collections::BTreeMap::<RetrievalSourceKind, std::collections::BTreeSet<String>>::new(
         );
-    let mut exact_paths = std::collections::BTreeSet::new();
-    let mut traced_selected_paths = std::collections::BTreeSet::new();
+    let mut exact_units = std::collections::BTreeSet::new();
+    let mut traced_selected_units = std::collections::BTreeSet::new();
 
-    for trace in &diagnostics.traces {
-        let path = normalize_path(&trace.path);
-        if !selected_paths.contains(&path) {
+    for result in selected {
+        let unit = RetrievalUnitKey::from_result(result);
+        let Some(trace) = retrieval_trace_for_result(diagnostics, result) else {
             continue;
-        }
-        traced_selected_paths.insert(path.clone());
+        };
+        traced_selected_units.insert(unit.clone());
         if trace.authority == RetrievalAuthority::Exact {
-            exact_paths.insert(path.clone());
+            exact_units.insert(unit);
         }
+        let path = normalize_path(&result.path);
         for contribution in &trace.contributions {
             source_paths
                 .entry(contribution.source)
@@ -166,12 +196,12 @@ fn refresh_context_pack_retrieval_telemetry(
             selected_file_count: paths.len(),
         })
         .collect();
-    diagnostics.selection.exact_evidence_count = exact_paths.len();
+    diagnostics.selection.exact_evidence_count = exact_units.len();
     diagnostics.selection.unattributed_selected_file_count =
-        selected_paths.difference(&traced_selected_paths).count();
+        selected_units.difference(&traced_selected_units).count();
     if diagnostics.selection.unattributed_selected_file_count > 0 {
         let caveat = format!(
-            "{} selected file(s) lack retrieval-trace source attribution",
+            "{} selected retrieval unit(s) lack retrieval-trace source attribution because unit identity is ambiguous or unavailable",
             diagnostics.selection.unattributed_selected_file_count
         );
         if !diagnostics.selection.caveats.contains(&caveat) {
@@ -186,9 +216,6 @@ fn refresh_context_pack_retrieval_telemetry(
             caveat.contains("ambiguous") || caveat.contains("unresolved")
         })
         .count();
-    // Reuse the already evidence-backed ContextPack confidence enum rather than inventing a new
-    // probability calibration. CC6 may later replace this qualitative signal with calibrated
-    // abstention metrics without breaking this additive telemetry shape.
     diagnostics.selection.retrieval_confidence = Some(confidence.overall_enum);
     diagnostics.selection.abstention_reason = if selected.is_empty() {
         Some(
@@ -892,10 +919,7 @@ fn retrieval_authority_for_result(
     diagnostics: &RetrievalDiagnostics,
     result: &SearchResult,
 ) -> RetrievalAuthority {
-    diagnostics
-        .traces
-        .iter()
-        .find(|trace| normalize_path(&trace.path) == normalize_path(&result.path))
+    retrieval_trace_for_result(diagnostics, result)
         .map(|trace| trace.authority)
         .unwrap_or(RetrievalAuthority::Heuristic)
 }
@@ -904,10 +928,7 @@ fn retrieval_sources_for_result(
     diagnostics: &RetrievalDiagnostics,
     result: &SearchResult,
 ) -> std::collections::BTreeSet<RetrievalSourceKind> {
-    diagnostics
-        .traces
-        .iter()
-        .find(|trace| normalize_path(&trace.path) == normalize_path(&result.path))
+    retrieval_trace_for_result(diagnostics, result)
         .map(|trace| {
             trace
                 .contributions
@@ -1921,27 +1942,14 @@ fn rerank_fused_for_task_with_options(
         }
         result.reconcile_score_breakdown();
     }
-    let authority_by_path = diagnostics
-        .traces
-        .iter()
-        .map(|trace| (normalize_path(&trace.path), trace.authority))
-        .collect::<std::collections::BTreeMap<_, _>>();
     results.sort_by(|a, b| {
         let a_haystack = searchable_result_text(a);
         let b_haystack = searchable_result_text(b);
         task_relevance_tier(&b.path, &b_haystack, intent)
             .cmp(&task_relevance_tier(&a.path, &a_haystack, intent))
             .then_with(|| {
-                authority_by_path
-                    .get(&normalize_path(&b.path))
-                    .copied()
-                    .unwrap_or(RetrievalAuthority::Heuristic)
-                    .cmp(
-                        &authority_by_path
-                            .get(&normalize_path(&a.path))
-                            .copied()
-                            .unwrap_or(RetrievalAuthority::Heuristic),
-                    )
+                retrieval_authority_for_result(diagnostics, b)
+                    .cmp(&retrieval_authority_for_result(diagnostics, a))
             })
             .then_with(|| {
                 context_quality_tier(&b.path, ranking_options)
@@ -2466,12 +2474,14 @@ mod tests {
             traces: vec![
                 open_kioku_core::RetrievalTrace {
                     path: exact.path.clone(),
+                    unit_key: None,
                     fused_score: exact.score,
                     authority: RetrievalAuthority::Exact,
                     contributions: Vec::new(),
                 },
                 open_kioku_core::RetrievalTrace {
                     path: heuristic.path.clone(),
+                    unit_key: None,
                     fused_score: heuristic.score,
                     authority: RetrievalAuthority::Heuristic,
                     contributions: Vec::new(),
@@ -2514,12 +2524,14 @@ mod tests {
             traces: vec![
                 open_kioku_core::RetrievalTrace {
                     path: primary.path.clone(),
+                    unit_key: None,
                     fused_score: primary.score,
                     authority: RetrievalAuthority::Heuristic,
                     contributions: Vec::new(),
                 },
                 open_kioku_core::RetrievalTrace {
                     path: reference.path.clone(),
+                    unit_key: None,
                     fused_score: reference.score,
                     authority: RetrievalAuthority::Exact,
                     contributions: Vec::new(),
@@ -2567,12 +2579,14 @@ mod tests {
             traces: vec![
                 open_kioku_core::RetrievalTrace {
                     path: docs.path.clone(),
+                    unit_key: None,
                     fused_score: docs.score,
                     authority: RetrievalAuthority::Heuristic,
                     contributions: Vec::new(),
                 },
                 open_kioku_core::RetrievalTrace {
                     path: code.path.clone(),
+                    unit_key: None,
                     fused_score: code.score,
                     authority: RetrievalAuthority::Exact,
                     contributions: Vec::new(),
@@ -2616,12 +2630,14 @@ mod tests {
             traces: vec![
                 open_kioku_core::RetrievalTrace {
                     path: docs.path.clone(),
+                    unit_key: None,
                     fused_score: docs.score,
                     authority: RetrievalAuthority::Heuristic,
                     contributions: Vec::new(),
                 },
                 open_kioku_core::RetrievalTrace {
                     path: code.path.clone(),
+                    unit_key: None,
                     fused_score: code.score,
                     authority: RetrievalAuthority::Exact,
                     contributions: Vec::new(),
@@ -2653,6 +2669,7 @@ mod tests {
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![open_kioku_core::RetrievalTrace {
                 path: "src/a.rs".into(),
+                unit_key: None,
                 fused_score: 1.0,
                 authority: RetrievalAuthority::Exact,
                 contributions: vec![
@@ -2781,6 +2798,137 @@ mod tests {
         assert_eq!(
             diagnostics.selection.retrieval_confidence,
             Some(Confidence::Low)
+        );
+    }
+
+    #[test]
+    fn retrieval_unit_provenance_does_not_bleed_between_sections_of_same_file() {
+        let heuristic = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(open_kioku_core::LineRange { start: 1, end: 10 }),
+            snippet: "heuristic section".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "fixture".into(),
+            evidence: vec!["document section".into()],
+            evidence_refs: vec!["doc:section:one".into()],
+            confidence: 0.6,
+            score_breakdown: Vec::new(),
+        };
+        let exact = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(open_kioku_core::LineRange { start: 20, end: 30 }),
+            snippet: "other exact section".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "fixture".into(),
+            evidence: vec!["exact fixture".into()],
+            evidence_refs: vec!["symbol:exact-other-section".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let heuristic_key = RetrievalUnitKey::from_result(&heuristic);
+        let exact_key = RetrievalUnitKey::from_result(&exact);
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                RetrievalTrace {
+                    path: heuristic.path.clone(),
+                    unit_key: Some(heuristic_key),
+                    fused_score: 1.0,
+                    authority: RetrievalAuthority::Heuristic,
+                    contributions: vec![open_kioku_core::RetrievalContribution {
+                        source: RetrievalSourceKind::Document,
+                        rank: 1,
+                        raw_score: Some(1.0),
+                        rrf_contribution: 1.0,
+                        authority: RetrievalAuthority::Heuristic,
+                        symbol_id: None,
+                        evidence_refs: heuristic.evidence_refs.clone(),
+                        rationale: "document section".into(),
+                    }],
+                },
+                RetrievalTrace {
+                    path: exact.path.clone(),
+                    unit_key: Some(exact_key),
+                    fused_score: 2.0,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: vec![open_kioku_core::RetrievalContribution {
+                        source: RetrievalSourceKind::ExactSemantic,
+                        rank: 1,
+                        raw_score: Some(2.0),
+                        rrf_contribution: 2.0,
+                        authority: RetrievalAuthority::Exact,
+                        symbol_id: None,
+                        evidence_refs: exact.evidence_refs.clone(),
+                        rationale: "exact other section".into(),
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            retrieval_authority_for_result(&diagnostics, &heuristic),
+            RetrievalAuthority::Heuristic
+        );
+        assert_eq!(
+            retrieval_sources_for_result(&diagnostics, &heuristic),
+            std::collections::BTreeSet::from([RetrievalSourceKind::Document])
+        );
+
+        diagnostics.selection.budget.max_tokens = 100;
+        diagnostics.selection.available_context_tokens = 100;
+        refresh_context_pack_retrieval_telemetry(
+            &mut diagnostics,
+            std::slice::from_ref(&heuristic),
+            &ConfidenceBreakdown::default(),
+        );
+        assert_eq!(diagnostics.selection.exact_evidence_count, 0);
+        assert_eq!(diagnostics.selection.unattributed_selected_file_count, 0);
+        assert_eq!(diagnostics.selection.source_stream_mix.len(), 1);
+        assert_eq!(
+            diagnostics.selection.source_stream_mix[0].source,
+            RetrievalSourceKind::Document
+        );
+    }
+
+    #[test]
+    fn ambiguous_legacy_same_path_traces_fail_closed_for_unit_attribution() {
+        let result = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(open_kioku_core::LineRange { start: 1, end: 10 }),
+            snippet: "section".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 1.0,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                },
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 0.5,
+                    authority: RetrievalAuthority::Heuristic,
+                    contributions: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(retrieval_trace_for_result(&diagnostics, &result).is_none());
+        assert_eq!(
+            retrieval_authority_for_result(&diagnostics, &result),
+            RetrievalAuthority::Heuristic
         );
     }
 
@@ -2923,6 +3071,7 @@ mod tests {
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![open_kioku_core::RetrievalTrace {
                 path: exact.path.clone(),
+                unit_key: None,
                 fused_score: exact.score,
                 authority: RetrievalAuthority::Exact,
                 contributions: Vec::new(),
@@ -2976,6 +3125,7 @@ mod tests {
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![open_kioku_core::RetrievalTrace {
                 path: exact.path.clone(),
+                unit_key: None,
                 fused_score: exact.score,
                 authority: RetrievalAuthority::Exact,
                 contributions: Vec::new(),
