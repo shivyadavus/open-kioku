@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "corpus_id": "open-kioku-retrieval-v1",
+  "strategy": "fusion",
+  "split": "holdout",
+  "minimums": {
+    "recall_at_5": 0.611111111111111,
+    "recall_at_10": 0.9444444444444443,
+    "mean_reciprocal_rank": 0.8333333333333334,
+    "file_f1_at_10": 0.4358974358974359,
+    "token_budget_gold_yield_2000": 1.0
+  },
+  "maximums": {
+    "no_gold_false_positive_rate": 0.75
+  }
+}
