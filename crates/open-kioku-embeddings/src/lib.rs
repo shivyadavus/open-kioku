@@ -230,9 +230,16 @@ impl FastEmbedEmbeddingProvider {
                 let model = inner.lock().map_err(|_| {
                     OkError::Unsupported("Qwen3 embedding model lock poisoned".into())
                 })?;
-                model.embed(inputs).map_err(|err| {
-                    OkError::Unsupported(format!("Qwen3 embedding inference failed: {err}"))
-                })?
+                {
+                    let mut vectors = Vec::with_capacity(inputs.len());
+                    for chunk in inputs.chunks(batch_size.max(1)) {
+                        let mut chunk_vectors = model.embed(chunk).map_err(|err| {
+                            OkError::Unsupported(format!("Qwen3 embedding inference failed: {err}"))
+                        })?;
+                        vectors.append(&mut chunk_vectors);
+                    }
+                    vectors
+                }
             }
             NeuralBackend::JinaCode(inner) => {
                 let mut model = inner.lock().map_err(|_| {
