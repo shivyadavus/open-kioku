@@ -1,0 +1,37 @@
+name: agent-finalize-cc4-caps
+
+on:
+  push:
+    branches: [agent/cc4-task-family-routing]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC4 candidate allocation integration
+        run: python3 .github/scripts/agent_finalize_cc4_caps.py
+      - name: Validate workspace
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-context
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product change and remove temporary tooling
+        run: |
+          rm .github/scripts/agent_finalize_cc4_caps.py .github/workflows/agent-finalize-cc4-caps.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(context): enforce task-family candidate allocation"
+          git push origin HEAD:agent/cc4-task-family-routing
