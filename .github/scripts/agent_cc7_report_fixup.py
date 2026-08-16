@@ -99,4 +99,20 @@ replacement = '''        let baseline = RetrievalQualityBaseline {
 assert s.count(needle) == 1, s.count(needle)
 s = s.replace(needle, replacement, 1)
 
+# Keep the regression fixture compliant with workspace-wide -D warnings.
+needle = '''        let mut previous_quality = RetrievalQualityMetrics::default();
+        previous_quality.recall_at_10 = 0.5;
+        previous_quality.mean_reciprocal_rank = 0.25;
+        previous_quality.file_f1_at_10 = 0.2;
+        previous_quality.no_gold_false_positive_rate = 0.5;'''
+replacement = '''        let previous_quality = RetrievalQualityMetrics {
+            recall_at_10: 0.5,
+            mean_reciprocal_rank: 0.25,
+            file_f1_at_10: 0.2,
+            no_gold_false_positive_rate: 0.5,
+            ..Default::default()
+        };'''
+assert s.count(needle) == 1, s.count(needle)
+s = s.replace(needle, replacement, 1)
+
 p.write_text(s)
