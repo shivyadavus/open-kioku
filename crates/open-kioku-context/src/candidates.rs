@@ -61,6 +61,7 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                 .index
                 .search(term, request.limit)?
                 .into_iter()
+                .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
                 .enumerate()
             {
                 let rank = index + 1;
@@ -240,6 +241,7 @@ impl FusionConfig {
             rrf_k: DEFAULT_RRF_K,
             source_weights: BTreeMap::from([
                 (RetrievalSourceKind::Lexical, 1.00),
+                (RetrievalSourceKind::Document, 0.90),
                 (RetrievalSourceKind::ExactSemantic, 1.50),
                 (RetrievalSourceKind::Graph, 1.20),
                 (RetrievalSourceKind::SemanticVector, 0.80),
@@ -271,6 +273,11 @@ impl FusionConfig {
         for (source, configured, baseline) in [
             (
                 RetrievalSourceKind::Lexical,
+                options.weights.text_relevance,
+                defaults.text_relevance,
+            ),
+            (
+                RetrievalSourceKind::Document,
                 options.weights.text_relevance,
                 defaults.text_relevance,
             ),
@@ -314,6 +321,11 @@ impl FusionConfig {
             if let Some(source) = source_for_ranking_signal(signal) {
                 config.source_weights.insert(source, 0.0);
             }
+            if matches!(signal, RankingSignal::TextRelevance) {
+                config
+                    .source_weights
+                    .insert(RetrievalSourceKind::Document, 0.0);
+            }
         }
         config
     }
@@ -347,9 +359,10 @@ impl Default for FusionConfig {
     }
 }
 
-fn all_retrieval_sources() -> [RetrievalSourceKind; 7] {
+fn all_retrieval_sources() -> [RetrievalSourceKind; 8] {
     [
         RetrievalSourceKind::Lexical,
+        RetrievalSourceKind::Document,
         RetrievalSourceKind::ExactSemantic,
         RetrievalSourceKind::Graph,
         RetrievalSourceKind::SemanticVector,
@@ -575,6 +588,7 @@ pub fn retrieve_and_fuse_candidate_streams(
 pub(crate) fn retrieval_source_label(source: RetrievalSourceKind) -> &'static str {
     match source {
         RetrievalSourceKind::Lexical => "lexical",
+        RetrievalSourceKind::Document => "document",
         RetrievalSourceKind::ExactSemantic => "exact_semantic",
         RetrievalSourceKind::Graph => "graph",
         RetrievalSourceKind::SemanticVector => "semantic_vector",
@@ -672,6 +686,16 @@ fn dedup_strings(mut values: Vec<String>) -> Vec<String> {
 
 fn normalize_candidate_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn is_document_candidate_path(path: &str) -> bool {
+    let path = normalize_candidate_path(path).to_ascii_lowercase();
+    path.starts_with("docs/")
+        || path.contains("/docs/")
+        || path.ends_with("readme.md")
+        || path.ends_with("readme.mdx")
+        || path.ends_with(".md")
+        || path.ends_with(".mdx")
 }
 
 #[cfg(test)]
@@ -977,6 +1001,7 @@ mod tests {
     fn search_index_source_collapses_same_file_to_one_ranked_vote() {
         let index = FixtureSearchIndex {
             results: vec![
+                result("docs/guide.md", 1.0, None),
                 result("src/a.rs", 0.9, Some("a")),
                 result("src/a.rs", 0.8, Some("a2")),
                 result("src/b.rs", 0.7, Some("b")),
@@ -990,6 +1015,12 @@ mod tests {
         assert_eq!(stream.candidates.len(), 2);
         assert_eq!(stream.candidates[0].result.path, PathBuf::from("src/a.rs"));
         assert_eq!(stream.candidates[1].result.path, PathBuf::from("src/b.rs"));
+        assert!(stream
+            .candidates
+            .iter()
+            .all(|candidate| !is_document_candidate_path(
+                &candidate.result.path.to_string_lossy()
+            )));
     }
 
     #[derive(Clone)]

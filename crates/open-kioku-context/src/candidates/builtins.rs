@@ -40,6 +40,9 @@ impl<'a> BuiltinCandidateContext<'a> {
         if !excluded.contains(&RetrievalSourceKind::Lexical) {
             streams.push(self.lexical_stream(request));
         }
+        if !excluded.contains(&RetrievalSourceKind::Document) {
+            streams.push(self.document_stream(request));
+        }
         if !excluded.contains(&RetrievalSourceKind::ExactSemantic) {
             streams.push(exact);
         }
@@ -70,22 +73,127 @@ impl<'a> BuiltinCandidateContext<'a> {
         ) {
             Ok(results) => CandidateStream::success(
                 RetrievalSourceKind::Lexical,
-                rerank_baseline(results)
-                    .into_iter()
-                    .map(|result| {
-                        StreamCandidate::from_result(
-                            result,
-                            RetrievalAuthority::Heuristic,
-                            "lexical repository search candidate",
-                        )
-                    })
-                    .collect(),
+                rerank_baseline(
+                    results
+                        .into_iter()
+                        .filter(|result| !is_document_path(&result.path))
+                        .collect(),
+                )
+                .into_iter()
+                .map(|result| {
+                    StreamCandidate::from_result(
+                        result,
+                        RetrievalAuthority::Heuristic,
+                        "lexical repository search candidate",
+                    )
+                })
+                .collect(),
             ),
             Err(err) => CandidateStream::unavailable(
                 RetrievalSourceKind::Lexical,
                 format!("lexical candidate stream unavailable: {err}"),
             ),
         }
+    }
+
+    fn document_stream(&self, request: &CandidateRequest) -> CandidateStream {
+        let terms = retrieval_terms(request);
+        let files_by_id = self
+            .files
+            .iter()
+            .map(|file| (file.id.clone(), file))
+            .collect::<BTreeMap<_, _>>();
+        let mut chunks = self
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let file = files_by_id.get(&chunk.file_id).copied()?;
+                is_document_path(&file.path).then_some((file, chunk))
+            })
+            .collect::<Vec<_>>();
+        chunks.sort_by(|left, right| {
+            left.0
+                .path
+                .cmp(&right.0.path)
+                .then_with(|| left.1.range.start.cmp(&right.1.range.start))
+                .then_with(|| left.1.range.end.cmp(&right.1.range.end))
+        });
+
+        let mut headings_by_path = BTreeMap::<String, Vec<String>>::new();
+        let mut scored = Vec::new();
+        for (file, chunk) in chunks {
+            let path_key = normalized_path(&file.path);
+            let headings = headings_by_path.entry(path_key.clone()).or_default();
+            update_document_heading_path(headings, &chunk.text);
+            let heading_path = headings.join(" > ");
+            let haystack =
+                format!("{} {} {}", path_key, heading_path, chunk.text).to_ascii_lowercase();
+            let overlap = term_overlap(&terms, &haystack);
+            if overlap == 0 {
+                continue;
+            }
+            let heading_label = if heading_path.is_empty() {
+                "document root".to_string()
+            } else {
+                heading_path
+            };
+            let evidence_ref = format!(
+                "document:{}:{}-{}",
+                path_key, chunk.range.start, chunk.range.end
+            );
+            let reason = format!("document section `{heading_label}` matched task vocabulary");
+            let result = SearchResult {
+                path: file.path.clone(),
+                line_range: Some(chunk.range.clone()),
+                snippet: chunk.text.clone(),
+                symbol: None,
+                score: overlap as f32,
+                match_reason: reason.clone(),
+                evidence: vec![reason, format!("document heading path: {heading_label}")],
+                evidence_refs: vec![evidence_ref],
+                confidence: 0.65,
+                score_breakdown: Vec::new(),
+            };
+            scored.push((
+                overlap,
+                StreamCandidate::from_result(
+                    result,
+                    RetrievalAuthority::Heuristic,
+                    "heading-aware documentation candidate",
+                ),
+            ));
+        }
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.result.path.cmp(&right.1.result.path))
+                .then_with(|| {
+                    left.1
+                        .result
+                        .line_range
+                        .as_ref()
+                        .map(|range| range.start)
+                        .unwrap_or_default()
+                        .cmp(
+                            &right
+                                .1
+                                .result
+                                .line_range
+                                .as_ref()
+                                .map(|range| range.start)
+                                .unwrap_or_default(),
+                        )
+                })
+        });
+        CandidateStream::success(
+            RetrievalSourceKind::Document,
+            scored
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .take(request.limit)
+                .collect(),
+        )
     }
 
     fn exact_symbol_stream(&self, request: &CandidateRequest) -> CandidateStream {
@@ -752,6 +860,40 @@ fn normalized_path(path: &Path) -> String {
         .to_string()
 }
 
+fn is_document_path(path: &Path) -> bool {
+    let path = normalized_path(path).to_ascii_lowercase();
+    path.starts_with("docs/")
+        || path.contains("/docs/")
+        || path.ends_with("readme.md")
+        || path.ends_with("readme.mdx")
+        || path.ends_with(".md")
+        || path.ends_with(".mdx")
+}
+
+fn update_document_heading_path(headings: &mut Vec<String>, text: &str) {
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+        if !(1..=6).contains(&level) {
+            continue;
+        }
+        let remainder = &trimmed[level..];
+        if !remainder.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let title = remainder.trim();
+        if title.is_empty() {
+            continue;
+        }
+        headings.truncate(level.saturating_sub(1));
+        while headings.len() < level.saturating_sub(1) {
+            headings.push(String::new());
+        }
+        headings.push(title.to_string());
+    }
+    headings.retain(|heading| !heading.is_empty());
+}
+
 #[cfg(test)]
 mod exact_authority_tests {
     use super::*;
@@ -832,5 +974,33 @@ mod exact_authority_tests {
         let anchors = symbol_anchor_keys("change src/Foo.java and config.json", &[]);
         assert!(!anchors.contains("src::Foo::java"));
         assert!(!anchors.contains("config::json"));
+    }
+
+    #[test]
+    fn document_paths_are_classified_without_claiming_code_authority() {
+        assert!(is_document_path(Path::new(
+            "docs/guides/agent-workflows.md"
+        )));
+        assert!(is_document_path(Path::new("README.md")));
+        assert!(!is_document_path(Path::new("src/lib.rs")));
+    }
+
+    #[test]
+    fn document_heading_path_tracks_nested_sections_across_chunks() {
+        let mut headings = Vec::new();
+        update_document_heading_path(
+            &mut headings,
+            "# Context Compiler
+intro
+## Retrieval
+text",
+        );
+        update_document_heading_path(
+            &mut headings,
+            "continued text
+### Documents
+more",
+        );
+        assert_eq!(headings, vec!["Context Compiler", "Retrieval", "Documents"]);
     }
 }

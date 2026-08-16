@@ -2061,6 +2061,7 @@ impl Default for GraphEdge {
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalSourceKind {
     Lexical,
+    Document,
     ExactSemantic,
     Graph,
     SemanticVector,
