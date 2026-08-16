@@ -15,6 +15,7 @@ use open_kioku_storage::{HistoryStore, OkStore};
 use open_kioku_tests::TestSelector;
 
 pub mod candidates;
+pub mod routing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ContextPackFormat {
@@ -131,6 +132,13 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
         return;
     }
     out.push_str("## Retrieval\n\n");
+    out.push_str(&format!(
+        "- Task family: `{:?}` (confidence `{:.2}`)\n",
+        diagnostics.routing.task_family, diagnostics.routing.confidence
+    ));
+    for reason in &diagnostics.routing.reasons {
+        out.push_str(&format!("  - Routing rationale: {reason}\n"));
+    }
     if !diagnostics.sources_attempted.is_empty() {
         out.push_str(&format!(
             "- Attempted: `{}`\n",
@@ -167,6 +175,13 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
 }
 
 fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+    out.push_str(&format!(
+        "TASK_FAMILY: {:?} confidence={:.2}\n",
+        diagnostics.routing.task_family, diagnostics.routing.confidence
+    ));
+    for reason in &diagnostics.routing.reasons {
+        out.push_str(&format!("TASK_ROUTING_RATIONALE: {reason}\n"));
+    }
     if !diagnostics.sources_attempted.is_empty() {
         out.push_str(&format!(
             "RETRIEVAL_SOURCES_ATTEMPTED: {}\n",
@@ -278,10 +293,19 @@ impl<'a> ContextPackBuilder<'a> {
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
         let intent = TaskSearchIntent::parse(task);
-        let candidate_limit = limit.saturating_mul(4).clamp(20, 200);
+        let routing = routing::classify_task(task);
+        let candidate_limit = limit
+            .saturating_mul(routing.policy.candidate_multiplier)
+            .clamp(20, 200);
         let request =
             candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit);
-        let external_streams = candidates::retrieve_candidate_streams(external_sources, &request);
+        let routed_external_sources = external_sources
+            .iter()
+            .copied()
+            .filter(|source| routing.policy.allows(source.source()))
+            .collect::<Vec<_>>();
+        let external_streams =
+            candidates::retrieve_candidate_streams(&routed_external_sources, &request);
         let overridden_sources = external_streams
             .iter()
             .filter(|stream| stream.available)
@@ -295,10 +319,29 @@ impl<'a> ContextPackBuilder<'a> {
             symbols: &symbols,
         }
         .collect_excluding(&request, &overridden_sources);
+        streams.retain(|stream| routing.policy.allows(stream.source));
         streams.extend(external_streams);
+        // Task routing changes which evidence families run and how much candidate headroom they
+        // receive. It deliberately does not introduce uncalibrated fusion weights: the measured
+        // product default remains unweighted RRF unless repository ranking configuration says otherwise.
         let fusion_config = candidates::FusionConfig::from_ranking_options(&self.ranking_options);
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
         let mut diagnostics = fused.diagnostics;
+        diagnostics.routing = routing.diagnostics();
+        for required in &diagnostics.routing.required_evidence {
+            let contributed = diagnostics.traces.iter().any(|trace| {
+                trace
+                    .contributions
+                    .iter()
+                    .any(|contribution| contribution.source == *required)
+            });
+            if !contributed {
+                diagnostics.caveats.push(format!(
+                    "task-family policy requires {} evidence, but it did not contribute task-relevant evidence",
+                    retrieval_source_label(*required)
+                ));
+            }
+        }
         let primary = rerank_fused_for_task_with_options(
             fused.results,
             &intent,
@@ -321,7 +364,11 @@ impl<'a> ContextPackBuilder<'a> {
             rerank_with_options(primary, &self.ranking_options),
             false,
             true,
-            open_kioku_core::RetrievalDiagnostics::default(),
+            {
+                let mut diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+                diagnostics.routing = routing::classify_task(task).diagnostics();
+                diagnostics
+            },
         )
     }
 
@@ -2437,6 +2484,7 @@ mod tests {
             caveats: vec!["semantic index is stale".into()],
             traces: Vec::new(),
             selection: Default::default(),
+            routing: Default::default(),
         };
         let mut markdown = String::new();
         write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);

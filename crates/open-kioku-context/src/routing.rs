@@ -117,7 +117,15 @@ pub fn classify_task(task: &str) -> TaskRoutingDecision {
     );
     let has_issue = contains_any(
         &lower,
-        &["issue", "ticket", "bug", "feature", "request", "implement", "fix"],
+        &[
+            "issue",
+            "ticket",
+            "bug",
+            "feature",
+            "request",
+            "implement",
+            "fix",
+        ],
     );
 
     if has_doc && has_code {
@@ -181,7 +189,10 @@ pub fn classify_task(task: &str) -> TaskRoutingDecision {
         return decision(
             TaskFamily::IssueToCode,
             0.78,
-            vec!["task uses issue/change implementation language without a more specific family".into()],
+            vec![
+                "task uses issue/change implementation language without a more specific family"
+                    .into(),
+            ],
         );
     }
 
@@ -347,8 +358,14 @@ mod tests {
     fn ambiguous_runtime_failure_exposes_routing_precedence() {
         let route = classify_task("fix panic and add regression tests for dependency impact");
         assert_eq!(route.family, TaskFamily::TraceToCode);
-        assert!(route.reasons.iter().any(|reason| reason.contains("multiple")));
-        assert!(route.policy.required_evidence.contains(&RetrievalSourceKind::Runtime));
+        assert!(route
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("multiple")));
+        assert!(route
+            .policy
+            .required_evidence
+            .contains(&RetrievalSourceKind::Runtime));
     }
 
     #[test]
@@ -366,6 +383,9 @@ mod tests {
         let route = classify_task("trace runtime error to implementation");
         assert_eq!(route.family, TaskFamily::TraceToCode);
         assert!(route.policy.allows(RetrievalSourceKind::Runtime));
-        assert!(route.policy.required_evidence.contains(&RetrievalSourceKind::Runtime));
+        assert!(route
+            .policy
+            .required_evidence
+            .contains(&RetrievalSourceKind::Runtime));
     }
 }
