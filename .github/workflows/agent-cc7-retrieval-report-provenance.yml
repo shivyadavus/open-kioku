@@ -15,7 +15,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted CC7 patch
-        run: python3 .github/scripts/agent_cc7_report_patch.py
+        run: |
+          python3 .github/scripts/agent_cc7_report_patch.py
+          python3 .github/scripts/agent_cc7_report_fixup.py
       - name: Validate focused and workspace contracts
         run: |
           cargo fmt --all -- --check
@@ -33,6 +35,7 @@ jobs:
           assert len(report['provenance']['source_revision']) == 40
           assert report['provenance']['cases_sha256'].startswith('sha256:')
           assert report['provenance']['frozen_fixture_revisions_verified'] is True
+          assert report['cases_file'] == 'benchmarks/retrieval-cases.json'
           semantic = report['strategy_identities']['cc2:semantic_vector_local_hash']
           assert semantic == {'algorithm':'semantic_vector','provider':'local','model':'local-hash','backend':'exact-flat'}
           assert report['baseline_deltas']
@@ -51,6 +54,6 @@ jobs:
           git config user.email "155265880+shivyadavus@users.noreply.github.com"
           git add crates/open-kioku-cli/src/bench/retrieval.rs
           git commit -m "feat(bench): add reproducible retrieval report provenance"
-          git rm .github/scripts/agent_cc7_report_patch.py .github/workflows/agent-cc7-retrieval-report-provenance.yml
+          git rm .github/scripts/agent_cc7_report_patch.py .github/scripts/agent_cc7_report_fixup.py .github/workflows/agent-cc7-retrieval-report-provenance.yml
           git commit -m "chore: remove temporary CC7 validation tooling"
           git push origin HEAD:agent/cc7-retrieval-report-provenance
