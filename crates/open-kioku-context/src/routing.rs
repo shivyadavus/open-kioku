@@ -24,12 +24,37 @@ impl TaskRoutingDecision {
 pub struct RetrievalPolicy {
     pub enabled_sources: Vec<RetrievalSourceKind>,
     pub required_evidence: Vec<RetrievalSourceKind>,
-    pub candidate_multiplier: usize,
+    /// Per-source candidate allocation expressed as a multiplier of the caller's requested
+    /// primary-file limit. This changes retrieval breadth, never evidence authority or RRF weight.
+    pub candidate_factors: Vec<(RetrievalSourceKind, usize)>,
+    pub preferred_context_shape: &'static str,
+    pub fusion_profile: &'static str,
+    pub missing_required_evidence_is_blocker: bool,
 }
 
 impl RetrievalPolicy {
     pub fn allows(&self, source: RetrievalSourceKind) -> bool {
         self.enabled_sources.contains(&source)
+    }
+
+    pub fn candidate_cap(&self, source: RetrievalSourceKind, requested_limit: usize) -> usize {
+        let factor = self
+            .candidate_factors
+            .iter()
+            .find_map(|(candidate_source, factor)| {
+                (*candidate_source == source).then_some(*factor)
+            })
+            .unwrap_or(1);
+        requested_limit.saturating_mul(factor).clamp(1, 200)
+    }
+
+    pub fn request_limit(&self, requested_limit: usize) -> usize {
+        self.enabled_sources
+            .iter()
+            .map(|source| self.candidate_cap(*source, requested_limit))
+            .max()
+            .unwrap_or(requested_limit.max(1))
+            .clamp(1, 200)
     }
 }
 
@@ -142,48 +167,51 @@ pub fn classify_task(task: &str) -> TaskRoutingDecision {
             vec!["task explicitly targets documentation content".into()],
         );
     }
-    if has_trace {
-        let mut reasons = vec!["task contains runtime failure or trace language".into()];
-        if has_test || has_ripple || has_issue {
-            reasons.push(
-                "multiple task-family signals matched; runtime failure evidence takes safety precedence"
+
+    let specialized = [has_trace, has_review, has_ripple, has_test]
+        .into_iter()
+        .filter(|matched| *matched)
+        .count();
+    if specialized > 1 {
+        return decision(
+            TaskFamily::General,
+            0.45,
+            vec![
+                "multiple specialized task-family signals matched; using conservative general retrieval rather than silently choosing one"
                     .into(),
-            );
-        }
-        return decision(TaskFamily::TraceToCode, 0.90, reasons);
+            ],
+        );
+    }
+    if has_trace {
+        return decision(
+            TaskFamily::TraceToCode,
+            0.92,
+            vec!["task contains runtime failure or trace language".into()],
+        );
     }
     if has_review {
-        let mut reasons = vec!["task explicitly references review feedback/comment context".into()];
-        if has_test || has_ripple || has_issue {
-            reasons.push(
-                "multiple task-family signals matched; review context remains the primary routing anchor"
-                    .into(),
-            );
-        }
-        return decision(TaskFamily::CommentToContext, 0.90, reasons);
+        return decision(
+            TaskFamily::CommentToContext,
+            0.92,
+            vec!["task explicitly references review feedback/comment context".into()],
+        );
     }
     if has_ripple {
-        let mut reasons =
-            vec!["task asks for dependency, impact, contract, or boundary context".into()];
-        if has_test || has_issue {
-            reasons.push(
-                "multiple task-family signals matched; dependency/impact evidence takes structural precedence"
-                    .into(),
-            );
-        }
-        return decision(TaskFamily::EditToRipple, 0.86, reasons);
+        return decision(
+            TaskFamily::EditToRipple,
+            0.88,
+            vec!["task asks for dependency, impact, contract, or boundary context".into()],
+        );
     }
     if has_test {
-        let mut reasons = vec![
-            "task explicitly targets tests, validation, coverage, or regression evidence".into(),
-        ];
-        if has_issue {
-            reasons.push(
-                "multiple task-family signals matched; validation intent is more specific than general issue-to-code"
+        return decision(
+            TaskFamily::CodeToTest,
+            0.86,
+            vec![
+                "task explicitly targets tests, validation, coverage, or regression evidence"
                     .into(),
-            );
-        }
-        return decision(TaskFamily::CodeToTest, 0.84, reasons);
+            ],
+        );
     }
     if has_issue {
         return decision(
@@ -221,12 +249,27 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
         TaskFamily::Documentation => RetrievalPolicy {
             enabled_sources: vec![S::Document, S::ExactSemantic],
             required_evidence: vec![S::Document],
-            candidate_multiplier: 6,
+            candidate_factors: vec![(S::Document, 6), (S::ExactSemantic, 2)],
+            preferred_context_shape: "document_sections_with_exact_code_anchors",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: true,
         },
         TaskFamily::MixedCodeDocs => RetrievalPolicy {
             enabled_sources: all_sources().to_vec(),
             required_evidence: vec![S::Document, S::Lexical],
-            candidate_multiplier: 5,
+            candidate_factors: vec![
+                (S::Document, 4),
+                (S::Lexical, 3),
+                (S::ExactSemantic, 3),
+                (S::Graph, 2),
+                (S::SemanticVector, 2),
+                (S::Validation, 2),
+                (S::GitHistory, 2),
+                (S::Runtime, 2),
+            ],
+            preferred_context_shape: "implementation_tests_and_document_sections",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: true,
         },
         TaskFamily::CodeToTest => RetrievalPolicy {
             enabled_sources: vec![
@@ -238,7 +281,17 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
                 S::Runtime,
             ],
             required_evidence: vec![S::Validation],
-            candidate_multiplier: 5,
+            candidate_factors: vec![
+                (S::Validation, 5),
+                (S::ExactSemantic, 3),
+                (S::Graph, 3),
+                (S::GitHistory, 3),
+                (S::Lexical, 2),
+                (S::Runtime, 2),
+            ],
+            preferred_context_shape: "tests_fixtures_validation_and_changed_code",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: true,
         },
         TaskFamily::TraceToCode => RetrievalPolicy {
             enabled_sources: vec![
@@ -250,7 +303,17 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
                 S::Runtime,
             ],
             required_evidence: vec![S::Runtime],
-            candidate_multiplier: 5,
+            candidate_factors: vec![
+                (S::Runtime, 5),
+                (S::Graph, 4),
+                (S::ExactSemantic, 3),
+                (S::Validation, 2),
+                (S::GitHistory, 2),
+                (S::Lexical, 2),
+            ],
+            preferred_context_shape: "runtime_failure_call_path_and_implementation",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: true,
         },
         TaskFamily::CommentToContext => RetrievalPolicy {
             enabled_sources: vec![
@@ -262,7 +325,17 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
                 S::GitHistory,
             ],
             required_evidence: vec![S::Lexical],
-            candidate_multiplier: 4,
+            candidate_factors: vec![
+                (S::Lexical, 4),
+                (S::ExactSemantic, 3),
+                (S::Graph, 3),
+                (S::Document, 2),
+                (S::Validation, 2),
+                (S::GitHistory, 2),
+            ],
+            preferred_context_shape: "review_anchor_changed_hunk_and_references",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: false,
         },
         TaskFamily::EditToRipple => RetrievalPolicy {
             enabled_sources: vec![
@@ -274,17 +347,33 @@ fn policy_for(family: TaskFamily) -> RetrievalPolicy {
                 S::Runtime,
             ],
             required_evidence: vec![S::ExactSemantic, S::Graph],
-            candidate_multiplier: 5,
+            candidate_factors: vec![
+                (S::ExactSemantic, 5),
+                (S::Graph, 5),
+                (S::Validation, 3),
+                (S::GitHistory, 3),
+                (S::Lexical, 2),
+                (S::Runtime, 2),
+            ],
+            preferred_context_shape: "callers_callees_contracts_tests_and_boundaries",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: true,
         },
         TaskFamily::IssueToCode => RetrievalPolicy {
             enabled_sources: all_sources().to_vec(),
             required_evidence: vec![S::Lexical],
-            candidate_multiplier: 4,
+            candidate_factors: all_sources().into_iter().map(|source| (source, 4)).collect(),
+            preferred_context_shape: "implementation_boundaries_and_tests",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: false,
         },
         TaskFamily::General => RetrievalPolicy {
             enabled_sources: all_sources().to_vec(),
             required_evidence: Vec::new(),
-            candidate_multiplier: 4,
+            candidate_factors: all_sources().into_iter().map(|source| (source, 4)).collect(),
+            preferred_context_shape: "diverse_general_context",
+            fusion_profile: "existing_repository_rrf",
+            missing_required_evidence_is_blocker: false,
         },
     }
 }
@@ -311,7 +400,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_to_test_requires_validation_without_document_noise() {
+    fn code_to_test_allocates_more_candidates_to_validation_without_document_noise() {
         let route = classify_task("find regression tests and validation for changed parser code");
         assert_eq!(route.family, TaskFamily::CodeToTest);
         assert!(route.policy.allows(RetrievalSourceKind::Validation));
@@ -320,13 +409,16 @@ mod tests {
             route.policy.required_evidence,
             vec![RetrievalSourceKind::Validation]
         );
-        assert!(route.policy.candidate_multiplier >= 4);
+        assert!(
+            route.policy.candidate_cap(RetrievalSourceKind::Validation, 10)
+                > route.policy.candidate_cap(RetrievalSourceKind::Lexical, 10)
+        );
     }
 
     #[test]
-    fn edit_to_ripple_requires_exact_and_graph_evidence() {
+    fn edit_to_ripple_allocates_more_candidates_to_exact_and_graph_evidence() {
         let route = classify_task(
-            "show ripple impact across callers, dependencies, and public API boundary",
+            "show ripple across callers, callees, public API boundary and contract relationships",
         );
         assert_eq!(route.family, TaskFamily::EditToRipple);
         assert_eq!(
@@ -336,6 +428,9 @@ mod tests {
                 RetrievalSourceKind::Graph
             ]
         );
+        let lexical = route.policy.candidate_cap(RetrievalSourceKind::Lexical, 10);
+        assert!(route.policy.candidate_cap(RetrievalSourceKind::ExactSemantic, 10) > lexical);
+        assert!(route.policy.candidate_cap(RetrievalSourceKind::Graph, 10) > lexical);
     }
 
     #[test]
@@ -344,6 +439,10 @@ mod tests {
         assert_eq!(docs.family, TaskFamily::Documentation);
         assert!(docs.policy.allows(RetrievalSourceKind::Document));
         assert!(!docs.policy.allows(RetrievalSourceKind::Lexical));
+        assert!(
+            docs.policy.candidate_cap(RetrievalSourceKind::Document, 10)
+                > docs.policy.candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+        );
 
         let api_docs = classify_task("update the API guide with authentication examples");
         assert_eq!(api_docs.family, TaskFamily::Documentation);
@@ -355,17 +454,14 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_runtime_failure_exposes_routing_precedence() {
+    fn ambiguous_specialized_task_falls_back_to_conservative_general_policy() {
         let route = classify_task("fix panic and add regression tests for dependency impact");
-        assert_eq!(route.family, TaskFamily::TraceToCode);
-        assert!(route
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("multiple")));
-        assert!(route
-            .policy
-            .required_evidence
-            .contains(&RetrievalSourceKind::Runtime));
+        assert_eq!(route.family, TaskFamily::General);
+        assert!(route.reasons.iter().any(|reason| reason.contains("multiple")));
+        for source in all_sources() {
+            assert!(route.policy.allows(source));
+        }
+        assert!(route.confidence < 0.5);
     }
 
     #[test]
@@ -382,10 +478,8 @@ mod tests {
     fn routing_policy_does_not_encode_unmeasured_fusion_weights() {
         let route = classify_task("trace runtime error to implementation");
         assert_eq!(route.family, TaskFamily::TraceToCode);
+        assert_eq!(route.policy.fusion_profile, "existing_repository_rrf");
         assert!(route.policy.allows(RetrievalSourceKind::Runtime));
-        assert!(route
-            .policy
-            .required_evidence
-            .contains(&RetrievalSourceKind::Runtime));
+        assert!(route.policy.required_evidence.contains(&RetrievalSourceKind::Runtime));
     }
 }
