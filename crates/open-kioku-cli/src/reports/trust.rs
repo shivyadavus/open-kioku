@@ -729,6 +729,34 @@ fn render_proof_html(report: &ProofReport) -> String {
         ));
     }
     out.push_str("</tbody></table></section>");
+    out.push_str("<section class=\"panel\"><h2>Retrieval Quality</h2>");
+    out.push_str("<p><strong>Scope:</strong> frozen benchmark artifact only. These metrics do not measure the repository evaluated by <code>ok prove</code>.</p>");
+    if report.retrieval_quality.available {
+        out.push_str("<table><tbody>");
+        if let Some(value) = report.retrieval_quality.recall_at_10 {
+            out.push_str(&format!("<tr><th>Fusion holdout Recall@10</th><td>{value:.3}</td></tr>"));
+        }
+        if let Some(value) = report.retrieval_quality.mean_reciprocal_rank {
+            out.push_str(&format!("<tr><th>Fusion holdout MRR</th><td>{value:.3}</td></tr>"));
+        }
+        if let Some(value) = report.retrieval_quality.file_f1_at_10 {
+            out.push_str(&format!("<tr><th>Fusion holdout file F1@10</th><td>{value:.3}</td></tr>"));
+        }
+        if let Some(value) = report.retrieval_quality.no_gold_false_positive_rate {
+            out.push_str(&format!("<tr><th>Fusion holdout no-gold FP rate</th><td>{value:.3}</td></tr>"));
+        }
+        out.push_str("</tbody></table>");
+    } else {
+        out.push_str("<p>Status: <code>unavailable</code></p>");
+    }
+    if !report.retrieval_quality.caveats.is_empty() {
+        out.push_str("<ul>");
+        for caveat in &report.retrieval_quality.caveats {
+            out.push_str(&format!("<li>{}</li>", escape_html(caveat)));
+        }
+        out.push_str("</ul>");
+    }
+    out.push_str("</section>");
     html_list_section(&mut out, "Reproduce", &report.reproduce);
     let notes = report.notes.iter().map(|note| (*note).to_string()).collect::<Vec<_>>();
     html_list_section(&mut out, "Caveats", &notes);
