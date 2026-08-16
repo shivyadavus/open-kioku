@@ -50,6 +50,7 @@ struct RetrievalBenchArgs {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetrievalCorpus {
     schema_version: String,
     corpus_id: String,
@@ -59,6 +60,7 @@ struct RetrievalCorpus {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetrievalCase {
     id: String,
     task_family: RetrievalTaskFamily,
@@ -977,6 +979,36 @@ mod retrieval_bench_tests {
             returned_any: no_gold,
             latency_ms: 10.0,
         }
+    }
+
+    #[test]
+    fn corpus_schema_rejects_unknown_fields() {
+        let unknown_corpus = r#"{
+            "schema_version": "1.0.0",
+            "corpus_id": "strict",
+            "token_budgets": [2000],
+            "cases": [],
+            "unexpected": true
+        }"#;
+        assert!(serde_json::from_str::<RetrievalCorpus>(unknown_corpus).is_err());
+
+        let unknown_case = r#"{
+            "schema_version": "1.0.0",
+            "corpus_id": "strict",
+            "token_budgets": [2000],
+            "cases": [{
+                "id": "case",
+                "task_family": "issue_to_code",
+                "language": "rust",
+                "repo_fixture": "fixture",
+                "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+                "split": "holdout",
+                "query": "query",
+                "gold_files": ["src/lib.rs"],
+                "unexpected": true
+            }]
+        }"#;
+        assert!(serde_json::from_str::<RetrievalCorpus>(unknown_case).is_err());
     }
 
     #[test]
