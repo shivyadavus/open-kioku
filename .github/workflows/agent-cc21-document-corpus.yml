@@ -20,6 +20,27 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Target incremental watch rebuild marker
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/scripts/agent_cc21_document_corpus.py')
+          text = path.read_text()
+          anchor = "def insert_before_once(path: str, marker: str, insertion: str) -> None:\n"
+          helper = '''def replace_first(path: str, old: str, new: str) -> None:\n    text = read(path)\n    if old not in text:\n        raise SystemExit(f'{path}: expected replacement marker: {old[:120]!r}')\n    write(path, text.replace(old, new, 1))\n\n\n'''
+          if 'def replace_first(' not in text:
+              if anchor not in text:
+                  raise SystemExit('staging script insertion anchor missing')
+              text = text.replace(anchor, helper + anchor, 1)
+          marker = "replace_once(\n    WATCH,\n    '''    rebuild_disk_index("
+          if text.count(marker) != 1:
+              raise SystemExit(f'expected one watch replacement call in staging script, found {text.count(marker)}')
+          text = text.replace(marker, "replace_first(\n    WATCH,\n    '''    rebuild_disk_index(", 1)
+          path.write_text(text)
+          PY
+
       - name: Apply asserted product patch
         run: python3 .github/scripts/agent_cc21_document_corpus.py
 
