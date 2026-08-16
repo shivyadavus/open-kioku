@@ -36,40 +36,48 @@ new = '''    RetrievalQualityBaseline {
 assert s.count(old) == 1, s.count(old)
 s = s.replace(old, new, 1)
 
-# The benchmark source revision belongs to the checkout containing the frozen corpus, not the
-# target fixture root. This avoids falsely labeling an arbitrary evaluated repository as the
-# Open Kioku revision.
+# This is the revision of the checkout containing the benchmark corpus. Name it accordingly: a
+# custom corpus can live in a different repository, and we must never label that commit as the
+# Open Kioku source revision.
+s = s.replace('    source_revision: String,', '    corpus_revision: String,', 1)
 s = s.replace(
     'let (source_revision, revision_caveat) = retrieval_source_revision(&root);',
-    'let (source_revision, revision_caveat) = retrieval_source_revision(&cases_file);',
+    'let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);',
     1,
 )
-
-old = '''fn retrieval_source_revision(root: &Path) -> (String, Option<String>) {
-    match ProcessCommand::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-    {'''
-new = '''fn retrieval_source_revision(cases_file: &Path) -> (String, Option<String>) {
+s = s.replace('            source_revision,', '            corpus_revision,', 1)
+s = s.replace(
+    'fn retrieval_source_revision(root: &Path) -> (String, Option<String>) {',
+    'fn retrieval_corpus_revision(cases_file: &Path) -> (String, Option<String>) {',
+    1,
+)
+s = s.replace('        .arg(root)\n', '        .arg(source_root)\n', 1)
+old = '''fn retrieval_corpus_revision(cases_file: &Path) -> (String, Option<String>) {
+    match ProcessCommand::new("git")'''
+new = '''fn retrieval_corpus_revision(cases_file: &Path) -> (String, Option<String>) {
     let Some(source_root) = cases_file
         .ancestors()
         .find(|candidate| candidate.join(".git").exists())
     else {
         return (
             "unavailable".into(),
-            Some("Open Kioku source revision is unavailable because the frozen corpus is not inside a git checkout; report remains reproducible by package version, corpus digest, and fixture digests".into()),
+            Some("frozen corpus revision is unavailable because the corpus is not inside a git checkout; reproducibility remains anchored by corpus digest and fixture digests".into()),
         );
     };
-    match ProcessCommand::new("git")
-        .arg("-C")
-        .arg(source_root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-    {'''
+    match ProcessCommand::new("git")'''
 assert s.count(old) == 1, s.count(old)
 s = s.replace(old, new, 1)
+s = s.replace(
+    '"Open Kioku source revision could not be validated as a full git commit; report remains reproducible only by package version and fixture digests"',
+    '"frozen corpus revision could not be validated as a full git commit; reproducibility remains anchored by corpus digest and fixture digests"',
+)
+s = s.replace(
+    '"Open Kioku source revision is unavailable because git metadata could not be read; report remains reproducible only by package version and fixture digests"',
+    '"frozen corpus revision is unavailable because git metadata could not be read; reproducibility remains anchored by corpus digest and fixture digests"',
+)
+s = s.replace('report.provenance.source_revision,', 'report.provenance.corpus_revision,', 1)
+s = s.replace('- Open Kioku revision: `{}`\\n', '- Frozen corpus revision: `{}`\\n', 1)
+s = s.replace('                source_revision: "0123456789012345678901234567890123456789".into(),', '                corpus_revision: "0123456789012345678901234567890123456789".into(),', 1)
 
 # Public reports should not embed machine-specific absolute corpus paths when the corpus lives
 # beneath the requested benchmark root.
@@ -114,5 +122,14 @@ replacement = '''        let previous_quality = RetrievalQualityMetrics {
         };'''
 assert s.count(needle) == 1, s.count(needle)
 s = s.replace(needle, replacement, 1)
+
+# The tiny unit fixture has no current holdout split, so comparison intentionally falls back to
+# overall. The workflow below exercises and asserts the real frozen-corpus holdout path.
+s = s.replace(
+    'fn baseline_comparison_reports_holdout_quality_deltas_without_latency()',
+    'fn baseline_comparison_reports_quality_deltas_without_latency()',
+    1,
+)
+s = s.replace('assert_eq!(deltas[0].split, "holdout");', 'assert_eq!(deltas[0].split, "overall");', 1)
 
 p.write_text(s)
