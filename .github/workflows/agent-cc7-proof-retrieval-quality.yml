@@ -19,7 +19,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted CC7 proof patch
-        run: python3 .github/scripts/agent_cc7_proof_retrieval_quality.py
+        run: |
+          python3 .github/scripts/agent_cc7_proof_retrieval_quality.py
+          python3 .github/scripts/agent_cc7_clippy_fix.py
       - name: Validate formatting, lint, tests, and frozen retrieval contract
         shell: bash
         run: |
@@ -39,6 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           rm .github/scripts/agent_cc7_proof_retrieval_quality.py
+          rm .github/scripts/agent_cc7_clippy_fix.py
           rm .github/workflows/agent-cc7-proof-retrieval-quality.yml
           git config user.name "Shiv Yadav"
           git config user.email "155265880+shivyadavus@users.noreply.github.com"
