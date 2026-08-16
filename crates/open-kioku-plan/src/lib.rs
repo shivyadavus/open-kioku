@@ -2847,6 +2847,7 @@ mod tests {
             architecture_policy: None,
             confidence_summary: "fixture".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
+            retrieval_diagnostics: Default::default(),
         };
         let impact = ImpactReport {
             target: "tests/auth_flow.rs".into(),
@@ -3213,6 +3214,7 @@ mod tests {
             architecture_policy: None,
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
+            retrieval_diagnostics: Default::default(),
         };
 
         let report = PlanEngine::new(&store)
@@ -3310,6 +3312,7 @@ mod tests {
             architecture_policy: None,
             confidence_summary: "bounded".into(),
             confidence_breakdown: ConfidenceBreakdown::default(),
+            retrieval_diagnostics: Default::default(),
         };
 
         let report = PlanEngine::new(&store)

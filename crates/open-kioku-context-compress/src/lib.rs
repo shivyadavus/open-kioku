@@ -347,6 +347,7 @@ mod tests {
             architecture_policy: None,
             confidence_summary: "test".into(),
             confidence_breakdown: open_kioku_core::ConfidenceBreakdown::default(),
+            retrieval_diagnostics: Default::default(),
         };
 
         let compressed = store.compress_pack(&pack).unwrap();

@@ -2,6 +2,38 @@ fn normalize_path_fragment(value: &str) -> String {
     value.replace('\\', "/").to_ascii_lowercase()
 }
 
+struct SemanticContextCandidateSource<'a> {
+    manager: SemanticIndexManager<'a>,
+}
+
+impl<'a> open_kioku_context::candidates::ContextCandidateSource
+    for SemanticContextCandidateSource<'a>
+{
+    fn source(&self) -> open_kioku_core::RetrievalSourceKind {
+        open_kioku_core::RetrievalSourceKind::SemanticVector
+    }
+
+    fn retrieve(
+        &self,
+        request: &open_kioku_context::candidates::CandidateRequest,
+    ) -> open_kioku_errors::Result<open_kioku_context::candidates::CandidateStream> {
+        let results = self.manager.search(&request.task, request.limit)?;
+        Ok(open_kioku_context::candidates::CandidateStream::success(
+            open_kioku_core::RetrievalSourceKind::SemanticVector,
+            results
+                .into_iter()
+                .map(|result| {
+                    open_kioku_context::candidates::StreamCandidate::from_result(
+                        result,
+                        open_kioku_core::RetrievalAuthority::Heuristic,
+                        "local semantic-vector similarity",
+                    )
+                })
+                .collect(),
+        ))
+    }
+}
+
 fn build_context_pack(
     repo: &Path,
     store: &SqliteStore,
@@ -9,102 +41,50 @@ fn build_context_pack(
     limit: usize,
 ) -> anyhow::Result<open_kioku_core::ContextPack> {
     let search_dir = default_index_dir(repo);
+    let config = OkConfig::load_from_repo(repo)?;
     let mut ranking_options = ranking_options_for_repo(repo)?;
     ranking_options.query = Some(task.into());
     let builder = ContextPackBuilder::new(store as &dyn OkStore)
         .with_history_store(Some(store))
         .with_ranking_options(ranking_options);
-    let mut pack = if TantivySearchIndex::exists(&search_dir) {
-        let index = TantivySearchIndex::open_or_create(&search_dir)?;
-        let primary = search_context_candidates(&index, task, ranking_candidate_limit(limit))?;
-        builder.build_from_primary(task, limit, primary)?
-    } else {
-        builder.build(task, limit)?
-    };
+
+    let mut lexical_index_source = None;
+    let mut lexical_failure_source = None;
+    if TantivySearchIndex::exists(&search_dir) {
+        match TantivySearchIndex::open_or_create(&search_dir) {
+            Ok(index) => {
+                lexical_index_source = Some(
+                    open_kioku_context::candidates::SearchIndexCandidateSource::new(index),
+                );
+            }
+            Err(err) => {
+                lexical_failure_source = Some(
+                    open_kioku_context::candidates::UnavailableCandidateSource::new(
+                        open_kioku_core::RetrievalSourceKind::Lexical,
+                        format!("Tantivy lexical index unavailable; using regex fallback: {err}"),
+                    ),
+                );
+            }
+        }
+    }
+
+    let semantic_source = config.semantic.enabled.then(|| SemanticContextCandidateSource {
+        manager: SemanticIndexManager::new(repo, store as &dyn MetadataStore, &config.semantic),
+    });
+
+    let mut sources = Vec::<&dyn open_kioku_context::candidates::ContextCandidateSource>::new();
+    if let Some(source) = lexical_index_source.as_ref() {
+        sources.push(source);
+    } else if let Some(source) = lexical_failure_source.as_ref() {
+        sources.push(source);
+    }
+    if let Some(source) = semantic_source.as_ref() {
+        sources.push(source);
+    }
+
+    let mut pack = builder.build_with_sources(task, limit, &sources)?;
     pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
     Ok(pack)
-}
-
-fn search_context_candidates(
-    index: &TantivySearchIndex,
-    task: &str,
-    limit: usize,
-) -> anyhow::Result<Vec<SearchResult>> {
-    let mut merged = std::collections::BTreeMap::<String, SearchResult>::new();
-    for term in expanded_task_search_terms(task) {
-        let mut results = index.search(&term, limit)?;
-        for result in &mut results {
-            if term != task {
-                let evidence = format!("expanded task query `{term}` matched");
-                if !result.evidence.contains(&evidence) {
-                    result.evidence.push(evidence);
-                }
-                if !result.match_reason.contains(&term) {
-                    result.match_reason =
-                        format!("{}; expanded task query `{term}`", result.match_reason);
-                }
-            }
-        }
-        for result in results {
-            merge_context_candidate(&mut merged, result);
-        }
-    }
-    Ok(merged.into_values().collect())
-}
-
-fn merge_context_candidate(
-    merged: &mut std::collections::BTreeMap<String, SearchResult>,
-    result: SearchResult,
-) {
-    let key = search_result_key(&result);
-    match merged.get_mut(&key) {
-        Some(existing) => {
-            if result.score > existing.score {
-                existing.score = result.score;
-                existing.snippet = result.snippet.clone();
-                existing.line_range = result.line_range.clone();
-                existing.symbol = result.symbol.clone();
-            }
-            for evidence in result.evidence {
-                if !existing.evidence.contains(&evidence) {
-                    existing.evidence.push(evidence);
-                }
-            }
-            for evidence_ref in result.evidence_refs {
-                if !existing.evidence_refs.contains(&evidence_ref) {
-                    existing.evidence_refs.push(evidence_ref);
-                }
-            }
-            if !existing.match_reason.contains(&result.match_reason) {
-                existing.match_reason =
-                    format!("{}; {}", existing.match_reason, result.match_reason);
-            }
-            for component in result.score_breakdown {
-                existing.score_breakdown.push(component);
-            }
-            existing.reconcile_score_breakdown();
-        }
-        None => {
-            merged.insert(key, result);
-        }
-    }
-}
-
-fn search_result_key(result: &SearchResult) -> String {
-    format!(
-        "{}:{}-{}",
-        normalize_path_fragment(&result.path.to_string_lossy()),
-        result
-            .line_range
-            .as_ref()
-            .map(|range| range.start)
-            .unwrap_or_default(),
-        result
-            .line_range
-            .as_ref()
-            .map(|range| range.end)
-            .unwrap_or_default()
-    )
 }
 
 fn configured_architecture_policy_report<S>(

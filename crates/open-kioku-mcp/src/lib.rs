@@ -4,7 +4,13 @@ use open_kioku_architecture::{
     evaluate_policy, evaluate_public_api_boundary, ArchitectureDetector, PolicyResolver,
 };
 use open_kioku_config::{load_architecture_policy, load_architecture_policy_from_path, OkConfig};
-use open_kioku_context::ContextPackBuilder;
+use open_kioku_context::{
+    candidates::{
+        CandidateRequest, CandidateStream, ContextCandidateSource, SearchIndexCandidateSource,
+        StreamCandidate, UnavailableCandidateSource,
+    },
+    ContextPackBuilder,
+};
 use open_kioku_context_compress::ContextHandleStore;
 use open_kioku_contract::{
     ChangeContractV1, ContractId, ContractStore, FsContractStore, StoredContractRecord,
@@ -41,6 +47,78 @@ const MAX_TOOL_TEXT_BYTES: usize = 120_000;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 const STORE_IDLE_TTL: Duration = Duration::from_secs(300);
 const CONTINUATION_TTL_SECS: u64 = 900;
+
+struct SemanticContextCandidateSource<'a> {
+    manager: SemanticIndexManager<'a>,
+}
+
+impl<'a> ContextCandidateSource for SemanticContextCandidateSource<'a> {
+    fn source(&self) -> open_kioku_core::RetrievalSourceKind {
+        open_kioku_core::RetrievalSourceKind::SemanticVector
+    }
+
+    fn retrieve(&self, request: &CandidateRequest) -> open_kioku_errors::Result<CandidateStream> {
+        let results = self.manager.search(&request.task, request.limit)?;
+        Ok(CandidateStream::success(
+            open_kioku_core::RetrievalSourceKind::SemanticVector,
+            results
+                .into_iter()
+                .map(|result| {
+                    StreamCandidate::from_result(
+                        result,
+                        open_kioku_core::RetrievalAuthority::Heuristic,
+                        "local semantic-vector similarity",
+                    )
+                })
+                .collect(),
+        ))
+    }
+}
+
+fn build_context_for_task(
+    repo: &Path,
+    store: &SqliteStore,
+    config: &OkConfig,
+    task: &str,
+    limit: usize,
+) -> anyhow::Result<open_kioku_core::ContextPack> {
+    let search_dir = default_index_dir(repo);
+    let builder = ContextPackBuilder::new(store as &dyn OkStore).with_history_store(Some(store));
+
+    let mut lexical_index_source = None;
+    let mut lexical_failure_source = None;
+    if TantivySearchIndex::exists(&search_dir) {
+        match TantivySearchIndex::open_or_create(&search_dir) {
+            Ok(index) => lexical_index_source = Some(SearchIndexCandidateSource::new(index)),
+            Err(err) => {
+                lexical_failure_source = Some(UnavailableCandidateSource::new(
+                    open_kioku_core::RetrievalSourceKind::Lexical,
+                    format!("Tantivy lexical index unavailable; using regex fallback: {err}"),
+                ));
+            }
+        }
+    }
+    let semantic_source = config
+        .semantic
+        .enabled
+        .then(|| SemanticContextCandidateSource {
+            manager: SemanticIndexManager::new(repo, store as &dyn MetadataStore, &config.semantic),
+        });
+
+    let mut sources = Vec::<&dyn ContextCandidateSource>::new();
+    if let Some(source) = lexical_index_source.as_ref() {
+        sources.push(source);
+    } else if let Some(source) = lexical_failure_source.as_ref() {
+        sources.push(source);
+    }
+    if let Some(source) = semantic_source.as_ref() {
+        sources.push(source);
+    }
+
+    let mut pack = builder.build_with_sources(task, limit, &sources)?;
+    pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
+    Ok(pack)
+}
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -242,10 +320,7 @@ async fn dispatch(
         "regex_search" => search_tool(repo, store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
-            let mut pack = ContextPackBuilder::new(store as &dyn OkStore)
-                .with_history_store(Some(store))
-                .build(task, limit(&params))?;
-            pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            let pack = build_context_for_task(repo, store, config, task, limit(&params))?;
             let format_arg = params
                 .get("format")
                 .and_then(Value::as_str)
@@ -260,10 +335,7 @@ async fn dispatch(
         }
         "build_compressed_context" => {
             let task = required_str(&params, "task")?;
-            let mut pack = ContextPackBuilder::new(store as &dyn OkStore)
-                .with_history_store(Some(store))
-                .build(task, limit(&params))?;
-            pack.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            let pack = build_context_for_task(repo, store, config, task, limit(&params))?;
             let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
             let format_arg = params
                 .get("format")
@@ -292,10 +364,7 @@ async fn dispatch(
             };
             let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
             let limit = limit(&params);
-            let mut context = ContextPackBuilder::new(store as &dyn OkStore)
-                .with_history_store(Some(store))
-                .build(&task, limit)?;
-            context.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            let context = build_context_for_task(repo, store, config, &task, limit)?;
             let report = PlanEngine::new(store as &dyn OkStore)
                 .with_history_store(Some(store))
                 .with_memory_facts(memory_facts)
@@ -319,10 +388,7 @@ async fn dispatch(
             };
             let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
             let limit = limit(&params);
-            let mut context = ContextPackBuilder::new(store as &dyn OkStore)
-                .with_history_store(Some(store))
-                .build(&task, limit)?;
-            context.architecture_policy = configured_architecture_policy_report(repo, store)?;
+            let context = build_context_for_task(repo, store, config, &task, limit)?;
             let plan = PlanEngine::new(store as &dyn OkStore)
                 .with_history_store(Some(store))
                 .with_memory_facts(memory_facts)

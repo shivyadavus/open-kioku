@@ -1,4 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.1.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -126,6 +127,7 @@ impl RetrievalStrategy {
 #[derive(Debug, Serialize)]
 struct RetrievalBenchReport {
     schema_version: &'static str,
+    report_version: &'static str,
     corpus_id: String,
     cases_file: PathBuf,
     case_count: usize,
@@ -133,6 +135,9 @@ struct RetrievalBenchReport {
     token_estimator: &'static str,
     fixture_digests: BTreeMap<String, String>,
     strategies: Vec<RetrievalStrategyReport>,
+    /// Advisory Context Compiler V2 source/fusion measurements. Excluded from the frozen CC1
+    /// quality baseline and release thresholds until explicitly promoted.
+    stream_ablations: Vec<RetrievalStrategyReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,10 +241,13 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     let limit = args.limit.clamp(20, 100);
     let fixtures = retrieval_fixture_paths(&root, &corpus.cases)?;
     validate_retrieval_gold_files(&root, &corpus.cases)?;
+    let semantic_config = cc2_semantic_benchmark_config();
     let mut fixture_digests = BTreeMap::new();
     for fixture in fixtures.values() {
         if !args.no_index {
             index_repo(fixture)?;
+            let store = open_store(fixture)?;
+            SemanticIndexManager::new(fixture, &store, &semantic_config).rebuild()?;
         }
         let digest = retrieval_fixture_digest(fixture)?;
         fixture_digests.insert(
@@ -255,6 +263,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
 
     let mut lexical_cases = Vec::with_capacity(corpus.cases.len());
     let mut fusion_cases = Vec::with_capacity(corpus.cases.len());
+    let mut cc2_cases = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();
     for case in &corpus.cases {
         let fixture = fixtures
             .get(&case.repo_fixture)
@@ -282,10 +291,55 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
             limit,
             RetrievalStrategy::Fusion,
         )?);
+        for source in cc2_benchmark_sources() {
+            let label = format!("cc2:{}", retrieval_source_label(source));
+            cc2_cases.entry(label).or_default().push(run_cc2_retrieval_case(
+                &store,
+                case,
+                budgets,
+                limit,
+                Some(source),
+                &open_kioku_context::candidates::FusionConfig::unweighted(),
+            )?);
+        }
+        cc2_cases
+            .entry("cc2:semantic_vector_local_hash".into())
+            .or_default()
+            .push(run_cc2_semantic_retrieval_case(
+                fixture,
+                &store,
+                &semantic_config,
+                case,
+                budgets,
+                limit,
+            )?);
+        cc2_cases
+            .entry("cc2:rrf_unweighted".into())
+            .or_default()
+            .push(run_cc2_retrieval_case(
+                &store,
+                case,
+                budgets,
+                limit,
+                None,
+                &open_kioku_context::candidates::FusionConfig::unweighted(),
+            )?);
+        cc2_cases
+            .entry("cc2:rrf_evidence_prior".into())
+            .or_default()
+            .push(run_cc2_retrieval_case(
+                &store,
+                case,
+                budgets,
+                limit,
+                None,
+                &open_kioku_context::candidates::FusionConfig::evidence_prior_weighted(),
+            )?);
     }
 
     let report = RetrievalBenchReport {
         schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
+        report_version: RETRIEVAL_REPORT_VERSION,
         corpus_id: corpus.corpus_id,
         cases_file,
         case_count: corpus.cases.len(),
@@ -296,6 +350,10 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
             build_retrieval_strategy_report(RetrievalStrategy::Lexical, lexical_cases),
             build_retrieval_strategy_report(RetrievalStrategy::Fusion, fusion_cases),
         ],
+        stream_ablations: cc2_cases
+            .into_iter()
+            .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
+            .collect(),
     };
 
     write_retrieval_outputs(&report, &args)?;
@@ -527,6 +585,124 @@ fn run_retrieval_case(
     Ok(score_retrieval_case(case, token_budgets, ranked, latency_ms))
 }
 
+fn cc2_semantic_benchmark_config() -> open_kioku_config::SemanticConfig {
+    let mut config = OkConfig::default().semantic;
+    config.enabled = true;
+    config.provider = "local".into();
+    config.model = "local-hash".into();
+    config.backend = "exact-flat".into();
+    config
+}
+
+fn cc2_benchmark_sources() -> [open_kioku_core::RetrievalSourceKind; 6] {
+    [
+        open_kioku_core::RetrievalSourceKind::Lexical,
+        open_kioku_core::RetrievalSourceKind::ExactSemantic,
+        open_kioku_core::RetrievalSourceKind::Graph,
+        open_kioku_core::RetrievalSourceKind::Validation,
+        open_kioku_core::RetrievalSourceKind::GitHistory,
+        open_kioku_core::RetrievalSourceKind::Runtime,
+    ]
+}
+
+fn retrieval_source_label(source: open_kioku_core::RetrievalSourceKind) -> &'static str {
+    match source {
+        open_kioku_core::RetrievalSourceKind::Lexical => "lexical",
+        open_kioku_core::RetrievalSourceKind::ExactSemantic => "exact_semantic",
+        open_kioku_core::RetrievalSourceKind::Graph => "graph",
+        open_kioku_core::RetrievalSourceKind::SemanticVector => "semantic_vector",
+        open_kioku_core::RetrievalSourceKind::Validation => "validation",
+        open_kioku_core::RetrievalSourceKind::GitHistory => "git_history",
+        open_kioku_core::RetrievalSourceKind::Runtime => "runtime",
+    }
+}
+
+fn run_cc2_semantic_retrieval_case(
+    fixture: &Path,
+    store: &SqliteStore,
+    config: &open_kioku_config::SemanticConfig,
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    limit: usize,
+) -> anyhow::Result<RetrievalCaseReport> {
+    let started = Instant::now();
+    let manager = SemanticIndexManager::new(fixture, store as &dyn MetadataStore, config);
+    let ranked = if manager.status().ready {
+        let stream = open_kioku_context::candidates::CandidateStream::success(
+            open_kioku_core::RetrievalSourceKind::SemanticVector,
+            manager
+                .search(&case.query, ranking_candidate_limit(limit))?
+                .into_iter()
+                .map(|result| {
+                    open_kioku_context::candidates::StreamCandidate::from_result(
+                        result,
+                        open_kioku_core::RetrievalAuthority::Heuristic,
+                        "current local-hash semantic-vector similarity",
+                    )
+                })
+                .collect(),
+        );
+        top_unique_paths(
+            open_kioku_context::candidates::fuse_candidate_streams(
+                &[stream],
+                limit,
+                &open_kioku_context::candidates::FusionConfig::unweighted(),
+            )
+            .results,
+            limit,
+        )
+    } else {
+        Vec::new()
+    };
+    Ok(score_retrieval_case(
+        case,
+        token_budgets,
+        ranked,
+        duration_ms(started.elapsed()),
+    ))
+}
+
+fn run_cc2_retrieval_case(
+    store: &SqliteStore,
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    limit: usize,
+    only_source: Option<open_kioku_core::RetrievalSourceKind>,
+    config: &open_kioku_context::candidates::FusionConfig,
+) -> anyhow::Result<RetrievalCaseReport> {
+    let started = Instant::now();
+    let files = store.list_files(usize::MAX, 0)?;
+    let chunks = store.all_chunks()?;
+    let symbols = store.list_symbols(None, usize::MAX, 0)?;
+    let request = open_kioku_context::candidates::CandidateRequest::new(
+        &case.query,
+        expanded_task_search_terms(&case.query),
+        ranking_candidate_limit(limit),
+    );
+    let context = open_kioku_context::candidates::builtins::BuiltinCandidateContext {
+        store: store as &dyn OkStore,
+        history_store: Some(store as &dyn HistoryStore),
+        files: &files,
+        chunks: &chunks,
+        symbols: &symbols,
+    };
+    let streams = if let Some(source) = only_source {
+        let excluded = cc2_benchmark_sources()
+            .into_iter()
+            .filter(|candidate| *candidate != source)
+            .collect::<BTreeSet<_>>();
+        context.collect_excluding(&request, &excluded)
+    } else {
+        context.collect(&request)
+    };
+    let ranked = top_unique_paths(
+        open_kioku_context::candidates::fuse_candidate_streams(&streams, limit, config).results,
+        limit,
+    );
+    let latency_ms = duration_ms(started.elapsed());
+    Ok(score_retrieval_case(case, token_budgets, ranked, latency_ms))
+}
+
 fn retrieval_candidate_pool(
     fixture: &Path,
     store: &dyn MetadataStore,
@@ -681,8 +857,15 @@ fn build_retrieval_strategy_report(
     strategy: RetrievalStrategy,
     cases: Vec<RetrievalCaseReport>,
 ) -> RetrievalStrategyReport {
+    build_named_retrieval_strategy_report(strategy.label(), cases)
+}
+
+fn build_named_retrieval_strategy_report(
+    strategy: impl Into<String>,
+    cases: Vec<RetrievalCaseReport>,
+) -> RetrievalStrategyReport {
     RetrievalStrategyReport {
-        strategy: strategy.label().into(),
+        strategy: strategy.into(),
         summary: summarize_retrieval_cases(&cases),
         by_language: summarize_retrieval_groups(&cases, |case| case.language.clone()),
         by_task_family: summarize_retrieval_groups(&cases, |case| {
@@ -912,7 +1095,28 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             out.push_str("No holdout cases.\n\n");
         }
     }
-    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible.\n");
+    if !report.stream_ablations.is_empty() {
+        out.push_str("## Context Compiler V2 stream ablations (advisory)\n\nThese measurements are excluded from the frozen CC1 release baseline. `cc2:semantic_vector_local_hash` measures Open Kioku's current deterministic local-hash/exact-flat backend; CC5/#209 evaluates real neural embedding models and ANN before any semantic backend is promoted.\n\n");
+        out.push_str("| Strategy | R@5 | R@10 | MRR | F1@10 | No-gold FP | Holdout R@10 | Holdout MRR | p95 ms |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for strategy in &report.stream_ablations {
+            let quality = &strategy.summary.quality;
+            let holdout = strategy.by_split.get("holdout").unwrap_or(&strategy.summary);
+            out.push_str(&format!(
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |\n",
+                strategy.strategy,
+                quality.recall_at_5,
+                quality.recall_at_10,
+                quality.mean_reciprocal_rank,
+                quality.file_f1_at_10,
+                quality.no_gold_false_positive_rate,
+                holdout.quality.recall_at_10,
+                holdout.quality.mean_reciprocal_rank,
+                strategy.summary.latency.p95_ms,
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory CC2 ablations are also excluded until explicitly promoted.\n");
     out
 }
 
@@ -935,6 +1139,21 @@ fn print_retrieval_bench_report(report: &RetrievalBenchReport) {
             quality.no_gold_false_positive_rate,
             strategy.summary.latency.p95_ms
         );
+    }
+    if !report.stream_ablations.is_empty() {
+        println!("CC2 stream ablations (advisory; excluded from frozen baseline):");
+        for strategy in &report.stream_ablations {
+            let quality = &strategy.summary.quality;
+            println!(
+                "  {}: R@5 {:.3}, R@10 {:.3}, MRR {:.3}, no-gold FP {:.3}, p95 {:.2}ms",
+                strategy.strategy,
+                quality.recall_at_5,
+                quality.recall_at_10,
+                quality.mean_reciprocal_rank,
+                quality.no_gold_false_positive_rate,
+                strategy.summary.latency.p95_ms
+            );
+        }
     }
 }
 
@@ -1041,6 +1260,7 @@ mod retrieval_bench_tests {
         );
         let report = RetrievalBenchReport {
             schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
+            report_version: RETRIEVAL_REPORT_VERSION,
             corpus_id: "fixture".into(),
             cases_file: "cases.json".into(),
             case_count: 1,
@@ -1048,9 +1268,14 @@ mod retrieval_bench_tests {
             token_estimator: RETRIEVAL_TOKEN_ESTIMATOR,
             fixture_digests: BTreeMap::new(),
             strategies: vec![strategy],
+            stream_ablations: vec![build_named_retrieval_strategy_report(
+                "cc2:rrf_unweighted",
+                vec![report("advisory", false, &[Some(1)])],
+            )],
         };
         let json = serde_json::to_string(&retrieval_quality_baseline(&report)).unwrap();
         assert!(!json.contains("latency"));
         assert!(!json.contains("p95_ms"));
+        assert!(!json.contains("cc2:rrf_unweighted"));
     }
 }
