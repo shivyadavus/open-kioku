@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
-    ConfidenceSignalInput, ContextPack, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
+    ConfidenceSignalInput, ContextBudget, ContextPack, Evidence, EvidenceId, EvidenceSourceType,
+    File, FileRange, GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
     RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceKind, RiskReport, RuntimeSignal,
     ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
@@ -142,6 +142,20 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
     }
+    if diagnostics.selection.budget.max_tokens > 0 {
+        out.push_str(&format!(
+            "- Context budget: `{}` tokens (`{}` available after reserves); selected estimate `{}`\n",
+            diagnostics.selection.budget.max_tokens,
+            diagnostics.selection.available_context_tokens,
+            diagnostics.selection.estimated_tokens_selected
+        ));
+        if !diagnostics.selection.omitted_high_value.is_empty() {
+            out.push_str("- High-value omissions:\n");
+            for omission in &diagnostics.selection.omitted_high_value {
+                out.push_str(&format!("  - {omission}\n"));
+            }
+        }
+    }
     if !diagnostics.caveats.is_empty() {
         out.push_str("- Caveats:\n");
         for caveat in &diagnostics.caveats {
@@ -163,6 +177,17 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
             "RETRIEVAL_SOURCES_SUCCEEDED: {}\n",
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
+    }
+    if diagnostics.selection.budget.max_tokens > 0 {
+        out.push_str(&format!(
+            "CONTEXT_BUDGET: max={} available={} selected_estimate={}\n",
+            diagnostics.selection.budget.max_tokens,
+            diagnostics.selection.available_context_tokens,
+            diagnostics.selection.estimated_tokens_selected
+        ));
+        for omission in &diagnostics.selection.omitted_high_value {
+            out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
+        }
     }
     for caveat in &diagnostics.caveats {
         out.push_str(&format!("RETRIEVAL_CAVEAT: {caveat}\n"));
@@ -221,7 +246,11 @@ impl<'a> ContextPackBuilder<'a> {
     }
 
     pub fn build(&self, task: &str, limit: usize) -> Result<ContextPack> {
-        self.build_with_sources(task, limit, &[])
+        self.build_with_budget_and_sources(task, ContextBudget::from_file_limit(limit), &[])
+    }
+
+    pub fn build_with_budget(&self, task: &str, budget: ContextBudget) -> Result<ContextPack> {
+        self.build_with_budget_and_sources(task, budget, &[])
     }
 
     pub fn build_with_sources(
@@ -230,6 +259,20 @@ impl<'a> ContextPackBuilder<'a> {
         limit: usize,
         external_sources: &[&dyn candidates::ContextCandidateSource],
     ) -> Result<ContextPack> {
+        self.build_with_budget_and_sources(
+            task,
+            ContextBudget::from_file_limit(limit),
+            external_sources,
+        )
+    }
+
+    pub fn build_with_budget_and_sources(
+        &self,
+        task: &str,
+        budget: ContextBudget,
+        external_sources: &[&dyn candidates::ContextCandidateSource],
+    ) -> Result<ContextPack> {
+        let limit = budget.max_primary_files;
         let files = self.store.list_files(usize::MAX, 0)?;
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
@@ -254,13 +297,14 @@ impl<'a> ContextPackBuilder<'a> {
         streams.extend(external_streams);
         let fusion_config = candidates::FusionConfig::from_ranking_options(&self.ranking_options);
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
-        let diagnostics = fused.diagnostics;
+        let mut diagnostics = fused.diagnostics;
         let primary = rerank_fused_for_task_with_options(
             fused.results,
             &intent,
             &diagnostics,
             &self.ranking_options,
         );
+        let primary = select_context_units(primary, &budget, &mut diagnostics);
         self.build_from_primary_with_impact(task, limit, primary, true, false, diagnostics)
     }
 
@@ -465,6 +509,169 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn select_context_units(
+    ranked: Vec<SearchResult>,
+    budget: &ContextBudget,
+    diagnostics: &mut RetrievalDiagnostics,
+) -> Vec<SearchResult> {
+    let available = budget.available_context_tokens();
+    diagnostics.selection.budget = *budget;
+    diagnostics.selection.available_context_tokens = available;
+
+    if budget.max_primary_files == 0 || available == 0 {
+        diagnostics.selection.omitted_due_to_budget.extend(
+            ranked
+                .iter()
+                .map(|result| format!("{}: no context budget available", result.path.display())),
+        );
+        return Vec::new();
+    }
+
+    let authority_by_path = diagnostics
+        .traces
+        .iter()
+        .map(|trace| (normalize_path(&trace.path), trace.authority))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut selected_indices = std::collections::BTreeSet::new();
+    let mut selected_token_sets = Vec::<std::collections::BTreeSet<String>>::new();
+    let mut selected_tokens = 0usize;
+    let mut per_file_tokens = std::collections::BTreeMap::<std::path::PathBuf, usize>::new();
+
+    let mut order = ranked
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| {
+            authority_by_path
+                .get(&normalize_path(&result.path))
+                .copied()
+                .unwrap_or(RetrievalAuthority::Heuristic)
+                == RetrievalAuthority::Exact
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let exact_indices = order
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    order.extend((0..ranked.len()).filter(|index| !exact_indices.contains(index)));
+
+    for index in order {
+        if selected_indices.len() >= budget.max_primary_files {
+            break;
+        }
+        let result = &ranked[index];
+        let authority = authority_by_path
+            .get(&normalize_path(&result.path))
+            .copied()
+            .unwrap_or(RetrievalAuthority::Heuristic);
+        let tokens = estimate_search_result_tokens(result);
+        let file_used = per_file_tokens
+            .get(&result.path)
+            .copied()
+            .unwrap_or_default();
+        let is_exact = authority == RetrievalAuthority::Exact;
+
+        if file_used.saturating_add(tokens) > budget.max_per_file {
+            let message = format!(
+                "{}: estimated {} tokens exceeds per-file cap {}",
+                result.path.display(),
+                tokens,
+                budget.max_per_file
+            );
+            if is_exact {
+                diagnostics.selection.omitted_high_value.push(message);
+            } else {
+                diagnostics.selection.omitted_due_to_budget.push(message);
+            }
+            continue;
+        }
+
+        let token_set = context_unit_tokens(result);
+        if !is_exact
+            && selected_token_sets
+                .iter()
+                .any(|selected| token_set_overlap(&token_set, selected) >= 0.90)
+        {
+            diagnostics.selection.redundancy_omissions.push(format!(
+                "{}: near-duplicate context unit omitted",
+                result.path.display()
+            ));
+            continue;
+        }
+
+        if selected_tokens.saturating_add(tokens) > available {
+            let message = format!(
+                "{}: estimated {} tokens would exceed remaining context budget {}",
+                result.path.display(),
+                tokens,
+                available.saturating_sub(selected_tokens)
+            );
+            if is_exact {
+                diagnostics
+                    .selection
+                    .omitted_high_value
+                    .push(message.clone());
+                diagnostics.selection.caveats.push(format!(
+                    "exact evidence omitted by hard context budget: {}",
+                    result.path.display()
+                ));
+            } else {
+                diagnostics.selection.omitted_due_to_budget.push(message);
+            }
+            continue;
+        }
+
+        selected_tokens = selected_tokens.saturating_add(tokens);
+        *per_file_tokens.entry(result.path.clone()).or_default() += tokens;
+        selected_token_sets.push(token_set);
+        selected_indices.insert(index);
+    }
+
+    diagnostics.selection.estimated_tokens_selected = selected_tokens;
+    diagnostics.selection.per_file_tokens = per_file_tokens;
+    for caveat in &diagnostics.selection.caveats {
+        if !diagnostics.caveats.contains(caveat) {
+            diagnostics.caveats.push(caveat.clone());
+        }
+    }
+
+    ranked
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, result)| selected_indices.contains(&index).then_some(result))
+        .collect()
+}
+
+fn estimate_search_result_tokens(result: &SearchResult) -> usize {
+    // Deliberately model-independent and deterministic. Four UTF-8 chars/token is a conservative
+    // local estimate for mixed source/code prose, with fixed metadata overhead.
+    let content = result.snippet.chars().count()
+        + result.path.to_string_lossy().chars().count()
+        + result.match_reason.chars().count();
+    content.saturating_add(3) / 4 + 12
+}
+
+fn context_unit_tokens(result: &SearchResult) -> std::collections::BTreeSet<String> {
+    result
+        .snippet
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn token_set_overlap(
+    left: &std::collections::BTreeSet<String>,
+    right: &std::collections::BTreeSet<String>,
+) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count() as f32;
+    let smaller = left.len().min(right.len()) as f32;
+    intersection / smaller
 }
 
 fn validation_seed_results<'a>(
@@ -2080,6 +2287,7 @@ mod tests {
             sources_succeeded: vec![RetrievalSourceKind::Lexical],
             caveats: vec!["semantic index is stale".into()],
             traces: Vec::new(),
+            selection: Default::default(),
         };
         let mut markdown = String::new();
         write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
@@ -2133,6 +2341,143 @@ mod tests {
             context_quality_tier(Path::new("src/generated/service.rs"), &without_path_quality,),
             2
         );
+    }
+
+    #[test]
+    fn token_budget_prevents_one_large_heuristic_unit_from_monopolizing_context() {
+        let huge = SearchResult {
+            path: "src/huge.rs".into(),
+            line_range: Some(LineRange { start: 1, end: 400 }),
+            snippet: "large implementation block ".repeat(500),
+            symbol: None,
+            score: 10.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let compact = SearchResult {
+            path: "src/compact.rs".into(),
+            line_range: Some(LineRange { start: 10, end: 20 }),
+            snippet: "fn compact_target() { validate(); }".into(),
+            symbol: None,
+            score: 5.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 800,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 300,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![huge, compact.clone()], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, compact.path);
+        assert!(!diagnostics.selection.omitted_due_to_budget.is_empty());
+        assert!(diagnostics.selection.estimated_tokens_selected <= 600);
+    }
+
+    #[test]
+    fn exact_evidence_is_considered_before_cheaper_heuristics_under_budget() {
+        let heuristic = SearchResult {
+            path: "src/cheap.rs".into(),
+            line_range: None,
+            snippet: "cheap candidate".into(),
+            symbol: None,
+            score: 100.0,
+            match_reason: "heuristic".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let exact = SearchResult {
+            path: "src/exact.rs".into(),
+            line_range: Some(LineRange { start: 20, end: 24 }),
+            snippet: "fn exact_target() {}".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "exact".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![open_kioku_core::RetrievalTrace {
+                path: exact.path.clone(),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 300,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 100,
+            max_primary_files: 1,
+        };
+
+        let selected =
+            select_context_units(vec![heuristic, exact.clone()], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, exact.path);
+    }
+
+    #[test]
+    fn token_selection_preserves_document_section_range_and_dedupes_redundant_units() {
+        let first = SearchResult {
+            path: "docs/guide.md".into(),
+            line_range: Some(LineRange { start: 40, end: 55 }),
+            snippet: "configure agent workflow validation boundary evidence".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "document section".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["document:guide:section".into()],
+            confidence: 0.7,
+            score_breakdown: Vec::new(),
+        };
+        let duplicate = SearchResult {
+            path: "docs/copy.md".into(),
+            line_range: Some(LineRange { start: 1, end: 8 }),
+            snippet: first.snippet.clone(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "document section".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["document:copy:section".into()],
+            confidence: 0.6,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 1_000,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 500,
+            max_primary_files: 4,
+        };
+
+        let selected =
+            select_context_units(vec![first.clone(), duplicate], &budget, &mut diagnostics);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, first.path);
+        assert_eq!(selected[0].line_range, first.line_range);
+        assert_eq!(diagnostics.selection.redundancy_omissions.len(), 1);
     }
 
     #[test]
