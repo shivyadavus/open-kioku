@@ -16,4 +16,9 @@ for name in [
             'unit_key: None,\n                unit_key: Some(',
             'unit_key: Some(',
         )
+    if name.endswith('/lib.rs'):
+        text = text.replace(
+            '{} selected retrieval unit(s) lack unambiguous retrieval-trace source attribution',
+            '{} selected retrieval unit(s) lack retrieval-trace source attribution because unit identity is ambiguous or unavailable',
+        )
     path.write_text(text)
