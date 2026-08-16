@@ -9,7 +9,10 @@ use open_kioku_embeddings::{
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
-use open_kioku_vector::{ExactFlatVectorIndex, VectorId, VectorRecord, VectorSearchOptions};
+use open_kioku_vector::{
+    AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorId, VectorRecord,
+    VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS, PRODUCTION_HNSW_PROFILE,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -18,7 +21,8 @@ use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u32 = 1;
 const CHUNKER_VERSION: &str = "open-kioku-chunks-v1";
-const INDEX_VERSION: &str = "exact-flat-json-v1";
+const EXACT_INDEX_VERSION: &str = "exact-flat-json-v1";
+const HNSW_INDEX_VERSION: &str = PRODUCTION_HNSW_PROFILE;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticManifest {
@@ -59,6 +63,8 @@ pub struct SemanticStatus {
     pub corrupt: bool,
     pub provider: String,
     pub backend: String,
+    pub ann_active: bool,
+    pub ann_profile: Option<String>,
     pub model: String,
     pub embedding_implementation: String,
     pub model_artifact_sha256: Option<String>,
@@ -154,6 +160,8 @@ impl<'a> SemanticIndexManager<'a> {
                 corrupt: false,
                 provider: self.config.provider.clone(),
                 backend: self.config.backend.clone(),
+                ann_active: false,
+                ann_profile: None,
                 model: self.config.model.clone(),
                 embedding_implementation: expected_embedding_implementation(&self.config),
                 model_artifact_sha256: None,
@@ -180,7 +188,10 @@ impl<'a> SemanticIndexManager<'a> {
             cache_misses: 0,
             disk_usage_bytes: dir_size(&current),
         });
-        let corrupt = manifest.is_none() || !current.join("index.json").exists();
+        let corrupt = manifest
+            .as_ref()
+            .map(|manifest| !index_artifacts_present(&current, &manifest.backend))
+            .unwrap_or(true);
         let stale = manifest
             .as_ref()
             .map(|manifest| !self.compatible(manifest))
@@ -192,6 +203,11 @@ impl<'a> SemanticIndexManager<'a> {
             notes.push("semantic index is corrupt or incomplete".into());
         }
         let ready = !corrupt && !stale;
+        let resolved_backend = manifest
+            .as_ref()
+            .map(|value| value.backend.clone())
+            .unwrap_or_else(|| self.config.backend.clone());
+        let ann_active = backend_is_ann(&resolved_backend) && ready;
         SemanticStatus {
             state: if corrupt {
                 "corrupt"
@@ -205,7 +221,9 @@ impl<'a> SemanticIndexManager<'a> {
             stale,
             corrupt,
             provider: self.config.provider.clone(),
-            backend: self.config.backend.clone(),
+            backend: resolved_backend,
+            ann_active,
+            ann_profile: ann_active.then(|| PRODUCTION_HNSW_PROFILE.to_string()),
             model: self.config.model.clone(),
             embedding_implementation: manifest
                 .as_ref()
@@ -275,27 +293,44 @@ impl<'a> SemanticIndexManager<'a> {
             )));
         }
         let provider = provider_for_config(&self.config, false, &self.models_dir())?;
-        let index = ExactFlatVectorIndex::load(&self.current_dir().join("index.json"))?;
         let targets = read_targets(&self.current_dir().join("ids.json"))?;
         let query_vector = provider.embed_query(query)?;
-        let hits = index.search(
-            &query_vector,
-            VectorSearchOptions {
-                limit,
-                allowlist,
-                target_kind: None,
-            },
-        )?;
+        let options = VectorSearchOptions {
+            limit,
+            allowlist,
+            target_kind: None,
+        };
+        let backend = status
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.backend.as_str())
+            .ok_or_else(|| OkError::Storage("semantic manifest missing for ready index".into()))?;
+        let hits = match backend {
+            "exact-flat" => ExactFlatVectorIndex::load(&self.current_dir().join("index.json"))?
+                .search(&query_vector, options)?,
+            "usearch-hnsw-f32" | "usearch-hnsw-bf16" => {
+                let index =
+                    UsearchHnswVectorIndex::load(&self.current_dir().join("index.usearch"))?;
+                if index.parameters() != PRODUCTION_HNSW_PARAMETERS {
+                    return Err(OkError::Storage(format!(
+                        "semantic HNSW artifact uses {:?}, expected measured profile {} ({:?}); rebuild the semantic index",
+                        index.parameters(),
+                        PRODUCTION_HNSW_PROFILE,
+                        PRODUCTION_HNSW_PARAMETERS
+                    )));
+                }
+                index.search(&query_vector, options)?
+            }
+            other => {
+                return Err(OkError::Storage(format!(
+                    "semantic manifest contains unsupported vector backend `{other}`"
+                )))
+            }
+        };
         hydrate_hits(self.store, &targets, hits)
     }
 
     fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
-        if self.config.backend != "exact-flat" {
-            return Err(OkError::Unsupported(format!(
-                "semantic backend `{}` is not supported; use exact-flat",
-                self.config.backend
-            )));
-        }
         let provider = provider_for_config(&self.config, allow_model_download, &self.models_dir())?;
         let descriptor = provider.descriptor();
         if descriptor.dimensions != self.config.dimensions {
@@ -306,6 +341,7 @@ impl<'a> SemanticIndexManager<'a> {
         }
         let model_artifact_sha256 = model_artifact_digest(&self.config, &self.models_dir())?;
         let targets = collect_targets(self.store, &self.config)?;
+        let resolved_backend = resolve_semantic_backend(&self.config, targets.len())?;
         let current_cache =
             read_json::<EmbeddingCache>(&self.current_dir().join("embeddings.cache"))
                 .unwrap_or_default();
@@ -315,7 +351,26 @@ impl<'a> SemanticIndexManager<'a> {
         fs::create_dir_all(&build_dir)?;
 
         let mut cache = EmbeddingCache::default();
-        let mut index = ExactFlatVectorIndex::new(self.config.dimensions)?;
+        let mut exact_index = if resolved_backend == ResolvedSemanticBackend::ExactFlat {
+            Some(ExactFlatVectorIndex::new(self.config.dimensions)?)
+        } else {
+            None
+        };
+        let mut ann_index = match resolved_backend {
+            ResolvedSemanticBackend::ExactFlat => None,
+            ResolvedSemanticBackend::HnswF32 => Some(UsearchHnswVectorIndex::with_parameters(
+                self.config.dimensions,
+                AnnScalarKind::F32,
+                targets.len(),
+                PRODUCTION_HNSW_PARAMETERS,
+            )?),
+            ResolvedSemanticBackend::HnswBf16 => Some(UsearchHnswVectorIndex::with_parameters(
+                self.config.dimensions,
+                AnnScalarKind::Bf16,
+                targets.len(),
+                PRODUCTION_HNSW_PARAMETERS,
+            )?),
+        };
         let mut cache_hits = 0usize;
         let mut cache_misses = 0usize;
         let mut failed = 0usize;
@@ -369,12 +424,21 @@ impl<'a> SemanticIndexManager<'a> {
                 failed += 1;
                 continue;
             }
-            index.add(VectorRecord {
+            let record = VectorRecord {
                 id: target.vector_id,
                 target_id: target.stable_id.clone(),
                 target_kind: target.kind.clone(),
                 vector: vector.clone(),
-            })?;
+            };
+            if let Some(index) = exact_index.as_mut() {
+                index.add(record)?;
+            } else if let Some(index) = ann_index.as_mut() {
+                index.add(record)?;
+            } else {
+                return Err(OkError::Storage(
+                    "semantic vector backend was not initialized".into(),
+                ));
+            }
             cache.entries.insert(
                 cache_key(target, &self.config),
                 EmbeddingCacheEntry {
@@ -391,7 +455,7 @@ impl<'a> SemanticIndexManager<'a> {
 
         let manifest = SemanticManifest {
             schema_version: SCHEMA_VERSION,
-            backend: self.config.backend.clone(),
+            backend: resolved_backend_name(resolved_backend).into(),
             embedding_provider: self.config.provider.clone(),
             embedding_model: descriptor.model.clone(),
             embedding_implementation: descriptor.implementation.clone(),
@@ -399,7 +463,7 @@ impl<'a> SemanticIndexManager<'a> {
             dimensions: self.config.dimensions,
             distance_metric: self.config.distance.clone(),
             chunker_version: CHUNKER_VERSION.into(),
-            index_version: INDEX_VERSION.into(),
+            index_version: index_version_for_backend(resolved_backend).into(),
             source_commit: self
                 .store
                 .manifest()
@@ -407,7 +471,11 @@ impl<'a> SemanticIndexManager<'a> {
                 .flatten()
                 .and_then(|manifest| manifest.repository.commit),
             created_at: Utc::now().to_rfc3339(),
-            vector_count: index.stats().vector_count,
+            vector_count: exact_index
+                .as_ref()
+                .map(|index| index.stats().vector_count)
+                .or_else(|| ann_index.as_ref().map(|index| index.stats().vector_count))
+                .unwrap_or(0),
             target_counts: counts,
         };
         let stats = SemanticStats {
@@ -423,7 +491,11 @@ impl<'a> SemanticIndexManager<'a> {
         write_json(&build_dir.join("manifest.json"), &manifest)?;
         write_json(&build_dir.join("ids.json"), &targets)?;
         write_json(&build_dir.join("embeddings.cache"), &cache)?;
-        index.save(&build_dir.join("index.json"))?;
+        if let Some(index) = exact_index.as_ref() {
+            index.save(&build_dir.join("index.json"))?;
+        } else if let Some(index) = ann_index.as_ref() {
+            index.save(&build_dir.join("index.usearch"))?;
+        }
         let mut stats = stats;
         stats.disk_usage_bytes = dir_size(&build_dir);
         write_json(&build_dir.join("stats.json"), &stats)?;
@@ -453,7 +525,8 @@ impl<'a> SemanticIndexManager<'a> {
 
     fn compatible(&self, manifest: &SemanticManifest) -> bool {
         manifest.schema_version == SCHEMA_VERSION
-            && manifest.backend == self.config.backend
+            && resolve_semantic_backend(&self.config, manifest.vector_count)
+                .is_ok_and(|backend| manifest.backend == resolved_backend_name(backend))
             && manifest.embedding_provider == self.config.provider
             && manifest.embedding_model == canonical_model_name(&self.config)
             && manifest.embedding_implementation == expected_embedding_implementation(&self.config)
@@ -464,7 +537,8 @@ impl<'a> SemanticIndexManager<'a> {
             && manifest.dimensions == self.config.dimensions
             && manifest.distance_metric == self.config.distance
             && manifest.chunker_version == CHUNKER_VERSION
-            && manifest.index_version == INDEX_VERSION
+            && resolved_backend_from_name(&manifest.backend)
+                .is_ok_and(|backend| manifest.index_version == index_version_for_backend(backend))
     }
 
     fn vectors_dir(&self) -> PathBuf {
@@ -481,6 +555,74 @@ impl<'a> SemanticIndexManager<'a> {
 
     fn models_dir(&self) -> PathBuf {
         self.repo.join(".ok/models/fastembed")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedSemanticBackend {
+    ExactFlat,
+    HnswF32,
+    HnswBf16,
+}
+
+fn resolve_semantic_backend(
+    config: &SemanticConfig,
+    vector_count: usize,
+) -> Result<ResolvedSemanticBackend> {
+    match config.backend.as_str() {
+        "exact-flat" => Ok(ResolvedSemanticBackend::ExactFlat),
+        "auto" => {
+            if vector_count >= config.ann_min_rows {
+                Ok(ResolvedSemanticBackend::HnswF32)
+            } else {
+                Ok(ResolvedSemanticBackend::ExactFlat)
+            }
+        }
+        "usearch-hnsw-f32" => Ok(ResolvedSemanticBackend::HnswF32),
+        "usearch-hnsw-bf16" => Ok(ResolvedSemanticBackend::HnswBf16),
+        other => Err(OkError::Unsupported(format!(
+            "semantic backend `{other}` is not supported; use exact-flat, auto, usearch-hnsw-f32, or usearch-hnsw-bf16"
+        ))),
+    }
+}
+
+fn resolved_backend_from_name(name: &str) -> Result<ResolvedSemanticBackend> {
+    match name {
+        "exact-flat" => Ok(ResolvedSemanticBackend::ExactFlat),
+        "usearch-hnsw-f32" => Ok(ResolvedSemanticBackend::HnswF32),
+        "usearch-hnsw-bf16" => Ok(ResolvedSemanticBackend::HnswBf16),
+        other => Err(OkError::Storage(format!(
+            "semantic manifest contains unsupported vector backend `{other}`"
+        ))),
+    }
+}
+
+fn resolved_backend_name(backend: ResolvedSemanticBackend) -> &'static str {
+    match backend {
+        ResolvedSemanticBackend::ExactFlat => "exact-flat",
+        ResolvedSemanticBackend::HnswF32 => "usearch-hnsw-f32",
+        ResolvedSemanticBackend::HnswBf16 => "usearch-hnsw-bf16",
+    }
+}
+
+fn backend_is_ann(backend: &str) -> bool {
+    matches!(backend, "usearch-hnsw-f32" | "usearch-hnsw-bf16")
+}
+
+fn index_version_for_backend(backend: ResolvedSemanticBackend) -> &'static str {
+    match backend {
+        ResolvedSemanticBackend::ExactFlat => EXACT_INDEX_VERSION,
+        ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16 => HNSW_INDEX_VERSION,
+    }
+}
+
+fn index_artifacts_present(current: &Path, backend: &str) -> bool {
+    match resolved_backend_from_name(backend) {
+        Ok(ResolvedSemanticBackend::ExactFlat) => current.join("index.json").is_file(),
+        Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
+            current.join("index.usearch").is_file() && current.join("index.meta.json").is_file()
+        }
+        Err(_) => false,
     }
 }
 
@@ -864,7 +1006,7 @@ fn hydrate_hits(
             continue;
         };
         let evidence = vec![
-            "semantic vector similarity from local exact-flat index".into(),
+            "semantic vector similarity from local semantic index".into(),
             "embedding provider mode: local; repository source stayed on this machine".into(),
         ];
         let evidence_refs =
@@ -887,7 +1029,7 @@ fn hydrate_hits(
                 "semantic_similarity",
                 hit.score,
                 evidence_refs,
-                "cosine similarity from local exact-flat semantic vector index",
+                "cosine similarity from local semantic vector index",
             )],
         });
     }
@@ -1043,6 +1185,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_backend_respects_vector_count_gate() {
+        let mut config = SemanticConfig {
+            enabled: true,
+            backend: "auto".into(),
+            provider: "local".into(),
+            model: "local-hash".into(),
+            dimensions: 8,
+            distance: "cosine".into(),
+            batch_size: 4,
+            ann_min_rows: 100,
+            index_symbols: true,
+            index_chunks: true,
+            index_docs: true,
+            index_memory: true,
+            external_provider_allowed: false,
+        };
+        assert_eq!(
+            resolve_semantic_backend(&config, 99).unwrap(),
+            ResolvedSemanticBackend::ExactFlat
+        );
+        assert_eq!(
+            resolve_semantic_backend(&config, 100).unwrap(),
+            ResolvedSemanticBackend::HnswF32
+        );
+        config.backend = "usearch-hnsw-bf16".into();
+        assert_eq!(
+            resolve_semantic_backend(&config, 1).unwrap(),
+            ResolvedSemanticBackend::HnswBf16
+        );
+    }
+
+    #[test]
     fn builds_persisted_semantic_index_and_reuses_cache() {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
@@ -1116,6 +1290,7 @@ mod tests {
             dimensions: 64,
             distance: "cosine".into(),
             batch_size: 64,
+            ann_min_rows: 10_000,
             index_symbols: true,
             index_chunks: true,
             index_docs: true,
