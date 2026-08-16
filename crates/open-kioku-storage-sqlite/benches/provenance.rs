@@ -32,6 +32,11 @@ fn provenance_lookup(c: &mut Criterion) {
         language: Language::Rust,
         confidence: Confidence::High,
         provenance: EvidenceSourceType::TreeSitter,
+        module_id: None,
+        parent_symbol_id: None,
+        scope_id: None,
+        signature: None,
+        visibility: open_kioku_core::Visibility::Public,
     };
     let manifest = IndexManifest {
         repository: Repository {

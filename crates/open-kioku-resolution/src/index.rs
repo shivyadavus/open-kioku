@@ -94,7 +94,7 @@ impl BindingIndex {
                 .push(binding);
         }
         for vec in index.bindings_by_scope_name.values_mut() {
-            vec.sort_by_key(|b| b.range.start_line);
+            vec.sort_by_key(|b| (b.range.start_line, b.range.start_column));
         }
         index
     }
@@ -107,7 +107,12 @@ impl BindingIndex {
         scopes: &ScopeIndex,
     ) -> Option<&Binding> {
         let mut current = Some(scope_id.clone());
+        let mut visited = std::collections::HashSet::new();
+        let call_pos = (call_range.start_line, call_range.start_column);
         while let Some(sid) = current {
+            if !visited.insert(sid.clone()) {
+                break;
+            }
             if let Some(list) = self
                 .bindings_by_scope_name
                 .get(&(sid.clone(), name.to_string()))
@@ -115,7 +120,7 @@ impl BindingIndex {
                 if let Some(b) = list
                     .iter()
                     .rev()
-                    .find(|b| b.range.start_line <= call_range.start_line)
+                    .find(|b| (b.range.start_line, b.range.start_column) <= call_pos)
                 {
                     return Some(b);
                 }

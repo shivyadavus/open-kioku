@@ -12,8 +12,6 @@ use std::collections::HashSet;
 pub struct ParsedFile {
     pub syntax: open_kioku_core::SyntaxFacts,
     pub chunks: Vec<CodeChunk>,
-    pub symbols: Vec<Symbol>,
-    pub imports: Vec<Import>,
     pub analysis_facts: Vec<AnalysisFact>,
     pub tests: Vec<TestTarget>,
 }
@@ -36,17 +34,14 @@ impl Parser for HeuristicParser {
         }
         dedupe_symbols(&mut syntax.symbols);
 
-        let imports = extract_imports(file, content);
         let analysis_facts = extract_analysis_facts(file, content, &syntax.symbols);
         let mut chunks = extract_chunks(file, content, &syntax.symbols);
         dedupe_chunks(&mut chunks);
         let tests = extract_tests(file, content, &syntax.symbols, build_hint);
 
         ParsedFile {
-            syntax: syntax.clone(),
+            syntax,
             chunks,
-            symbols: syntax.symbols,
-            imports,
             analysis_facts,
             tests,
         }

@@ -325,13 +325,14 @@ fn persist_full_snapshot(
 }
 
 fn graph_from_snapshot(snapshot: &open_kioku_ingest::IndexSnapshot) -> InMemoryGraph {
-    InMemoryGraph::from_index_with_analysis(
+    InMemoryGraph::from_index_with_resolved_relationships(
         &snapshot.files,
         &snapshot.symbols,
         &snapshot.chunks,
         &snapshot.occurrences,
         &snapshot.imports,
         &snapshot.analysis_facts,
+        &snapshot.resolved_relationships,
     )
 }
 

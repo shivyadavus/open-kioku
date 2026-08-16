@@ -41,6 +41,7 @@ pub enum ResolutionResult {
 
 pub struct ResolutionContext<'a> {
     pub file_id: &'a FileId,
+    pub file_path: &'a std::path::Path,
     pub module_id: Option<&'a ModuleId>,
     pub language: Language,
     pub repository: &'a SemanticRepository,
@@ -52,8 +53,10 @@ pub struct ResolutionContext<'a> {
 }
 
 impl<'a> ResolutionContext<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         file_id: &'a FileId,
+        file_path: &'a std::path::Path,
         module_id: Option<&'a ModuleId>,
         language: Language,
         repository: &'a SemanticRepository,
@@ -65,6 +68,7 @@ impl<'a> ResolutionContext<'a> {
     ) -> Self {
         Self {
             file_id,
+            file_path,
             module_id,
             language,
             repository,

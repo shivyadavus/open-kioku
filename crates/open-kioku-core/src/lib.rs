@@ -891,6 +891,44 @@ pub struct SyntaxFacts {
     pub inheritance: Vec<InheritanceSite>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionEvidenceKind {
+    LexicalScope,
+    TypedBinding,
+    ExactImport,
+    ExplicitImport,
+    ImplicitSelf,
+    SameFile,
+    InheritedMember,
+    InheritanceGraph,
+    SCIPOccurrence,
+    FallbackHeuristic,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolutionEvidence {
+    pub kind: ResolutionEvidenceKind,
+    pub source_type: EvidenceSourceType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_range: Option<FileRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<SymbolId>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolvedRelationship {
+    pub from: SymbolId,
+    pub to: SymbolId,
+    pub edge_type: GraphEdgeType,
+    pub confidence: Confidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_site: Option<SourceRange>,
+    #[serde(default)]
+    pub evidence: Vec<ResolutionEvidence>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Symbol {
     pub id: SymbolId,

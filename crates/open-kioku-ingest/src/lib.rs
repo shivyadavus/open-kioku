@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+pub mod imports;
+pub mod project_model;
 pub mod relationships;
 pub mod resolver;
 pub mod runtime;
@@ -47,6 +49,10 @@ pub struct IndexSnapshot {
     pub scip: Option<ScipIndexReport>,
     pub phase_reports: Vec<IndexPhaseReport>,
     pub skipped_paths: Vec<SkippedPath>,
+    pub scopes: Vec<open_kioku_core::Scope>,
+    pub bindings: Vec<open_kioku_core::Binding>,
+    pub call_sites: Vec<open_kioku_core::CallSite>,
+    pub resolved_relationships: Vec<open_kioku_resolution::ResolvedRelationship>,
     pub resolution_diffs: Vec<ResolutionDiff>,
     pub resolution_quality: Option<ResolutionQualityReport>,
 }
@@ -54,6 +60,8 @@ pub struct IndexSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionDiff {
     pub call_site_id: open_kioku_core::CallSiteId,
+    pub caller_symbol_id: Option<SymbolId>,
+    pub callee_name: String,
     pub legacy_target: Option<SymbolId>,
     pub semantic_target: Option<SymbolId>,
     pub agreement: bool,
@@ -228,6 +236,10 @@ impl Indexer {
                     scip: None,
                     phase_reports,
                     skipped_paths: Vec::new(),
+                    scopes: Vec::new(),
+                    bindings: Vec::new(),
+                    call_sites: Vec::new(),
+                    resolved_relationships: Vec::new(),
                     resolution_diffs: Vec::new(),
                     resolution_quality: None,
                 },
@@ -288,9 +300,33 @@ impl Indexer {
             .collect::<Result<Vec<_>>>()?;
         let mut symbols = parsed
             .iter()
-            .flat_map(|file| file.symbols.clone())
+            .flat_map(|file| file.syntax.symbols.clone())
             .collect::<Vec<_>>();
         dedupe_symbols(&mut symbols);
+        let scopes = parsed
+            .iter()
+            .flat_map(|file| file.syntax.scopes.clone())
+            .collect::<Vec<_>>();
+        let bindings = parsed
+            .iter()
+            .flat_map(|file| file.syntax.bindings.clone())
+            .collect::<Vec<_>>();
+        let call_sites = parsed
+            .iter()
+            .flat_map(|file| file.syntax.calls.clone())
+            .collect::<Vec<_>>();
+        let import_sites = parsed
+            .iter()
+            .flat_map(|file| file.syntax.imports.clone())
+            .collect::<Vec<_>>();
+        let export_sites = parsed
+            .iter()
+            .flat_map(|file| file.syntax.exports.clone())
+            .collect::<Vec<_>>();
+        let inheritance_sites = parsed
+            .iter()
+            .flat_map(|file| file.syntax.inheritance.clone())
+            .collect::<Vec<_>>();
         let chunks = parsed
             .iter()
             .flat_map(|file| file.chunks.clone())
@@ -299,10 +335,7 @@ impl Indexer {
             .iter()
             .flat_map(|file| file.tests.clone())
             .collect::<Vec<_>>();
-        let imports = parsed
-            .iter()
-            .flat_map(|file| file.imports.clone())
-            .collect::<Vec<_>>();
+        let imports = extract_imports_from_syntax(&import_sites);
         let mut analysis_facts = parsed
             .iter()
             .flat_map(|file| file.analysis_facts.clone())
@@ -317,9 +350,88 @@ impl Indexer {
                 .total(Some(files.len()))
                 .nodes_added(files.len() + symbols.len() + chunks.len() + tests.len()),
         );
+
+        use crate::project_model::ProjectModelDiscovery;
+        let project_model = open_kioku_semantic_model::ProjectModel::discover(&root);
+        let mut import_registry = imports::ImportRegistry::default();
+        let mut file_map: imports::FileMap = HashMap::new();
+        fn register_file_key(map: &mut imports::FileMap, key: String, file_id: &FileId) {
+            let candidates = map.entry(key).or_default();
+            if !candidates.contains(file_id) {
+                candidates.push(file_id.clone());
+            }
+        }
+        for file in &files {
+            let mod_path = project_model.module_path_from_file(&file.path, &file.language);
+            register_file_key(&mut file_map, mod_path.clone(), &file.id);
+            register_file_key(
+                &mut file_map,
+                file.path.to_string_lossy().to_string(),
+                &file.id,
+            );
+            if let Some(stem) = file.path.file_stem().and_then(|s| s.to_str()) {
+                if !mod_path.is_empty() {
+                    register_file_key(&mut file_map, format!("{mod_path}.{stem}"), &file.id);
+                    register_file_key(&mut file_map, format!("{mod_path}::{stem}"), &file.id);
+                }
+                register_file_key(&mut file_map, stem.to_string(), &file.id);
+            }
+        }
+        for site in &import_sites {
+            import_registry.resolve_site(site, &file_map);
+        }
+
+        let symbol_index = open_kioku_resolution::SymbolIndex::build(symbols.clone());
+        import_registry.resolve_symbols(&symbol_index, &file_map);
+
+        let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
+        let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
+        let mut inheritance_index =
+            open_kioku_resolution::InheritanceIndex::build(inheritance_sites);
+
+        let mut semantic_repo = open_kioku_semantic_model::SemanticRepository::new();
+        semantic_repo.project = project_model;
+        semantic_repo.imports = import_registry.index;
+        for exp in &export_sites {
+            let mod_id = open_kioku_core::ModuleId::new(format!("{}:module", exp.file_id.0));
+            semantic_repo.exports.insert(
+                mod_id.clone(),
+                open_kioku_semantic_model::ExportBinding {
+                    file_id: exp.file_id.clone(),
+                    exported_name: exp.exported_name.clone(),
+                    origin_symbol: exp.local_name.as_ref().and_then(|local| {
+                        let candidates = symbol_index
+                            .by_file
+                            .get(&exp.file_id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| {
+                                symbol_index
+                                    .get(id)
+                                    .map(|s| s.name == *local)
+                                    .unwrap_or(false)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        match candidates.as_slice() {
+                            [candidate] => Some(candidate.clone()),
+                            _ => None,
+                        }
+                    }),
+                    source_module: Some(mod_id),
+                    is_type_only: false,
+                    is_glob: exp.is_glob,
+                    evidence: Vec::new(),
+                },
+            );
+        }
+        inheritance_index.bind_parents_with_repository(&symbol_index, &semantic_repo);
+
+        let resolution_mode = config.index.resolution_mode;
         let resolver_report = resolver::resolve_imports(&root, &files, &symbols, &imports)?;
         let resolver_fact_count = resolver_report.analysis_facts.len();
         analysis_facts.extend(resolver_report.analysis_facts.clone());
+
         let registry_report = symbol_registry::resolve_symbol_edges(
             &chunks,
             &symbols,
@@ -327,7 +439,187 @@ impl Indexer {
             config.scip.enabled,
         );
         let registry_fact_count = registry_report.analysis_facts.len();
-        analysis_facts.extend(registry_report.analysis_facts);
+
+        let mut resolution_diffs = Vec::new();
+        let mut quality_report = ResolutionQualityReport::default();
+        let mut resolved_relationships = Vec::new();
+
+        let file_lookup: HashMap<FileId, &File> = files.iter().map(|f| (f.id.clone(), f)).collect();
+
+        if resolution_mode == open_kioku_config::ResolutionMode::Shadow
+            || resolution_mode == open_kioku_config::ResolutionMode::V2
+        {
+            quality_report.call_sites = call_sites.len();
+
+            let symbols_by_qualified: HashMap<&str, &Symbol> = symbols
+                .iter()
+                .map(|s| (s.qualified_name.as_str(), s))
+                .collect();
+            let symbols_by_name: HashMap<&str, Vec<&Symbol>> = {
+                let mut map: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+                for s in &symbols {
+                    map.entry(s.name.as_str()).or_default().push(s);
+                }
+                map
+            };
+
+            let mut legacy_calls_map: HashMap<(&FileId, u32, &str), Option<SymbolId>> =
+                HashMap::new();
+            for fact in &registry_report.analysis_facts {
+                if fact.edge_type == GraphEdgeType::Calls {
+                    if let Some(range) = &fact.range {
+                        let target_id = symbols_by_qualified
+                            .get(fact.target.as_str())
+                            .map(|s| s.id.clone())
+                            .or_else(|| {
+                                let name = fact
+                                    .target
+                                    .rsplit("::")
+                                    .next()
+                                    .unwrap_or(fact.target.as_str());
+                                symbols_by_name.get(name).and_then(|syms| {
+                                    if syms.len() == 1 {
+                                        Some(syms[0].id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        let callee_name = fact
+                            .target
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(fact.target.as_str());
+                        legacy_calls_map
+                            .insert((&fact.file_id, range.start, callee_name), target_id);
+                    }
+                }
+            }
+
+            for call in &call_sites {
+                if let Some(file) = file_lookup.get(&call.file_id) {
+                    if let Some(semantics) = open_kioku_languages::semantics_for(&file.language) {
+                        let ctx = open_kioku_resolution::ResolutionContext::new(
+                            &call.file_id,
+                            &file.path,
+                            None,
+                            file.language.clone(),
+                            &semantic_repo,
+                            &symbol_index,
+                            &scope_index,
+                            &binding_index,
+                            &inheritance_index,
+                            semantics,
+                        );
+
+                        let v2_result = open_kioku_resolution::resolve_call(call, &ctx);
+                        let semantic_target = match &v2_result {
+                            open_kioku_resolution::ResolutionResult::Resolved {
+                                target,
+                                confidence,
+                                evidence,
+                            } => {
+                                match confidence {
+                                    Confidence::Exact => quality_report.resolved_exact += 1,
+                                    Confidence::High => quality_report.resolved_high += 1,
+                                    _ => {}
+                                }
+                                if let Some(caller) = &call.caller_symbol_id {
+                                    resolved_relationships.push(
+                                        open_kioku_resolution::ResolvedRelationship {
+                                            from: caller.clone(),
+                                            to: target.clone(),
+                                            edge_type: GraphEdgeType::Calls,
+                                            confidence: *confidence,
+                                            call_site: Some(call.range.clone()),
+                                            evidence: evidence.clone(),
+                                        },
+                                    );
+                                }
+                                Some(target.clone())
+                            }
+                            open_kioku_resolution::ResolutionResult::Ambiguous { .. } => {
+                                quality_report.ambiguous += 1;
+                                None
+                            }
+                            open_kioku_resolution::ResolutionResult::External { .. } => None,
+                            open_kioku_resolution::ResolutionResult::Unresolved { .. } => {
+                                quality_report.unresolved += 1;
+                                None
+                            }
+                        };
+
+                        let legacy_target = legacy_calls_map
+                            .get(&(
+                                &call.file_id,
+                                call.range.start_line,
+                                call.callee_name.as_str(),
+                            ))
+                            .cloned()
+                            .flatten()
+                            .or_else(|| {
+                                registry_report
+                                    .analysis_facts
+                                    .iter()
+                                    .find(|fact| {
+                                        fact.edge_type == GraphEdgeType::Calls
+                                            && fact.file_id == call.file_id
+                                            && fact
+                                                .range
+                                                .as_ref()
+                                                .map(|r| {
+                                                    r.start == call.range.start_line
+                                                        || (r.start >= call.range.start_line
+                                                            && r.end <= call.range.end_line)
+                                                })
+                                                .unwrap_or(false)
+                                            && (fact.target.ends_with(&call.callee_name)
+                                                || fact.target == call.callee_name)
+                                    })
+                                    .and_then(|fact| {
+                                        symbols_by_qualified
+                                            .get(fact.target.as_str())
+                                            .map(|s| s.id.clone())
+                                    })
+                            });
+
+                        let agreement = legacy_target == semantic_target;
+
+                        if !agreement {
+                            quality_report.disagreement += 1;
+                            if legacy_target.is_some() && semantic_target.is_none() {
+                                quality_report.legacy_only += 1;
+                            } else if legacy_target.is_none() && semantic_target.is_some() {
+                                quality_report.semantic_only += 1;
+                            }
+                        }
+
+                        resolution_diffs.push(ResolutionDiff {
+                            call_site_id: call.id.clone(),
+                            caller_symbol_id: call.caller_symbol_id.clone(),
+                            callee_name: call.callee_name.clone(),
+                            legacy_target,
+                            semantic_target,
+                            agreement,
+                        });
+                    }
+                }
+            }
+        }
+
+        match resolution_mode {
+            open_kioku_config::ResolutionMode::Legacy
+            | open_kioku_config::ResolutionMode::Shadow => {
+                analysis_facts.extend(registry_report.analysis_facts);
+            }
+            open_kioku_config::ResolutionMode::V2 => {
+                let non_call_facts = registry_report
+                    .analysis_facts
+                    .into_iter()
+                    .filter(|f| f.edge_type != GraphEdgeType::Calls);
+                analysis_facts.extend(non_call_facts);
+            }
+        }
         let relationship_facts = collect_relationship_analysis_facts(
             &files,
             &symbols,
@@ -488,8 +780,17 @@ impl Indexer {
                 scip: scip_report,
                 phase_reports,
                 skipped_paths: scan.skipped_paths,
-                resolution_diffs: Vec::new(),
-                resolution_quality: None,
+                scopes,
+                bindings,
+                call_sites,
+                resolved_relationships,
+                resolution_diffs,
+                resolution_quality: if resolution_mode == open_kioku_config::ResolutionMode::Legacy
+                {
+                    None
+                } else {
+                    Some(quality_report)
+                },
             },
             git_history.snapshot,
         ))
@@ -1741,6 +2042,21 @@ fn hash_bytes(bytes: &[u8]) -> String {
 
 fn stable_id(value: &str) -> String {
     hash_bytes(value.as_bytes())
+}
+
+fn extract_imports_from_syntax(sites: &[open_kioku_core::ImportSite]) -> Vec<Import> {
+    sites
+        .iter()
+        .map(|site| Import {
+            file_id: site.file_id.clone(),
+            imported: site.source.clone(),
+            range: Some(LineRange {
+                start: site.range.start_line,
+                end: site.range.end_line,
+            }),
+            confidence: Confidence::High,
+        })
+        .collect()
 }
 
 fn dedupe_symbols(symbols: &mut Vec<Symbol>) {

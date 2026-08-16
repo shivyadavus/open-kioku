@@ -199,12 +199,6 @@ impl<'a> ContextPackBuilder<'a> {
             .filter_map(|result| result.symbol.clone())
             .take(10)
             .collect::<Vec<_>>();
-        let mut tests = Vec::new();
-        let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
-        for result in primary.iter().take(3) {
-            tests.extend(selector.for_changed_path_with_evidence(&result.path, 5)?);
-        }
-        tests.truncate(10);
         let impact = if expand_impact {
             if let Some(first) = primary.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
@@ -253,6 +247,27 @@ impl<'a> ContextPackBuilder<'a> {
             task,
             &mut supporting_files,
         )?;
+
+        let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
+        let mut tests_by_id = std::collections::BTreeMap::new();
+        for result in validation_seed_results(&primary_files, &supporting_files, 5) {
+            for test in selector.for_changed_path_with_evidence(&result.path, 5)? {
+                // Validation seeds are ordered by evidence strength. Keep the first observation
+                // of a test so runtime-corroborated selection is not overwritten by a weaker path.
+                tests_by_id.entry(test.id.clone()).or_insert(test);
+            }
+        }
+        let mut tests = tests_by_id.into_values().collect::<Vec<_>>();
+        tests.sort_by(|left, right| {
+            right
+                .confidence
+                .score()
+                .partial_cmp(&left.confidence.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        tests.truncate(10);
+
         let runtime_evidence = runtime_signals
             .iter()
             .map(runtime_signal_evidence)
@@ -350,6 +365,50 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn validation_seed_results<'a>(
+    primary_files: &'a [SearchResult],
+    supporting_files: &'a [SearchResult],
+    limit: usize,
+) -> Vec<&'a SearchResult> {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let ordered = primary_files
+        .iter()
+        .filter(|result| has_runtime_corroboration(result))
+        .chain(
+            supporting_files
+                .iter()
+                .filter(|result| has_runtime_corroboration(result)),
+        )
+        .chain(primary_files.iter())
+        .chain(supporting_files.iter());
+
+    for result in ordered {
+        if is_docs_or_test_path(&result.path.to_string_lossy()) {
+            continue;
+        }
+        let normalized = normalize_path(&result.path);
+        if !seen.insert(normalized) {
+            continue;
+        }
+        selected.push(result);
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    selected
+}
+
+fn has_runtime_corroboration(result: &SearchResult) -> bool {
+    result.score_breakdown.iter().any(|component| {
+        component.signal == "runtime_corroboration" && component.contribution > 0.0
+    }) || result.evidence.iter().any(|evidence| {
+        evidence
+            .to_ascii_lowercase()
+            .contains("runtime corroboration")
+    })
 }
 
 fn negative_evidence_for_context(
@@ -996,6 +1055,7 @@ struct TaskSearchIntent {
     reference_anchors: Vec<String>,
     ticket_anchors: Vec<String>,
     path_anchors: Vec<String>,
+    lexical_anchors: Vec<String>,
 }
 
 impl TaskSearchIntent {
@@ -1037,6 +1097,7 @@ impl TaskSearchIntent {
             }
         }
 
+        intent.lexical_anchors = task_lexical_terms(task);
         intent
     }
 
@@ -1049,6 +1110,7 @@ impl TaskSearchIntent {
             .chain(self.path_anchors.iter())
             .chain(self.primary_anchors.iter())
             .chain(self.reference_anchors.iter())
+            .chain(self.lexical_anchors.iter())
             .chain(alias_terms.iter())
         {
             if term.len() >= 3 && !terms.iter().any(|existing| existing == term) {
@@ -1276,6 +1338,53 @@ fn is_path_like(value: &str) -> bool {
         || value.ends_with(".py")
         || value.ends_with(".go")
         || value.ends_with(".md")
+}
+
+fn task_lexical_terms(task: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for token in task
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() >= 4)
+    {
+        if is_task_stopword(&token) || tokens.iter().any(|existing| existing == &token) {
+            continue;
+        }
+        tokens.push(token);
+        if tokens.len() >= 8 {
+            break;
+        }
+    }
+
+    let mut terms = tokens.clone();
+    for pair in tokens.windows(2).take(6) {
+        push_unique_alias(&mut terms, &format!("{} {}", pair[0], pair[1]));
+    }
+    terms
+}
+
+fn is_task_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "about"
+            | "after"
+            | "against"
+            | "before"
+            | "between"
+            | "from"
+            | "into"
+            | "that"
+            | "their"
+            | "there"
+            | "these"
+            | "this"
+            | "those"
+            | "through"
+            | "under"
+            | "using"
+            | "with"
+            | "without"
+    )
 }
 
 fn task_alias_terms(task: &str) -> Vec<String> {
@@ -1524,6 +1633,79 @@ mod tests {
         assert!(terms.iter().any(|term| term == "default"));
         assert!(terms.iter().any(|term| term == "history config"));
         assert!(terms.iter().any(|term| term == "config default"));
+    }
+
+    #[test]
+    fn natural_language_workflow_terms_retrieve_patch_verifier_context() {
+        let repo_id = RepositoryId::new("repo");
+        let patch_file = File {
+            id: FileId::new("patch"),
+            repository_id: repo_id.clone(),
+            path: "crates/open-kioku-patch/src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "patch".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let noise_file = File {
+            id: FileId::new("noise"),
+            repository_id: repo_id,
+            path: "crates/open-kioku-cli/src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "noise".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let patch_symbol = Symbol {
+            id: SymbolId::new("change-verifier"),
+            name: "ChangeVerifier".into(),
+            qualified_name: "open_kioku_patch::ChangeVerifier".into(),
+            kind: SymbolKind::Class,
+            file_id: patch_file.id.clone(),
+            range: Some(LineRange { start: 1, end: 8 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let chunks = vec![
+            CodeChunk {
+                id: "patch-chunk".into(),
+                file_id: patch_file.id.clone(),
+                range: LineRange { start: 1, end: 8 },
+                language: Language::Rust,
+                text: "pub struct ChangeVerifier; impl ChangeVerifier { fn verify(&self, changed_files: Vec<PathBuf>, plan: &PlanReport) {} }".into(),
+                symbol_id: Some(patch_symbol.id.clone()),
+            },
+            CodeChunk {
+                id: "noise-chunk".into(),
+                file_id: noise_file.id.clone(),
+                range: LineRange { start: 1, end: 4 },
+                language: Language::Rust,
+                text: "fn save_workspace_files() {}".into(),
+                symbol_id: None,
+            },
+        ];
+        let files = vec![patch_file, noise_file];
+        let symbols = vec![patch_symbol];
+        let task = "verify changed files against saved plans";
+        let intent = TaskSearchIntent::parse(task);
+        let results = rerank_for_task(
+            search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
+            &intent,
+            &RankingOptions::default(),
+        );
+
+        assert_eq!(
+            results.first().map(|result| result.path.as_path()),
+            Some(Path::new("crates/open-kioku-patch/src/lib.rs"))
+        );
     }
 
     #[test]
