@@ -1400,6 +1400,7 @@ dependencies = [
  "open-kioku-context-compress",
  "open-kioku-contract",
  "open-kioku-core",
+ "open-kioku-errors",
  "open-kioku-format",
  "open-kioku-git",
  "open-kioku-graph",

@@ -2055,6 +2055,66 @@ impl Default for GraphEdge {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalSourceKind {
+    Lexical,
+    ExactSemantic,
+    Graph,
+    SemanticVector,
+    Validation,
+    GitHistory,
+    Runtime,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalAuthority {
+    Heuristic,
+    Corroborating,
+    Exact,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RetrievalContribution {
+    pub source: RetrievalSourceKind,
+    pub rank: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_score: Option<f32>,
+    pub rrf_contribution: f32,
+    pub authority: RetrievalAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<SymbolId>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RetrievalTrace {
+    pub path: PathBuf,
+    pub fused_score: f32,
+    pub authority: RetrievalAuthority,
+    #[serde(default)]
+    pub contributions: Vec<RetrievalContribution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct RetrievalDiagnostics {
+    #[serde(default)]
+    pub traces: Vec<RetrievalTrace>,
+    #[serde(default)]
+    pub caveats: Vec<String>,
+    #[serde(default)]
+    pub sources_attempted: Vec<RetrievalSourceKind>,
+    #[serde(default)]
+    pub sources_succeeded: Vec<RetrievalSourceKind>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchResult {
     pub path: PathBuf,
@@ -2270,6 +2330,8 @@ impl ImpactReport {
 pub struct ContextPack {
     pub task: String,
     pub intent: String,
+    #[serde(default)]
+    pub retrieval_diagnostics: RetrievalDiagnostics,
     pub primary_files: Vec<SearchResult>,
     pub primary_symbols: Vec<Symbol>,
     pub supporting_files: Vec<SearchResult>,
