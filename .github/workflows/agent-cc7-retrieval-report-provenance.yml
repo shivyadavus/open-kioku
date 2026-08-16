@@ -32,17 +32,18 @@ jobs:
           from pathlib import Path
           report = json.loads(Path('/tmp/retrieval-report.json').read_text())
           assert report['report_version'] == '1.2.0'
-          assert len(report['provenance']['source_revision']) == 40
+          assert len(report['provenance']['corpus_revision']) == 40
           assert report['provenance']['cases_sha256'].startswith('sha256:')
           assert report['provenance']['frozen_fixture_revisions_verified'] is True
           assert report['cases_file'] == 'benchmarks/retrieval-cases.json'
           semantic = report['strategy_identities']['cc2:semantic_vector_local_hash']
           assert semantic == {'algorithm':'semantic_vector','provider':'local','model':'local-hash','backend':'exact-flat'}
           assert report['baseline_deltas']
-          assert all('query' not in d for d in report['baseline_deltas'])
+          assert all(delta['split'] == 'holdout' for delta in report['baseline_deltas'])
+          assert all('query' not in delta for delta in report['baseline_deltas'])
           markdown = Path('/tmp/retrieval-report.md').read_text()
           assert 'Regression deltas vs checked-in baseline' in markdown
-          assert 'Open Kioku revision:' in markdown
+          assert 'Frozen corpus revision:' in markdown
           assert 'abstention precision/recall is not reported' in markdown
           expected = json.loads(Path('benchmarks/retrieval-baseline.json').read_text())
           actual = json.loads(Path('/tmp/retrieval-baseline.json').read_text())
