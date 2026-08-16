@@ -25,6 +25,7 @@ jobs:
         run: |
           python3 .github/scripts/agent_fix_retrieval_unit_provenance.py
           python3 .github/scripts/agent_fix_retrieval_unit_provenance_post.py
+          python3 .github/scripts/agent_fix_retrieval_unit_key_scalars.py
           cargo fmt --all
       - name: Validate product tree
         run: |
@@ -36,6 +37,7 @@ jobs:
         run: |
           rm .github/scripts/agent_fix_retrieval_unit_provenance.py
           rm .github/scripts/agent_fix_retrieval_unit_provenance_post.py
+          rm .github/scripts/agent_fix_retrieval_unit_key_scalars.py
           rm .github/workflows/agent-fix-retrieval-unit-provenance.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
