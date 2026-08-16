@@ -1,0 +1,36 @@
+name: agent-cc4-task-routing
+
+on:
+  push:
+    branches: [agent/cc4-task-family-routing]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC4 routing integration
+        run: python3 .github/scripts/agent_apply_cc4_routing.py
+      - name: Validate routing and workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-context
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product change and remove temporary tooling
+        run: |
+          rm .github/scripts/agent_apply_cc4_routing.py .github/workflows/agent-cc4-task-routing.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(context): route retrieval by task family"
+          git push origin HEAD:agent/cc4-task-family-routing
