@@ -3,6 +3,12 @@ from pathlib import Path
 path = Path('crates/open-kioku-context/src/candidates/builtins.rs')
 text = path.read_text()
 text = text.replace(
+    '''identity::symbol_node_id, AnalysisFact, CodeChunk, EvidenceSourceType, File, GraphEdge, NodeId,
+    RetrievalAuthority, RetrievalSourceKind, SearchResult, Symbol, TestTarget,''',
+    '''identity::symbol_node_id, AnalysisFact, CodeChunk, EvidenceSourceType, File, GraphEdge, LineRange,
+    NodeId, RetrievalAuthority, RetrievalSourceKind, SearchResult, Symbol, TestTarget,''',
+)
+text = text.replace(
     '''if !(1..=6).contains(&level) || !trimmed[level..].starts_with(char::is_whitespace) {''',
     '''if !(1..=6).contains(&level)
             || !trimmed[level..]
@@ -10,6 +16,12 @@ text = text.replace(
                 .next()
                 .is_some_and(|ch| ch.is_whitespace())
         {''',
+)
+text = text.replace(
+    '''            start: chunk.range.start + start_index,
+            end: chunk.range.start + end_index,''',
+    '''            start: chunk.range.start.saturating_add(start_index as u32),
+            end: chunk.range.start.saturating_add(end_index as u32),''',
 )
 text = text.replace(
     '''            id: open_kioku_core::ChunkId::new("doc-1"),
