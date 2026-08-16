@@ -568,7 +568,10 @@ impl<'a> PlanEngine<'a> {
         }
 
         let selector = TestSelector::new(self.store as &dyn MetadataStore);
-        for result in source_results(primary_context).take(3) {
+        for result in validation_source_results(primary_context)
+            .into_iter()
+            .take(5)
+        {
             for test in selector.for_changed_path_with_evidence(&result.path, MAX_VALIDATION)? {
                 if is_plausible_test(&test) {
                     by_id.entry(test.id.clone()).or_insert(test);
@@ -1570,6 +1573,30 @@ fn source_results(primary_context: &[SearchResult]) -> impl Iterator<Item = &Sea
     primary_context
         .iter()
         .filter(|result| !is_test_path(&result.path))
+}
+
+fn validation_source_results(primary_context: &[SearchResult]) -> Vec<&SearchResult> {
+    let mut runtime_corroborated = Vec::new();
+    let mut remaining = Vec::new();
+    for result in source_results(primary_context) {
+        if result_has_runtime_corroboration(result) {
+            runtime_corroborated.push(result);
+        } else {
+            remaining.push(result);
+        }
+    }
+    runtime_corroborated.extend(remaining);
+    runtime_corroborated
+}
+
+fn result_has_runtime_corroboration(result: &SearchResult) -> bool {
+    result.score_breakdown.iter().any(|component| {
+        component.signal == "runtime_corroboration" && component.contribution > 0.0
+    }) || result.evidence.iter().any(|evidence| {
+        evidence
+            .to_ascii_lowercase()
+            .contains("runtime corroboration")
+    })
 }
 
 fn is_test_path(path: &Path) -> bool {
