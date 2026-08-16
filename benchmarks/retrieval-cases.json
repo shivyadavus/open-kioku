@@ -1,41 +1,400 @@
 {
   "schema_version": "1.0.0",
   "corpus_id": "open-kioku-retrieval-v1",
-  "token_budgets": [2000, 4000, 8000],
+  "token_budgets": [
+    2000,
+    4000,
+    8000
+  ],
   "cases": [
-    {"id":"java-issue-token-persistence","task_family":"issue_to_code","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"login requests issue an access token and persist its digest after validating credentials","gold_files":["java/src/com/acme/auth/AuthService.java","java/src/com/acme/auth/TokenStore.java"],"gold_symbols":["AuthService.issueToken","TokenStore.saveDigest"]},
-    {"id":"java-code-to-test-auth","task_family":"code_to_test","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"tests covering AuthService issueToken invalid credentials","gold_files":["java/test/com/acme/auth/AuthServiceTest.java"]},
-    {"id":"java-trace-login-audit","task_family":"trace_to_code","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"trace shows login_issued audit event after token digest persistence","gold_files":["java/src/com/acme/auth/AuthService.java","java/src/com/acme/auth/AuditTrail.java"]},
-    {"id":"java-comment-login-rejection-audit","task_family":"comment_to_context","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"review comment: rejected credentials should record a login_rejected security audit event with the user id","gold_files":["java/src/com/acme/auth/AuthService.java","java/src/com/acme/auth/AuditTrail.java"]},
-    {"id":"java-edit-tokenstore-contract","task_family":"edit_to_ripple","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"change TokenStore saveDigest contract to include token expiry and identify callers and tests","gold_files":["java/src/com/acme/auth/TokenStore.java","java/src/com/acme/auth/AuthService.java","java/test/com/acme/auth/AuthServiceTest.java"]},
-    {"id":"java-no-gold-password-reset","task_family":"issue_to_code","language":"java","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"password reset should email a one-time code and throttle repeated reset attempts","gold_files":[],"no_gold_expected":true},
-
-    {"id":"ts-issue-invoice-tax","task_family":"issue_to_code","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"invoice totals must use the jurisdiction tax rate before invoice persistence","gold_files":["typescript/src/billing/invoiceService.ts","typescript/src/billing/taxPolicy.ts"]},
-    {"id":"ts-code-to-test-invoice","task_family":"code_to_test","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"test coverage for finalizeInvoice jurisdiction tax calculation","gold_files":["typescript/src/billing/invoiceService.test.ts"]},
-    {"id":"ts-comment-webhook-retry","task_family":"comment_to_context","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"TODO retry signed webhook delivery only after invoice has been persisted","gold_files":["typescript/src/billing/webhook.ts","typescript/src/billing/invoiceService.ts"]},
-    {"id":"ts-edit-webhook-contract","task_family":"edit_to_ripple","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"change publishInvoiceCreated to include jurisdiction and tax rate and identify upstream invoice flow and tests","gold_files":["typescript/src/billing/webhook.ts","typescript/src/billing/invoiceService.ts","typescript/src/billing/invoiceService.test.ts"]},
-    {"id":"ts-trace-invoice-created","task_family":"trace_to_code","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"invoice.created webhook trace includes total after jurisdiction tax calculation","gold_files":["typescript/src/billing/webhook.ts","typescript/src/billing/invoiceService.ts","typescript/src/billing/taxPolicy.ts"]},
-    {"id":"ts-no-gold-subscription-renewal","task_family":"issue_to_code","language":"typescript","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"subscription renewals should prorate annual plans and retry failed card payments","gold_files":[],"no_gold_expected":true},
-
-    {"id":"python-issue-order-persistence","task_family":"issue_to_code","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"order placement persists a reservation through the repository after validating quantity","gold_files":["python/orders/service.py","python/orders/repository.py"]},
-    {"id":"python-code-to-test-order","task_family":"code_to_test","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"test for OrderService place_order reservation persistence","gold_files":["python/orders/test_service.py"]},
-    {"id":"python-comment-order-trace","task_family":"comment_to_context","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"review comment: order_created span should carry the reservation id after the repository write","gold_files":["python/orders/tracing.py","python/orders/service.py","python/orders/repository.py"]},
-    {"id":"python-no-gold-video","task_family":"issue_to_code","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"add websocket video transcoding with adaptive bitrate manifests","gold_files":[],"no_gold_expected":true},
-    {"id":"python-trace-order-created","task_family":"trace_to_code","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"order_created trace span is emitted after reservation persistence","gold_files":["python/orders/service.py","python/orders/tracing.py","python/orders/repository.py"]},
-    {"id":"python-edit-repository-contract","task_family":"edit_to_ripple","language":"python","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"change OrderRepository save_reservation to return a persisted identifier and identify callers and tests","gold_files":["python/orders/repository.py","python/orders/service.py","python/orders/test_service.py"]},
-
-    {"id":"go-issue-shipping-quote","task_family":"issue_to_code","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"shipping quote selects an upstream carrier rate and persists the quote by zone","gold_files":["go/shipping/service.go","go/shipping/carrier.go"]},
-    {"id":"go-code-to-test-quote","task_family":"code_to_test","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"test coverage for Service Quote carrier selection","gold_files":["go/shipping/service_test.go"]},
-    {"id":"go-comment-timeout","task_family":"comment_to_context","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"TODO map upstream carrier timeout failures to HTTP 504 Gateway Timeout","gold_files":["go/shipping/handler.go","go/shipping/service.go"]},
-    {"id":"go-trace-quote-handler","task_family":"trace_to_code","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"HTTP shipping quote trace enters QuoteHandler then calls Service Quote and the carrier Rate implementation","gold_files":["go/shipping/handler.go","go/shipping/service.go","go/shipping/carrier.go"]},
-    {"id":"go-no-gold-thumbnail","task_family":"issue_to_code","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"implement asynchronous image thumbnail generation with EXIF rotation","gold_files":[],"no_gold_expected":true},
-    {"id":"go-edit-carrier-contract","task_family":"edit_to_ripple","language":"go","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"change Carrier Rate to return timeout metadata and identify shipping quote callers and tests","gold_files":["go/shipping/carrier.go","go/shipping/service.go","go/shipping/service_test.go"]},
-
-    {"id":"rust-issue-cache-miss","task_family":"issue_to_code","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"cache get-or-load writes loaded values to the store after a cache miss","gold_files":["rust/src/cache/service.rs","rust/src/cache/store.rs"]},
-    {"id":"rust-code-to-test-cache","task_family":"code_to_test","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"test for get_or_load writing cache misses into CacheStore","gold_files":["rust/src/cache/tests.rs"]},
-    {"id":"rust-comment-cache-trace","task_family":"comment_to_context","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"TODO attach cache.miss trace attributes before the store write","gold_files":["rust/src/cache/trace.rs","rust/src/cache/service.rs"]},
-    {"id":"rust-trace-cache-miss","task_family":"trace_to_code","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"development","query":"cache.miss trace occurs in get_or_load before CacheStore put persists the loaded value","gold_files":["rust/src/cache/trace.rs","rust/src/cache/service.rs","rust/src/cache/store.rs"]},
-    {"id":"rust-edit-store-contract","task_family":"edit_to_ripple","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"change CacheStore put to return eviction metadata and identify callers and tests","gold_files":["rust/src/cache/store.rs","rust/src/cache/service.rs","rust/src/cache/tests.rs"]},
-    {"id":"rust-no-gold-http-session","task_family":"issue_to_code","language":"rust","repo_fixture":"benchmarks/retrieval-fixture","base_revision":"fixture-v2","split":"holdout","query":"encrypt HTTP session cookies and rotate signing keys without logging users out","gold_files":[],"no_gold_expected":true}
+    {
+      "id": "java-issue-token-persistence",
+      "task_family": "issue_to_code",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "login requests issue an access token and persist its digest after validating credentials",
+      "gold_files": [
+        "java/src/com/acme/auth/AuthService.java",
+        "java/src/com/acme/auth/TokenStore.java"
+      ],
+      "gold_symbols": [
+        "AuthService.issueToken",
+        "TokenStore.saveDigest"
+      ]
+    },
+    {
+      "id": "java-code-to-test-auth",
+      "task_family": "code_to_test",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "tests covering AuthService issueToken invalid credentials",
+      "gold_files": [
+        "java/test/com/acme/auth/AuthServiceTest.java"
+      ]
+    },
+    {
+      "id": "java-trace-login-audit",
+      "task_family": "trace_to_code",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "trace shows login_issued audit event after token digest persistence",
+      "gold_files": [
+        "java/src/com/acme/auth/AuthService.java",
+        "java/src/com/acme/auth/AuditTrail.java"
+      ]
+    },
+    {
+      "id": "java-comment-login-rejection-audit",
+      "task_family": "comment_to_context",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "review comment: rejected credentials should record a login_rejected security audit event with the user id",
+      "gold_files": [
+        "java/src/com/acme/auth/AuthService.java",
+        "java/src/com/acme/auth/AuditTrail.java"
+      ]
+    },
+    {
+      "id": "java-edit-tokenstore-contract",
+      "task_family": "edit_to_ripple",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "change TokenStore saveDigest contract to include token expiry and identify callers and tests",
+      "gold_files": [
+        "java/src/com/acme/auth/TokenStore.java",
+        "java/src/com/acme/auth/AuthService.java",
+        "java/test/com/acme/auth/AuthServiceTest.java"
+      ]
+    },
+    {
+      "id": "java-no-gold-password-reset",
+      "task_family": "issue_to_code",
+      "language": "java",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "password reset should email a one-time code and throttle repeated reset attempts",
+      "gold_files": [],
+      "no_gold_expected": true
+    },
+    {
+      "id": "ts-issue-invoice-tax",
+      "task_family": "issue_to_code",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "invoice totals must use the jurisdiction tax rate before invoice persistence",
+      "gold_files": [
+        "typescript/src/billing/invoiceService.ts",
+        "typescript/src/billing/taxPolicy.ts"
+      ]
+    },
+    {
+      "id": "ts-code-to-test-invoice",
+      "task_family": "code_to_test",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "test coverage for finalizeInvoice jurisdiction tax calculation",
+      "gold_files": [
+        "typescript/src/billing/invoiceService.test.ts"
+      ]
+    },
+    {
+      "id": "ts-comment-webhook-retry",
+      "task_family": "comment_to_context",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "TODO retry signed webhook delivery only after invoice has been persisted",
+      "gold_files": [
+        "typescript/src/billing/webhook.ts",
+        "typescript/src/billing/invoiceService.ts"
+      ]
+    },
+    {
+      "id": "ts-edit-webhook-contract",
+      "task_family": "edit_to_ripple",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "change publishInvoiceCreated to include jurisdiction and tax rate and identify upstream invoice flow and tests",
+      "gold_files": [
+        "typescript/src/billing/webhook.ts",
+        "typescript/src/billing/invoiceService.ts",
+        "typescript/src/billing/invoiceService.test.ts"
+      ]
+    },
+    {
+      "id": "ts-trace-invoice-created",
+      "task_family": "trace_to_code",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "invoice.created webhook trace includes total after jurisdiction tax calculation",
+      "gold_files": [
+        "typescript/src/billing/webhook.ts",
+        "typescript/src/billing/invoiceService.ts",
+        "typescript/src/billing/taxPolicy.ts"
+      ]
+    },
+    {
+      "id": "ts-no-gold-subscription-renewal",
+      "task_family": "issue_to_code",
+      "language": "typescript",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "subscription renewals should prorate annual plans and retry failed card payments",
+      "gold_files": [],
+      "no_gold_expected": true
+    },
+    {
+      "id": "python-issue-order-persistence",
+      "task_family": "issue_to_code",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "order placement persists a reservation through the repository after validating quantity",
+      "gold_files": [
+        "python/orders/service.py",
+        "python/orders/repository.py"
+      ]
+    },
+    {
+      "id": "python-code-to-test-order",
+      "task_family": "code_to_test",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "test for OrderService place_order reservation persistence",
+      "gold_files": [
+        "python/orders/test_service.py"
+      ]
+    },
+    {
+      "id": "python-comment-order-trace",
+      "task_family": "comment_to_context",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "review comment: order_created span should carry the reservation id after the repository write",
+      "gold_files": [
+        "python/orders/tracing.py",
+        "python/orders/service.py",
+        "python/orders/repository.py"
+      ]
+    },
+    {
+      "id": "python-no-gold-video",
+      "task_family": "issue_to_code",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "add websocket video transcoding with adaptive bitrate manifests",
+      "gold_files": [],
+      "no_gold_expected": true
+    },
+    {
+      "id": "python-trace-order-created",
+      "task_family": "trace_to_code",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "order_created trace span is emitted after reservation persistence",
+      "gold_files": [
+        "python/orders/service.py",
+        "python/orders/tracing.py",
+        "python/orders/repository.py"
+      ]
+    },
+    {
+      "id": "python-edit-repository-contract",
+      "task_family": "edit_to_ripple",
+      "language": "python",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "change OrderRepository save_reservation to return a persisted identifier and identify callers and tests",
+      "gold_files": [
+        "python/orders/repository.py",
+        "python/orders/service.py",
+        "python/orders/test_service.py"
+      ]
+    },
+    {
+      "id": "go-issue-shipping-quote",
+      "task_family": "issue_to_code",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "shipping quote selects an upstream carrier rate and persists the quote by zone",
+      "gold_files": [
+        "go/shipping/service.go",
+        "go/shipping/carrier.go"
+      ]
+    },
+    {
+      "id": "go-code-to-test-quote",
+      "task_family": "code_to_test",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "test coverage for Service Quote carrier selection",
+      "gold_files": [
+        "go/shipping/service_test.go"
+      ]
+    },
+    {
+      "id": "go-comment-timeout",
+      "task_family": "comment_to_context",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "TODO map upstream carrier timeout failures to HTTP 504 Gateway Timeout",
+      "gold_files": [
+        "go/shipping/handler.go",
+        "go/shipping/service.go"
+      ]
+    },
+    {
+      "id": "go-trace-quote-handler",
+      "task_family": "trace_to_code",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "HTTP shipping quote trace enters QuoteHandler then calls Service Quote and the carrier Rate implementation",
+      "gold_files": [
+        "go/shipping/handler.go",
+        "go/shipping/service.go",
+        "go/shipping/carrier.go"
+      ]
+    },
+    {
+      "id": "go-no-gold-thumbnail",
+      "task_family": "issue_to_code",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "implement asynchronous image thumbnail generation with EXIF rotation",
+      "gold_files": [],
+      "no_gold_expected": true
+    },
+    {
+      "id": "go-edit-carrier-contract",
+      "task_family": "edit_to_ripple",
+      "language": "go",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "change Carrier Rate to return timeout metadata and identify shipping quote callers and tests",
+      "gold_files": [
+        "go/shipping/carrier.go",
+        "go/shipping/service.go",
+        "go/shipping/service_test.go"
+      ]
+    },
+    {
+      "id": "rust-issue-cache-miss",
+      "task_family": "issue_to_code",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "cache get-or-load writes loaded values to the store after a cache miss",
+      "gold_files": [
+        "rust/src/cache/service.rs",
+        "rust/src/cache/store.rs"
+      ]
+    },
+    {
+      "id": "rust-code-to-test-cache",
+      "task_family": "code_to_test",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "test for get_or_load writing cache misses into CacheStore",
+      "gold_files": [
+        "rust/src/cache/tests.rs"
+      ]
+    },
+    {
+      "id": "rust-comment-cache-trace",
+      "task_family": "comment_to_context",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "TODO attach cache.miss trace attributes before the store write",
+      "gold_files": [
+        "rust/src/cache/trace.rs",
+        "rust/src/cache/service.rs"
+      ]
+    },
+    {
+      "id": "rust-trace-cache-miss",
+      "task_family": "trace_to_code",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "development",
+      "query": "cache.miss trace occurs in get_or_load before CacheStore put persists the loaded value",
+      "gold_files": [
+        "rust/src/cache/trace.rs",
+        "rust/src/cache/service.rs",
+        "rust/src/cache/store.rs"
+      ]
+    },
+    {
+      "id": "rust-edit-store-contract",
+      "task_family": "edit_to_ripple",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "change CacheStore put to return eviction metadata and identify callers and tests",
+      "gold_files": [
+        "rust/src/cache/store.rs",
+        "rust/src/cache/service.rs",
+        "rust/src/cache/tests.rs"
+      ]
+    },
+    {
+      "id": "rust-no-gold-http-session",
+      "task_family": "issue_to_code",
+      "language": "rust",
+      "repo_fixture": "benchmarks/retrieval-fixture",
+      "base_revision": "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+      "split": "holdout",
+      "query": "encrypt HTTP session cookies and rotate signing keys without logging users out",
+      "gold_files": [],
+      "no_gold_expected": true
+    }
   ]
 }

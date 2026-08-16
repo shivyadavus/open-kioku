@@ -21,7 +21,7 @@ struct RetrievalBenchArgs {
     no_index: bool,
 
     /// Fail unless at least this many validated cases are loaded.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 30)]
     min_cases: usize,
 
     /// Minimum Fusion recall@10 required on the holdout split (or overall when no holdout exists).
