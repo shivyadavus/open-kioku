@@ -6,6 +6,7 @@ on:
       - agent/cc3-token-budget
     paths:
       - .github/scripts/agent_cc3_self_review.py
+      - .github/scripts/agent_cc3_self_review_repair.py
       - .github/workflows/agent-cc3-self-review.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply self-review hardening
-        run: python3 .github/scripts/agent_cc3_self_review.py
+        run: |
+          python3 .github/scripts/agent_cc3_self_review.py
+          python3 .github/scripts/agent_cc3_self_review_repair.py
       - name: Format and validate targeted packages
         run: |
           cargo fmt --all
@@ -37,7 +40,7 @@ jobs:
           cargo test -p open-kioku-tests
       - name: Commit hardened product tree and remove temporary tooling
         run: |
-          rm .github/scripts/agent_cc3_self_review.py .github/workflows/agent-cc3-self-review.yml
+          rm .github/scripts/agent_cc3_self_review.py .github/scripts/agent_cc3_self_review_repair.py .github/workflows/agent-cc3-self-review.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
