@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 # Core telemetry model: extend the existing selection diagnostics rather than creating a parallel report.
 path = Path('crates/open-kioku-core/src/lib.rs')
@@ -159,15 +158,9 @@ if text.count(marker) != 1:
     raise SystemExit(f'helper marker count={text.count(marker)}')
 text = text.replace(marker, helper, 1)
 
-old = '''        if !diagnostics.selection.omitted_high_value.is_empty() {
-            out.push_str("- High-value omissions:\n");
-            for omission in &diagnostics.selection.omitted_high_value {
-                out.push_str(&format!("  - {omission}\n"));
-            }
-        }
-    }
-'''
-new = '''        if !diagnostics.selection.source_stream_mix.is_empty() {
+# Insert compact telemetry immediately before the existing high-value omission section.
+marker = '''        if !diagnostics.selection.omitted_high_value.is_empty() {'''
+telemetry = r'''        if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
                 .source_stream_mix
@@ -197,24 +190,14 @@ new = '''        if !diagnostics.selection.source_stream_mix.is_empty() {
         if let Some(reason) = &diagnostics.selection.abstention_reason {
             out.push_str(&format!("- Abstention reason: `{reason}`\n"));
         }
-        if !diagnostics.selection.omitted_high_value.is_empty() {
-            out.push_str("- High-value omissions:\n");
-            for omission in &diagnostics.selection.omitted_high_value {
-                out.push_str(&format!("  - {omission}\n"));
-            }
-        }
-    }
-'''
-if text.count(old) != 1:
-    raise SystemExit(f'markdown telemetry marker count={text.count(old)}')
-text = text.replace(old, new, 1)
+        if !diagnostics.selection.omitted_high_value.is_empty() {'''
+if text.count(marker) != 1:
+    raise SystemExit(f'markdown omission marker count={text.count(marker)}')
+text = text.replace(marker, telemetry, 1)
 
-old = '''        for omission in &diagnostics.selection.omitted_high_value {
-            out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
-        }
-    }
-'''
-new = '''        if !diagnostics.selection.source_stream_mix.is_empty() {
+# Prompt output gets the same summary, inserted before its existing omission loop.
+marker = '''        for omission in &diagnostics.selection.omitted_high_value {'''
+prompt = r'''        if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
                 .source_stream_mix
@@ -241,14 +224,13 @@ new = '''        if !diagnostics.selection.source_stream_mix.is_empty() {
         if let Some(reason) = &diagnostics.selection.abstention_reason {
             out.push_str(&format!("RETRIEVAL_ABSTENTION_REASON: {reason}\n"));
         }
-        for omission in &diagnostics.selection.omitted_high_value {
-            out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
-        }
-    }
-'''
-if text.count(old) != 1:
-    raise SystemExit(f'prompt telemetry marker count={text.count(old)}')
-text = text.replace(old, new, 1)
+        for omission in &diagnostics.selection.omitted_high_value {'''
+if text.count(marker) != 2:
+    raise SystemExit(f'omission loop marker count={text.count(marker)}, expected 2')
+# The first loop belongs to markdown; patch the second occurrence only.
+first = text.find(marker)
+second = text.find(marker, first + len(marker))
+text = text[:second] + text[second:].replace(marker, prompt, 1)
 
 # Add focused adversarial tests next to existing retrieval diagnostics tests.
 marker = '''    #[test]
