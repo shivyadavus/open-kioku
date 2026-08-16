@@ -1,5 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.2.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.3.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -157,6 +157,18 @@ struct RetrievalBaselineDelta {
     no_gold_false_positive_rate: f64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct RetrievalStrategyComparison {
+    candidate_strategy: String,
+    baseline_strategy: String,
+    scope: String,
+    delta_recall_at_10: f64,
+    delta_mean_reciprocal_rank: f64,
+    delta_file_f1_at_10: f64,
+    delta_no_gold_false_positive_rate: f64,
+    delta_token_budget_gold_yield: BTreeMap<usize, f64>,
+}
+
 #[derive(Debug, Serialize)]
 struct RetrievalBenchReport {
     schema_version: &'static str,
@@ -170,9 +182,10 @@ struct RetrievalBenchReport {
     fixture_digests: BTreeMap<String, String>,
     strategy_identities: BTreeMap<String, RetrievalStrategyIdentity>,
     baseline_deltas: Vec<RetrievalBaselineDelta>,
+    advisory_comparisons: Vec<RetrievalStrategyComparison>,
     caveats: Vec<String>,
     strategies: Vec<RetrievalStrategyReport>,
-    /// Advisory Context Compiler V2 source/fusion measurements. Excluded from the frozen CC1
+    /// Advisory source/fusion/routing measurements. Excluded from the frozen generic retrieval
     /// quality baseline and release thresholds until explicitly promoted.
     stream_ablations: Vec<RetrievalStrategyReport>,
 }
@@ -372,6 +385,12 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
                 None,
                 &open_kioku_context::candidates::FusionConfig::evidence_prior_weighted(),
             )?);
+        cc2_cases
+            .entry("cc4:routed_contextpack".into())
+            .or_default()
+            .push(run_routed_contextpack_retrieval_case(
+                &store, case, budgets, limit,
+            )?);
     }
 
     let strategies = vec![
@@ -382,6 +401,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         .into_iter()
         .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
         .collect::<Vec<_>>();
+    let advisory_comparisons = routed_contextpack_comparisons(&strategies, &stream_ablations);
     let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
     let mut caveats = Vec::new();
     if let Some(caveat) = revision_caveat {
@@ -389,6 +409,9 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     }
     caveats.push(
         "abstention precision/recall is not reported until calibrated abstention ships; no-gold false-positive rate remains the active negative-case signal".into(),
+    );
+    caveats.push(
+        "cc4:routed_contextpack is advisory and executes task classification, routing policy, routed candidate caps, fusion, budget selection, and ContextPack construction; it does not alter the frozen generic-fusion release gate".into(),
     );
     let baseline_path = absolutize(&args.baseline_file)?;
     let baseline_deltas = if baseline_path.is_file() {
@@ -429,6 +452,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         fixture_digests,
         strategy_identities: retrieval_strategy_identities(&semantic_config),
         baseline_deltas,
+        advisory_comparisons,
         caveats,
         strategies,
         stream_ablations,
@@ -783,6 +807,60 @@ fn run_cc2_retrieval_case(
     Ok(score_retrieval_case(case, token_budgets, ranked, latency_ms))
 }
 
+fn run_routed_contextpack_retrieval_case(
+    store: &SqliteStore,
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    limit: usize,
+) -> anyhow::Result<RetrievalCaseReport> {
+    let builder = open_kioku_context::ContextPackBuilder::new(
+        store as &dyn open_kioku_storage::OkStore,
+    )
+    .with_history_store(Some(store as &dyn open_kioku_storage::HistoryStore));
+    let started = Instant::now();
+    let compatibility_pack = builder.build(&case.query, limit)?;
+    let latency_ms = duration_ms(started.elapsed());
+    let mut report = score_retrieval_case(
+        case,
+        token_budgets,
+        compatibility_pack.primary_files,
+        latency_ms,
+    );
+    let gold = case
+        .gold_files
+        .iter()
+        .map(|path| normalize_path_fragment(&path.to_string_lossy()))
+        .collect::<Vec<_>>();
+
+    for budget in token_budgets {
+        let pack = builder.build_with_budget(
+            &case.query,
+            open_kioku_core::ContextBudget {
+                max_tokens: *budget,
+                reserve_for_instructions: 0,
+                reserve_for_validation: 0,
+                max_per_file: 2,
+                max_primary_files: limit,
+            },
+        )?;
+        let selected = pack
+            .primary_files
+            .iter()
+            .map(|result| normalize_path_fragment(&result.path.to_string_lossy()))
+            .collect::<std::collections::HashSet<_>>();
+        let hits = gold.iter().filter(|path| selected.contains(*path)).count();
+        report
+            .token_budget_gold_yield
+            .insert(*budget, retrieval_ratio(hits, gold.len()));
+        report.token_budget_used.insert(
+            *budget,
+            pack.retrieval_diagnostics.selection.estimated_tokens_selected,
+        );
+    }
+
+    Ok(report)
+}
+
 fn retrieval_candidate_pool(
     fixture: &Path,
     store: &dyn MetadataStore,
@@ -1040,6 +1118,82 @@ fn summarize_retrieval_cases(cases: &[RetrievalCaseReport]) -> RetrievalMetricSu
     }
 }
 
+fn routed_contextpack_comparisons(
+    strategies: &[RetrievalStrategyReport],
+    advisory: &[RetrievalStrategyReport],
+) -> Vec<RetrievalStrategyComparison> {
+    let Some(fusion) = strategies
+        .iter()
+        .find(|strategy| strategy.strategy == RetrievalStrategy::Fusion.label())
+    else {
+        return Vec::new();
+    };
+    let Some(routed) = advisory
+        .iter()
+        .find(|strategy| strategy.strategy == "cc4:routed_contextpack")
+    else {
+        return Vec::new();
+    };
+
+    let mut comparisons = vec![retrieval_strategy_comparison(
+        "overall",
+        &routed.summary.quality,
+        &fusion.summary.quality,
+    )];
+    for (family, routed_summary) in &routed.by_task_family {
+        let Some(fusion_summary) = fusion.by_task_family.get(family) else {
+            continue;
+        };
+        comparisons.push(retrieval_strategy_comparison(
+            &format!("task_family:{family}"),
+            &routed_summary.quality,
+            &fusion_summary.quality,
+        ));
+    }
+    comparisons
+}
+
+fn retrieval_strategy_comparison(
+    scope: &str,
+    candidate: &RetrievalQualityMetrics,
+    baseline: &RetrievalQualityMetrics,
+) -> RetrievalStrategyComparison {
+    let budgets = candidate
+        .token_budget_gold_yield
+        .keys()
+        .chain(baseline.token_budget_gold_yield.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    RetrievalStrategyComparison {
+        candidate_strategy: "cc4:routed_contextpack".into(),
+        baseline_strategy: RetrievalStrategy::Fusion.label().into(),
+        scope: scope.into(),
+        delta_recall_at_10: candidate.recall_at_10 - baseline.recall_at_10,
+        delta_mean_reciprocal_rank: candidate.mean_reciprocal_rank - baseline.mean_reciprocal_rank,
+        delta_file_f1_at_10: candidate.file_f1_at_10 - baseline.file_f1_at_10,
+        delta_no_gold_false_positive_rate: candidate.no_gold_false_positive_rate
+            - baseline.no_gold_false_positive_rate,
+        delta_token_budget_gold_yield: budgets
+            .into_iter()
+            .map(|budget| {
+                (
+                    budget,
+                    candidate
+                        .token_budget_gold_yield
+                        .get(&budget)
+                        .copied()
+                        .unwrap_or_default()
+                        - baseline
+                            .token_budget_gold_yield
+                            .get(&budget)
+                            .copied()
+                            .unwrap_or_default(),
+                )
+            })
+            .collect(),
+    }
+}
+
 fn retrieval_ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
@@ -1162,6 +1316,15 @@ fn retrieval_strategy_identities(
         "cc2:rrf_evidence_prior".into(),
         RetrievalStrategyIdentity {
             algorithm: format!("rrf_evidence_prior_k{}", open_kioku_context::candidates::DEFAULT_RRF_K),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    identities.insert(
+        "cc4:routed_contextpack".into(),
+        RetrievalStrategyIdentity {
+            algorithm: "deterministic_task_family_routed_contextpack".into(),
             provider: None,
             model: None,
             backend: None,
@@ -1385,6 +1548,27 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
         }
         out.push('\n');
     }
+    if !report.advisory_comparisons.is_empty() {
+        out.push_str("## Routed ContextPack vs generic fusion (advisory)\n\nPositive Recall/MRR/F1/token-yield delta is improvement; negative no-gold FP delta is improvement.\n\n| Scope | Δ R@10 | Δ MRR | Δ F1@10 | Δ no-gold FP | Token-budget gold-yield deltas |\n|---|---:|---:|---:|---:|---|\n");
+        for comparison in &report.advisory_comparisons {
+            let budget_deltas = comparison
+                .delta_token_budget_gold_yield
+                .iter()
+                .map(|(budget, delta)| format!("{budget}={delta:+.3}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "| {} | {:+.3} | {:+.3} | {:+.3} | {:+.3} | {} |\n",
+                comparison.scope,
+                comparison.delta_recall_at_10,
+                comparison.delta_mean_reciprocal_rank,
+                comparison.delta_file_f1_at_10,
+                comparison.delta_no_gold_false_positive_rate,
+                budget_deltas
+            ));
+        }
+        out.push('\n');
+    }
     if !report.caveats.is_empty() {
         out.push_str("## Caveats\n\n");
         for caveat in &report.caveats {
@@ -1393,7 +1577,7 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
         out.push('\n');
     }
     if !report.stream_ablations.is_empty() {
-        out.push_str("## Context Compiler V2 stream ablations (advisory)\n\nThese measurements are excluded from the frozen CC1 release baseline. `cc2:semantic_vector_local_hash` measures Open Kioku's current deterministic local-hash/exact-flat backend; CC5/#209 evaluates real neural embedding models and ANN before any semantic backend is promoted.\n\n");
+        out.push_str("## Advisory retrieval strategies\n\nThese measurements are excluded from the frozen generic retrieval release baseline. `cc2:semantic_vector_local_hash` measures the current deterministic local-hash/exact-flat backend; `cc4:routed_contextpack` measures the complete deterministic task-family routing and ContextPack path.\n\n");
         out.push_str("| Strategy | R@5 | R@10 | MRR | F1@10 | No-gold FP | Holdout R@10 | Holdout MRR | p95 ms |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for strategy in &report.stream_ablations {
             let quality = &strategy.summary.quality;
@@ -1412,8 +1596,34 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             ));
         }
         out.push('\n');
+        if let Some(routed) = report
+            .stream_ablations
+            .iter()
+            .find(|strategy| strategy.strategy == "cc4:routed_contextpack")
+        {
+            out.push_str("### Routed ContextPack by task family\n\n| Task family | R@10 | MRR | F1@10 | No-gold FP | Token-budget gold-file yield |\n|---|---:|---:|---:|---:|---|\n");
+            for (family, summary) in &routed.by_task_family {
+                let budgets = summary
+                    .quality
+                    .token_budget_gold_yield
+                    .iter()
+                    .map(|(budget, value)| format!("{budget}={value:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {} |\n",
+                    family,
+                    summary.quality.recall_at_10,
+                    summary.quality.mean_reciprocal_rank,
+                    summary.quality.file_f1_at_10,
+                    summary.quality.no_gold_false_positive_rate,
+                    budgets
+                ));
+            }
+            out.push('\n');
+        }
     }
-    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory CC2 ablations are also excluded until explicitly promoted.\n");
+    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory retrieval measurements are also excluded until explicitly promoted.\n");
     out
 }
 
@@ -1438,7 +1648,7 @@ fn print_retrieval_bench_report(report: &RetrievalBenchReport) {
         );
     }
     if !report.stream_ablations.is_empty() {
-        println!("CC2 stream ablations (advisory; excluded from frozen baseline):");
+        println!("Advisory retrieval strategies (excluded from frozen baseline):");
         for strategy in &report.stream_ablations {
             let quality = &strategy.summary.quality;
             println!(
@@ -1495,6 +1705,33 @@ mod retrieval_bench_tests {
             returned_any: no_gold,
             latency_ms: 10.0,
         }
+    }
+
+    #[test]
+    fn routed_contextpack_comparison_reports_overall_and_task_family_deltas() {
+        let fusion_cases = vec![report("fusion", false, &[Some(1)])];
+        let routed_cases = vec![report("routed", false, &[Some(2)])];
+        let strategies = vec![build_named_retrieval_strategy_report(
+            "fusion",
+            fusion_cases,
+        )];
+        let advisory = vec![build_named_retrieval_strategy_report(
+            "cc4:routed_contextpack",
+            routed_cases,
+        )];
+
+        let comparisons = routed_contextpack_comparisons(&strategies, &advisory);
+
+        assert_eq!(comparisons.len(), 2);
+        assert_eq!(comparisons[0].scope, "overall");
+        assert!(comparisons[0].delta_mean_reciprocal_rank < 0.0);
+        assert_eq!(
+            comparisons[0]
+                .delta_token_budget_gold_yield
+                .get(&2_000),
+            Some(&0.0)
+        );
+        assert_eq!(comparisons[1].scope, "task_family:issue_to_code");
     }
 
     #[test]
@@ -1572,6 +1809,7 @@ mod retrieval_bench_tests {
             fixture_digests: BTreeMap::new(),
             strategy_identities: BTreeMap::new(),
             baseline_deltas: Vec::new(),
+            advisory_comparisons: Vec::new(),
             caveats: Vec::new(),
             strategies: vec![strategy],
             stream_ablations: vec![build_named_retrieval_strategy_report(
