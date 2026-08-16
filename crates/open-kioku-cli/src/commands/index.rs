@@ -35,28 +35,32 @@ fn index_repo_with_config(
         &reporter,
         "store",
         format!(
-            "writing {} files, {} symbols, {} chunks, {} occurrences, {} analysis facts",
+            "writing {} files, {} symbols, {} chunks, {} document sections, {} occurrences, {} analysis facts",
             snapshot.files.len(),
             snapshot.symbols.len(),
             snapshot.chunks.len(),
+            snapshot.document_sections.len(),
             snapshot.occurrences.len(),
             snapshot.analysis_facts.len()
         ),
     );
     let store = open_store(repo)?;
-    store.replace_index(IndexData {
-        manifest: &snapshot.manifest,
-        files: &snapshot.files,
-        symbols: &snapshot.symbols,
-        chunks: &snapshot.chunks,
-        tests: &snapshot.tests,
-        imports: &snapshot.imports,
-        occurrences: &snapshot.occurrences,
-        analysis_facts: &snapshot.analysis_facts,
-        scopes: &snapshot.scopes,
-        bindings: &snapshot.bindings,
-        call_sites: &snapshot.call_sites,
-    })?;
+    store.replace_index_with_documents(
+        IndexData {
+            manifest: &snapshot.manifest,
+            files: &snapshot.files,
+            symbols: &snapshot.symbols,
+            chunks: &snapshot.chunks,
+            tests: &snapshot.tests,
+            imports: &snapshot.imports,
+            occurrences: &snapshot.occurrences,
+            analysis_facts: &snapshot.analysis_facts,
+            scopes: &snapshot.scopes,
+            bindings: &snapshot.bindings,
+            call_sites: &snapshot.call_sites,
+        },
+        &snapshot.document_sections,
+    )?;
     report_index_stage(
         &reporter,
         "history",

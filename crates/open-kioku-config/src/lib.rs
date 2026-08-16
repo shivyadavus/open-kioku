@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 pub struct OkConfig {
     pub repo: RepoConfig,
     pub index: IndexConfig,
+    #[serde(default)]
+    pub documents: DocumentsConfig,
     pub languages: LanguagesConfig,
     pub scip: ScipConfig,
     #[serde(default)]
@@ -68,6 +70,7 @@ impl Default for OkConfig {
                 ],
                 resolution_mode: ResolutionMode::Legacy,
             },
+            documents: DocumentsConfig::default(),
             languages: LanguagesConfig {
                 enabled: vec![
                     "rust".into(),
@@ -176,6 +179,25 @@ pub struct IndexConfig {
     pub exclude: Vec<String>,
     #[serde(default)]
     pub resolution_mode: ResolutionMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Additional documentation-oriented plain-text paths. Markdown/MDX and README files are
+    /// first-class and do not need to be listed here.
+    #[serde(default)]
+    pub plain_text: Vec<String>,
+}
+
+impl Default for DocumentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            plain_text: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

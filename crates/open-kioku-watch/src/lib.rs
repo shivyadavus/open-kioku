@@ -5,8 +5,8 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
 use open_kioku_storage::{
-    classify_file_changes, partial_index_supported, GraphStore, HistoryStore, IndexChangeKind,
-    IndexData, MetadataStore, PartialIndexUpdate,
+    changed_document_paths, classify_file_changes, partial_index_supported, GraphStore,
+    HistoryStore, IndexChangeKind, IndexData, MetadataStore, PartialIndexUpdate,
 };
 use open_kioku_storage_sqlite::SqliteStore;
 use std::collections::BTreeSet;
@@ -108,6 +108,7 @@ pub fn reindex_repo_after_changes<'a>(
     let store = SqliteStore::open(root.join(".ok/index.sqlite"))?;
     let previous_manifest = store.manifest()?;
     let previous_files = store.list_files(usize::MAX, 0)?;
+    let previous_documents = store.document_sections()?;
     let changed_paths = changed_paths
         .into_iter()
         .filter_map(|path| path.strip_prefix(root).ok().or(Some(path)))
@@ -247,6 +248,18 @@ pub fn reindex_repo_after_changes<'a>(
     } else {
         persist_full_snapshot(&store, &snapshot)?;
     }
+    if partial {
+        let changed_documents =
+            changed_document_paths(&previous_documents, &snapshot.document_sections)
+                .into_iter()
+                .collect::<Vec<_>>();
+        if !changed_documents.is_empty() {
+            store.replace_document_sections_for_paths(
+                &changed_documents,
+                &snapshot.document_sections,
+            )?;
+        }
+    }
     store.put_history_snapshot(&history)?;
 
     if !partial {
@@ -256,12 +269,14 @@ pub fn reindex_repo_after_changes<'a>(
             &graph.edges,
         )?;
     }
-    rebuild_disk_index(
-        default_index_dir(root),
-        &snapshot.chunks,
-        &snapshot.files,
-        &snapshot.symbols,
-    )?;
+    if !partial || changed_file_count > 0 || deleted_file_count > 0 {
+        rebuild_disk_index(
+            default_index_dir(root),
+            &snapshot.chunks,
+            &snapshot.files,
+            &snapshot.symbols,
+        )?;
+    }
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -309,19 +324,22 @@ fn persist_full_snapshot(
     store: &SqliteStore,
     snapshot: &open_kioku_ingest::IndexSnapshot,
 ) -> Result<()> {
-    store.replace_index(IndexData {
-        manifest: &snapshot.manifest,
-        files: &snapshot.files,
-        symbols: &snapshot.symbols,
-        chunks: &snapshot.chunks,
-        tests: &snapshot.tests,
-        imports: &snapshot.imports,
-        occurrences: &snapshot.occurrences,
-        analysis_facts: &snapshot.analysis_facts,
-        scopes: &[],
-        bindings: &[],
-        call_sites: &[],
-    })
+    store.replace_index_with_documents(
+        IndexData {
+            manifest: &snapshot.manifest,
+            files: &snapshot.files,
+            symbols: &snapshot.symbols,
+            chunks: &snapshot.chunks,
+            tests: &snapshot.tests,
+            imports: &snapshot.imports,
+            occurrences: &snapshot.occurrences,
+            analysis_facts: &snapshot.analysis_facts,
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
+        },
+        &snapshot.document_sections,
+    )
 }
 
 fn graph_from_snapshot(snapshot: &open_kioku_ingest::IndexSnapshot) -> InMemoryGraph {

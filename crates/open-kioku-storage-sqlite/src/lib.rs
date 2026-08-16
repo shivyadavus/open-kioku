@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
     AnalysisFact, ChurnEntityKind, ChurnStats, ChurnSummary, CodeChunk, Confidence,
-    EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge, GitCommitId,
-    GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
-    GraphNodeType, HistoricalChangeSummary, HistoryRecordId, HistorySnapshot, HistorySummary,
-    Import, IndexManifest, ProvenanceTouch, SimilarChangeHit, SimilarChangeQuery,
+    DocumentSection, EvidenceSourceType, File, FileId, FileProvenance, GitCochangeEdge,
+    GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType,
+    GraphNode, GraphNodeType, HistoricalChangeSummary, HistoryRecordId, HistorySnapshot,
+    HistorySummary, Import, IndexManifest, ProvenanceTouch, SimilarChangeHit, SimilarChangeQuery,
     SimilarChangeReport, SimilarityEvidence, SimilarityEvidenceSource, Symbol, SymbolId,
     SymbolOccurrence, SymbolProvenance, TestTarget, HISTORY_SCHEMA_VERSION,
 };
@@ -212,6 +212,18 @@ impl MetadataStore for SqliteStore {
               json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+            CREATE TABLE IF NOT EXISTS document_sections (
+              path TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              json TEXT NOT NULL,
+              PRIMARY KEY(path, start_line, end_line)
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_sections_path
+              ON document_sections(path, start_line);
+            CREATE INDEX IF NOT EXISTS idx_document_sections_hash
+              ON document_sections(content_hash);
             CREATE TABLE IF NOT EXISTS tests (
               id TEXT PRIMARY KEY,
               file_id TEXT NOT NULL,
@@ -382,42 +394,27 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let tx = conn.transaction().map_err(storage_err)?;
-        tx.execute("DELETE FROM call_sites", [])
+        replace_index_rows(&tx, data)?;
+        tx.execute("DELETE FROM document_sections", [])
             .map_err(storage_err)?;
-        tx.execute("DELETE FROM bindings", [])
+        tx.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    fn replace_index_with_documents(
+        &self,
+        data: IndexData<'_>,
+        document_sections: &[DocumentSection],
+    ) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        replace_index_rows(&tx, data)?;
+        tx.execute("DELETE FROM document_sections", [])
             .map_err(storage_err)?;
-        tx.execute("DELETE FROM scopes", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM occurrences", [])
-            .map_err(storage_err)?;
-        tx.execute("DELETE FROM analysis_facts", [])
-            .map_err(storage_err)?;
-        tx.execute("DELETE FROM imports", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM tests", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM chunks", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM symbols", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM files", []).map_err(storage_err)?;
-        tx.execute("DELETE FROM manifests", [])
-            .map_err(storage_err)?;
-        tx.execute(
-            "INSERT INTO manifests(id, json) VALUES(1, ?1)",
-            params![serde_json::to_string(data.manifest)?],
-        )
-        .map_err(storage_err)?;
-        insert_index_rows(
-            &tx,
-            IndexRows {
-                files: data.files,
-                symbols: data.symbols,
-                chunks: data.chunks,
-                tests: data.tests,
-                imports: data.imports,
-                occurrences: data.occurrences,
-                analysis_facts: data.analysis_facts,
-                scopes: data.scopes,
-                bindings: data.bindings,
-                call_sites: data.call_sites,
-            },
-        )?;
+        insert_document_sections(&tx, document_sections)?;
         tx.commit().map_err(storage_err)?;
         Ok(())
     }
@@ -706,6 +703,67 @@ impl MetadataStore for SqliteStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         collect_json(rows)
+    }
+
+    fn document_sections(&self) -> Result<Vec<DocumentSection>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let mut stmt = conn
+            .prepare("SELECT json FROM document_sections ORDER BY path, start_line, end_line")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn replace_document_corpus(&self, sections: &[DocumentSection]) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        tx.execute("DELETE FROM document_sections", [])
+            .map_err(storage_err)?;
+        insert_document_sections(&tx, sections)?;
+        tx.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    fn replace_document_sections_for_paths(
+        &self,
+        paths: &[PathBuf],
+        sections: &[DocumentSection],
+    ) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let changed = paths
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<BTreeSet<_>>();
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        for path in &changed {
+            tx.execute(
+                "DELETE FROM document_sections WHERE path = ?1",
+                params![path],
+            )
+            .map_err(storage_err)?;
+        }
+        let replacements = sections
+            .iter()
+            .filter(|section| changed.contains(&section.path.to_string_lossy().replace('\\', "/")))
+            .cloned()
+            .collect::<Vec<_>>();
+        insert_document_sections(&tx, &replacements)?;
+        tx.commit().map_err(storage_err)?;
+        Ok(())
     }
 
     fn tests(&self) -> Result<Vec<TestTarget>> {
@@ -2174,6 +2232,66 @@ struct IndexRows<'a> {
     scopes: &'a [open_kioku_core::Scope],
     bindings: &'a [open_kioku_core::Binding],
     call_sites: &'a [open_kioku_core::CallSite],
+}
+
+fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
+    tx.execute("DELETE FROM call_sites", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM bindings", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM scopes", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM occurrences", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM analysis_facts", [])
+        .map_err(storage_err)?;
+    tx.execute("DELETE FROM imports", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM tests", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM chunks", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM symbols", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM files", []).map_err(storage_err)?;
+    tx.execute("DELETE FROM manifests", [])
+        .map_err(storage_err)?;
+    tx.execute(
+        "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+        params![serde_json::to_string(data.manifest)?],
+    )
+    .map_err(storage_err)?;
+    insert_index_rows(
+        tx,
+        IndexRows {
+            files: data.files,
+            symbols: data.symbols,
+            chunks: data.chunks,
+            tests: data.tests,
+            imports: data.imports,
+            occurrences: data.occurrences,
+            analysis_facts: data.analysis_facts,
+            scopes: data.scopes,
+            bindings: data.bindings,
+            call_sites: data.call_sites,
+        },
+    )
+}
+
+fn insert_document_sections(tx: &Transaction<'_>, sections: &[DocumentSection]) -> Result<()> {
+    let mut stmt = tx
+        .prepare(
+            "INSERT INTO document_sections(path, start_line, end_line, content_hash, json) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+        )
+        .map_err(storage_err)?;
+    for section in sections {
+        let path = section.path.to_string_lossy().replace('\\', "/");
+        stmt.execute(params![
+            path,
+            i64::from(section.line_range.start),
+            i64::from(section.line_range.end),
+            &section.content_hash,
+            serde_json::to_string(section)?,
+        ])
+        .map_err(storage_err)?;
+    }
+    Ok(())
 }
 
 fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
@@ -5277,5 +5395,54 @@ mod tests {
         let overall = store.graph_counts().unwrap();
         assert_eq!(overall.nodes, 2);
         assert_eq!(overall.edges, 1);
+    }
+}
+
+#[cfg(test)]
+mod document_corpus_tests {
+    use super::*;
+    use open_kioku_core::{DocumentSection, DocumentType, LineRange};
+    use open_kioku_storage::MetadataStore;
+
+    fn section(path: &str, hash: &str, content: &str) -> DocumentSection {
+        DocumentSection {
+            path: PathBuf::from(path),
+            heading_path: vec!["Guide".into()],
+            line_range: LineRange { start: 1, end: 3 },
+            content_hash: hash.into(),
+            content: content.into(),
+            document_type: DocumentType::Markdown,
+        }
+    }
+
+    #[test]
+    fn partial_document_replacement_preserves_unaffected_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("index.sqlite")).unwrap();
+        store
+            .replace_document_corpus(&[
+                section("docs/a.md", "a1", "old-a"),
+                section("docs/b.md", "b1", "stable-b"),
+            ])
+            .unwrap();
+
+        store
+            .replace_document_sections_for_paths(
+                &[PathBuf::from("docs/a.md")],
+                &[
+                    section("docs/a.md", "a2", "new-a"),
+                    section("docs/b.md", "b2-ignored", "should-not-rewrite"),
+                ],
+            )
+            .unwrap();
+
+        let sections = store.document_sections().unwrap();
+        assert_eq!(sections.len(), 2);
+        assert!(sections.iter().any(|section| {
+            section.path == Path::new("docs/a.md") && section.content == "new-a"
+        }));
+        assert!(sections.iter().any(|section| {
+            section.path == Path::new("docs/b.md") && section.content == "stable-b"
+        }));
     }
 }
