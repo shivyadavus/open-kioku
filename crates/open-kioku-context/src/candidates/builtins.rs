@@ -1,8 +1,8 @@
 use super::{CandidateRequest, CandidateStream, StreamCandidate};
 use crate::{search_candidates, TaskSearchIntent};
 use open_kioku_core::{
-    identity::symbol_node_id, AnalysisFact, CodeChunk, EvidenceSourceType, File, GraphEdge, NodeId,
-    RetrievalAuthority, RetrievalSourceKind, SearchResult, Symbol, TestTarget,
+    identity::symbol_node_id, AnalysisFact, CodeChunk, EvidenceSourceType, File, GraphEdge,
+    LineRange, NodeId, RetrievalAuthority, RetrievalSourceKind, SearchResult, Symbol, TestTarget,
 };
 use open_kioku_ranking::rerank_baseline;
 use open_kioku_storage::{HistoryStore, OkStore};
@@ -40,6 +40,9 @@ impl<'a> BuiltinCandidateContext<'a> {
         if !excluded.contains(&RetrievalSourceKind::Lexical) {
             streams.push(self.lexical_stream(request));
         }
+        if !excluded.contains(&RetrievalSourceKind::Document) {
+            streams.push(self.document_stream(request));
+        }
         if !excluded.contains(&RetrievalSourceKind::ExactSemantic) {
             streams.push(exact);
         }
@@ -70,22 +73,126 @@ impl<'a> BuiltinCandidateContext<'a> {
         ) {
             Ok(results) => CandidateStream::success(
                 RetrievalSourceKind::Lexical,
-                rerank_baseline(results)
-                    .into_iter()
-                    .map(|result| {
-                        StreamCandidate::from_result(
-                            result,
-                            RetrievalAuthority::Heuristic,
-                            "lexical repository search candidate",
-                        )
-                    })
-                    .collect(),
+                rerank_baseline(
+                    results
+                        .into_iter()
+                        .filter(|result| {
+                            !super::is_document_candidate_path(&result.path.to_string_lossy())
+                        })
+                        .collect(),
+                )
+                .into_iter()
+                .map(|result| {
+                    StreamCandidate::from_result(
+                        result,
+                        RetrievalAuthority::Heuristic,
+                        "lexical repository search candidate",
+                    )
+                })
+                .collect(),
             ),
             Err(err) => CandidateStream::unavailable(
                 RetrievalSourceKind::Lexical,
                 format!("lexical candidate stream unavailable: {err}"),
             ),
         }
+    }
+
+    fn document_stream(&self, request: &CandidateRequest) -> CandidateStream {
+        let terms = retrieval_terms(request);
+        let mut chunks_by_file = BTreeMap::<open_kioku_core::FileId, Vec<&CodeChunk>>::new();
+        for chunk in self.chunks {
+            chunks_by_file
+                .entry(chunk.file_id.clone())
+                .or_default()
+                .push(chunk);
+        }
+
+        let mut scored = Vec::<(f32, StreamCandidate)>::new();
+        for file in self
+            .files
+            .iter()
+            .filter(|file| super::is_document_candidate_path(&file.path.to_string_lossy()))
+        {
+            let chunks = chunks_by_file
+                .get(&file.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for section in document_sections(file, chunks) {
+                let path = normalized_path(&file.path);
+                let heading_label = if section.heading_path.is_empty() {
+                    "document root".to_string()
+                } else {
+                    section.heading_path.join(" > ")
+                };
+                let heading = heading_label.to_ascii_lowercase();
+                let body = section.text.to_ascii_lowercase();
+                let path_lower = path.to_ascii_lowercase();
+                let heading_overlap = term_overlap(&terms, &heading);
+                let body_overlap = term_overlap(&terms, &body);
+                let path_overlap = term_overlap(&terms, &path_lower);
+                if heading_overlap + body_overlap + path_overlap == 0 {
+                    continue;
+                }
+                let score =
+                    body_overlap as f32 + heading_overlap as f32 * 1.5 + path_overlap as f32 * 0.5;
+                let evidence_ref = format!(
+                    "document:{}:{}-{}",
+                    path, section.range.start, section.range.end
+                );
+                let reason = format!("document section `{heading_label}` matched task vocabulary");
+                let result = SearchResult {
+                    path: file.path.clone(),
+                    line_range: Some(section.range.clone()),
+                    snippet: section.text,
+                    symbol: None,
+                    score,
+                    match_reason: reason.clone(),
+                    evidence: vec![reason, format!("document heading path: {heading_label}")],
+                    evidence_refs: vec![evidence_ref],
+                    confidence: 0.65,
+                    score_breakdown: Vec::new(),
+                };
+                scored.push((
+                    score,
+                    StreamCandidate::from_result(
+                        result,
+                        RetrievalAuthority::Heuristic,
+                        "heading-aware documentation section matched the task",
+                    ),
+                ));
+            }
+        }
+
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| left.1.result.path.cmp(&right.1.result.path))
+                .then_with(|| {
+                    left.1
+                        .result
+                        .line_range
+                        .as_ref()
+                        .map(|range| (range.start, range.end))
+                        .cmp(
+                            &right
+                                .1
+                                .result
+                                .line_range
+                                .as_ref()
+                                .map(|range| (range.start, range.end)),
+                        )
+                })
+        });
+        CandidateStream::success(
+            RetrievalSourceKind::Document,
+            scored
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .take(request.limit)
+                .collect(),
+        )
     }
 
     fn exact_symbol_stream(&self, request: &CandidateRequest) -> CandidateStream {
@@ -752,6 +859,157 @@ fn normalized_path(path: &Path) -> String {
         .to_string()
 }
 
+#[derive(Debug, Clone)]
+struct DocumentSectionCandidate {
+    heading_path: Vec<String>,
+    range: LineRange,
+    text: String,
+}
+
+fn document_sections(file: &File, chunks: &[&CodeChunk]) -> Vec<DocumentSectionCandidate> {
+    if is_markdown_document_path(&file.path) {
+        markdown_document_sections(chunks)
+    } else {
+        plain_document_sections(chunks)
+    }
+}
+
+fn is_markdown_document_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("md" | "mdx")
+    )
+}
+
+fn plain_document_sections(chunks: &[&CodeChunk]) -> Vec<DocumentSectionCandidate> {
+    let mut ordered = chunks.to_vec();
+    ordered.sort_by_key(|chunk| (chunk.range.start, chunk.range.end));
+    ordered
+        .into_iter()
+        .filter(|chunk| !chunk.text.trim().is_empty())
+        .map(|chunk| DocumentSectionCandidate {
+            heading_path: Vec::new(),
+            range: chunk.range.clone(),
+            text: chunk.text.clone(),
+        })
+        .collect()
+}
+
+fn markdown_document_sections(chunks: &[&CodeChunk]) -> Vec<DocumentSectionCandidate> {
+    let mut ordered = chunks.to_vec();
+    ordered.sort_by_key(|chunk| (chunk.range.start, chunk.range.end));
+
+    let mut sections = Vec::new();
+    let mut heading_stack = Vec::<String>::new();
+    let mut current_heading_path = Vec::<String>::new();
+    let mut current_start = None::<u32>;
+    let mut current_lines = Vec::<String>::new();
+    let mut previous_line = None::<u32>;
+
+    for chunk in ordered {
+        for (offset, line) in chunk.text.lines().enumerate() {
+            let line_number = chunk.range.start.saturating_add(offset as u32);
+            if let Some(previous) = previous_line {
+                if line_number > previous.saturating_add(1) {
+                    finish_document_section(
+                        &mut sections,
+                        &mut current_start,
+                        &mut current_heading_path,
+                        &mut current_lines,
+                        previous,
+                    );
+                    heading_stack.clear();
+                }
+            }
+
+            if let Some((level, title)) = markdown_heading(line) {
+                if let Some(previous) = previous_line {
+                    finish_document_section(
+                        &mut sections,
+                        &mut current_start,
+                        &mut current_heading_path,
+                        &mut current_lines,
+                        previous,
+                    );
+                }
+                update_heading_stack(&mut heading_stack, level, title);
+                current_heading_path = heading_stack.clone();
+                current_start = Some(line_number);
+            } else if current_start.is_none() {
+                current_heading_path = heading_stack.clone();
+                current_start = Some(line_number);
+            }
+
+            current_lines.push(line.to_string());
+            previous_line = Some(line_number);
+        }
+    }
+
+    if let Some(end) = previous_line {
+        finish_document_section(
+            &mut sections,
+            &mut current_start,
+            &mut current_heading_path,
+            &mut current_lines,
+            end,
+        );
+    }
+    sections
+}
+
+fn finish_document_section(
+    sections: &mut Vec<DocumentSectionCandidate>,
+    current_start: &mut Option<u32>,
+    current_heading_path: &mut Vec<String>,
+    current_lines: &mut Vec<String>,
+    end: u32,
+) {
+    let Some(start) = current_start.take() else {
+        current_lines.clear();
+        current_heading_path.clear();
+        return;
+    };
+    let text = current_lines.join("\n");
+    current_lines.clear();
+    if text.trim().is_empty() {
+        current_heading_path.clear();
+        return;
+    }
+    sections.push(DocumentSectionCandidate {
+        heading_path: std::mem::take(current_heading_path),
+        range: LineRange {
+            start,
+            end: end.max(start),
+        },
+        text,
+    });
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let remainder = &trimmed[level..];
+    if !remainder.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let title = remainder.trim();
+    (!title.is_empty()).then_some((level, title))
+}
+
+fn update_heading_stack(headings: &mut Vec<String>, level: usize, title: &str) {
+    let parent_count = level.saturating_sub(1);
+    if headings.len() > parent_count {
+        headings.truncate(parent_count);
+    }
+    headings.push(title.to_string());
+}
+
 #[cfg(test)]
 mod exact_authority_tests {
     use super::*;
@@ -832,5 +1090,64 @@ mod exact_authority_tests {
         let anchors = symbol_anchor_keys("change src/Foo.java and config.json", &[]);
         assert!(!anchors.contains("src::Foo::java"));
         assert!(!anchors.contains("config::json"));
+    }
+
+    #[test]
+    fn markdown_sections_preserve_nested_heading_paths_and_exact_ranges() {
+        let chunk = CodeChunk {
+            id: "doc-chunk".into(),
+            file_id: open_kioku_core::FileId::new("doc-file"),
+            range: LineRange { start: 1, end: 8 },
+            language: open_kioku_core::Language::Markdown,
+            text: "# Guide\nintro\n## Install\nsteps\n### Linux\napt install\n## Usage\nrun it"
+                .into(),
+            symbol_id: None,
+        };
+        let sections = markdown_document_sections(&[&chunk]);
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].heading_path, vec!["Guide"]);
+        assert_eq!(sections[0].range, LineRange { start: 1, end: 2 });
+        assert_eq!(sections[1].heading_path, vec!["Guide", "Install"]);
+        assert_eq!(sections[1].range, LineRange { start: 3, end: 4 });
+        assert_eq!(sections[2].heading_path, vec!["Guide", "Install", "Linux"]);
+        assert_eq!(sections[2].range, LineRange { start: 5, end: 6 });
+        assert_eq!(sections[3].heading_path, vec!["Guide", "Usage"]);
+        assert_eq!(sections[3].range, LineRange { start: 7, end: 8 });
+    }
+
+    #[test]
+    fn markdown_section_state_survives_generic_chunk_boundaries() {
+        let first = CodeChunk {
+            id: "doc-a".into(),
+            file_id: open_kioku_core::FileId::new("doc-file"),
+            range: LineRange { start: 1, end: 3 },
+            language: open_kioku_core::Language::Markdown,
+            text: "# Guide\n## Install\nfirst".into(),
+            symbol_id: None,
+        };
+        let second = CodeChunk {
+            id: "doc-b".into(),
+            file_id: open_kioku_core::FileId::new("doc-file"),
+            range: LineRange { start: 4, end: 6 },
+            language: open_kioku_core::Language::Markdown,
+            text: "second\n### Linux\nthird".into(),
+            symbol_id: None,
+        };
+        let sections = markdown_document_sections(&[&second, &first]);
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[1].heading_path, vec!["Guide", "Install"]);
+        assert_eq!(sections[1].range, LineRange { start: 2, end: 4 });
+        assert!(sections[1].text.contains("second"));
+        assert_eq!(sections[2].heading_path, vec!["Guide", "Install", "Linux"]);
+        assert_eq!(sections[2].range, LineRange { start: 5, end: 6 });
+    }
+
+    #[test]
+    fn code_examples_under_docs_are_not_document_candidates() {
+        assert!(super::super::is_document_candidate_path("docs/guide.md"));
+        assert!(super::super::is_document_candidate_path("docs/notes.txt"));
+        assert!(!super::super::is_document_candidate_path(
+            "docs/examples/client.rs"
+        ));
     }
 }
