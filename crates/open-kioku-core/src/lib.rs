@@ -2202,6 +2202,8 @@ pub struct ContextSelectionDiagnostics {
     pub exact_evidence_count: usize,
     #[serde(default)]
     pub ambiguity_unresolved_count: usize,
+    #[serde(default)]
+    pub unattributed_selected_file_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval_confidence: Option<Confidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2237,6 +2239,7 @@ impl Default for ContextSelectionDiagnostics {
             source_stream_mix: Vec::new(),
             exact_evidence_count: 0,
             ambiguity_unresolved_count: 0,
+            unattributed_selected_file_count: 0,
             retrieval_confidence: None,
             abstention_reason: None,
             selected_units: Vec::new(),
