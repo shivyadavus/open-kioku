@@ -21,6 +21,7 @@ jobs:
         run: python3 .github/scripts/agent_apply_cc4_routing.py
       - name: Validate routing and workspace
         run: |
+          cargo fmt --all
           cargo fmt --all -- --check
           cargo clippy --all-targets --all-features -- -D warnings
           cargo test -p open-kioku-context
