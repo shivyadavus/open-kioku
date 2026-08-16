@@ -551,7 +551,7 @@ fn select_context_units(
 
     while selected_indices.len() < budget.max_primary_files {
         let remaining_tokens = available.saturating_sub(selected_tokens);
-        let mut best: Option<(usize, f32, usize, std::collections::BTreeSet<String>)> = None;
+        let mut best: Option<(usize, u8, f32, usize, std::collections::BTreeSet<String>)> = None;
 
         for (index, result) in ranked.iter().enumerate() {
             if selected_indices.contains(&index) || terminally_rejected.contains(&index) {
@@ -631,15 +631,26 @@ fn select_context_units(
                 &selected_sources,
                 redundancy,
             );
+            let safety_priority = if authority == RetrievalAuthority::Exact {
+                2
+            } else if sources.contains(&RetrievalSourceKind::Validation)
+                || sources.contains(&RetrievalSourceKind::Graph)
+            {
+                1
+            } else {
+                0
+            };
             match &best {
-                Some((best_index, best_utility, _, _))
-                    if *best_utility > utility
-                        || (*best_utility == utility && *best_index < index) => {}
-                _ => best = Some((index, utility, tokens, token_set)),
+                Some((best_index, best_priority, best_utility, _, _))
+                    if *best_priority > safety_priority
+                        || (*best_priority == safety_priority
+                            && (*best_utility > utility
+                                || (*best_utility == utility && *best_index < index))) => {}
+                _ => best = Some((index, safety_priority, utility, tokens, token_set)),
             }
         }
 
-        let Some((index, _utility, tokens, token_set)) = best else {
+        let Some((index, _priority, _utility, tokens, token_set)) = best else {
             break;
         };
         let result = &ranked[index];
@@ -2570,6 +2581,56 @@ mod tests {
         let selected =
             select_context_units(vec![heuristic, exact.clone()], &budget, &mut diagnostics);
 
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].path, exact.path);
+    }
+
+    #[test]
+    fn exact_evidence_cannot_be_displaced_by_many_cheaper_heuristics() {
+        let exact = SearchResult {
+            path: "src/exact_target.rs".into(),
+            line_range: Some(LineRange { start: 20, end: 24 }),
+            snippet: "fn exact_target() { validate_boundary(); }".into(),
+            symbol: None,
+            score: 0.01,
+            match_reason: "exact symbol evidence".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact-target".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut ranked = (0..8)
+            .map(|index| SearchResult {
+                path: format!("src/cheap_{index}.rs").into(),
+                line_range: None,
+                snippet: "tiny semantic candidate".into(),
+                symbol: None,
+                score: 100.0 - index as f32,
+                match_reason: "heuristic semantic similarity".into(),
+                evidence: Vec::new(),
+                evidence_refs: Vec::new(),
+                confidence: 0.5,
+                score_breakdown: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        ranked.push(exact.clone());
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![open_kioku_core::RetrievalTrace {
+                path: exact.path.clone(),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 300,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 1,
+        };
+        let selected = select_context_units(ranked, &budget, &mut diagnostics);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].path, exact.path);
     }
