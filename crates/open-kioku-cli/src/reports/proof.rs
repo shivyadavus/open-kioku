@@ -155,9 +155,12 @@ fn parse_proof_retrieval_quality(
         ));
     }
     let report_version = required_json_string(value, &["report_version"])?;
-    if report_version != RETRIEVAL_REPORT_VERSION {
+    const LEGACY_RETRIEVAL_REPORT_VERSION: &str = "1.2.0";
+    if report_version != LEGACY_RETRIEVAL_REPORT_VERSION
+        && report_version != RETRIEVAL_REPORT_VERSION
+    {
         return Err(format!(
-            "retrieval report version `{report_version}` is incompatible with supported report version `{RETRIEVAL_REPORT_VERSION}`"
+            "retrieval report version `{report_version}` is incompatible with supported report versions `{LEGACY_RETRIEVAL_REPORT_VERSION}` and `{RETRIEVAL_REPORT_VERSION}`"
         ));
     }
     let corpus_id = required_json_string(value, &["corpus_id"])?;
@@ -725,6 +728,17 @@ mod proof_retrieval_quality_tests {
             serde_json::json!(1.1);
         let error = parse_proof_retrieval_quality(&report).unwrap_err();
         assert!(error.contains("must be a finite value in [0, 1]"));
+    }
+
+    #[test]
+    fn proof_retrieval_quality_accepts_current_report_version() {
+        let mut report = valid_report();
+        report["report_version"] = serde_json::json!(RETRIEVAL_REPORT_VERSION);
+        let quality = parse_proof_retrieval_quality(&report).unwrap();
+        assert_eq!(
+            quality.report_version.as_deref(),
+            Some(RETRIEVAL_REPORT_VERSION)
+        );
     }
 
     #[test]
