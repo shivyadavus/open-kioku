@@ -1,0 +1,39 @@
+name: agent-polish-retrieval-schema-docs
+
+on:
+  push:
+    branches:
+      - agent/context-retrieval-benchmark
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/context-retrieval-benchmark
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply strict schema and docs update
+        run: |
+          python3 .github/patch_retrieval_schema_docs.py
+          rm .github/patch_retrieval_schema_docs.py
+          rm .github/workflows/agent-polish-retrieval-schema-docs.yml
+          cargo fmt --all
+          cargo test -p open-kioku-cli retrieval_bench_tests
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+          chmod +x scripts/validate-docs.sh
+          scripts/validate-docs.sh
+      - name: Commit polish
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add README.md crates/open-kioku-cli/src/bench/retrieval.rs .github/patch_retrieval_schema_docs.py .github/workflows/agent-polish-retrieval-schema-docs.yml
+          git commit -m "docs(bench): harden retrieval schema and command contract"
+          git push origin HEAD:agent/context-retrieval-benchmark
