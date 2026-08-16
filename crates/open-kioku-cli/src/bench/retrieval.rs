@@ -233,6 +233,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     }
     let limit = args.limit.clamp(20, 100);
     let fixtures = retrieval_fixture_paths(&root, &corpus.cases)?;
+    validate_retrieval_gold_files(&root, &corpus.cases)?;
     let mut fixture_digests = BTreeMap::new();
     for fixture in fixtures.values() {
         if !args.no_index {
@@ -331,9 +332,15 @@ fn load_retrieval_corpus(path: &Path) -> anyhow::Result<RetrievalCorpus> {
                 "retrieval case requires non-empty id, query, language, and base_revision"
             );
         }
+        validate_fixture_revision(&case.base_revision, &case.id)?;
         validate_safe_relative_path(&case.repo_fixture, "repo_fixture", &case.id)?;
+        let mut gold_paths = std::collections::HashSet::new();
         for gold in &case.gold_files {
             validate_safe_relative_path(gold, "gold_files", &case.id)?;
+            let normalized = normalize_path_fragment(&gold.to_string_lossy());
+            if !gold_paths.insert(normalized) {
+                anyhow::bail!("retrieval case `{}` contains a duplicate gold file", case.id);
+            }
         }
         if case.no_gold_expected && !case.gold_files.is_empty() {
             anyhow::bail!(
@@ -373,6 +380,20 @@ fn validate_token_budgets(budgets: &[usize], label: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn validate_fixture_revision(revision: &str, case_id: &str) -> anyhow::Result<()> {
+    let Some(hex) = revision.strip_prefix("sha256:") else {
+        anyhow::bail!(
+            "retrieval case `{case_id}` base_revision must be a frozen sha256 digest"
+        );
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "retrieval case `{case_id}` base_revision is not a valid sha256 digest"
+        );
+    }
+    Ok(())
+}
+
 fn validate_safe_relative_path(path: &Path, field: &str, case_id: &str) -> anyhow::Result<()> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         anyhow::bail!("retrieval case `{case_id}` {field} must be a relative path");
@@ -403,6 +424,23 @@ fn retrieval_fixture_paths(
         fixtures.entry(case.repo_fixture.clone()).or_insert(path);
     }
     Ok(fixtures)
+}
+
+fn validate_retrieval_gold_files(root: &Path, cases: &[RetrievalCase]) -> anyhow::Result<()> {
+    for case in cases {
+        let fixture = root.join(&case.repo_fixture);
+        for gold in &case.gold_files {
+            let gold_path = fixture.join(gold);
+            if !gold_path.is_file() {
+                anyhow::bail!(
+                    "retrieval case `{}` gold file does not exist: {}",
+                    case.id,
+                    gold_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn retrieval_fixture_digest(fixture: &Path) -> anyhow::Result<String> {
@@ -443,9 +481,6 @@ fn validate_retrieval_fixture_revisions(
     digests: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     for case in cases {
-        if !case.base_revision.starts_with("sha256:") {
-            continue;
-        }
         let key = root
             .join(&case.repo_fixture)
             .strip_prefix(root)
@@ -942,6 +977,17 @@ mod retrieval_bench_tests {
             returned_any: no_gold,
             latency_ms: 10.0,
         }
+    }
+
+    #[test]
+    fn frozen_revision_validation_rejects_unpinned_and_malformed_values() {
+        assert!(validate_fixture_revision(
+            "sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+            "valid"
+        )
+        .is_ok());
+        assert!(validate_fixture_revision("main", "unpinned").is_err());
+        assert!(validate_fixture_revision("sha256:not-a-digest", "malformed").is_err());
     }
 
     #[test]
