@@ -1,0 +1,39 @@
+name: agent-cc7-unattributed-selection
+
+on:
+  push:
+    branches: [agent/cc7-contextpack-telemetry]
+    paths:
+      - '.github/scripts/agent_cc7_unattributed_selection.py'
+      - '.github/workflows/agent-cc7-unattributed-selection.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted provenance fix
+        run: python3 .github/scripts/agent_cc7_unattributed_selection.py
+      - name: Format and validate
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product change and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/agent_cc7_unattributed_selection.py .github/workflows/agent-cc7-unattributed-selection.yml
+          git add crates/open-kioku-core/src/lib.rs crates/open-kioku-context/src/lib.rs
+          git commit -m "fix(context): expose incomplete retrieval attribution"
+          git push origin HEAD:agent/cc7-contextpack-telemetry
