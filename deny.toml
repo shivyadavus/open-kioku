@@ -1,7 +1,11 @@
 [advisories]
 ignore = [
     "RUSTSEC-2024-0437",
-    "RUSTSEC-2024-0384"
+    "RUSTSEC-2024-0384",
+    # Candle 0.11 -> gemm 0.19 uses `paste` only as a compile-time macro.
+    # RustSec classifies this as unmaintained, not vulnerable, and no maintained
+    # compatible gemm release is available through Candle's current dependency.
+    "RUSTSEC-2024-0436"
 ]
 
 [licenses]
@@ -9,13 +13,16 @@ allow = [
     "MIT",
     "Elastic-2.0",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
     "BSD-2-Clause",
     "ISC",
     "Zlib",
     "Unlicense",
     "MPL-2.0",
+    "NCSA",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "Unicode-3.0"
 ]
 confidence-threshold = 0.8
