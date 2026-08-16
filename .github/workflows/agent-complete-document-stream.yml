@@ -1,0 +1,71 @@
+name: agent-complete-document-stream
+
+on:
+  push:
+    branches:
+      - agent/context-candidate-streams
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-complete-document-stream
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/context-candidate-streams
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted document stream completion
+        run: python3 .github/scripts/agent_complete_document_stream.py
+      - name: Validate full workspace
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Validate workflow and frozen retrieval contracts
+        run: |
+          cargo build --release -p open-kioku-cli
+          ./target/release/ok init .
+          ./target/release/ok index .
+          ./target/release/ok workflow-bench . \
+            --cases-file benchmarks/workflow-cases.json \
+            --limit 10 \
+            --min-cases 20 \
+            --min-context-recall 1.0 \
+            --min-verification-accuracy 1.0 \
+            --no-index
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline-first.json \
+            > /tmp/retrieval-first.json
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --no-index \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline-second.json \
+            > /tmp/retrieval-second.json
+          cmp /tmp/retrieval-baseline-first.json /tmp/retrieval-baseline-second.json
+          cmp /tmp/retrieval-baseline-first.json benchmarks/retrieval-baseline.json
+      - name: Commit product-only result
+        run: |
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-core/src/lib.rs \
+            crates/open-kioku-context/src/candidates.rs \
+            crates/open-kioku-context/src/candidates/builtins.rs \
+            crates/open-kioku-cli/src/bench/retrieval.rs Cargo.lock
+          git commit -m "feat(context): add independent document candidate stream"
+          git rm .github/scripts/agent_complete_document_stream.py .github/workflows/agent-complete-document-stream.yml
+          git commit -m "chore: remove temporary document stream validator"
+          git push origin HEAD:agent/context-candidate-streams
