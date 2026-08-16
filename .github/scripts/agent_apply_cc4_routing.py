@@ -6,9 +6,7 @@ text = path.read_text()
 marker = '''#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RetrievalDiagnostics {
 '''
-insert = '''#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
-)]
+insert = '''#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskFamily {
     IssueToCode,
@@ -64,17 +62,29 @@ new = '''    #[serde(default)]
 '''
 if text.count(old) != 1:
     raise SystemExit(f'core retrieval diagnostics field marker count={text.count(old)}')
-text = text.replace(old, new, 1)
-path.write_text(text)
+path.write_text(text.replace(old, new, 1))
+
+# Fusion diagnostics get a backwards-compatible routing default.
+path = Path('crates/open-kioku-context/src/candidates.rs')
+text = path.read_text()
+old = '''            sources_succeeded: succeeded.into_iter().collect(),
+            selection: Default::default(),
+        },
+'''
+new = '''            sources_succeeded: succeeded.into_iter().collect(),
+            selection: Default::default(),
+            routing: Default::default(),
+        },
+'''
+if text.count(old) != 1:
+    raise SystemExit(f'fusion diagnostics marker count={text.count(old)}')
+path.write_text(text.replace(old, new, 1))
 
 # Context: classify before retrieval, route candidate streams, preserve provenance, record rationale.
 path = Path('crates/open-kioku-context/src/lib.rs')
 text = path.read_text()
-old = '''pub mod candidates;
-'''
-new = '''pub mod candidates;
-pub mod routing;
-'''
+old = 'pub mod candidates;\n'
+new = 'pub mod candidates;\npub mod routing;\n'
 if text.count(old) != 1:
     raise SystemExit(f'context module marker count={text.count(old)}')
 text = text.replace(old, new, 1)
@@ -87,7 +97,9 @@ old = '''        let intent = TaskSearchIntent::parse(task);
 '''
 new = '''        let intent = TaskSearchIntent::parse(task);
         let routing = routing::classify_task(task);
-        let candidate_limit = limit.saturating_mul(4).clamp(20, 200);
+        let candidate_limit = limit
+            .saturating_mul(routing.policy.candidate_multiplier)
+            .clamp(20, 200);
         let request =
             candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit);
         let routed_external_sources = external_sources
@@ -125,18 +137,23 @@ new = '''        let mut streams = candidates::builtins::BuiltinCandidateContext
         .collect_excluding(&request, &overridden_sources);
         streams.retain(|stream| routing.policy.allows(stream.source));
         streams.extend(external_streams);
-        let mut fusion_config =
-            candidates::FusionConfig::from_ranking_options(&self.ranking_options);
-        routing
-            .policy
-            .apply_source_priors(&mut fusion_config.source_weights);
+        // Task routing changes which evidence families run and how much candidate headroom they
+        // receive. It deliberately does not introduce uncalibrated fusion weights: the measured
+        // product default remains unweighted RRF unless repository ranking configuration says otherwise.
+        let fusion_config = candidates::FusionConfig::from_ranking_options(&self.ranking_options);
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
         let mut diagnostics = fused.diagnostics;
         diagnostics.routing = routing.diagnostics();
         for required in &diagnostics.routing.required_evidence {
-            if !diagnostics.sources_succeeded.contains(required) {
+            let contributed = diagnostics.traces.iter().any(|trace| {
+                trace
+                    .contributions
+                    .iter()
+                    .any(|contribution| contribution.source == *required)
+            });
+            if !contributed {
                 diagnostics.caveats.push(format!(
-                    "task-family policy requires {} evidence but that stream produced no available evidence",
+                    "task-family policy requires {} evidence, but it did not contribute task-relevant evidence",
                     retrieval_source_label(*required)
                 ));
             }
@@ -162,8 +179,7 @@ if text.count(old) != 1:
     raise SystemExit(f'context direct-primary diagnostics marker count={text.count(old)}')
 text = text.replace(old, new, 1)
 
-old = '''    out.push_str("## Retrieval\\n\\n");
-'''
+old = '    out.push_str("## Retrieval\\n\\n");\n'
 new = '''    out.push_str("## Retrieval\\n\\n");
     out.push_str(&format!(
         "- Task family: `{:?}` (confidence `{:.2}`)\\n",
@@ -192,5 +208,4 @@ new = '''fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &R
 '''
 if text.count(old) != 1:
     raise SystemExit(f'prompt routing marker count={text.count(old)}')
-text = text.replace(old, new, 1)
-path.write_text(text)
+path.write_text(text.replace(old, new, 1))
