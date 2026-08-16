@@ -5,6 +5,7 @@ on:
     branches: [agent/cc7-contextpack-telemetry]
     paths:
       - '.github/scripts/agent_cc7_contextpack_telemetry.py'
+      - '.github/scripts/agent_cc7_fix_test_rationale.py'
       - '.github/workflows/agent-cc7-contextpack-telemetry.yml'
 
 permissions:
@@ -21,7 +22,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted CC7 telemetry patch
-        run: python3 .github/scripts/agent_cc7_contextpack_telemetry.py
+        run: |
+          python3 .github/scripts/agent_cc7_contextpack_telemetry.py
+          python3 .github/scripts/agent_cc7_fix_test_rationale.py
       - name: Format
         run: cargo fmt --all
       - name: Validate full workspace
@@ -34,7 +37,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/scripts/agent_cc7_contextpack_telemetry.py .github/workflows/agent-cc7-contextpack-telemetry.yml
+          git rm .github/scripts/agent_cc7_contextpack_telemetry.py .github/scripts/agent_cc7_fix_test_rationale.py .github/workflows/agent-cc7-contextpack-telemetry.yml
           git add crates/open-kioku-core/src/lib.rs crates/open-kioku-context/src/lib.rs
           git commit -m "feat(context): expose ContextPack retrieval telemetry"
           git push origin HEAD:agent/cc7-contextpack-telemetry
