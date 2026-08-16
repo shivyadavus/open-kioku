@@ -2229,6 +2229,44 @@ impl Default for ContextSelectionDiagnostics {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFamily {
+    IssueToCode,
+    CodeToTest,
+    TraceToCode,
+    CommentToContext,
+    EditToRipple,
+    Documentation,
+    MixedCodeDocs,
+    #[default]
+    General,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RetrievalRoutingDiagnostics {
+    pub task_family: TaskFamily,
+    pub confidence: f32,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub enabled_sources: Vec<RetrievalSourceKind>,
+    #[serde(default)]
+    pub required_evidence: Vec<RetrievalSourceKind>,
+}
+
+impl Default for RetrievalRoutingDiagnostics {
+    fn default() -> Self {
+        Self {
+            task_family: TaskFamily::General,
+            confidence: 0.0,
+            reasons: Vec::new(),
+            enabled_sources: Vec::new(),
+            required_evidence: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct RetrievalDiagnostics {
     #[serde(default)]
@@ -2241,6 +2279,8 @@ pub struct RetrievalDiagnostics {
     pub sources_succeeded: Vec<RetrievalSourceKind>,
     #[serde(default)]
     pub selection: ContextSelectionDiagnostics,
+    #[serde(default)]
+    pub routing: RetrievalRoutingDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
