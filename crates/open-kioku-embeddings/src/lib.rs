@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-pub const FASTEMBED_PROVIDER_VERSION: &str = "fastembed-5.8.0";
+pub const FASTEMBED_PROVIDER_VERSION: &str = "fastembed-5.17.4";
 pub const QWEN3_MAX_LENGTH: usize = 8_192;
 const QWEN3_QUERY_INSTRUCTION: &str = "Given a code search query, retrieve relevant code and documentation passages that help implement, explain, debug, or verify the requested change.";
 

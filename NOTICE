@@ -88,10 +88,16 @@ Each entry lists the crate name, version used, license, and upstream URL.
   — https://github.com/dtolnay/unicode-ident
   — Unicode License v3: https://www.unicode.org/license.txt
 
+## Local neural embedding dependencies
+
+- fastembed v5.17.4 (Apache-2.0) — https://github.com/Anush008/fastembed-rs
+- libfuzzer-sys v0.4.13 ((MIT OR Apache-2.0) AND NCSA), transitively included by
+  FastEmbed's Qwen3 image feature — https://github.com/rust-fuzz/libfuzzer
+  — NCSA license text: https://spdx.org/licenses/NCSA.html
+
 ## Certificate root data used by local model download TLS
 
-- webpki-root-certs v1.0.9 (CDLA-Permissive-2.0)
-- webpki-roots v0.26.11 and v1.0.9 (CDLA-Permissive-2.0)
+- webpki-roots v1.0.9 (CDLA-Permissive-2.0)
   — upstream: https://github.com/rustls/webpki-roots
   — CDLA-Permissive-2.0 license text: https://cdla.dev/permissive-2-0/
 
