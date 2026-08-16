@@ -1,8 +1,9 @@
 use super::{CandidateRequest, CandidateStream, StreamCandidate};
 use crate::{search_candidates, TaskSearchIntent};
 use open_kioku_core::{
-    identity::symbol_node_id, AnalysisFact, CodeChunk, EvidenceSourceType, File, GraphEdge,
-    LineRange, NodeId, RetrievalAuthority, RetrievalSourceKind, SearchResult, Symbol, TestTarget,
+    identity::symbol_node_id, AnalysisFact, CodeChunk, DocumentSection, EvidenceSourceType, File,
+    GraphEdge, IndexMode, LineRange, NodeId, RetrievalAuthority, RetrievalSourceKind, SearchResult,
+    Symbol, TestTarget,
 };
 use open_kioku_ranking::rerank_baseline;
 use open_kioku_storage::{HistoryStore, OkStore};
@@ -99,6 +100,31 @@ impl<'a> BuiltinCandidateContext<'a> {
     }
 
     fn document_stream(&self, request: &CandidateRequest) -> CandidateStream {
+        match self.store.document_sections() {
+            Ok(sections) if !sections.is_empty() => indexed_document_stream(request, &sections),
+            Ok(_) => {
+                if self
+                    .store
+                    .manifest()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|manifest| manifest.index_mode == IndexMode::CrossProject)
+                {
+                    return CandidateStream::unavailable(
+                        RetrievalSourceKind::Document,
+                        "document corpus unavailable in cross-project mode; source was not indexed",
+                    );
+                }
+                self.legacy_document_stream(request)
+            }
+            Err(err) => CandidateStream::unavailable(
+                RetrievalSourceKind::Document,
+                format!("document corpus unavailable: {err}"),
+            ),
+        }
+    }
+
+    fn legacy_document_stream(&self, request: &CandidateRequest) -> CandidateStream {
         let terms = retrieval_terms(request);
         let mut chunks_by_file = BTreeMap::<open_kioku_core::FileId, Vec<&CodeChunk>>::new();
         for chunk in self.chunks {
@@ -581,6 +607,90 @@ impl<'a> BuiltinCandidateContext<'a> {
             candidates.into_iter().take(request.limit).collect(),
         )
     }
+}
+
+fn indexed_document_stream(
+    request: &CandidateRequest,
+    sections: &[DocumentSection],
+) -> CandidateStream {
+    let terms = retrieval_terms(request);
+    let mut scored = sections
+        .iter()
+        .filter_map(|section| {
+            let path = normalized_path(&section.path);
+            let heading_label = if section.heading_path.is_empty() {
+                "document root".to_string()
+            } else {
+                section.heading_path.join(" > ")
+            };
+            let heading_overlap = term_overlap(&terms, &heading_label.to_ascii_lowercase());
+            let body_overlap = term_overlap(&terms, &section.content.to_ascii_lowercase());
+            let path_overlap = term_overlap(&terms, &path.to_ascii_lowercase());
+            if heading_overlap + body_overlap + path_overlap == 0 {
+                return None;
+            }
+            let score =
+                body_overlap as f32 + heading_overlap as f32 * 1.5 + path_overlap as f32 * 0.5;
+            let evidence_ref = format!(
+                "document:{}:{}-{}",
+                path, section.line_range.start, section.line_range.end
+            );
+            let reason = format!("document section `{heading_label}` matched task vocabulary");
+            let result = SearchResult {
+                path: section.path.clone(),
+                line_range: Some(section.line_range.clone()),
+                snippet: section.content.clone(),
+                symbol: None,
+                score,
+                match_reason: reason.clone(),
+                evidence: vec![
+                    reason,
+                    format!("document heading path: {heading_label}"),
+                    format!("document content hash: {}", section.content_hash),
+                ],
+                evidence_refs: vec![evidence_ref],
+                confidence: 0.65,
+                score_breakdown: Vec::new(),
+            };
+            Some((
+                score,
+                StreamCandidate::from_result(
+                    result,
+                    RetrievalAuthority::Heuristic,
+                    "indexed document section matched the task",
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.result.path.cmp(&right.1.result.path))
+            .then_with(|| {
+                left.1
+                    .result
+                    .line_range
+                    .as_ref()
+                    .map(|range| (range.start, range.end))
+                    .cmp(
+                        &right
+                            .1
+                            .result
+                            .line_range
+                            .as_ref()
+                            .map(|range| (range.start, range.end)),
+                    )
+            })
+    });
+    CandidateStream::success(
+        RetrievalSourceKind::Document,
+        scored
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .take(request.limit)
+            .collect(),
+    )
 }
 
 pub(super) fn incident_edge_ids(
@@ -1149,5 +1259,48 @@ mod exact_authority_tests {
         assert!(!super::super::is_document_candidate_path(
             "docs/examples/client.rs"
         ));
+    }
+}
+
+#[cfg(test)]
+mod indexed_document_stream_tests {
+    use super::*;
+    use open_kioku_core::{DocumentType, LineRange};
+    use std::path::PathBuf;
+
+    #[test]
+    fn indexed_document_stream_preserves_heading_range_and_heuristic_authority() {
+        let section = DocumentSection {
+            path: PathBuf::from("docs/architecture.md"),
+            heading_path: vec!["Runtime".into(), "Rotation protocol".into()],
+            line_range: LineRange { start: 3, end: 5 },
+            content_hash: "abc123".into(),
+            content: "## Rotation protocol\nThe quasar token rotates nightly.\nRun the verifier."
+                .into(),
+            document_type: DocumentType::Architecture,
+        };
+        let request = CandidateRequest::new(
+            "quasar token rotation protocol",
+            vec![
+                "quasar".into(),
+                "token".into(),
+                "rotation".into(),
+                "protocol".into(),
+            ],
+            10,
+        );
+        let stream = indexed_document_stream(&request, &[section]);
+        assert_eq!(stream.candidates.len(), 1);
+        let candidate = &stream.candidates[0];
+        assert_eq!(candidate.authority, RetrievalAuthority::Heuristic);
+        assert_eq!(
+            candidate.result.line_range,
+            Some(LineRange { start: 3, end: 5 })
+        );
+        assert!(candidate
+            .result
+            .evidence
+            .iter()
+            .any(|value| value == "document heading path: Runtime > Rotation protocol"));
     }
 }

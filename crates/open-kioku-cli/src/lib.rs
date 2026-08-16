@@ -98,4 +98,80 @@ mod tests {
             PathBuf::from("/tmp/open-kioku-global")
         );
     }
+
+    #[test]
+    fn document_corpus_mode_benchmark_preserves_context_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::create_dir_all(repo.join("docs")).unwrap();
+        fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+        fs::write(
+            repo.join("docs/architecture.md"),
+            "# Runtime\nintro\n## Rotation protocol\nThe quasar token rotates nightly.\nRun the verifier.\n## Failure\nEscalate safely.\n",
+        )
+        .unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+
+        for mode in [IndexMode::Fast, IndexMode::Balanced, IndexMode::Full] {
+            let mut config = OkConfig::load_from_repo(repo).unwrap();
+            config.history.enabled = false;
+            config.scip.enabled = false;
+            config.semantic.enabled = false;
+            let snapshot = index_repo_with_config(repo, config, mode).unwrap();
+            assert!(!snapshot
+                .files
+                .iter()
+                .any(|file| file.path == Path::new("docs/architecture.md")));
+            let report = snapshot
+                .phase_reports
+                .iter()
+                .find(|report| report.phase == "document_corpus")
+                .unwrap();
+            assert_eq!(report.document_files, Some(1));
+            assert!(report.document_sections.is_some_and(|count| count >= 3));
+            assert!(report.duration_ms.is_some());
+
+            let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+            let section = store
+                .document_sections()
+                .unwrap()
+                .into_iter()
+                .find(|section| {
+                    section.path == Path::new("docs/architecture.md")
+                        && section.heading_path == ["Runtime", "Rotation protocol"]
+                })
+                .unwrap();
+            assert_eq!(
+                section.line_range,
+                open_kioku_core::LineRange { start: 3, end: 5 }
+            );
+            assert!(!section.content_hash.is_empty());
+            assert!(store
+                .get_file_by_path(Path::new("docs/architecture.md"))
+                .unwrap()
+                .is_none());
+
+            let pack = build_context_pack(
+                repo,
+                &store,
+                "Find the quasar token rotation protocol in the architecture documentation",
+                10,
+            )
+            .unwrap();
+            let result = pack
+                .primary_files
+                .iter()
+                .find(|result| result.path == Path::new("docs/architecture.md"))
+                .unwrap();
+            assert_eq!(
+                result.line_range,
+                Some(open_kioku_core::LineRange { start: 3, end: 5 })
+            );
+            assert!(result
+                .evidence
+                .iter()
+                .any(|value| { value == "document heading path: Runtime > Rotation protocol" }));
+        }
+    }
 }
