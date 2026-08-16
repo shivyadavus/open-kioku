@@ -124,19 +124,35 @@ pub fn classify_task(task: &str) -> TaskRoutingDecision {
             "pr comment",
         ],
     );
+    // Ripple routing is safety-critical because missing exact/graph evidence blocks retrieval.
+    // Require explicit relationship or blast-radius intent rather than generic domain words such
+    // as `impact` or `boundary`, which also occur in ordinary implementation tasks.
     let has_ripple = contains_any(
         &lower,
         &[
-            "impact",
             "ripple",
             "callers",
             "callees",
             "dependent",
             "dependency",
             "public api",
-            "contract",
-            "boundary",
+            "blast radius",
+            "impact radius",
+            "affected callers",
+            "affected callees",
+            "affected dependents",
+            "what breaks",
+            "what would break",
+            "what is impacted",
+            "what gets impacted",
+            "downstream impact",
+            "upstream impact",
+            "cross-boundary",
+            "cross boundary",
         ],
+    ) || contains_any(
+        &lower,
+        &["impact of ", "impact from ", "impact if ", "impact when "],
     );
     let has_issue = contains_any(
         &lower,
@@ -198,7 +214,10 @@ pub fn classify_task(task: &str) -> TaskRoutingDecision {
         return decision(
             TaskFamily::EditToRipple,
             0.88,
-            vec!["task asks for dependency, impact, contract, or boundary context".into()],
+            vec![
+                "task explicitly asks for dependency, ripple, caller/callee, or blast-radius context"
+                    .into(),
+            ],
         );
     }
     if has_test {
@@ -478,6 +497,40 @@ mod tests {
             assert!(route.policy.allows(source));
         }
         assert!(route.confidence < 0.5);
+    }
+
+    #[test]
+    fn contract_explanation_alone_does_not_claim_ripple_evidence_requirements() {
+        let route = classify_task(
+            "explain contract evidence for checkout summary in src/domain/checkout.rs",
+        );
+        assert_eq!(route.family, TaskFamily::General);
+        assert!(!route.policy.missing_required_evidence_is_blocker);
+
+        let explicit_ripple =
+            classify_task("explain contract dependency boundary and callers for checkout");
+        assert_eq!(explicit_ripple.family, TaskFamily::EditToRipple);
+        assert!(explicit_ripple.policy.missing_required_evidence_is_blocker);
+    }
+
+    #[test]
+    fn implementation_impact_and_boundary_terms_do_not_trigger_ripple_blockers() {
+        for task in [
+            "change plan engine boundary evidence",
+            "improve impact analysis direct impacts",
+        ] {
+            let route = classify_task(task);
+            assert_eq!(route.family, TaskFamily::General, "task: {task}");
+            assert!(
+                !route.policy.missing_required_evidence_is_blocker,
+                "task: {task}"
+            );
+        }
+
+        let explicit_ripple =
+            classify_task("show the impact of changing checkout on downstream callers");
+        assert_eq!(explicit_ripple.family, TaskFamily::EditToRipple);
+        assert!(explicit_ripple.policy.missing_required_evidence_is_blocker);
     }
 
     #[test]
