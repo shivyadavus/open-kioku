@@ -1,5 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.1.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.2.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -48,6 +48,10 @@ struct RetrievalBenchArgs {
     /// Write a deterministic quality-only baseline (latency intentionally excluded).
     #[arg(long, value_name = "PATH")]
     write_baseline: Option<PathBuf>,
+
+    /// Checked-in deterministic quality baseline used to calculate report deltas.
+    #[arg(long, default_value = "benchmarks/retrieval-baseline.json")]
+    baseline_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,16 +128,49 @@ impl RetrievalStrategy {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RetrievalReportProvenance {
+    open_kioku_version: &'static str,
+    corpus_revision: String,
+    cases_sha256: String,
+    frozen_fixture_revisions_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetrievalStrategyIdentity {
+    algorithm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct RetrievalBaselineDelta {
+    strategy: String,
+    split: String,
+    recall_at_10: f64,
+    mean_reciprocal_rank: f64,
+    file_f1_at_10: f64,
+    no_gold_false_positive_rate: f64,
+}
+
 #[derive(Debug, Serialize)]
 struct RetrievalBenchReport {
     schema_version: &'static str,
     report_version: &'static str,
+    provenance: RetrievalReportProvenance,
     corpus_id: String,
     cases_file: PathBuf,
     case_count: usize,
     limit: usize,
     token_estimator: &'static str,
     fixture_digests: BTreeMap<String, String>,
+    strategy_identities: BTreeMap<String, RetrievalStrategyIdentity>,
+    baseline_deltas: Vec<RetrievalBaselineDelta>,
+    caveats: Vec<String>,
     strategies: Vec<RetrievalStrategyReport>,
     /// Advisory Context Compiler V2 source/fusion measurements. Excluded from the frozen CC1
     /// quality baseline and release thresholds until explicitly promoted.
@@ -150,7 +187,7 @@ struct RetrievalStrategyReport {
     cases: Vec<RetrievalCaseReport>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RetrievalQualityMetrics {
     positive_cases: usize,
     no_gold_cases: usize,
@@ -204,17 +241,17 @@ struct RetrievalCaseReport {
     latency_ms: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RetrievalQualityBaseline {
-    schema_version: &'static str,
+    schema_version: String,
     corpus_id: String,
     case_count: usize,
-    token_estimator: &'static str,
+    token_estimator: String,
     fixture_digests: BTreeMap<String, String>,
     strategies: Vec<RetrievalStrategyQualityBaseline>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct RetrievalStrategyQualityBaseline {
     strategy: String,
     summary: RetrievalQualityMetrics,
@@ -337,23 +374,57 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
             )?);
     }
 
+    let strategies = vec![
+        build_retrieval_strategy_report(RetrievalStrategy::Lexical, lexical_cases),
+        build_retrieval_strategy_report(RetrievalStrategy::Fusion, fusion_cases),
+    ];
+    let stream_ablations = cc2_cases
+        .into_iter()
+        .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
+        .collect::<Vec<_>>();
+    let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
+    let mut caveats = Vec::new();
+    if let Some(caveat) = revision_caveat {
+        caveats.push(caveat);
+    }
+    caveats.push(
+        "abstention precision/recall is not reported until calibrated abstention ships; no-gold false-positive rate remains the active negative-case signal".into(),
+    );
+    let baseline_path = absolutize(&args.baseline_file)?;
+    let baseline_deltas = if baseline_path.is_file() {
+        let baseline = load_retrieval_quality_baseline(&baseline_path)?;
+        compare_retrieval_baseline(&strategies, &baseline, &mut caveats)
+    } else {
+        caveats.push(format!(
+            "checked-in retrieval baseline unavailable at {}; regression deltas omitted",
+            baseline_path.display()
+        ));
+        Vec::new()
+    };
+    let report_cases_file = cases_file
+        .strip_prefix(&root)
+        .unwrap_or(&cases_file)
+        .to_path_buf();
     let report = RetrievalBenchReport {
         schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
         report_version: RETRIEVAL_REPORT_VERSION,
+        provenance: RetrievalReportProvenance {
+            open_kioku_version: env!("CARGO_PKG_VERSION"),
+            corpus_revision,
+            cases_sha256: sha256_file(&cases_file)?,
+            frozen_fixture_revisions_verified: true,
+        },
         corpus_id: corpus.corpus_id,
-        cases_file,
+        cases_file: report_cases_file,
         case_count: corpus.cases.len(),
         limit,
         token_estimator: RETRIEVAL_TOKEN_ESTIMATOR,
         fixture_digests,
-        strategies: vec![
-            build_retrieval_strategy_report(RetrievalStrategy::Lexical, lexical_cases),
-            build_retrieval_strategy_report(RetrievalStrategy::Fusion, fusion_cases),
-        ],
-        stream_ablations: cc2_cases
-            .into_iter()
-            .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
-            .collect(),
+        strategy_identities: retrieval_strategy_identities(&semantic_config),
+        baseline_deltas,
+        caveats,
+        strategies,
+        stream_ablations,
     };
 
     write_retrieval_outputs(&report, &args)?;
@@ -988,12 +1059,170 @@ fn retrieval_percentile(sorted: &[f64], percentile: f64) -> f64 {
     sorted[rank]
 }
 
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn retrieval_corpus_revision(cases_file: &Path) -> (String, Option<String>) {
+    let Some(source_root) = cases_file
+        .ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+    else {
+        return (
+            "unavailable".into(),
+            Some("frozen corpus revision is unavailable because the corpus is not inside a git checkout; reproducibility remains anchored by corpus digest and fixture digests".into()),
+        );
+    };
+    match ProcessCommand::new("git")
+        .arg("-C")
+        .arg(source_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                (revision, None)
+            } else {
+                (
+                    "unavailable".into(),
+                    Some("frozen corpus revision could not be validated as a full git commit; reproducibility remains anchored by corpus digest and fixture digests".into()),
+                )
+            }
+        }
+        Ok(_) | Err(_) => (
+            "unavailable".into(),
+            Some("frozen corpus revision is unavailable because git metadata could not be read; reproducibility remains anchored by corpus digest and fixture digests".into()),
+        ),
+    }
+}
+
+fn retrieval_strategy_identities(
+    semantic: &open_kioku_config::SemanticConfig,
+) -> BTreeMap<String, RetrievalStrategyIdentity> {
+    let mut identities = BTreeMap::new();
+    identities.insert(
+        "lexical".into(),
+        RetrievalStrategyIdentity {
+            algorithm: "lexical_baseline".into(),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    identities.insert(
+        "fusion".into(),
+        RetrievalStrategyIdentity {
+            algorithm: "ranking_fusion".into(),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    for source in cc2_benchmark_sources() {
+        identities.insert(
+            format!("cc2:{}", retrieval_source_label(source)),
+            RetrievalStrategyIdentity {
+                algorithm: format!("single_stream_{}", retrieval_source_label(source)),
+                provider: None,
+                model: None,
+                backend: None,
+            },
+        );
+    }
+    identities.insert(
+        "cc2:semantic_vector_local_hash".into(),
+        RetrievalStrategyIdentity {
+            algorithm: "semantic_vector".into(),
+            provider: Some(semantic.provider.clone()),
+            model: Some(semantic.model.clone()),
+            backend: Some(semantic.backend.clone()),
+        },
+    );
+    identities.insert(
+        "cc2:rrf_unweighted".into(),
+        RetrievalStrategyIdentity {
+            algorithm: format!("rrf_unweighted_k{}", open_kioku_context::candidates::DEFAULT_RRF_K),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    identities.insert(
+        "cc2:rrf_evidence_prior".into(),
+        RetrievalStrategyIdentity {
+            algorithm: format!("rrf_evidence_prior_k{}", open_kioku_context::candidates::DEFAULT_RRF_K),
+            provider: None,
+            model: None,
+            backend: None,
+        },
+    );
+    identities
+}
+
+fn load_retrieval_quality_baseline(path: &Path) -> anyhow::Result<RetrievalQualityBaseline> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read retrieval baseline {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse retrieval baseline {}", path.display()))
+}
+
+fn compare_retrieval_baseline(
+    strategies: &[RetrievalStrategyReport],
+    baseline: &RetrievalQualityBaseline,
+    caveats: &mut Vec<String>,
+) -> Vec<RetrievalBaselineDelta> {
+    if baseline.schema_version != RETRIEVAL_BENCH_SCHEMA_VERSION {
+        caveats.push(format!(
+            "retrieval baseline schema {} does not match {}; regression deltas omitted",
+            baseline.schema_version, RETRIEVAL_BENCH_SCHEMA_VERSION
+        ));
+        return Vec::new();
+    }
+    let mut deltas = Vec::new();
+    for current in strategies {
+        let Some(previous) = baseline
+            .strategies
+            .iter()
+            .find(|candidate| candidate.strategy == current.strategy)
+        else {
+            caveats.push(format!(
+                "strategy {} is absent from the checked-in baseline; its regression delta is unavailable",
+                current.strategy
+            ));
+            continue;
+        };
+        let (split, current_quality, previous_quality) = match (
+            current.by_split.get("holdout"),
+            previous.by_split.get("holdout"),
+        ) {
+            (Some(current), Some(previous)) => ("holdout", &current.quality, previous),
+            _ => ("overall", &current.summary.quality, &previous.summary),
+        };
+        deltas.push(RetrievalBaselineDelta {
+            strategy: current.strategy.clone(),
+            split: split.into(),
+            recall_at_10: current_quality.recall_at_10 - previous_quality.recall_at_10,
+            mean_reciprocal_rank: current_quality.mean_reciprocal_rank
+                - previous_quality.mean_reciprocal_rank,
+            file_f1_at_10: current_quality.file_f1_at_10 - previous_quality.file_f1_at_10,
+            no_gold_false_positive_rate: current_quality.no_gold_false_positive_rate
+                - previous_quality.no_gold_false_positive_rate,
+        });
+    }
+    deltas.sort_by(|left, right| left.strategy.cmp(&right.strategy));
+    deltas
+}
+
 fn retrieval_quality_baseline(report: &RetrievalBenchReport) -> RetrievalQualityBaseline {
     RetrievalQualityBaseline {
-        schema_version: report.schema_version,
+        schema_version: report.schema_version.to_string(),
         corpus_id: report.corpus_id.clone(),
         case_count: report.case_count,
-        token_estimator: report.token_estimator,
+        token_estimator: report.token_estimator.to_string(),
         fixture_digests: report.fixture_digests.clone(),
         strategies: report
             .strategies
@@ -1062,8 +1291,14 @@ fn write_retrieval_file(path: &Path, content: &str) -> anyhow::Result<()> {
 
 fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
     let mut out = format!(
-        "# Repository Context Retrieval Benchmark\n\n- Corpus: `{}`\n- Cases: {}\n- Result limit: {}\n- Token estimator: `{}`\n\n",
-        report.corpus_id, report.case_count, report.limit, report.token_estimator
+        "# Repository Context Retrieval Benchmark\n\n- Corpus: `{}`\n- Cases: {}\n- Result limit: {}\n- Token estimator: `{}`\n- Open Kioku version: `{}`\n- Frozen corpus revision: `{}`\n- Corpus file digest: `{}`\n\n",
+        report.corpus_id,
+        report.case_count,
+        report.limit,
+        report.token_estimator,
+        report.provenance.open_kioku_version,
+        report.provenance.corpus_revision,
+        report.provenance.cases_sha256
     );
     for strategy in &report.strategies {
         let quality = &strategy.summary.quality;
@@ -1096,6 +1331,28 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
         } else {
             out.push_str("No holdout cases.\n\n");
         }
+    }
+    if !report.baseline_deltas.is_empty() {
+        out.push_str("## Regression deltas vs checked-in baseline\n\nPositive Recall/MRR/F1 is improvement; negative no-gold FP is improvement.\n\n| Strategy | Split | Δ R@10 | Δ MRR | Δ F1@10 | Δ no-gold FP |\n|---|---|---:|---:|---:|---:|\n");
+        for delta in &report.baseline_deltas {
+            out.push_str(&format!(
+                "| {} | {} | {:+.3} | {:+.3} | {:+.3} | {:+.3} |\n",
+                delta.strategy,
+                delta.split,
+                delta.recall_at_10,
+                delta.mean_reciprocal_rank,
+                delta.file_f1_at_10,
+                delta.no_gold_false_positive_rate
+            ));
+        }
+        out.push('\n');
+    }
+    if !report.caveats.is_empty() {
+        out.push_str("## Caveats\n\n");
+        for caveat in &report.caveats {
+            out.push_str(&format!("- {caveat}\n"));
+        }
+        out.push('\n');
     }
     if !report.stream_ablations.is_empty() {
         out.push_str("## Context Compiler V2 stream ablations (advisory)\n\nThese measurements are excluded from the frozen CC1 release baseline. `cc2:semantic_vector_local_hash` measures Open Kioku's current deterministic local-hash/exact-flat backend; CC5/#209 evaluates real neural embedding models and ANN before any semantic backend is promoted.\n\n");
@@ -1263,12 +1520,21 @@ mod retrieval_bench_tests {
         let report = RetrievalBenchReport {
             schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
             report_version: RETRIEVAL_REPORT_VERSION,
+            provenance: RetrievalReportProvenance {
+                open_kioku_version: env!("CARGO_PKG_VERSION"),
+                corpus_revision: "0123456789012345678901234567890123456789".into(),
+                cases_sha256: "sha256:test".into(),
+                frozen_fixture_revisions_verified: true,
+            },
             corpus_id: "fixture".into(),
             cases_file: "cases.json".into(),
             case_count: 1,
             limit: 20,
             token_estimator: RETRIEVAL_TOKEN_ESTIMATOR,
             fixture_digests: BTreeMap::new(),
+            strategy_identities: BTreeMap::new(),
+            baseline_deltas: Vec::new(),
+            caveats: Vec::new(),
             strategies: vec![strategy],
             stream_ablations: vec![build_named_retrieval_strategy_report(
                 "cc2:rrf_unweighted",
@@ -1280,4 +1546,52 @@ mod retrieval_bench_tests {
         assert!(!json.contains("p95_ms"));
         assert!(!json.contains("cc2:rrf_unweighted"));
     }
+    #[test]
+    fn baseline_comparison_reports_quality_deltas_without_latency() {
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![report("current", false, &[Some(1)])],
+        );
+        let previous_quality = RetrievalQualityMetrics {
+            recall_at_10: 0.5,
+            mean_reciprocal_rank: 0.25,
+            file_f1_at_10: 0.2,
+            no_gold_false_positive_rate: 0.5,
+            ..Default::default()
+        };
+        let baseline = RetrievalQualityBaseline {
+            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
+            corpus_id: "fixture".into(),
+            case_count: 1,
+            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
+            fixture_digests: BTreeMap::new(),
+            strategies: vec![RetrievalStrategyQualityBaseline {
+                strategy: "fusion".into(),
+                summary: previous_quality.clone(),
+                by_language: BTreeMap::new(),
+                by_task_family: BTreeMap::new(),
+                by_split: BTreeMap::from([("holdout".into(), previous_quality)]),
+            }],
+        };
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(&[current], &baseline, &mut caveats);
+        assert!(caveats.is_empty());
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].strategy, "fusion");
+        assert_eq!(deltas[0].split, "overall");
+        assert!(deltas[0].recall_at_10 > 0.0);
+        let json = serde_json::to_string(&deltas).unwrap();
+        assert!(!json.contains("latency"));
+    }
+
+    #[test]
+    fn strategy_identity_pins_local_semantic_provider_model_and_backend() {
+        let config = cc2_semantic_benchmark_config();
+        let identities = retrieval_strategy_identities(&config);
+        let semantic = identities.get("cc2:semantic_vector_local_hash").unwrap();
+        assert_eq!(semantic.provider.as_deref(), Some("local"));
+        assert_eq!(semantic.model.as_deref(), Some("local-hash"));
+        assert_eq!(semantic.backend.as_deref(), Some("exact-flat"));
+    }
+
 }
