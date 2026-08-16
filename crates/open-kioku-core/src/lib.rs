@@ -2186,10 +2186,28 @@ pub struct ContextSelectedUnit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RetrievalSourceCount {
+    pub source: RetrievalSourceKind,
+    pub selected_file_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextSelectionDiagnostics {
     pub budget: ContextBudget,
     pub available_context_tokens: usize,
     pub estimated_tokens_selected: usize,
+    #[serde(default)]
+    pub source_stream_mix: Vec<RetrievalSourceCount>,
+    #[serde(default)]
+    pub exact_evidence_count: usize,
+    #[serde(default)]
+    pub ambiguity_unresolved_count: usize,
+    #[serde(default)]
+    pub unattributed_selected_file_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_confidence: Option<Confidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abstention_reason: Option<String>,
     #[serde(default)]
     pub selected_units: Vec<ContextSelectedUnit>,
     #[serde(default)]
@@ -2218,6 +2236,12 @@ impl Default for ContextSelectionDiagnostics {
             },
             available_context_tokens: 0,
             estimated_tokens_selected: 0,
+            source_stream_mix: Vec::new(),
+            exact_evidence_count: 0,
+            ambiguity_unresolved_count: 0,
+            unattributed_selected_file_count: 0,
+            retrieval_confidence: None,
+            abstention_reason: None,
             selected_units: Vec::new(),
             per_file_tokens: BTreeMap::new(),
             omitted_due_to_budget: Vec::new(),
