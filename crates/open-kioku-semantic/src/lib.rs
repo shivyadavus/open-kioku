@@ -341,7 +341,7 @@ impl<'a> SemanticIndexManager<'a> {
         }
         let model_artifact_sha256 = model_artifact_digest(&self.config, &self.models_dir())?;
         let targets = collect_targets(self.store, &self.config)?;
-        let resolved_backend = resolve_semantic_backend(&self.config, targets.len())?;
+        let mut resolved_backend = resolve_semantic_backend(&self.config, targets.len())?;
         let current_cache =
             read_json::<EmbeddingCache>(&self.current_dir().join("embeddings.cache"))
                 .unwrap_or_default();
@@ -387,6 +387,7 @@ impl<'a> SemanticIndexManager<'a> {
                     && entry.embedding_implementation == descriptor.implementation
                     && entry.model_artifact_sha256 == model_artifact_sha256
                     && entry.dimensions == self.config.dimensions
+                    && entry.vector.len() == self.config.dimensions
                 {
                     cache_hits += 1;
                     vectors[index] = Some(entry.vector.clone());
@@ -451,6 +452,33 @@ impl<'a> SemanticIndexManager<'a> {
                     vector,
                 },
             );
+        }
+
+        let successful_vector_count = exact_index
+            .as_ref()
+            .map(|index| index.stats().vector_count)
+            .or_else(|| ann_index.as_ref().map(|index| index.stats().vector_count))
+            .unwrap_or(0);
+        if auto_backend_needs_exact_fallback(
+            &self.config,
+            resolved_backend,
+            successful_vector_count,
+        ) {
+            let mut fallback = ExactFlatVectorIndex::new(self.config.dimensions)?;
+            for target in &targets {
+                let Some(entry) = cache.entries.get(&cache_key(target, &self.config)) else {
+                    continue;
+                };
+                fallback.add(VectorRecord {
+                    id: target.vector_id,
+                    target_id: target.stable_id.clone(),
+                    target_kind: target.kind.clone(),
+                    vector: entry.vector.clone(),
+                })?;
+            }
+            exact_index = Some(fallback);
+            ann_index = None;
+            resolved_backend = ResolvedSemanticBackend::ExactFlat;
         }
 
         let manifest = SemanticManifest {
@@ -584,6 +612,16 @@ fn resolve_semantic_backend(
             "semantic backend `{other}` is not supported; use exact-flat, auto, usearch-hnsw-f32, or usearch-hnsw-bf16"
         ))),
     }
+}
+
+fn auto_backend_needs_exact_fallback(
+    config: &SemanticConfig,
+    resolved_backend: ResolvedSemanticBackend,
+    successful_vector_count: usize,
+) -> bool {
+    config.backend == "auto"
+        && resolved_backend != ResolvedSemanticBackend::ExactFlat
+        && successful_vector_count < config.ann_min_rows
 }
 
 fn resolved_backend_from_name(name: &str) -> Result<ResolvedSemanticBackend> {
@@ -1209,6 +1247,16 @@ mod tests {
             resolve_semantic_backend(&config, 100).unwrap(),
             ResolvedSemanticBackend::HnswF32
         );
+        assert!(auto_backend_needs_exact_fallback(
+            &config,
+            ResolvedSemanticBackend::HnswF32,
+            99
+        ));
+        assert!(!auto_backend_needs_exact_fallback(
+            &config,
+            ResolvedSemanticBackend::HnswF32,
+            100
+        ));
         config.backend = "usearch-hnsw-bf16".into();
         assert_eq!(
             resolve_semantic_backend(&config, 1).unwrap(),
