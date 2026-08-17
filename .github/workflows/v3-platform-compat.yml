@@ -32,6 +32,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/v3-platform-compat-v2.py")
+          text = path.read_text(encoding="utf-8")
+          old = '    remove_once("CHANGELOG.md", "- `ok-macos-x86_64`\\n- `ok-macos-x86_64.sha256`\\n")\n'
+          new = '''    changelog = load("CHANGELOG.md")
+              block = "- `ok-macos-x86_64`\\n- `ok-macos-x86_64.sha256`\\n"
+              if block not in changelog:
+                  raise SystemExit("CHANGELOG.md: V3 Intel artifact block missing")
+              save("CHANGELOG.md", changelog.replace(block, "", 1))
+          '''.replace("              ", "")
+          if text.count(old) != 1:
+              raise SystemExit("temporary migration changelog anchor mismatch")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
           python3 scripts/v3-platform-compat-v2.py
           git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
 
@@ -45,8 +60,9 @@ jobs:
           scripts/validate-versions.sh
           scripts/verify-npm-package.sh
           git diff --check
+          # Historical changelog sections may mention old targets; current release/install surfaces may not.
           if git grep -nE 'ok-macos-x86_64|@open-kioku/darwin-x64|x86_64-apple-darwin|unknown-linux-musl' -- \
-              release-metadata.json Formula crates/open-kioku-cli packages/npm docs/release-checklist.md CHANGELOG.md scripts/validate-release-metadata.py; then
+              release-metadata.json Formula crates/open-kioku-cli packages/npm docs/release-checklist.md scripts/validate-release-metadata.py; then
             echo 'unsupported V3 platform reference remains' >&2
             exit 1
           fi
