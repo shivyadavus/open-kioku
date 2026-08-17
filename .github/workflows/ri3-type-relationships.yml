@@ -19,8 +19,9 @@ jobs:
 
       - name: Apply type relationship migration
         run: |
-          python3 -m py_compile scripts/ri3_type_relationships_tmp.py
+          python3 -m py_compile scripts/ri3_type_relationships_tmp.py scripts/ri3_type_relationships_fix_tmp.py
           python3 scripts/ri3_type_relationships_tmp.py
+          python3 scripts/ri3_type_relationships_fix_tmp.py
 
       - name: Validate type relationship trust boundary
         run: |
@@ -34,7 +35,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git checkout -- Cargo.lock
           rm -rf scripts/__pycache__
-          git rm -f .github/workflows/ri3-type-relationships.yml scripts/ri3_type_relationships_tmp.py
+          git rm -f .github/workflows/ri3-type-relationships.yml scripts/ri3_type_relationships_tmp.py scripts/ri3_type_relationships_fix_tmp.py
           git add crates/open-kioku-core/src/relationship.rs crates/open-kioku-resolution/src/lib.rs crates/open-kioku-resolution/src/inheritance.rs crates/open-kioku-resolution/src/typed_calls.rs crates/open-kioku-resolution/src/type_relations.rs crates/open-kioku-ingest/src/lib.rs
           if ! git diff --quiet; then
             echo "unexpected unstaged tracked changes after validation cleanup:" >&2
