@@ -1,0 +1,75 @@
+name: RI3 deterministic compact conformance gate
+
+on:
+  push:
+    branches:
+      - agent/ri3-frozen-conformance
+    paths:
+      - .github/workflows/ri3-complete-240-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-frozen-conformance
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Materialize RI3 product tree
+        run: |
+          set -euo pipefail
+          python3 .tmp-ri3/materialize_v3.py
+          cargo fmt --all
+      - name: Compile and lint changed product surface
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check -p open-kioku-cli -p open-kioku-graph -p open-kioku-tree-sitter --all-targets
+          cargo clippy -p open-kioku-cli -p open-kioku-graph -p open-kioku-tree-sitter --all-targets -- -D warnings
+      - name: Focused regression suites
+        run: |
+          set -euo pipefail
+          cargo test -p open-kioku-cli relationship_bench -- --nocapture
+          cargo test -p open-kioku-cli relationship_live -- --nocapture
+          cargo test -p open-kioku-tree-sitter ri3_go_type_classification_tests -- --nocapture
+          cargo test -p open-kioku-graph -- --nocapture
+      - name: Compact 42-cohort live conformance
+        run: |
+          set -euo pipefail
+          cargo run -p open-kioku-cli -- --json relationship-bench \
+            --corpus benchmarks/relationship-ci-cases.json \
+            --observations @live \
+            --write /tmp/relationship-ci-report.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/relationship-ci-report.json'))
+          diagnostics = report.get('diagnostics', [])
+          if diagnostics:
+              for item in diagnostics[:80]:
+                  print(item)
+              raise SystemExit(f'compact conformance produced {len(diagnostics)} diagnostics')
+          print(json.dumps(report['overall'], indent=2))
+          PY
+      - name: Commit validated RI3 implementation
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-cli/src/bench/relationship.rs \
+                  crates/open-kioku-cli/src/bench/relationship_live.rs \
+                  crates/open-kioku-graph/src/lib.rs \
+                  crates/open-kioku-tree-sitter/src/lib.rs \
+                  benchmarks/relationship-cases.json \
+                  benchmarks/relationship-ci-cases.json \
+                  benchmarks/relationship-thresholds.json
+          git rm -r .tmp-ri3
+          git diff --cached --check
+          git commit -m "test(ri3): add live frozen relationship conformance gate"
+          git push origin HEAD:agent/ri3-frozen-conformance
