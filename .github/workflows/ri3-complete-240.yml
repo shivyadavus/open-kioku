@@ -83,16 +83,18 @@ jobs:
           block = '\n'.join(lines) + '\n'
           path.write_text(text[:insertion_pos] + block + text[insertion_pos:])
           PY
-      - name: Validate scorer contract and code quality
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --all
-          cargo fmt --all -- --check
-          cargo clippy -p open-kioku-cli -p open-kioku-graph --all-targets -- -D warnings
-          cargo test -p open-kioku-cli relationship_bench -- --nocapture
-          cargo test -p open-kioku-cli relationship_live -- --nocapture
-          cargo test -p open-kioku-graph -- --nocapture
+      - name: Rustfmt generated product tree
+        run: cargo fmt --all
+      - name: Verify rustfmt
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy for changed crates
+        run: cargo clippy -p open-kioku-cli -p open-kioku-graph --all-targets -- -D warnings
+      - name: Relationship scorer tests
+        run: cargo test -p open-kioku-cli relationship_bench -- --nocapture
+      - name: Live producer tests
+        run: cargo test -p open-kioku-cli relationship_live -- --nocapture
+      - name: Graph proof tests
+        run: cargo test -p open-kioku-graph -- --nocapture
       - name: Run compact live conformance matrix
         shell: bash
         run: |
