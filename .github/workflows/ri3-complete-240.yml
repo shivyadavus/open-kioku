@@ -1,0 +1,113 @@
+name: RI3 complete frozen relationship conformance
+
+on:
+  push:
+    branches:
+      - agent/ri3-frozen-conformance
+    paths:
+      - .github/workflows/ri3-complete-240.yml
+
+permissions:
+  contents: write
+
+jobs:
+  implement-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-frozen-conformance
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Install RI3 frozen conformance implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .tmp-ri3/relationship.rs.gz.b64 | gzip -dc > crates/open-kioku-cli/src/bench/relationship.rs
+          base64 -d .tmp-ri3/relationship_live.rs.gz.b64 | gzip -dc > crates/open-kioku-cli/src/bench/relationship_live.rs
+          base64 -d .tmp-ri3/relationship-cases.json.gz.b64 | gzip -dc > benchmarks/relationship-cases.json
+          base64 -d .tmp-ri3/relationship-ci-cases.json.gz.b64 | gzip -dc > benchmarks/relationship-ci-cases.json
+          base64 -d .tmp-ri3/relationship-thresholds.json.gz.b64 | gzip -dc > benchmarks/relationship-thresholds.json
+          python3 - <<'PATCH'
+          from pathlib import Path
+          path=Path('crates/open-kioku-graph/src/lib.rs')
+          text=path.read_text()
+          anchor='''                edge.set_relationship_proofs(vec![proof])
+                    .expect("resolved import binding proof must serialize to JSON");
+            }
+            buffer.insert_edge(edge);'''
+          replacement='''                edge.set_relationship_proofs(vec![proof])
+                    .expect("resolved import binding proof must serialize to JSON");
+            }
+            if fact.edge_type == GraphEdgeType::DependsOn
+                && fact.target_kind == GraphNodeType::Package
+                && fact.source.starts_with("open-kioku-import-resolver/")
+                && matches!(fact.confidence, Confidence::High | Confidence::Exact)
+            {
+                let mut proof = RelationshipProof::new(
+                    RelationshipProofKind::ModuleOrPackageBinding,
+                    fact.source.clone(),
+                    1,
+                );
+                proof.source_range = fact.range.as_ref().map(|range| FileRange {
+                    path: file.path.clone(),
+                    line_range: Some(range.clone()),
+                });
+                proof.evidence_ids.push(evidence_id);
+                proof
+                    .details
+                    .insert("package".into(), json!(fact.target));
+                edge.set_relationship_proofs(vec![proof])
+                    .expect("resolved package dependency proof must serialize to JSON");
+            }
+            buffer.insert_edge(edge);'''
+          if anchor not in text:
+              raise SystemExit('graph proof anchor not found')
+          path.write_text(text.replace(anchor,replacement,1))
+          PATCH
+      - name: Validate scorer contract and code quality
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-cli -p open-kioku-graph --all-targets -- -D warnings
+          cargo test -p open-kioku-cli relationship_bench -- --nocapture
+          cargo test -p open-kioku-cli relationship_live -- --nocapture
+          cargo test -p open-kioku-graph -- --nocapture
+      - name: Run compact live conformance matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p open-kioku-cli -- --json relationship-bench \
+            --corpus benchmarks/relationship-ci-cases.json \
+            --observations @live \
+            --write /tmp/relationship-ci-report.json
+          python3 - <<'CHECK'
+          import json
+          report=json.load(open('/tmp/relationship-ci-report.json'))
+          if report.get('diagnostics'):
+              for item in report['diagnostics'][:50]:
+                  print(item)
+              raise SystemExit(f"compact conformance produced {len(report['diagnostics'])} diagnostics")
+          print('compact conformance clean:', report['overall']['cases'], 'cases')
+          CHECK
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-cli/src/bench/relationship.rs \
+                  crates/open-kioku-cli/src/bench/relationship_live.rs \
+                  crates/open-kioku-graph/src/lib.rs \
+                  benchmarks/relationship-cases.json \
+                  benchmarks/relationship-ci-cases.json \
+                  benchmarks/relationship-thresholds.json
+          git rm -r .tmp-ri3
+          git diff --cached --check
+          git commit -m "test(ri3): complete frozen relationship conformance foundation"
+          git push origin HEAD:agent/ri3-frozen-conformance
