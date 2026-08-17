@@ -6,6 +6,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub mod identity;
+pub mod relationship;
+
+pub use relationship::{
+    normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
+    RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
+    RELATIONSHIP_PROOFS_PROPERTY,
+};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -1975,6 +1982,7 @@ pub enum GraphEdgeType {
     Contains,
     Defines,
     References,
+    UsesType,
     Calls,
     Implements,
     Extends,
@@ -2888,6 +2896,14 @@ mod tests {
         assert!(decoded.line_ranges.is_empty());
         assert_eq!(decoded.confidence, Confidence::Low);
         assert!(decoded.uncertainty.is_empty());
+    }
+
+    #[test]
+    fn uses_type_edge_type_has_stable_json_contract() {
+        let json = serde_json::to_string(&GraphEdgeType::UsesType).unwrap();
+        assert_eq!(json, "\"USES_TYPE\"");
+        let decoded: GraphEdgeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, GraphEdgeType::UsesType);
     }
 
     #[test]
