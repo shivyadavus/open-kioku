@@ -1,7 +1,7 @@
 use open_kioku_config::{ScipConfig, ScipMode};
 use open_kioku_core::{
-    Confidence, EvidenceSourceType, FileId, Language, LineRange, RepositoryId, Symbol, SymbolId,
-    SymbolKind, SymbolOccurrence,
+    Confidence, EvidenceSourceType, FileId, Language, LineRange, RepositoryId, SourceRange, Symbol,
+    SymbolId, SymbolKind, SymbolOccurrence,
 };
 use open_kioku_errors::{OkError, Result};
 use protobuf::{Enum, Message};
@@ -379,6 +379,7 @@ fn convert_index(index: Index, repository_id: &RepositoryId) -> ScipImport {
                 symbol_id: SymbolId::new(stable_id(&occurrence.symbol)),
                 file_id: file_id.clone(),
                 range: scip_range(&occurrence.range),
+                source_range: scip_source_range(&occurrence.range),
                 is_definition: has_role(occurrence.symbol_roles, SymbolRole::Definition),
                 confidence: Confidence::Exact,
                 provenance: EvidenceSourceType::Scip,
@@ -400,19 +401,22 @@ fn dedup_import(symbols: &mut Vec<Symbol>, occurrences: &mut Vec<SymbolOccurrenc
         (
             &a.symbol_id.0,
             &a.file_id.0,
-            a.range.as_ref().map(|range| range.start),
+            source_range_key(a.source_range.as_ref()),
+            a.range.as_ref().map(|range| (range.start, range.end)),
             a.is_definition,
         )
             .cmp(&(
                 &b.symbol_id.0,
                 &b.file_id.0,
-                b.range.as_ref().map(|range| range.start),
+                source_range_key(b.source_range.as_ref()),
+                b.range.as_ref().map(|range| (range.start, range.end)),
                 b.is_definition,
             ))
     });
     occurrences.dedup_by(|a, b| {
         a.symbol_id == b.symbol_id
             && a.file_id == b.file_id
+            && a.source_range == b.source_range
             && a.range == b.range
             && a.is_definition == b.is_definition
     });
@@ -460,15 +464,41 @@ fn definition_range(occurrences: &[scip::types::Occurrence], symbol: &str) -> Op
         .and_then(|occurrence| scip_range(&occurrence.range))
 }
 
-fn scip_range(range: &[i32]) -> Option<LineRange> {
+fn source_range_key(range: Option<&SourceRange>) -> Option<(u32, u32, u32, u32)> {
+    range.map(|range| {
+        (
+            range.start_line,
+            range.start_column,
+            range.end_line,
+            range.end_column,
+        )
+    })
+}
+
+fn scip_source_range(range: &[i32]) -> Option<SourceRange> {
+    let one_based = |value: i32| (value + 1).max(1) as u32;
     match range {
-        [start_line, _, end_line, _] => Some(LineRange {
-            start: (*start_line + 1).max(1) as u32,
-            end: (*end_line + 1).max(1) as u32,
+        [start_line, start_column, end_line, end_column] => Some(SourceRange {
+            start_line: one_based(*start_line),
+            start_column: one_based(*start_column),
+            end_line: one_based(*end_line),
+            end_column: one_based(*end_column),
         }),
-        [start_line, _, _] => Some(LineRange::single((*start_line + 1).max(1) as u32)),
+        [line, start_column, end_column] => Some(SourceRange {
+            start_line: one_based(*line),
+            start_column: one_based(*start_column),
+            end_line: one_based(*line),
+            end_column: one_based(*end_column),
+        }),
         _ => None,
     }
+}
+
+fn scip_range(range: &[i32]) -> Option<LineRange> {
+    scip_source_range(range).map(|range| LineRange {
+        start: range.start_line,
+        end: range.end_line,
+    })
 }
 
 fn has_role(roles: i32, role: SymbolRole) -> bool {
@@ -690,5 +720,65 @@ mod tests {
         assert_eq!(imported.symbols.len(), 1);
         assert_eq!(imported.symbols[0].language, Language::Java);
         assert_eq!(imported.symbols[0].name, "hello");
+    }
+}
+
+#[cfg(test)]
+mod ri3_exact_reference_tests {
+    use super::*;
+
+    fn occurrence(column: u32) -> SymbolOccurrence {
+        SymbolOccurrence {
+            symbol_id: SymbolId::new("symbol:target"),
+            file_id: FileId::new("file:src/lib.rs"),
+            range: Some(LineRange::single(10)),
+            source_range: Some(SourceRange {
+                start_line: 10,
+                start_column: column,
+                end_line: 10,
+                end_column: column + 3,
+            }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Scip,
+        }
+    }
+
+    #[test]
+    fn scip_source_range_preserves_same_line_columns() {
+        assert_eq!(
+            scip_source_range(&[9, 4, 8]),
+            Some(SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 10,
+                end_column: 9,
+            })
+        );
+        assert_eq!(
+            scip_source_range(&[9, 4, 11, 2]),
+            Some(SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 12,
+                end_column: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_same_line_reference_occurrences() {
+        let mut symbols = Vec::new();
+        let mut occurrences = vec![occurrence(5), occurrence(20), occurrence(5)];
+        dedup_import(&mut symbols, &mut occurrences);
+        assert_eq!(occurrences.len(), 2);
+        assert_eq!(
+            occurrences[0].source_range.as_ref().unwrap().start_column,
+            5
+        );
+        assert_eq!(
+            occurrences[1].source_range.as_ref().unwrap().start_column,
+            20
+        );
     }
 }

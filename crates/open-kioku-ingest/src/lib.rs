@@ -2372,6 +2372,7 @@ fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOc
             symbol_id: symbol.id.clone(),
             file_id: symbol.file_id.clone(),
             range: symbol.range.clone(),
+            source_range: None,
             is_definition: true,
             confidence: symbol.confidence,
             provenance: symbol.provenance.clone(),

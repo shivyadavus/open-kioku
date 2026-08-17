@@ -991,6 +991,8 @@ pub struct SymbolOccurrence {
     pub symbol_id: SymbolId,
     pub file_id: FileId,
     pub range: Option<LineRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_range: Option<SourceRange>,
     pub is_definition: bool,
     pub confidence: Confidence,
     pub provenance: EvidenceSourceType,

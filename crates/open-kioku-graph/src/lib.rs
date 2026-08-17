@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    ResolvedRelationship, Symbol, SymbolOccurrence,
+    identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,
+    FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
+    RelationshipProof, RelationshipProofKind, ResolvedRelationship, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -137,16 +137,47 @@ impl InMemoryGraph {
             };
             let from = identity::file_node_id(&file.path);
             let to = identity::symbol_node_id(symbol);
-            buffer.insert_edge(GraphEdge {
+            let occurrence_key = occurrence
+                .source_range
+                .as_ref()
+                .map(|range| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        range.start_line, range.start_column, range.end_line, range.end_column
+                    )
+                })
+                .unwrap_or_else(|| {
+                    occurrence
+                        .range
+                        .as_ref()
+                        .map(|range| format!("{}:{}", range.start, range.end))
+                        .unwrap_or_else(|| "unknown".into())
+                });
+            let evidence_id = EvidenceId::new(stable_id(&format!(
+                "occurrence-evidence:{}:{}:{}",
+                file.id.0, symbol.id.0, occurrence_key
+            )));
+            let mut properties = BTreeMap::new();
+            if let Some(range) = &occurrence.source_range {
+                properties.insert(
+                    "reference_sites".into(),
+                    json!([{
+                        "path": file.path.to_string_lossy(),
+                        "start_line": range.start_line,
+                        "start_column": range.start_column,
+                        "end_line": range.end_line,
+                        "end_column": range.end_column,
+                    }]),
+                );
+            }
+            let mut edge = GraphEdge {
                 id: identity::edge_id(GraphEdgeType::References, &from, &to, None),
                 from,
                 to,
                 edge_type: GraphEdgeType::References,
+                properties,
                 evidence: Evidence {
-                    id: EvidenceId::new(stable_id(&format!(
-                        "occurrence-evidence:{}:{}",
-                        file.id.0, symbol.id.0
-                    ))),
+                    id: evidence_id.clone(),
                     source: "open-kioku-graph".into(),
                     source_type: occurrence.provenance.clone(),
                     file_range: Some(FileRange {
@@ -160,7 +191,39 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            if occurrence.provenance == EvidenceSourceType::Scip
+                && occurrence.confidence == Confidence::Exact
+            {
+                if let Some(range) = &occurrence.source_range {
+                    let mut proof = RelationshipProof::new(
+                        RelationshipProofKind::ExactOccurrence,
+                        "scip_exact_occurrence",
+                        1,
+                    );
+                    proof.source_range = Some(FileRange {
+                        path: file.path.clone(),
+                        line_range: occurrence.range.clone(),
+                    });
+                    proof.target_symbol_id = Some(symbol.id.clone());
+                    proof.evidence_ids.push(evidence_id);
+                    proof
+                        .details
+                        .insert("start_line".into(), json!(range.start_line));
+                    proof
+                        .details
+                        .insert("start_column".into(), json!(range.start_column));
+                    proof
+                        .details
+                        .insert("end_line".into(), json!(range.end_line));
+                    proof
+                        .details
+                        .insert("end_column".into(), json!(range.end_column));
+                    edge.set_relationship_proofs(vec![proof])
+                        .expect("SCIP occurrence proof must serialize to JSON");
+                }
+            }
+            buffer.insert_edge(edge);
         }
         for import in imports {
             let Some(file) = files_by_id.get(import.file_id.0.as_str()) else {
@@ -948,6 +1011,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 10, end: 10 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
@@ -956,6 +1020,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 12, end: 12 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
@@ -976,6 +1041,91 @@ mod tests {
             .filter(|e| e.edge_type == GraphEdgeType::References)
             .collect::<Vec<_>>();
         assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+    }
+
+    #[test]
+    fn exact_scip_references_preserve_columns_and_become_authoritative() {
+        let file = make_file("src/reference");
+        let symbol = make_symbol("target", "src/reference", "target");
+        let make_occurrence = |start_column| SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange::single(10)),
+            source_range: Some(SourceRange {
+                start_line: 10,
+                start_column,
+                end_line: 10,
+                end_column: start_column + 4,
+            }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Scip,
+        };
+        let graph = InMemoryGraph::from_index_with_occurrences(
+            std::slice::from_ref(&file),
+            std::slice::from_ref(&symbol),
+            &[],
+            &[make_occurrence(5), make_occurrence(20)],
+        );
+        let refs = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == GraphEdgeType::References)
+            .collect::<Vec<_>>();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+        let sites = refs[0]
+            .properties
+            .get("reference_sites")
+            .and_then(serde_json::Value::as_array)
+            .expect("exact reference edge should retain structured sites");
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0]["start_column"], 5);
+        assert_eq!(sites[1]["start_column"], 20);
+        let proofs = refs[0].relationship_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert!(proofs
+            .iter()
+            .all(|proof| proof.kind == RelationshipProofKind::ExactOccurrence));
+    }
+
+    #[test]
+    fn exact_non_scip_reference_range_does_not_create_structural_authority() {
+        let file = make_file("src/reference_lsp");
+        let symbol = make_symbol("target_lsp", "src/reference_lsp", "target");
+        let occurrence = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange::single(10)),
+            source_range: Some(SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 10,
+                end_column: 9,
+            }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        let graph =
+            InMemoryGraph::from_index_with_occurrences(&[file], &[symbol], &[], &[occurrence]);
+        let reference = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::References)
+            .expect("reference edge should exist as non-authoritative evidence");
+        assert_eq!(
+            reference.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+        assert!(reference.relationship_proofs().is_empty());
     }
 
     #[test]
@@ -1093,6 +1243,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 10, end: 10 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
