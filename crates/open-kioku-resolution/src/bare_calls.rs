@@ -10,6 +10,17 @@ pub(crate) fn resolve_bare_call_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
 ) -> ResolutionOutcome {
+    // A lexical value binding with the same name shadows function/import symbols. Until a
+    // callable value binding can itself be proven to a unique target, fail closed rather than
+    // emitting a structural CALLS edge to an unrelated same-named symbol.
+    if ctx
+        .bindings
+        .resolve_before(&call.scope_id, &call.callee_name, &call.range, ctx.scopes)
+        .is_some()
+    {
+        return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+    }
+
     if let Some(candidates) = nearest_lexical_scope_candidates(call, ctx) {
         return evaluate_target_set(
             call,
@@ -298,8 +309,8 @@ mod tests {
     use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
     use crate::inheritance::InheritanceIndex;
     use open_kioku_core::{
-        CallSiteId, FileId, Language, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol,
-        SymbolKind, Visibility,
+        Binding, BindingId, CallSiteId, FileId, Language, ReceiverKind, Scope, ScopeId, ScopeKind,
+        SourceRange, Symbol, SymbolKind, Visibility,
     };
 
     fn symbol(id: &str, name: &str, file: &str, scope_id: Option<&str>) -> Symbol {
@@ -322,6 +333,14 @@ mod tests {
     }
 
     fn with_context<T>(symbols: Vec<Symbol>, test: impl FnOnce(&ResolutionContext<'_>) -> T) -> T {
+        with_context_and_bindings(symbols, Vec::new(), test)
+    }
+
+    fn with_context_and_bindings<T>(
+        symbols: Vec<Symbol>,
+        bindings: Vec<Binding>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let file_id = FileId::new("file:src/lib.rs");
         let scopes = ScopeIndex::build(vec![Scope {
             id: ScopeId::new("scope:file"),
@@ -337,7 +356,7 @@ mod tests {
             },
         }]);
         let symbol_index = SymbolIndex::build(symbols);
-        let bindings = BindingIndex::build(Vec::new());
+        let bindings = BindingIndex::build(bindings);
         let inheritance = InheritanceIndex::build(Vec::new());
         let repository = open_kioku_semantic_model::SemanticRepository::new();
         let semantics = open_kioku_languages::semantics_for(&Language::Rust).unwrap();
@@ -398,6 +417,36 @@ mod tests {
                     }
                     other => panic!("expected proven lexical call, got {other:?}"),
                 }
+            },
+        );
+    }
+
+    #[test]
+    fn lexical_value_binding_shadows_same_named_function() {
+        with_context_and_bindings(
+            vec![symbol(
+                "symbol:run",
+                "run",
+                "file:src/lib.rs",
+                Some("scope:file"),
+            )],
+            vec![Binding {
+                id: BindingId::new("binding:run"),
+                file_id: FileId::new("file:src/lib.rs"),
+                scope_id: ScopeId::new("scope:file"),
+                name: "run".into(),
+                declared_type: None,
+                inferred_type: None,
+                range: SourceRange {
+                    start_line: 10,
+                    start_column: 5,
+                    end_line: 10,
+                    end_column: 8,
+                },
+            }],
+            |ctx| match resolve_bare_call_outcome(&bare_call(), ctx) {
+                ResolutionOutcome::Unresolved { candidates, .. } => assert!(candidates.is_empty()),
+                other => panic!("shadowed bare call must fail closed, got {other:?}"),
             },
         );
     }
