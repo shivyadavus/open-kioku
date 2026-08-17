@@ -34,4 +34,12 @@ new = '''        assert_eq!(comparisons[1].scope, "task_family:issue_to_code");
 if text.count(old) != 1:
     raise SystemExit(f'comparison test marker count={text.count(old)}')
 text = text.replace(old, new, 1)
+old = '''    fn corpus_schema_rejects_unknown_fields() {
+'''
+new = '''    #[test]
+    fn corpus_schema_rejects_unknown_fields() {
+'''
+if text.count(old) != 1:
+    raise SystemExit(f'corpus schema test marker count={text.count(old)}')
+text = text.replace(old, new, 1)
 path.write_text(text)
