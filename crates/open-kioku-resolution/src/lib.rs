@@ -3,12 +3,16 @@ pub mod context;
 pub mod evidence;
 pub mod index;
 pub mod inheritance;
+pub mod pipeline;
 
 pub use calls::resolve_call;
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
 pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
+pub use pipeline::{
+    evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+};
 
 #[cfg(test)]
 mod tests {
