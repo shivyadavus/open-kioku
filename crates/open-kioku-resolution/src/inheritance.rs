@@ -95,7 +95,15 @@ impl InheritanceIndex {
                     &edge.parent_name,
                     repository,
                     symbols,
-                );
+                )
+                .into_iter()
+                .filter(|candidate| {
+                    symbols
+                        .get(&candidate.target)
+                        .map(|symbol| inheritance_parent_kind_allowed(&edge.kind, &symbol.kind))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
                 for strategy in [
                     TypeDiscovery::SameFile,
                     TypeDiscovery::ImportBinding,
@@ -120,18 +128,9 @@ impl InheritanceIndex {
         }
     }
 
-    /// Deterministic view of uniquely bound inheritance declarations for structural emission.
-    pub fn resolved_edges(&self) -> Vec<&InheritanceEdge> {
-        let mut edges = self
-            .edges_by_child
-            .values()
-            .flatten()
-            .filter(|edge| {
-                edge.parent_id.is_some()
-                    && edge.binding_strategy.is_some()
-                    && edge.binding_candidate_count == 1
-            })
-            .collect::<Vec<_>>();
+    /// Deterministic view of all inheritance declarations, including ambiguous/unresolved ones.
+    pub fn all_edges(&self) -> Vec<&InheritanceEdge> {
+        let mut edges = self.edges_by_child.values().flatten().collect::<Vec<_>>();
         edges.sort_by(|left, right| {
             inheritance_edge_order(left, right).then_with(|| {
                 left.parent_id
@@ -141,6 +140,18 @@ impl InheritanceIndex {
             })
         });
         edges
+    }
+
+    /// Deterministic view of uniquely bound inheritance declarations for structural emission.
+    pub fn resolved_edges(&self) -> Vec<&InheritanceEdge> {
+        self.all_edges()
+            .into_iter()
+            .filter(|edge| {
+                edge.parent_id.is_some()
+                    && edge.binding_strategy.is_some()
+                    && edge.binding_candidate_count == 1
+            })
+            .collect()
     }
 
     /// Returns every viable inherited member at the nearest inheritance depth containing a match.
@@ -233,6 +244,22 @@ fn inheritance_edge_order(left: &InheritanceEdge, right: &InheritanceEdge) -> st
         .then_with(|| inheritance_kind_order(&left.kind).cmp(&inheritance_kind_order(&right.kind)))
         .then_with(|| left.order.cmp(&right.order))
         .then_with(|| left.parent_name.cmp(&right.parent_name))
+}
+
+fn inheritance_parent_kind_allowed(kind: &InheritanceKind, parent: &SymbolKind) -> bool {
+    match kind {
+        InheritanceKind::Extends => matches!(
+            parent,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface
+        ),
+        InheritanceKind::Implements | InheritanceKind::TraitImpl => {
+            matches!(parent, SymbolKind::Trait | SymbolKind::Interface)
+        }
+        InheritanceKind::Embeds => matches!(
+            parent,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Module
+        ),
+    }
 }
 
 fn inheritance_kind_order(kind: &InheritanceKind) -> u8 {
@@ -449,6 +476,27 @@ mod tests {
         assert_eq!(edge.binding_strategy, Some(TypeDiscovery::SameFile));
         assert_eq!(edge.binding_candidate_count, 2);
         assert!(index.resolved_edges().is_empty());
+    }
+
+    #[test]
+    fn implements_does_not_bind_class_target() {
+        let file = "file:types";
+        let child = symbol_in_file("Child", "Child", SymbolKind::Class, None, file);
+        let parent = symbol_in_file("Contract", "Contract", SymbolKind::Class, None, file);
+        let symbols = SymbolIndex::build(vec![child, parent]);
+        let repository = SemanticRepository::new();
+        let mut index = InheritanceIndex::build(vec![InheritanceSite {
+            child_symbol_id: SymbolId::new("Child"),
+            parent_name: "Contract".into(),
+            kind: InheritanceKind::Implements,
+            order: 0,
+            range: range(12),
+        }]);
+
+        index.bind_parents_with_repository(&symbols, &repository);
+        let edge = index.all_edges()[0];
+        assert_eq!(edge.parent_id, None);
+        assert_eq!(edge.binding_candidate_count, 0);
     }
 
     #[test]

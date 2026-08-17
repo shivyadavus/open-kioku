@@ -68,6 +68,42 @@ pub struct ResolutionDiff {
     pub agreement: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationshipResolutionTelemetry {
+    pub relationship: GraphEdgeType,
+    pub language: open_kioku_core::Language,
+    pub cases: usize,
+    pub candidates_considered: usize,
+    pub proven: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    #[serde(default)]
+    pub candidate_count_histogram: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub strategy_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub proof_counts: BTreeMap<String, usize>,
+}
+
+impl RelationshipResolutionTelemetry {
+    fn new(relationship: GraphEdgeType, language: open_kioku_core::Language) -> Self {
+        Self {
+            relationship,
+            language,
+            cases: 0,
+            candidates_considered: 0,
+            proven: 0,
+            ambiguous: 0,
+            unresolved: 0,
+            external: 0,
+            candidate_count_histogram: BTreeMap::new(),
+            strategy_counts: BTreeMap::new(),
+            proof_counts: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResolutionQualityReport {
     pub call_sites: usize,
@@ -79,6 +115,231 @@ pub struct ResolutionQualityReport {
     pub legacy_only: usize,
     pub semantic_only: usize,
     pub disagreement: usize,
+    #[serde(default)]
+    pub relationship_telemetry: Vec<RelationshipResolutionTelemetry>,
+}
+
+impl ResolutionQualityReport {
+    fn bucket_mut(
+        &mut self,
+        relationship: GraphEdgeType,
+        language: open_kioku_core::Language,
+    ) -> &mut RelationshipResolutionTelemetry {
+        if let Some(index) = self
+            .relationship_telemetry
+            .iter()
+            .position(|bucket| bucket.relationship == relationship && bucket.language == language)
+        {
+            return &mut self.relationship_telemetry[index];
+        }
+        self.relationship_telemetry
+            .push(RelationshipResolutionTelemetry::new(relationship, language));
+        self.relationship_telemetry
+            .last_mut()
+            .expect("telemetry bucket was just inserted")
+    }
+
+    fn record_outcome(
+        &mut self,
+        relationship: GraphEdgeType,
+        language: open_kioku_core::Language,
+        outcome: &open_kioku_resolution::ResolutionOutcome,
+    ) {
+        let (candidate_count, status, candidates): (
+            usize,
+            &'static str,
+            Vec<&open_kioku_resolution::ResolutionCandidate>,
+        ) = match outcome {
+            open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
+                (1, "proven", vec![candidate])
+            }
+            open_kioku_resolution::ResolutionOutcome::Ambiguous { candidates, .. } => {
+                (candidates.len(), "ambiguous", candidates.iter().collect())
+            }
+            open_kioku_resolution::ResolutionOutcome::Unresolved { candidates, .. } => {
+                (candidates.len(), "unresolved", candidates.iter().collect())
+            }
+            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                (0, "external", Vec::new())
+            }
+        };
+        let bucket = self.bucket_mut(relationship, language);
+        bucket.cases += 1;
+        bucket.candidates_considered += candidate_count;
+        *bucket
+            .candidate_count_histogram
+            .entry(candidate_count.to_string())
+            .or_default() += 1;
+        match status {
+            "proven" => bucket.proven += 1,
+            "ambiguous" => bucket.ambiguous += 1,
+            "unresolved" => bucket.unresolved += 1,
+            "external" => bucket.external += 1,
+            _ => unreachable!("internal telemetry status is closed"),
+        }
+        for candidate in candidates {
+            for strategy in &candidate.strategies {
+                *bucket
+                    .strategy_counts
+                    .entry(strategy.as_str().to_string())
+                    .or_default() += 1;
+            }
+            for proof in &candidate.proofs {
+                *bucket
+                    .proof_counts
+                    .entry(proof.kind.as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    fn record_inheritance(
+        &mut self,
+        relationship: GraphEdgeType,
+        language: open_kioku_core::Language,
+        edge: &open_kioku_resolution::inheritance::InheritanceEdge,
+    ) {
+        let candidate_count = edge.binding_candidate_count;
+        let bucket = self.bucket_mut(relationship.clone(), language);
+        bucket.cases += 1;
+        bucket.candidates_considered += candidate_count;
+        *bucket
+            .candidate_count_histogram
+            .entry(candidate_count.to_string())
+            .or_default() += 1;
+        if let Some(strategy) = edge.binding_strategy {
+            *bucket
+                .strategy_counts
+                .entry(strategy.as_str().to_string())
+                .or_default() += 1;
+        }
+        if edge.parent_id.is_some() && candidate_count == 1 {
+            bucket.proven += 1;
+            *bucket
+                .proof_counts
+                .entry(
+                    open_kioku_core::RelationshipProofKind::InheritanceBinding
+                        .as_str()
+                        .into(),
+                )
+                .or_default() += 1;
+            if let Some(strategy) = edge.binding_strategy {
+                let kind = match strategy {
+                    open_kioku_resolution::TypeDiscovery::SameFile => {
+                        open_kioku_core::RelationshipProofKind::SameScopeDefinition
+                    }
+                    open_kioku_resolution::TypeDiscovery::ImportBinding => {
+                        open_kioku_core::RelationshipProofKind::ImportBinding
+                    }
+                    open_kioku_resolution::TypeDiscovery::QualifiedName => {
+                        open_kioku_core::RelationshipProofKind::QualifiedName
+                    }
+                };
+                *bucket.proof_counts.entry(kind.as_str().into()).or_default() += 1;
+            }
+            if relationship == GraphEdgeType::Implements {
+                *bucket
+                    .proof_counts
+                    .entry(
+                        open_kioku_core::RelationshipProofKind::TraitOrInterfaceBinding
+                            .as_str()
+                            .into(),
+                    )
+                    .or_default() += 1;
+            }
+        } else if candidate_count > 1 {
+            bucket.ambiguous += 1;
+        } else {
+            bucket.unresolved += 1;
+        }
+    }
+
+    fn record_reference_occurrence(&mut self, language: open_kioku_core::Language, exact: bool) {
+        let bucket = self.bucket_mut(GraphEdgeType::References, language);
+        bucket.cases += 1;
+        bucket.candidates_considered += 1;
+        *bucket
+            .candidate_count_histogram
+            .entry("1".into())
+            .or_default() += 1;
+        if exact {
+            bucket.proven += 1;
+            *bucket
+                .strategy_counts
+                .entry("exact_occurrence".into())
+                .or_default() += 1;
+            *bucket
+                .proof_counts
+                .entry(
+                    open_kioku_core::RelationshipProofKind::ExactOccurrence
+                        .as_str()
+                        .into(),
+                )
+                .or_default() += 1;
+        } else {
+            bucket.unresolved += 1;
+            *bucket
+                .strategy_counts
+                .entry("heuristic".into())
+                .or_default() += 1;
+        }
+    }
+
+    fn normalize_telemetry(&mut self) {
+        self.relationship_telemetry.sort_by(|left, right| {
+            format!("{:?}", left.relationship)
+                .cmp(&format!("{:?}", right.relationship))
+                .then_with(|| format!("{:?}", left.language).cmp(&format!("{:?}", right.language)))
+        });
+    }
+}
+
+#[cfg(test)]
+mod resolution_quality_telemetry_tests {
+    use super::*;
+    use open_kioku_core::{RelationshipProof, RelationshipProofKind};
+
+    #[test]
+    fn telemetry_is_deterministic_and_keeps_authority_separate_from_confidence() {
+        let target = SymbolId::new("symbol:target");
+        let mut candidate =
+            open_kioku_resolution::ResolutionCandidate::new(target.clone(), Confidence::Exact)
+                .with_strategy(open_kioku_resolution::ResolutionStrategy::TypedReceiver);
+        let mut proof =
+            RelationshipProof::new(RelationshipProofKind::QualifiedName, "qualified_name", 1);
+        proof.target_symbol_id = Some(target);
+        candidate.proofs.push(proof);
+        let outcome = open_kioku_resolution::ResolutionOutcome::Unresolved {
+            candidates: vec![candidate],
+            reason: "not enough CALLS proof".into(),
+        };
+
+        let mut report = ResolutionQualityReport::default();
+        report.record_outcome(
+            GraphEdgeType::Calls,
+            open_kioku_core::Language::Java,
+            &outcome,
+        );
+        report.record_reference_occurrence(open_kioku_core::Language::Rust, true);
+        report.normalize_telemetry();
+
+        assert_eq!(report.relationship_telemetry.len(), 2);
+        let calls = report
+            .relationship_telemetry
+            .iter()
+            .find(|bucket| bucket.relationship == GraphEdgeType::Calls)
+            .unwrap();
+        assert_eq!(calls.unresolved, 1);
+        assert_eq!(calls.proven, 0);
+        assert_eq!(calls.candidate_count_histogram.get("1"), Some(&1));
+        assert_eq!(calls.strategy_counts.get("typed_receiver"), Some(&1));
+        assert_eq!(calls.proof_counts.get("qualified_name"), Some(&1));
+
+        let first = serde_json::to_string(&report).unwrap();
+        report.normalize_telemetry();
+        let second = serde_json::to_string(&report).unwrap();
+        assert_eq!(first, second);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -483,14 +744,8 @@ impl Indexer {
         {
             quality_report.call_sites = call_sites.len();
 
-            for edge in inheritance_index.resolved_edges() {
-                let Some(parent_id) = edge.parent_id.clone() else {
-                    continue;
-                };
+            for edge in inheritance_index.all_edges() {
                 let Some(child_symbol) = symbol_index.get(&edge.child) else {
-                    continue;
-                };
-                let Some(parent_symbol) = symbol_index.get(&parent_id) else {
                     continue;
                 };
                 let Some(file) = file_lookup.get(&child_symbol.file_id) else {
@@ -501,6 +756,17 @@ impl Indexer {
                     open_kioku_core::InheritanceKind::Implements
                     | open_kioku_core::InheritanceKind::TraitImpl => GraphEdgeType::Implements,
                     open_kioku_core::InheritanceKind::Embeds => continue,
+                };
+                quality_report.record_inheritance(
+                    edge_type.clone(),
+                    child_symbol.language.clone(),
+                    edge,
+                );
+                let Some(parent_id) = edge.parent_id.clone() else {
+                    continue;
+                };
+                let Some(parent_symbol) = symbol_index.get(&parent_id) else {
+                    continue;
                 };
                 if edge_type == GraphEdgeType::Implements
                     && !matches!(
@@ -604,15 +870,19 @@ impl Indexer {
                 let Some(file) = file_lookup.get(&binding.file_id) else {
                     continue;
                 };
-                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } =
-                    open_kioku_resolution::resolve_declared_type_use(
-                        binding,
-                        &source_symbol_id,
-                        &file.path,
-                        &semantic_repo,
-                        &symbol_index,
-                    )
-                {
+                let outcome = open_kioku_resolution::resolve_declared_type_use(
+                    binding,
+                    &source_symbol_id,
+                    &file.path,
+                    &semantic_repo,
+                    &symbol_index,
+                );
+                quality_report.record_outcome(
+                    GraphEdgeType::UsesType,
+                    file.language.clone(),
+                    &outcome,
+                );
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
                     resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
                         from: source_symbol_id,
                         to: candidate.target_symbol_id,
@@ -687,6 +957,11 @@ impl Indexer {
                         );
 
                         let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);
+                        quality_report.record_outcome(
+                            GraphEdgeType::Calls,
+                            file.language.clone(),
+                            &v2_outcome,
+                        );
                         let semantic_target = match &v2_outcome {
                             open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
                                 match candidate.confidence {
@@ -896,6 +1171,21 @@ impl Indexer {
             );
             scip_report = Some(report);
         }
+        if resolution_mode != open_kioku_config::ResolutionMode::Legacy {
+            for occurrence in occurrences
+                .iter()
+                .filter(|occurrence| !occurrence.is_definition)
+            {
+                if let Some(file) = file_lookup.get(&occurrence.file_id) {
+                    quality_report.record_reference_occurrence(
+                        file.language.clone(),
+                        occurrence.confidence == Confidence::Exact,
+                    );
+                }
+            }
+            quality_report.normalize_telemetry();
+        }
+
         let repository = Repository {
             id: repo_id,
             name: config.repo.name.clone(),

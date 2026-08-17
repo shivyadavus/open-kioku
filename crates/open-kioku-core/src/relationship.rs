@@ -65,6 +65,23 @@ pub enum RelationshipAuthority {
 }
 
 impl RelationshipProofKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactOccurrence => "exact_occurrence",
+            Self::ExactReference => "exact_reference",
+            Self::ExactCallSite => "exact_call_site",
+            Self::ImportBinding => "import_binding",
+            Self::QualifiedName => "qualified_name",
+            Self::SameScopeDefinition => "same_scope_definition",
+            Self::ContainingType => "containing_type",
+            Self::ReceiverType => "receiver_type",
+            Self::TraitOrInterfaceBinding => "trait_or_interface_binding",
+            Self::InheritanceBinding => "inheritance_binding",
+            Self::ModuleOrPackageBinding => "module_or_package_binding",
+            Self::ExternalExactIndex => "external_exact_index",
+        }
+    }
+
     /// Maximum authority this proof kind can contribute before relationship-specific policy runs.
     /// This is an intrinsic safety ceiling, not an edge-authorization decision.
     pub fn maximum_authority(self) -> RelationshipAuthority {

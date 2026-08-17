@@ -18,6 +18,16 @@ pub enum TypeDiscovery {
     QualifiedName,
 }
 
+impl TypeDiscovery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameFile => "same_file",
+            Self::ImportBinding => "import_binding",
+            Self::QualifiedName => "qualified_name",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeCandidate {
     pub target: SymbolId,

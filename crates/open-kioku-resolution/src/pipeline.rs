@@ -26,6 +26,25 @@ pub enum ResolutionStrategy {
     Heuristic,
 }
 
+impl ResolutionStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactOccurrence => "exact_occurrence",
+            Self::LexicalScope => "lexical_scope",
+            Self::ImplicitSelf => "implicit_self",
+            Self::TypedReceiver => "typed_receiver",
+            Self::StaticReceiver => "static_receiver",
+            Self::ExactImportBinding => "exact_import_binding",
+            Self::ModuleExport => "module_export",
+            Self::SameFile => "same_file",
+            Self::Inheritance => "inheritance",
+            Self::QualifiedName => "qualified_name",
+            Self::ExternalExactIndex => "external_exact_index",
+            Self::Heuristic => "heuristic",
+        }
+    }
+}
+
 /// One plausible structural target discovered by one or more resolver strategies.
 ///
 /// `confidence` remains retrieval/ranking metadata. Structural truth is decided only from
