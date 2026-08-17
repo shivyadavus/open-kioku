@@ -4,6 +4,7 @@
 //! by graph storage, query APIs, and downstream consumers. Parsers may produce proof facts, but they
 //! do not independently decide whether a structural graph relationship is trusted.
 
+use crate::identity::symbol_id_node_id;
 use crate::{EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -286,6 +287,20 @@ pub fn normalize_relationship_proofs(mut proofs: Vec<RelationshipProof>) -> Vec<
     proofs
 }
 
+fn graph_edge_relationship_authority(
+    edge: &GraphEdge,
+    proofs: &[RelationshipProof],
+) -> RelationshipAuthority {
+    if proofs
+        .iter()
+        .filter_map(|proof| proof.target_symbol_id.as_ref())
+        .any(|target| symbol_id_node_id(target) != edge.to)
+    {
+        return RelationshipAuthority::Heuristic;
+    }
+    relationship_authority(&edge.edge_type, proofs)
+}
+
 fn source_range_key(range: &Option<FileRange>) -> (String, Option<u32>, Option<u32>) {
     let Some(range) = range else {
         return (String::new(), None, None);
@@ -336,7 +351,7 @@ impl GraphEdge {
         let Ok(proofs) = self.try_relationship_proofs() else {
             return RelationshipAuthority::Heuristic;
         };
-        relationship_authority(&self.edge_type, &proofs)
+        graph_edge_relationship_authority(self, &proofs)
     }
 
     pub fn is_authoritative_relationship(&self) -> bool {
@@ -378,7 +393,7 @@ impl RelationshipProofFilter {
                     && self.accepted_proof_kinds.is_none();
             }
         };
-        if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
+        if graph_edge_relationship_authority(edge, &proofs) < self.minimum_authority {
             return false;
         }
         match self.accepted_proof_kinds.as_ref() {
@@ -492,6 +507,34 @@ mod tests {
             edge.relationship_authority(),
             RelationshipAuthority::Heuristic
         );
+    }
+
+    #[test]
+    fn persisted_target_identity_must_match_claimed_proof_target() {
+        let target = SymbolId::new("symbol:Target.run");
+        let mut exact = proof(RelationshipProofKind::ExactReference, 1);
+        exact.target_symbol_id = Some(target.clone());
+
+        let mut matching = edge(GraphEdgeType::References, vec![exact.clone()]);
+        matching.to = symbol_id_node_id(&target);
+        assert!(matching.is_authoritative_relationship());
+        assert!(RelationshipProofFilter {
+            minimum_authority: RelationshipAuthority::Authoritative,
+            accepted_proof_kinds: None,
+        }
+        .matches(&matching));
+
+        let mut mismatched = edge(GraphEdgeType::References, vec![exact]);
+        mismatched.to = symbol_id_node_id(&SymbolId::new("symbol:Other.run"));
+        assert_eq!(
+            mismatched.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+        assert!(!RelationshipProofFilter {
+            minimum_authority: RelationshipAuthority::Authoritative,
+            accepted_proof_kinds: None,
+        }
+        .matches(&mismatched));
     }
 
     #[test]
