@@ -127,36 +127,36 @@ fn query_shape_label(shape: open_kioku_core::QueryShape) -> &'static str {
 }
 '''
 replace_once(marker, helper, 'query shape label helper')
-old = '''            out.push('\n');
+marker = '''    out.push_str("## Reproducibility'''
+query_table = '''    if let Some(routed) = report
+        .stream_ablations
+        .iter()
+        .find(|strategy| strategy.strategy == "cc4:routed_contextpack")
+    {
+        out.push_str("### Routed ContextPack by query shape\n\n| Query shape | R@10 | MRR | F1@10 | No-gold FP | p95 ms | Token-budget gold-file yield |\n|---|---:|---:|---:|---:|---:|---|\n");
+        for (shape, summary) in &routed.by_query_shape {
+            let budgets = summary
+                .quality
+                .token_budget_gold_yield
+                .iter()
+                .map(|(budget, value)| format!("{budget}={value:.3}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} | {} |\n",
+                shape,
+                summary.quality.recall_at_10,
+                summary.quality.mean_reciprocal_rank,
+                summary.quality.file_f1_at_10,
+                summary.quality.no_gold_false_positive_rate,
+                summary.latency.p95_ms,
+                budgets
+            ));
         }
+        out.push('\n');
     }
-    out.push_str("## Reproducibility'''
-new = '''            out.push('\n');
-            out.push_str("### Routed ContextPack by query shape\n\n| Query shape | R@10 | MRR | F1@10 | No-gold FP | p95 ms | Token-budget gold-file yield |\n|---|---:|---:|---:|---:|---:|---|\n");
-            for (shape, summary) in &routed.by_query_shape {
-                let budgets = summary
-                    .quality
-                    .token_budget_gold_yield
-                    .iter()
-                    .map(|(budget, value)| format!("{budget}={value:.3}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!(
-                    "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} | {} |\n",
-                    shape,
-                    summary.quality.recall_at_10,
-                    summary.quality.mean_reciprocal_rank,
-                    summary.quality.file_f1_at_10,
-                    summary.quality.no_gold_false_positive_rate,
-                    summary.latency.p95_ms,
-                    budgets
-                ));
-            }
-            out.push('\n');
-        }
-    }
-    out.push_str("## Reproducibility'''
-replace_once(old, new, 'markdown query-shape table')
+''' + marker
+replace_once(marker, query_table, 'markdown query-shape table')
 replace_once('''            id: id.into(),
             task_family: RetrievalTaskFamily::IssueToCode,
             language: "rust".into(),''', '''            id: id.into(),
