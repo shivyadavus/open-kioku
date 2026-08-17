@@ -27,36 +27,27 @@ require_site_text() {
 reject_site_text() {
   local unexpected="$1"
   if grep -Fq -- "$unexpected" "$site"; then
-    echo "public quickstart advertises an unsupported command: $unexpected" >&2
+    echo "public quickstart advertises an unsupported or stale command: $unexpected" >&2
     exit 1
   fi
 }
 
+# The homepage is product-first: it must expose installation and the real plan
+# path, but it does not need to spell out lower-level init/index plumbing.
 for command in \
   'npm install -g open-kioku' \
-  'ok init .' \
-  'ok index .' \
-  'ok plan "change token expiration"' \
-  'ok mcp install cursor --repo /work/acme-api' \
-  'ok mcp install claude --repo /work/acme-api'; do
+  'ok plan "change token expiration"'; do
   require_site_text "$command"
 done
 
+# Keep the homepage off retired/unsupported public flows.
 reject_site_text 'ok preflight '
+for stale_claim in 'explicit write controls' 'Patch and command paths are opt-in'; do
+  reject_site_text "$stale_claim"
+done
 
-expected_copy_button=$'data-copy="npm install -g open-kioku\nok init .\nok index .\nok plan &quot;change token expiration&quot;"'
-copy_button_count="$(python3 - "$site" "$expected_copy_button" <<'PY'
-import sys
-from pathlib import Path
-
-print(Path(sys.argv[1]).read_text(encoding="utf-8").count(sys.argv[2]))
-PY
-)"
-if [[ "$copy_button_count" != "2" ]]; then
-  echo "public quickstart must expose exactly two matching copyable command blocks; found $copy_button_count" >&2
-  exit 1
-fi
-
+# The README owns the canonical first-win onboarding contract. `setup agent`
+# indexes the repo and installs repository-scoped MCP/guidance in one flow.
 readme_quickstart=$'npm install -g open-kioku\nok setup agent cursor --repo . --apply'
 if ! grep -Fq -- "$readme_quickstart" "$readme"; then
   echo "README.md first-win commands are stale" >&2
@@ -71,12 +62,19 @@ for unsupported in 'ok preflight ' 'preflight_change'; do
   fi
 done
 
-for stale_claim in 'explicit write controls' 'Patch and command paths are opt-in'; do
-  reject_site_text "$stale_claim"
+# Preserve the actual public security posture without coupling CI to one exact
+# sentence that marketing copy may legitimately rewrite.
+for claim in \
+  'Read-only by default' \
+  'No hosted index' \
+  'source edits remain in the normal editor and agent workflow.' \
+  'network denial'; do
+  require_site_text "$claim"
 done
 
-require_site_text 'Open Kioku does not upload source or edit source files.'
-require_site_text 'Source edits stay in your normal editor. Command execution is opt-in and policy-controlled.'
+# Keep the install CTA copyable without pinning CI to an obsolete four-command
+# block. The current homepage intentionally copies installation separately.
+require_site_text 'data-copy="npm install -g open-kioku"'
 
 if [[ "$static_only" == true ]]; then
   echo "public quickstart static contract passed"
@@ -89,9 +87,15 @@ if [[ ! -x "$ok_bin" ]]; then
   exit 1
 fi
 
+# Canonical first-win commands must remain executable.
+"$ok_bin" setup agent cursor --help >/dev/null
+"$ok_bin" setup agent claude --help >/dev/null
+"$ok_bin" plan --help >/dev/null
+
+# Lower-level/manual commands remain supported CLI surface, even though the
+# homepage no longer has to advertise them as onboarding steps.
 "$ok_bin" init --help >/dev/null
 "$ok_bin" index --help >/dev/null
-"$ok_bin" plan --help >/dev/null
 "$ok_bin" mcp install cursor --help >/dev/null
 "$ok_bin" mcp install claude --help >/dev/null
 
