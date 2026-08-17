@@ -46,7 +46,7 @@ bare_call = """candidates_for_targets(
                 &[RelationshipProofKind::SameScopeDefinition],
                 ResolutionEvidenceKind::LexicalScope,
                 \"bare-call candidate discovered in exact lexical scope\",
-            )
+            );
 """
 bare_call_new = """candidates_for_targets(
                 call,
@@ -59,7 +59,7 @@ bare_call_new = """candidates_for_targets(
                     evidence_kind: ResolutionEvidenceKind::LexicalScope,
                     message: \"bare-call candidate discovered in exact lexical scope\",
                 },
-            )
+            );
 """
 if text.count(bare_call) != 1:
     raise SystemExit(f"unexpected bare candidate call seam: {text.count(bare_call)}")
