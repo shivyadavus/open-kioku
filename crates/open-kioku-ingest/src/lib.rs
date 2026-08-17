@@ -419,7 +419,7 @@ impl Indexer {
         let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
-            open_kioku_resolution::InheritanceIndex::build(inheritance_sites);
+            open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
 
         let mut semantic_repo = open_kioku_semantic_model::SemanticRepository::new();
         semantic_repo.project = project_model;
@@ -635,6 +635,84 @@ impl Indexer {
                             agreement,
                         });
                     }
+                }
+            }
+        }
+
+        if resolution_mode == open_kioku_config::ResolutionMode::Shadow
+            || resolution_mode == open_kioku_config::ResolutionMode::V2
+        {
+            for site in &inheritance_sites {
+                let Some(child) = symbol_index.get(&site.child_symbol_id) else {
+                    continue;
+                };
+                let Some(file) = file_lookup.get(&child.file_id) else {
+                    continue;
+                };
+                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
+                    continue;
+                };
+                let ctx = open_kioku_resolution::ResolutionContext::new(
+                    &child.file_id,
+                    &file.path,
+                    child.module_id.as_ref(),
+                    file.language.clone(),
+                    &semantic_repo,
+                    &symbol_index,
+                    &scope_index,
+                    &binding_index,
+                    &inheritance_index,
+                    semantics,
+                );
+                let (edge_type, outcome) =
+                    open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
+                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                        from: site.child_symbol_id.clone(),
+                        to: candidate.target_symbol_id,
+                        edge_type,
+                        confidence: candidate.confidence,
+                        call_site: None,
+                        evidence: candidate.evidence,
+                        proofs: candidate.proofs,
+                    });
+                }
+            }
+
+            for binding in &bindings {
+                let Some(file) = file_lookup.get(&binding.file_id) else {
+                    continue;
+                };
+                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
+                    continue;
+                };
+                let ctx = open_kioku_resolution::ResolutionContext::new(
+                    &binding.file_id,
+                    &file.path,
+                    None,
+                    file.language.clone(),
+                    &semantic_repo,
+                    &symbol_index,
+                    &scope_index,
+                    &binding_index,
+                    &inheritance_index,
+                    semantics,
+                );
+                let Some((source, outcome)) =
+                    open_kioku_resolution::resolve_declared_type_use_outcome(binding, &ctx)
+                else {
+                    continue;
+                };
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
+                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                        from: source,
+                        to: candidate.target_symbol_id,
+                        edge_type: GraphEdgeType::UsesType,
+                        confidence: candidate.confidence,
+                        call_site: None,
+                        evidence: candidate.evidence,
+                        proofs: candidate.proofs,
+                    });
                 }
             }
         }

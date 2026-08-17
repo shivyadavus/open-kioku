@@ -6,6 +6,7 @@ pub mod index;
 pub mod inheritance;
 pub mod pipeline;
 mod self_calls;
+mod type_relations;
 mod typed_calls;
 
 pub use calls::{resolve_call, resolve_call_outcome};
@@ -15,6 +16,9 @@ pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
 pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+};
+pub use type_relations::{
+    resolve_declared_type_use_outcome, resolve_inheritance_relationship_outcome,
 };
 
 #[cfg(test)]

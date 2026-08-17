@@ -281,7 +281,7 @@ pub(crate) fn evaluate_inherited_targets(
     evaluate_candidates(&GraphEdgeType::Calls, candidates)
 }
 
-fn collect_type_candidates(
+pub(crate) fn collect_type_candidates(
     ctx: &ResolutionContext<'_>,
     scope_id: &ScopeId,
     type_name: &str,

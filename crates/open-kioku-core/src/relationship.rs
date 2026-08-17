@@ -236,6 +236,7 @@ pub fn relationship_authority(
             exact_target
                 || (receiver_type && (qualified_name || same_scope))
                 || (import_binding && qualified_name)
+                || (inheritance_binding && (qualified_name || same_scope || import_binding))
         }
         GraphEdgeType::Calls => {
             exact_call_site
@@ -247,7 +248,9 @@ pub fn relationship_authority(
         GraphEdgeType::Implements => {
             inheritance_binding && (trait_binding || exact_target || qualified_name)
         }
-        GraphEdgeType::Extends => inheritance_binding && (exact_target || qualified_name),
+        GraphEdgeType::Extends => {
+            inheritance_binding && (exact_target || qualified_name || same_scope || import_binding)
+        }
         GraphEdgeType::Imports => import_binding || module_binding || external_exact,
         GraphEdgeType::DependsOn => module_binding || import_binding || external_exact,
         _ => false,

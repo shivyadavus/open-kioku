@@ -56,70 +56,28 @@ impl InheritanceIndex {
         index
     }
 
-    /// Resolves string parent names into SymbolIds with evidence (same file, imports, qualified name),
-    /// not project-global unique matching.
+    /// Resolves string parent names through the same complete, deterministic candidate collector
+    /// used by proof-gated inheritance relationship emission.
     pub fn bind_parents_with_repository(
         &mut self,
         symbols: &SymbolIndex,
         repository: &SemanticRepository,
     ) {
         for (child_id, edges) in self.edges_by_child.iter_mut() {
-            let child_sym = match symbols.get(child_id) {
-                Some(s) => s,
-                None => continue,
+            let Some(child_sym) = symbols.get(child_id) else {
+                continue;
             };
-
             for edge in edges {
-                let parent_name = &edge.parent_name;
-
-                // 1. Same-file class/trait/interface match
-                if let Some(file_symbols) = symbols.by_file.get(&child_sym.file_id) {
-                    let matching: Vec<&SymbolId> = file_symbols
-                        .iter()
-                        .filter(|id| {
-                            symbols
-                                .get(id)
-                                .map(|s| {
-                                    s.name == *parent_name
-                                        && matches!(
-                                            s.kind,
-                                            SymbolKind::Class
-                                                | SymbolKind::Trait
-                                                | SymbolKind::Interface
-                                        )
-                                })
-                                .unwrap_or(false)
-                        })
-                        .collect();
-                    if matching.len() == 1 {
-                        edge.parent_id = Some(matching[0].clone());
-                        continue;
-                    }
-                }
-
-                // 2. Import binding lookup. Multiple exact bindings are ambiguous; never
-                // choose the first binding based on repository insertion order.
-                let import_bindings =
-                    repository
-                        .imports
-                        .lookup(&child_sym.file_id, None, parent_name);
-                let mut imported_targets = import_bindings
-                    .iter()
-                    .filter_map(|binding| binding.target_symbol.clone())
-                    .collect::<Vec<_>>();
-                imported_targets.sort_by(|left, right| left.0.cmp(&right.0));
-                imported_targets.dedup();
-                if imported_targets.len() == 1 {
-                    edge.parent_id = imported_targets.pop();
-                    continue;
-                }
-
-                // 3. Qualified name match
-                if let Some(qualified) = symbols.by_qualified.get(parent_name) {
-                    if qualified.len() == 1 {
-                        edge.parent_id = Some(qualified[0].clone());
-                    }
-                }
+                let candidates = crate::type_relations::collect_parent_type_candidates(
+                    child_sym,
+                    &edge.parent_name,
+                    symbols,
+                    repository,
+                );
+                edge.parent_id = match candidates.as_slice() {
+                    [candidate] => Some(candidate.target.clone()),
+                    _ => None,
+                };
             }
         }
         for edges in self.edges_by_child.values_mut() {

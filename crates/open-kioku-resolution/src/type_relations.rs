@@ -1,23 +1,11 @@
-from pathlib import Path
-
-
-def replace_exact(path: str, old: str, new: str, label: str, count: int = 1) -> None:
-    p = Path(path)
-    text = p.read_text()
-    observed = text.count(old)
-    if observed != count:
-        raise SystemExit(f"{label} seam changed: expected {count}, observed {observed}")
-    p.write_text(text.replace(old, new, count))
-
-
-Path("crates/open-kioku-resolution/src/type_relations.rs").write_text(r'''use crate::context::ResolutionContext;
+use crate::context::ResolutionContext;
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::index::{ScopeIndex, SymbolIndex};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     Binding, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, InheritanceKind,
-    InheritanceSite, LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol, SymbolId,
-    SymbolKind,
+    InheritanceSite, LineRange, RelationshipProof, RelationshipProofKind, ScopeId, Symbol,
+    SymbolId, SymbolKind,
 };
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -110,7 +98,10 @@ pub fn resolve_inheritance_relationship_outcome(
 ) -> (GraphEdgeType, ResolutionOutcome) {
     let edge_type = inheritance_edge_type(&site.kind);
     let Some(child) = ctx.symbols.get(&site.child_symbol_id) else {
-        return (edge_type.clone(), evaluate_candidates(&edge_type, Vec::new()));
+        return (
+            edge_type.clone(),
+            evaluate_candidates(&edge_type, Vec::new()),
+        );
     };
     let parent_candidates =
         collect_parent_type_candidates(child, &site.parent_name, ctx.symbols, ctx.repository);
@@ -170,12 +161,14 @@ pub fn resolve_inheritance_relationship_outcome(
                     &ambiguity,
                 ));
             }
-            if matches!(site.kind, InheritanceKind::Implements | InheritanceKind::TraitImpl)
-                && ctx
-                    .symbols
-                    .get(&parent.target)
-                    .map(|target| matches!(target.kind, SymbolKind::Trait | SymbolKind::Interface))
-                    .unwrap_or(false)
+            if matches!(
+                site.kind,
+                InheritanceKind::Implements | InheritanceKind::TraitImpl
+            ) && ctx
+                .symbols
+                .get(&parent.target)
+                .map(|target| matches!(target.kind, SymbolKind::Trait | SymbolKind::Interface))
+                .unwrap_or(false)
             {
                 candidate.proofs.push(proof(
                     RelationshipProofKind::TraitOrInterfaceBinding,
@@ -191,7 +184,10 @@ pub fn resolve_inheritance_relationship_outcome(
         })
         .collect();
 
-    (edge_type.clone(), evaluate_candidates(&edge_type, candidates))
+    (
+        edge_type.clone(),
+        evaluate_candidates(&edge_type, candidates),
+    )
 }
 
 pub fn resolve_declared_type_use_outcome(
@@ -277,7 +273,10 @@ fn proof(
     proof
 }
 
-fn syntax_file_range(ctx: &ResolutionContext<'_>, range: &open_kioku_core::SourceRange) -> Option<FileRange> {
+fn syntax_file_range(
+    ctx: &ResolutionContext<'_>,
+    range: &open_kioku_core::SourceRange,
+) -> Option<FileRange> {
     Some(FileRange {
         path: ctx.file_path.to_path_buf(),
         line_range: Some(LineRange {
@@ -308,8 +307,7 @@ mod tests {
     use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
     use crate::inheritance::InheritanceIndex;
     use open_kioku_core::{
-        BindingId, FileId, Language, ReceiverKind, Scope, ScopeKind, SourceRange, Symbol,
-        Visibility,
+        BindingId, FileId, Language, Scope, ScopeKind, SourceRange, Symbol, Visibility,
     };
     use open_kioku_semantic_model::SemanticRepository;
 
@@ -402,176 +400,3 @@ mod tests {
         assert!(matches!(outcome, ResolutionOutcome::Ambiguous { .. }));
     }
 }
-''')
-
-replace_exact(
-    "crates/open-kioku-resolution/src/lib.rs",
-    "mod self_calls;\nmod typed_calls;\n",
-    "mod self_calls;\nmod type_relations;\nmod typed_calls;\n",
-    "type relation module wiring",
-)
-replace_exact(
-    "crates/open-kioku-resolution/src/lib.rs",
-    "pub use inheritance::InheritanceIndex;\n",
-    "pub use inheritance::InheritanceIndex;\npub use type_relations::{resolve_declared_type_use_outcome, resolve_inheritance_relationship_outcome};\n",
-    "type relation exports",
-)
-replace_exact(
-    "crates/open-kioku-resolution/src/typed_calls.rs",
-    "fn collect_type_candidates(\n",
-    "pub(crate) fn collect_type_candidates(\n",
-    "share exact type candidate collector",
-)
-
-# Centralize parent target discovery so inheritance traversal and relationship emission use the same
-# complete candidate set rather than independent first-match implementations.
-inheritance = Path("crates/open-kioku-resolution/src/inheritance.rs")
-text = inheritance.read_text()
-start = text.index("    /// Resolves string parent names into SymbolIds with evidence")
-end = text.index("    /// Returns all matching members at the nearest inheritance depth", start)
-replacement = r'''    /// Resolves string parent names through the same complete, deterministic candidate collector
-    /// used by proof-gated inheritance relationship emission.
-    pub fn bind_parents_with_repository(
-        &mut self,
-        symbols: &SymbolIndex,
-        repository: &SemanticRepository,
-    ) {
-        for (child_id, edges) in self.edges_by_child.iter_mut() {
-            let Some(child_sym) = symbols.get(child_id) else {
-                continue;
-            };
-            for edge in edges {
-                let candidates = crate::type_relations::collect_parent_type_candidates(
-                    child_sym,
-                    &edge.parent_name,
-                    symbols,
-                    repository,
-                );
-                edge.parent_id = match candidates.as_slice() {
-                    [candidate] => Some(candidate.target.clone()),
-                    _ => None,
-                };
-            }
-        }
-        for edges in self.edges_by_child.values_mut() {
-            sort_inheritance_edges(edges);
-        }
-    }
-
-'''
-inheritance.write_text(text[:start] + replacement + text[end:])
-
-# Broaden only the explicit type/inheritance combinations required by #238. Fuzzy/name-only paths
-# still cannot authorize because none of those signals are proof kinds.
-replace_exact(
-    "crates/open-kioku-core/src/relationship.rs",
-    '''        GraphEdgeType::UsesType => {\n            exact_target\n                || (receiver_type && (qualified_name || same_scope))\n                || (import_binding && qualified_name)\n        }\n''',
-    '''        GraphEdgeType::UsesType => {\n            exact_target\n                || (receiver_type && (qualified_name || same_scope))\n                || (import_binding && qualified_name)\n                || (inheritance_binding && (qualified_name || same_scope || import_binding))\n        }\n''',
-    "USES_TYPE explicit inheritance policy",
-)
-replace_exact(
-    "crates/open-kioku-core/src/relationship.rs",
-    '''        GraphEdgeType::Extends => inheritance_binding && (exact_target || qualified_name),\n''',
-    '''        GraphEdgeType::Extends => {\n            inheritance_binding && (exact_target || qualified_name || same_scope || import_binding)\n        }\n''',
-    "EXTENDS exact binding policy",
-)
-
-# Preserve raw inheritance sites for proof-gated relationship emission.
-replace_exact(
-    "crates/open-kioku-ingest/src/lib.rs",
-    '''        let mut inheritance_index =\n            open_kioku_resolution::InheritanceIndex::build(inheritance_sites);\n''',
-    '''        let mut inheritance_index =\n            open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());\n''',
-    "preserve inheritance syntax facts",
-)
-
-# Add type-relationship emission after CALLS resolution while the same exact semantic context is live.
-ingest = Path("crates/open-kioku-ingest/src/lib.rs")
-text = ingest.read_text()
-anchor = '''            for call in &call_sites {\n'''
-if text.count(anchor) != 1:
-    raise SystemExit(f"call loop seam changed: expected 1, observed {text.count(anchor)}")
-# Insert loops at the end of the resolution-mode block, immediately before match resolution_mode.
-marker = '''        match resolution_mode {\n'''
-if text.count(marker) != 1:
-    raise SystemExit(f"resolution mode match seam changed: expected 1, observed {text.count(marker)}")
-loops = r'''
-        if resolution_mode == open_kioku_config::ResolutionMode::Shadow
-            || resolution_mode == open_kioku_config::ResolutionMode::V2
-        {
-            for site in &inheritance_sites {
-                let Some(child) = symbol_index.get(&site.child_symbol_id) else {
-                    continue;
-                };
-                let Some(file) = file_lookup.get(&child.file_id) else {
-                    continue;
-                };
-                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
-                    continue;
-                };
-                let ctx = open_kioku_resolution::ResolutionContext::new(
-                    &child.file_id,
-                    &file.path,
-                    child.module_id.as_ref(),
-                    file.language.clone(),
-                    &semantic_repo,
-                    &symbol_index,
-                    &scope_index,
-                    &binding_index,
-                    &inheritance_index,
-                    semantics,
-                );
-                let (edge_type, outcome) =
-                    open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);
-                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
-                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
-                        from: site.child_symbol_id.clone(),
-                        to: candidate.target_symbol_id,
-                        edge_type,
-                        confidence: candidate.confidence,
-                        call_site: None,
-                        evidence: candidate.evidence,
-                        proofs: candidate.proofs,
-                    });
-                }
-            }
-
-            for binding in &bindings {
-                let Some(file) = file_lookup.get(&binding.file_id) else {
-                    continue;
-                };
-                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
-                    continue;
-                };
-                let ctx = open_kioku_resolution::ResolutionContext::new(
-                    &binding.file_id,
-                    &file.path,
-                    None,
-                    file.language.clone(),
-                    &semantic_repo,
-                    &symbol_index,
-                    &scope_index,
-                    &binding_index,
-                    &inheritance_index,
-                    semantics,
-                );
-                let Some((source, outcome)) =
-                    open_kioku_resolution::resolve_declared_type_use_outcome(binding, &ctx)
-                else {
-                    continue;
-                };
-                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
-                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
-                        from: source,
-                        to: candidate.target_symbol_id,
-                        edge_type: GraphEdgeType::UsesType,
-                        confidence: candidate.confidence,
-                        call_site: None,
-                        evidence: candidate.evidence,
-                        proofs: candidate.proofs,
-                    });
-                }
-            }
-        }
-
-'''
-ingest.write_text(text.replace(marker, loops + marker, 1))
