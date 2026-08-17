@@ -111,6 +111,14 @@ struct RelationshipBenchRunMetadata {
     generated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    analysis_semantics_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    adapter_versions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof_policy_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_mode: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     index_config: BTreeMap<String, serde_json::Value>,
 }
@@ -215,6 +223,7 @@ struct RelationshipBenchPolicy {
     require_zero_false_negatives: bool,
     require_positive_and_negative_per_language_relationship: bool,
     require_metamorphic_group_per_language_relationship: bool,
+    require_reproducibility_metadata: bool,
     require_frozen_corpus: bool,
 }
 
@@ -309,6 +318,27 @@ fn evaluate_relationship_bench_gates(
     let mut failures = Vec::new();
     if policy.require_frozen_corpus && corpus.status != RelationshipBenchCorpusStatus::Frozen {
         failures.push("release gating requires a frozen relationship corpus".to_string());
+    }
+    if policy.require_reproducibility_metadata {
+        for (name, value) in [
+            ("git_commit", report.run_metadata.git_commit.as_deref()),
+            (
+                "analysis_semantics_fingerprint",
+                report.run_metadata.analysis_semantics_fingerprint.as_deref(),
+            ),
+            (
+                "proof_policy_version",
+                report.run_metadata.proof_policy_version.as_deref(),
+            ),
+            ("index_mode", report.run_metadata.index_mode.as_deref()),
+        ] {
+            if value.map(str::trim).filter(|value| !value.is_empty()).is_none() {
+                failures.push(format!("run metadata is missing required {name}"));
+            }
+        }
+        if report.run_metadata.adapter_versions.is_empty() {
+            failures.push("run metadata is missing required adapter_versions".to_string());
+        }
     }
     if report.overall.cases < policy.minimum_cases {
         failures.push(format!(
@@ -1469,6 +1499,7 @@ mod relationship_bench_tests {
             require_zero_false_negatives: false,
             require_positive_and_negative_per_language_relationship: false,
             require_metamorphic_group_per_language_relationship: false,
+            require_reproducibility_metadata: false,
             require_frozen_corpus: false,
         }
     }
@@ -1575,6 +1606,7 @@ mod ri3_metamorphic_bench_tests {
           "require_zero_false_negatives":false,
           "require_positive_and_negative_per_language_relationship":false,
           "require_metamorphic_group_per_language_relationship":false,
+          "require_reproducibility_metadata":false,
           "require_frozen_corpus":false,
           "future_unwired_threshold":1
         }"#;
@@ -1635,5 +1667,80 @@ mod ri3_metamorphic_bench_tests {
             .failures
             .iter()
             .any(|failure| failure.contains("metamorphic equivalence")));
+    }
+}
+
+
+#[cfg(test)]
+mod ri3_reproducibility_metadata_tests {
+    use super::*;
+    use open_kioku_core::{RelationshipAuthority, RelationshipProofKind, SourceRange};
+
+    #[test]
+    fn release_gate_fails_closed_when_reproducibility_metadata_is_missing() {
+        let range = SourceRange {
+            start_line: 10,
+            start_column: 4,
+            end_line: 10,
+            end_column: 17,
+        };
+        let mut positive_case = relationship_bench_tests::case(
+            "metadata-fixture",
+            RelationshipBenchExpectedOutcome::MustEmit,
+        );
+        positive_case.expected_source_range = Some(range.clone());
+        positive_case.expected_proof_kinds =
+            BTreeSet::from([RelationshipProofKind::ExactCallSite]);
+        let negative_case = relationship_bench_tests::case(
+            "metadata-negative",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        let corpus = relationship_bench_tests::corpus(vec![positive_case, negative_case]);
+
+        let mut relationship = relationship_bench_tests::observed(
+            "symbol:target",
+            RelationshipAuthority::Authoritative,
+        );
+        relationship.source_ranges.push(range);
+        relationship.proof_kinds = BTreeSet::from([RelationshipProofKind::ExactCallSite]);
+        let observations = vec![
+            RelationshipBenchObservation {
+                case_id: "metadata-fixture".into(),
+                outcome: RelationshipBenchObservedOutcome::Proven,
+                candidate_count: 1,
+                relationships: vec![relationship],
+            },
+            RelationshipBenchObservation {
+                case_id: "metadata-negative".into(),
+                outcome: RelationshipBenchObservedOutcome::Unresolved,
+                candidate_count: 0,
+                relationships: Vec::new(),
+            },
+        ];
+
+        let mut report = score_relationship_bench(&corpus, &observations).unwrap();
+        let mut policy = relationship_bench_tests::permissive_test_policy();
+        policy.require_reproducibility_metadata = true;
+        let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);
+        assert!(!gate.passed);
+        assert!(gate.failures.iter().any(|failure| failure.contains("git_commit")));
+        assert!(gate
+            .failures
+            .iter()
+            .any(|failure| failure.contains("analysis_semantics_fingerprint")));
+        assert!(gate
+            .failures
+            .iter()
+            .any(|failure| failure.contains("adapter_versions")));
+
+        report.run_metadata.git_commit = Some("abc123".into());
+        report.run_metadata.analysis_semantics_fingerprint = Some("semantics:v1".into());
+        report.run_metadata
+            .adapter_versions
+            .insert("rust".into(), "adapter:v1".into());
+        report.run_metadata.proof_policy_version = Some("ri3.1".into());
+        report.run_metadata.index_mode = Some("full".into());
+        let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);
+        assert!(gate.passed, "{:?}", gate.failures);
     }
 }

@@ -15,5 +15,6 @@
   "require_zero_false_negatives": true,
   "require_positive_and_negative_per_language_relationship": true,
   "require_metamorphic_group_per_language_relationship": true,
+  "require_reproducibility_metadata": true,
   "require_frozen_corpus": true
 }
