@@ -20,7 +20,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted routing patch
-        run: python3 .github/scripts/agent_cc5_generic_filter.py
+        run: |
+          python3 .github/scripts/agent_cc5_generic_filter.py
+          cargo fmt --all
       - name: Validate workspace
         run: |
           cargo fmt --all -- --check
