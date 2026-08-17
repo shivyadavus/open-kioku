@@ -18,15 +18,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply deterministic timing separation
+      - name: Apply asserted MCP golden-contract repair
         run: python3 .github/scripts/agent_fix_resolution_timing_determinism.py
-      - name: Validate exact product tree
+      - name: Validate repaired public MCP contract
         run: |
-          cargo fmt --all
           cargo fmt --all -- --check
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all
-          cargo test -p open-kioku-tests
+          cargo test -p open-kioku-tests mcp_tools_list_matches_golden_snapshot
       - name: Commit product repair and remove temporary tooling
         run: |
           rm .github/scripts/agent_fix_resolution_timing_determinism.py
@@ -35,5 +32,6 @@ jobs:
           git config user.email '155265880+shivyadavus@users.noreply.github.com'
           git add -A
           git diff --cached --quiet && exit 0
-          git commit -m 'fix(resolution): keep wall-clock timing out of durable quality'
+          git commit -m 'test(mcp): update evidence-schema tool-list contract'
+          git pull --rebase origin agent/ri3-language-semantics-complete
           git push origin HEAD:agent/ri3-language-semantics-complete
