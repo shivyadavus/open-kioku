@@ -1,6 +1,8 @@
 use crate::context::ResolutionContext;
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
-use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy};
+use crate::pipeline::{
+    evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy,
+};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
@@ -131,16 +133,19 @@ fn discover_self_candidates(
     let targets = members_by_name(ctx, containing_type, &call.callee_name, false);
     candidates_for_targets(
         call,
+        ctx,
         targets,
-        Confidence::Exact,
-        ResolutionStrategy::ImplicitSelf,
-        &[
-            RelationshipProofKind::ReceiverType,
-            RelationshipProofKind::ContainingType,
-            RelationshipProofKind::SameScopeDefinition,
-        ],
-        ResolutionEvidenceKind::ImplicitSelf,
-        "resolved explicit self/this member from containing type",
+        CandidateTemplate {
+            confidence: Confidence::Exact,
+            strategy: ResolutionStrategy::ImplicitSelf,
+            proof_kinds: &[
+                RelationshipProofKind::ReceiverType,
+                RelationshipProofKind::ContainingType,
+                RelationshipProofKind::SameScopeDefinition,
+            ],
+            evidence_kind: ResolutionEvidenceKind::ImplicitSelf,
+            message: "resolved explicit self/this member from containing type",
+        },
     )
 }
 
@@ -157,9 +162,9 @@ fn discover_super_candidates(
     let Some(containing_type) = caller.parent_symbol_id.as_ref() else {
         return Vec::new();
     };
-    let Some(target) = ctx
-        .inheritance
-        .resolve_inherited_member(containing_type, &call.callee_name, ctx.symbols)
+    let Some(target) =
+        ctx.inheritance
+            .resolve_inherited_member(containing_type, &call.callee_name, ctx.symbols)
     else {
         return Vec::new();
     };
@@ -209,8 +214,8 @@ fn discover_typed_or_static_candidates(
         .map(|(target, mut discoveries)| {
             discoveries.sort();
             discoveries.dedup();
-            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact)
-                .with_strategy(strategy);
+            let mut candidate =
+                ResolutionCandidate::new(target.clone(), Confidence::Exact).with_strategy(strategy);
             candidate.proofs.push(call_site_proof(call, ctx, &target));
             candidate.proofs.push(proof(
                 call,
@@ -393,15 +398,21 @@ fn discover_bare_candidates(
             // elevate it after a dedicated lexical-shadowing test matrix proves the language rule.
             return candidates_for_targets(
                 call,
+                ctx,
                 targets,
-                Confidence::Exact,
-                ResolutionStrategy::LexicalScope,
-                &[RelationshipProofKind::SameScopeDefinition],
-                ResolutionEvidenceKind::LexicalScope,
-                "bare-call candidate discovered in exact lexical scope",
+                CandidateTemplate {
+                    confidence: Confidence::Exact,
+                    strategy: ResolutionStrategy::LexicalScope,
+                    proof_kinds: &[RelationshipProofKind::SameScopeDefinition],
+                    evidence_kind: ResolutionEvidenceKind::LexicalScope,
+                    message: "bare-call candidate discovered in exact lexical scope",
+                },
             );
         }
-        current_scope = ctx.scopes.get(&scope_id).and_then(|scope| scope.parent_id.clone());
+        current_scope = ctx
+            .scopes
+            .get(&scope_id)
+            .and_then(|scope| scope.parent_id.clone());
     }
 
     if ctx.semantics.implicit_self_dispatch() {
@@ -574,10 +585,7 @@ fn members_by_name(
                                 && if fields_only {
                                     symbol.kind == SymbolKind::Field
                                 } else {
-                                    matches!(
-                                        symbol.kind,
-                                        SymbolKind::Method | SymbolKind::Function
-                                    )
+                                    matches!(symbol.kind, SymbolKind::Method | SymbolKind::Function)
                                 }
                         })
                         .unwrap_or(false)
@@ -609,25 +617,64 @@ fn is_type_kind(kind: SymbolKind) -> bool {
     )
 }
 
-fn candidates_for_targets(
-    call: &CallSite,
-    targets: Vec<SymbolId>,
+struct CandidateTemplate<'a> {
     confidence: Confidence,
     strategy: ResolutionStrategy,
-    proof_kinds: &[RelationshipProofKind],
+    proof_kinds: &'a [RelationshipProofKind],
     evidence_kind: ResolutionEvidenceKind,
-    message: &str,
+    message: &'a str,
+}
+
+fn candidates_for_targets(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    targets: Vec<SymbolId>,
+    template: CandidateTemplate<'_>,
 ) -> Vec<ResolutionCandidate> {
     let count = targets.len();
     targets
         .into_iter()
         .map(|target| {
-            let mut candidate = ResolutionCandidate::new(target.clone(), confidence)
-                .with_strategy(strategy);
-            candidate.proofs.push(call_site_proof(call, &dummy_context_path(ctx_path_placeholder()), &target));
+            let mut candidate = ResolutionCandidate::new(target.clone(), template.confidence)
+                .with_strategy(template.strategy);
+            candidate.proofs.push(call_site_proof(call, ctx, &target));
+            for kind in template.proof_kinds {
+                candidate.proofs.push(proof(
+                    call,
+                    ctx,
+                    &target,
+                    *kind,
+                    strategy_name(template.strategy),
+                    count,
+                ));
+            }
+            candidate.evidence.push(resolution_evidence(
+                call,
+                ctx,
+                target,
+                template.evidence_kind.clone(),
+                template.message,
+            ));
             candidate
         })
         .collect()
+}
+
+fn strategy_name(strategy: ResolutionStrategy) -> &'static str {
+    match strategy {
+        ResolutionStrategy::ExactOccurrence => "exact_occurrence",
+        ResolutionStrategy::LexicalScope => "lexical_scope",
+        ResolutionStrategy::ImplicitSelf => "implicit_self",
+        ResolutionStrategy::TypedReceiver => "typed_receiver",
+        ResolutionStrategy::StaticReceiver => "static_receiver",
+        ResolutionStrategy::ExactImportBinding => "exact_import_binding",
+        ResolutionStrategy::ModuleExport => "module_export",
+        ResolutionStrategy::SameFile => "same_file",
+        ResolutionStrategy::Inheritance => "inheritance",
+        ResolutionStrategy::QualifiedName => "qualified_name",
+        ResolutionStrategy::ExternalExactIndex => "external_exact_index",
+        ResolutionStrategy::Heuristic => "heuristic",
+    }
 }
 
 // Kept separate so all call proof paths preserve the same exact source occurrence metadata.
@@ -658,14 +705,6 @@ fn proof(
     proof.source_range = Some(call_file_range(call, ctx));
     proof.source_symbol_id = call.caller_symbol_id.clone();
     proof.target_symbol_id = Some(target.clone());
-    proof.details.insert(
-        "start_column".into(),
-        serde_json::Value::from(call.range.start_column),
-    );
-    proof.details.insert(
-        "end_column".into(),
-        serde_json::Value::from(call.range.end_column),
-    );
     proof
 }
 
@@ -693,14 +732,4 @@ fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> FileRange {
             end: call.range.end_line,
         }),
     }
-}
-
-// Placeholder helpers below are intentionally absent; `candidates_for_targets` is completed by the
-// follow-up patch in the same guarded validation slice.
-fn ctx_path_placeholder() -> &'static std::path::Path {
-    std::path::Path::new("")
-}
-
-fn dummy_context_path(_path: &std::path::Path) -> ResolutionContext<'static> {
-    unreachable!("validation patch must replace candidates_for_targets before compilation")
 }

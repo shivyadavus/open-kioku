@@ -144,7 +144,8 @@ mod tests {
 
     #[test]
     fn legacy_resolver_still_resolves_same_name_method_via_typed_receiver() {
-        let (symbols, scopes, bindings, inheritance, repository, file_id) = typed_receiver_fixture();
+        let (symbols, scopes, bindings, inheritance, repository, file_id) =
+            typed_receiver_fixture();
         let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
         let ctx = ResolutionContext::new(
             &file_id,
@@ -169,7 +170,8 @@ mod tests {
 
     #[test]
     fn proof_gated_resolver_proves_typed_receiver_without_rank_based_uniqueness() {
-        let (symbols, scopes, bindings, inheritance, repository, file_id) = typed_receiver_fixture();
+        let (symbols, scopes, bindings, inheritance, repository, file_id) =
+            typed_receiver_fixture();
         let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
         let ctx = ResolutionContext::new(
             &file_id,
@@ -186,9 +188,17 @@ mod tests {
 
         match resolve_call_outcome(&typed_receiver_call(), &ctx) {
             ResolutionOutcome::Proven { candidate } => {
-                assert_eq!(candidate.target_symbol_id, SymbolId::new("symbol:Repo.save"));
-                assert_eq!(candidate.authority(&open_kioku_core::GraphEdgeType::Calls), open_kioku_core::RelationshipAuthority::Authoritative);
-                assert!(candidate.strategies.contains(&ResolutionStrategy::TypedReceiver));
+                assert_eq!(
+                    candidate.target_symbol_id,
+                    SymbolId::new("symbol:Repo.save")
+                );
+                assert_eq!(
+                    candidate.authority(&open_kioku_core::GraphEdgeType::Calls),
+                    open_kioku_core::RelationshipAuthority::Authoritative
+                );
+                assert!(candidate
+                    .strategies
+                    .contains(&ResolutionStrategy::TypedReceiver));
             }
             other => panic!("expected proven typed-receiver call, got {other:?}"),
         }
