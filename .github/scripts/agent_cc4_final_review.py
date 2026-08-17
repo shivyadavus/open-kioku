@@ -4,8 +4,6 @@ import re
 path = Path("crates/open-kioku-context/src/routing.rs")
 text = path.read_text()
 
-# Recognize structured code references embedded in natural-language tasks, not just whole-query
-# identifiers. The shape remains Mixed when prose surrounds the reference.
 pattern = re.compile(
     r"    if is_qualified_symbol_query\(trimmed\) \{\n.*?    \} else if is_exact_identifier_query\(trimmed\) \{\n.*?    \}\n",
     re.S,
@@ -36,8 +34,6 @@ text, count = pattern.subn(replacement, text, count=1)
 if count != 1:
     raise SystemExit(f"embedded identifier classifier replacement count={count}")
 
-# Query shape may refine breadth, but it must not erase the ordering encoded by a specialized
-# parent task-family policy. Flat policies (General/Issue) may be differentiated by shape.
 pattern = re.compile(
     r"            let refined = factor\.saturating_add\(\*delta\);\n"
     r"            \*factor = if flat_family \{\n"
@@ -86,7 +82,7 @@ fn trim_query_token(token: &str) -> &str {
     token.trim_matches(|ch: char| {
         matches!(
             ch,
-            '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+            '`' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
         )
     })
 }
@@ -116,7 +112,6 @@ text, count = pattern.subn(replacement, text, count=1)
 if count != 1:
     raise SystemExit(f"path token normalization replacement count={count}")
 
-# API resource names are structured resources, not repository paths merely because they contain '/'.
 pattern = re.compile(
     r"fn is_source_path_token\(token: &str\) -> bool \{\n"
     r"    let lower = token\.to_ascii_lowercase\(\);\n"
