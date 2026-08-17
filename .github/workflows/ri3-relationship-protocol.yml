@@ -21,6 +21,15 @@ jobs:
         run: |
           python3 -m py_compile scripts/ri3_relationship_protocol_tmp.py
           python3 scripts/ri3_relationship_protocol_tmp.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-cli/src/bench/relationship.rs')
+          text = path.read_text()
+          old = 'fn score_relationship_bench(\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'unexpected test wrapper seam: {text.count(old)}')
+          path.write_text(text.replace(old, '#[cfg(test)]\nfn score_relationship_bench(\n', 1))
+          PY
 
       - name: Validate scorer protocol
         run: |
