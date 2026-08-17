@@ -59,13 +59,18 @@ mod ri3_reproducibility_metadata_tests {
             end_line: 10,
             end_column: 17,
         };
-        let mut case = relationship_bench_tests::case(
+        let mut positive_case = relationship_bench_tests::case(
             "metadata-fixture",
             RelationshipBenchExpectedOutcome::MustEmit,
         );
-        case.expected_source_range = Some(range.clone());
-        case.expected_proof_kinds = BTreeSet::from([RelationshipProofKind::ExactCallSite]);
-        let corpus = relationship_bench_tests::corpus(vec![case]);
+        positive_case.expected_source_range = Some(range.clone());
+        positive_case.expected_proof_kinds =
+            BTreeSet::from([RelationshipProofKind::ExactCallSite]);
+        let negative_case = relationship_bench_tests::case(
+            "metadata-negative",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        let corpus = relationship_bench_tests::corpus(vec![positive_case, negative_case]);
 
         let mut relationship = relationship_bench_tests::observed(
             "symbol:target",
@@ -73,12 +78,20 @@ mod ri3_reproducibility_metadata_tests {
         );
         relationship.source_ranges.push(range);
         relationship.proof_kinds = BTreeSet::from([RelationshipProofKind::ExactCallSite]);
-        let observations = vec![RelationshipBenchObservation {
-            case_id: "metadata-fixture".into(),
-            outcome: RelationshipBenchObservedOutcome::Proven,
-            candidate_count: 1,
-            relationships: vec![relationship],
-        }];
+        let observations = vec![
+            RelationshipBenchObservation {
+                case_id: "metadata-fixture".into(),
+                outcome: RelationshipBenchObservedOutcome::Proven,
+                candidate_count: 1,
+                relationships: vec![relationship],
+            },
+            RelationshipBenchObservation {
+                case_id: "metadata-negative".into(),
+                outcome: RelationshipBenchObservedOutcome::Unresolved,
+                candidate_count: 0,
+                relationships: Vec::new(),
+            },
+        ];
 
         let mut report = score_relationship_bench(&corpus, &observations).unwrap();
         let mut policy = relationship_bench_tests::permissive_test_policy();
