@@ -21,16 +21,6 @@ jobs:
         run: |
           git fetch origin agent/ri3-proof-gated-resolution
           git checkout origin/agent/ri3-proof-gated-resolution -- crates/open-kioku-resolution/src/lib.rs crates/open-kioku-resolution/src/index.rs crates/open-kioku-resolution/src/pipeline.rs
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('crates/open-kioku-resolution/src/pipeline.rs')
-          text = path.read_text()
-          old = '    evidence.sort_by(|left, right| evidence_key(left).cmp(&evidence_key(right)));\n'
-          new = '    evidence.sort_by_key(evidence_key);\n'
-          if text.count(old) != 1:
-              raise SystemExit(f'unexpected evidence sort seam: {text.count(old)}')
-          path.write_text(text.replace(old, new, 1))
-          PY
 
       - name: Validate resolution foundation
         run: |
