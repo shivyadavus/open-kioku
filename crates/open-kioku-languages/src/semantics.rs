@@ -17,9 +17,8 @@ pub trait LanguageSemantics: Send + Sync {
                     .is_some_and(|suffix| suffix.starts_with('.'))
         }) {
             ReceiverKind::Self_
-        } else if matches!(trimmed, "super" | "Super" | "super()")
+        } else if matches!(trimmed, "super" | "super()")
             || trimmed.starts_with("super.")
-            || trimmed.starts_with("Super.")
             || trimmed.starts_with("super().")
         {
             ReceiverKind::Super
