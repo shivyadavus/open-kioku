@@ -16,10 +16,10 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             binary_name: ok-linux-x86_64
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
             binary_name: ok-linux-arm64
           - os: macos-15-intel
             target: x86_64-apple-darwin
@@ -67,7 +67,7 @@ jobs:
           else
             cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
             case "${{ matrix.target }}" in
-              x86_64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin)
+              x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin)
                 strip dist/${{ matrix.binary_name }}
                 ;;
               *)
