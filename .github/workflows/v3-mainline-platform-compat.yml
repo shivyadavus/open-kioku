@@ -1,3 +1,4 @@
+# One-shot V3 supported-platform alignment; self-deletes on success.
 name: V3 mainline platform compatibility
 
 on:
