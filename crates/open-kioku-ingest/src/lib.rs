@@ -33,6 +33,8 @@ pub mod runtime;
 pub mod symbol_registry;
 pub mod validation;
 
+pub use open_kioku_core::{RelationshipResolutionQuality, ResolutionQualityReport};
+
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
 #[derive(Debug, Clone)]
@@ -68,36 +70,17 @@ pub struct ResolutionDiff {
     pub agreement: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RelationshipResolutionQuality {
-    pub candidates_considered: usize,
-    pub proven: usize,
-    pub ambiguous: usize,
-    pub unresolved: usize,
-    pub external: usize,
-    pub heuristic_candidates_retained: usize,
-    #[serde(default)]
-    pub proof_kind_counts: BTreeMap<String, usize>,
-    #[serde(default)]
-    pub resolver_strategy_counts: BTreeMap<String, usize>,
+trait ResolutionQualityReportExt {
+    fn record_outcome(
+        &mut self,
+        edge_type: &GraphEdgeType,
+        outcome: &open_kioku_resolution::ResolutionOutcome,
+    );
+
+    fn record_reference_occurrence(&mut self, occurrence: &SymbolOccurrence);
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResolutionQualityReport {
-    pub call_sites: usize,
-    pub resolved_exact: usize,
-    pub resolved_high: usize,
-    pub ambiguous: usize,
-    pub unresolved: usize,
-    pub external: usize,
-    pub legacy_only: usize,
-    pub semantic_only: usize,
-    pub disagreement: usize,
-    #[serde(default)]
-    pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
-}
-
-impl ResolutionQualityReport {
+impl ResolutionQualityReportExt for ResolutionQualityReport {
     fn record_outcome(
         &mut self,
         edge_type: &GraphEdgeType,
@@ -975,7 +958,7 @@ impl Indexer {
         resolver_quality_notes.extend(registry_report.quality_notes);
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
-        let quality = index_quality(IndexQualityInput {
+        let mut quality = index_quality(IndexQualityInput {
             root: &root,
             config,
             scip_report: scip_report.as_ref(),
@@ -996,6 +979,12 @@ impl Indexer {
             phase_reports: &phase_reports,
             skipped_paths: &scan.skipped_paths,
         });
+        let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
+            None
+        } else {
+            Some(quality_report)
+        };
+        quality.resolution_quality = resolution_quality.clone();
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -1027,12 +1016,7 @@ impl Indexer {
                 call_sites,
                 resolved_relationships,
                 resolution_diffs,
-                resolution_quality: if resolution_mode == open_kioku_config::ResolutionMode::Legacy
-                {
-                    None
-                } else {
-                    Some(quality_report)
-                },
+                resolution_quality,
             },
             git_history.snapshot,
         ))
@@ -1657,6 +1641,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             git_history_facts: analysis.git_history_facts,
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
+            resolution_quality: None,
             quality_notes,
         }
     } else {
@@ -1686,6 +1671,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             git_history_facts: analysis.git_history_facts,
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
+            resolution_quality: None,
             quality_notes,
         }
     }
