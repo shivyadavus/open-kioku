@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/ri3-semantics-stage.yml scripts/ri3-semantics-stage.py
+          git rm -f .github/workflows/ri3-semantics-stage.yml scripts/ri3-semantics-stage.py
           if git diff --quiet && git diff --cached --quiet; then
             echo "No durable changes to commit"
             exit 1
