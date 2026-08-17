@@ -2,7 +2,8 @@ name: agent-cc4-finalize
 
 on:
   push:
-    branches: [agent/cc4-query-shape-routing]
+    branches:
+      - agent/cc4-query-shape-routing
 
 permissions:
   contents: write
@@ -23,92 +24,7 @@ jobs:
           set -euo pipefail
           git fetch origin main
           git checkout origin/main -- Cargo.lock
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('crates/open-kioku-context/src/routing.rs')
-          s = p.read_text()
-
-          old = '''fn is_exact_identifier_query(query: &str) -> bool {
-    !query.is_empty()
-        && !query.chars().any(char::is_whitespace)
-        && !query.contains('/')
-        && !query.contains('.')
-        && !query.contains("::")
-        && query
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && query.chars().any(|ch| ch.is_ascii_alphabetic())
-}
-'''
-          new = '''fn is_exact_identifier_query(query: &str) -> bool {
-    !query.is_empty()
-        && !query.chars().any(char::is_whitespace)
-        && !query.contains('/')
-        && !query.contains('.')
-        && !query.contains("::")
-        && query
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && is_code_shaped_identifier(query)
-}
-
-fn is_code_shaped_identifier(value: &str) -> bool {
-    let has_lower = value.chars().any(|ch| ch.is_ascii_lowercase());
-    let has_upper = value.chars().any(|ch| ch.is_ascii_uppercase());
-    let has_digit = value.chars().any(|ch| ch.is_ascii_digit());
-    (has_lower && has_upper) || value.contains('_') || has_digit
-}
-'''
-          if s.count(old) != 1:
-              raise SystemExit(f'exact identifier marker count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          old = '''fn trim_query_token(token: &str) -> &str {
-    token.trim_matches(|ch: char| matches!(ch, '`' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'))
-}
-'''
-          new = '''fn trim_query_token(token: &str) -> &str {
-    token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '`' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '.' | '!' | '?'
-        )
-    })
-}
-'''
-          if s.count(old) != 1:
-              raise SystemExit(f'token trim marker count={s.count(old)}')
-          s = s.replace(old, new, 1)
-
-          marker = '''    #[test]
-    fn embedded_code_identifier_and_api_resource_shapes_are_not_lost_in_prose() {
-'''
-          tests = '''    #[test]
-    fn plain_single_word_query_stays_conservative_instead_of_claiming_exact_identity() {
-        let route = classify_task("authentication");
-        assert_eq!(route.query_shape, QueryShape::Unknown);
-        assert!(route.query_shape_fallback_reason.is_some());
-        for source in all_sources() {
-            assert_eq!(route.policy.candidate_cap(source, 10), 40);
-        }
-    }
-
-    #[test]
-    fn punctuation_around_identifier_does_not_hide_structured_signal() {
-        let route = classify_task("explain ContextPackBuilder. selection behavior");
-        assert_eq!(route.query_shape, QueryShape::MixedStructuredNaturalLanguage);
-        assert!(route
-            .query_shape_signals
-            .iter()
-            .any(|signal| signal.contains("identifier-shaped code reference")));
-    }
-
-'''
-          if s.count(marker) != 1:
-              raise SystemExit(f'test insertion marker count={s.count(marker)}')
-          s = s.replace(marker, tests + marker, 1)
-          p.write_text(s)
-          PY
+          python3 .github/scripts/agent_cc4_finalize.py
           cargo fmt --all
       - name: Validate workspace and routing regressions
         shell: bash
@@ -124,6 +40,7 @@ fn is_code_shaped_identifier(value: &str) -> bool {
         run: |
           set -euo pipefail
           rm .github/workflows/agent-cc4-finalize.yml
+          rm .github/scripts/agent_cc4_finalize.py
           git config user.name "Shiv Yadav"
           git config user.email "155265880+shivyadavus@users.noreply.github.com"
           git add -A
