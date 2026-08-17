@@ -38,6 +38,16 @@
         "target_types": []
       },
       {
+        "count": 0,
+        "description": "Edge of type UsesType",
+        "evidence_available": false,
+        "name": "UsesType",
+        "required_evidence": [],
+        "source_types": [],
+        "stable": true,
+        "target_types": []
+      },
+      {
         "count": 1,
         "description": "Edge of type Calls",
         "evidence_available": true,
@@ -297,6 +307,7 @@
       "routes",
       "config_keys",
       "service_boundaries",
+      "relationship_proofs",
       "read_only_graph_query"
     ],
     "indexed_at": "<indexed_at>",

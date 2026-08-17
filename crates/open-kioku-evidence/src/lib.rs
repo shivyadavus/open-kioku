@@ -1,171 +1,24 @@
-use open_kioku_core::{Confidence, Evidence, FileRange, GraphEdge, GraphEdgeType, SymbolId};
-pub use open_kioku_core::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
+pub use open_kioku_core::{
+    normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
+    RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
+    RELATIONSHIP_PROOFS_PROPERTY,
+};
+use open_kioku_core::{Confidence, Evidence, GraphEdge, GraphEdgeType};
+#[cfg(test)]
+use open_kioku_core::{FileRange, SymbolId};
 use open_kioku_errors::OkError;
 use open_kioku_storage::GraphStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::BTreeSet;
 
-/// Structured property key used to persist relationship proofs on existing graph edges.
-///
-/// Keeping the payload under the existing `GraphEdge::properties` extension point makes the
-/// contract backward-compatible with pre-RI3 indexes while still exposing a typed API. Invalid
-/// or malformed payloads always fail closed to heuristic authority.
-pub const RELATIONSHIP_PROOFS_PROPERTY: &str = "relationship_proofs";
-
-/// Maximum authority a single proof kind can contribute before relationship-specific combination
-/// rules are evaluated. The intrinsic ceiling is owned by the core domain type.
+/// Compatibility wrapper for callers that imported this helper from the evidence crate.
 pub fn proof_kind_authority(kind: RelationshipProofKind) -> RelationshipAuthority {
     kind.maximum_authority()
 }
 
-fn normalized_effective_authority(proof: &RelationshipProof) -> RelationshipAuthority {
-    proof.authority.min(proof_kind_authority(proof.kind))
-}
-
-fn has_unique(proofs: &[RelationshipProof], kind: RelationshipProofKind) -> bool {
-    proofs.iter().any(|proof| {
-        proof.kind == kind
-            && proof.is_unique()
-            && normalized_effective_authority(proof) >= RelationshipAuthority::Corroborating
-    })
-}
-
-fn has_unique_exact_target(proofs: &[RelationshipProof]) -> bool {
-    proofs.iter().any(|proof| {
-        matches!(
-            proof.kind,
-            RelationshipProofKind::ExactOccurrence
-                | RelationshipProofKind::ExactReference
-                | RelationshipProofKind::ExternalExactIndex
-        ) && proof.is_unique()
-            && normalized_effective_authority(proof) == RelationshipAuthority::Authoritative
-    })
-}
-
-fn fallback_authority(proofs: &[RelationshipProof]) -> RelationshipAuthority {
-    proofs
-        .iter()
-        .filter(|proof| proof.is_unique())
-        .map(normalized_effective_authority)
-        .max()
-        .unwrap_or(RelationshipAuthority::Heuristic)
-        .min(RelationshipAuthority::Corroborating)
-}
-
-fn proof_targets_are_coherent(proofs: &[RelationshipProof]) -> bool {
-    let mut expected_target: Option<&SymbolId> = None;
-    for proof in proofs {
-        let Some(target) = proof.target_symbol_id.as_ref() else {
-            continue;
-        };
-        match expected_target {
-            Some(expected) if expected != target => return false,
-            None => expected_target = Some(target),
-            _ => {}
-        }
-    }
-    true
-}
-
-/// Compute effective relationship authority from typed proofs using one fail-closed policy.
-///
-/// Candidate ordering, confidence, fuzzy/name similarity, and semantic scores are intentionally not
-/// inputs. A proof marked `authoritative` in serialized data cannot self-promote a weaker proof kind.
-pub fn relationship_authority(
-    edge_type: &GraphEdgeType,
-    proofs: &[RelationshipProof],
-) -> RelationshipAuthority {
-    if proofs.is_empty() || !proof_targets_are_coherent(proofs) {
-        return RelationshipAuthority::Heuristic;
-    }
-
-    let exact_target = has_unique_exact_target(proofs);
-    let exact_call_site = has_unique(proofs, RelationshipProofKind::ExactCallSite);
-    let import_binding = has_unique(proofs, RelationshipProofKind::ImportBinding);
-    let qualified_name = has_unique(proofs, RelationshipProofKind::QualifiedName);
-    let same_scope = has_unique(proofs, RelationshipProofKind::SameScopeDefinition);
-    let containing_type = has_unique(proofs, RelationshipProofKind::ContainingType);
-    let receiver_type = has_unique(proofs, RelationshipProofKind::ReceiverType);
-    let trait_binding = has_unique(proofs, RelationshipProofKind::TraitOrInterfaceBinding);
-    let inheritance_binding = has_unique(proofs, RelationshipProofKind::InheritanceBinding);
-    let module_binding = has_unique(proofs, RelationshipProofKind::ModuleOrPackageBinding);
-    let external_exact = has_unique(proofs, RelationshipProofKind::ExternalExactIndex);
-
-    let authoritative = match edge_type {
-        GraphEdgeType::References => {
-            exact_target
-                || (import_binding && (qualified_name || same_scope))
-                || (qualified_name && same_scope)
-        }
-        GraphEdgeType::UsesType => {
-            exact_target
-                || (receiver_type && (qualified_name || same_scope))
-                || (import_binding && qualified_name)
-        }
-        GraphEdgeType::Calls => {
-            exact_call_site
-                && (exact_target
-                    || (receiver_type && (qualified_name || same_scope || containing_type))
-                    || (import_binding && (qualified_name || same_scope)))
-        }
-        GraphEdgeType::Implements => {
-            inheritance_binding && (trait_binding || exact_target || qualified_name)
-        }
-        GraphEdgeType::Extends => inheritance_binding && (exact_target || qualified_name),
-        GraphEdgeType::Imports => import_binding || module_binding || external_exact,
-        GraphEdgeType::DependsOn => module_binding || import_binding || external_exact,
-        _ => false,
-    };
-
-    if authoritative {
-        RelationshipAuthority::Authoritative
-    } else {
-        fallback_authority(proofs)
-    }
-}
-
-/// Canonicalize a proof set for deterministic storage and output.
-pub fn normalize_relationship_proofs(mut proofs: Vec<RelationshipProof>) -> Vec<RelationshipProof> {
-    for proof in &mut proofs {
-        proof.normalize();
-    }
-    proofs.sort_by(|left, right| {
-        left.kind
-            .cmp(&right.kind)
-            .then_with(|| left.authority.cmp(&right.authority))
-            .then_with(|| left.resolver_strategy.cmp(&right.resolver_strategy))
-            .then_with(|| left.candidate_count.cmp(&right.candidate_count))
-            .then_with(|| left.source_symbol_id.cmp(&right.source_symbol_id))
-            .then_with(|| left.target_symbol_id.cmp(&right.target_symbol_id))
-            .then_with(|| {
-                source_range_key(&left.source_range).cmp(&source_range_key(&right.source_range))
-            })
-            .then_with(|| left.ambiguity.cmp(&right.ambiguity))
-            .then_with(|| left.evidence_ids.cmp(&right.evidence_ids))
-            .then_with(|| {
-                serde_json::to_string(&left.details)
-                    .unwrap_or_default()
-                    .cmp(&serde_json::to_string(&right.details).unwrap_or_default())
-            })
-    });
-    proofs.dedup();
-    proofs
-}
-
-fn source_range_key(range: &Option<FileRange>) -> (String, Option<u32>, Option<u32>) {
-    let Some(range) = range else {
-        return (String::new(), None, None);
-    };
-    (
-        range.path.to_string_lossy().replace('\\', "/"),
-        range.line_range.as_ref().map(|line| line.start),
-        range.line_range.as_ref().map(|line| line.end),
-    )
-}
-
-/// Typed access to RI3 relationship proofs persisted through the existing graph-edge extension
-/// point. Malformed proof JSON never becomes structural authority.
+/// Backward-compatible facade over the core-owned inherent `GraphEdge` proof API.
 pub trait GraphEdgeRelationshipProofExt {
     fn try_relationship_proofs(&self) -> Result<Vec<RelationshipProof>, serde_json::Error>;
     fn relationship_proofs(&self) -> Vec<RelationshipProof>;
@@ -180,86 +33,30 @@ pub trait GraphEdgeRelationshipProofExt {
 
 impl GraphEdgeRelationshipProofExt for GraphEdge {
     fn try_relationship_proofs(&self) -> Result<Vec<RelationshipProof>, serde_json::Error> {
-        let Some(value) = self.properties.get(RELATIONSHIP_PROOFS_PROPERTY) else {
-            return Ok(Vec::new());
-        };
-        let proofs: Vec<RelationshipProof> = serde_json::from_value(value.clone())?;
-        Ok(normalize_relationship_proofs(proofs))
+        GraphEdge::try_relationship_proofs(self)
     }
 
     fn relationship_proofs(&self) -> Vec<RelationshipProof> {
-        self.try_relationship_proofs().unwrap_or_default()
+        GraphEdge::relationship_proofs(self)
     }
 
     fn set_relationship_proofs(
         &mut self,
         proofs: Vec<RelationshipProof>,
     ) -> Result<(), serde_json::Error> {
-        let proofs = normalize_relationship_proofs(proofs);
-        if proofs.is_empty() {
-            self.properties.remove(RELATIONSHIP_PROOFS_PROPERTY);
-        } else {
-            self.properties.insert(
-                RELATIONSHIP_PROOFS_PROPERTY.to_string(),
-                serde_json::to_value(proofs)?,
-            );
-        }
-        Ok(())
+        GraphEdge::set_relationship_proofs(self, proofs)
     }
 
     fn relationship_authority(&self) -> RelationshipAuthority {
-        let Ok(proofs) = self.try_relationship_proofs() else {
-            return RelationshipAuthority::Heuristic;
-        };
-        relationship_authority(&self.edge_type, &proofs)
+        GraphEdge::relationship_authority(self)
     }
 
     fn is_authoritative_relationship(&self) -> bool {
-        self.relationship_authority() == RelationshipAuthority::Authoritative
+        GraphEdge::is_authoritative_relationship(self)
     }
 
     fn has_relationship_proof_kind(&self, kind: RelationshipProofKind) -> bool {
-        self.try_relationship_proofs()
-            .map(|proofs| proofs.iter().any(|proof| proof.kind == kind))
-            .unwrap_or(false)
-    }
-}
-
-/// Reusable typed filter for graph/query consumers that need authority-aware relationship reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RelationshipProofFilter {
-    #[serde(default)]
-    pub minimum_authority: RelationshipAuthority,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_proof_kinds: Option<BTreeSet<RelationshipProofKind>>,
-}
-
-impl Default for RelationshipProofFilter {
-    fn default() -> Self {
-        Self {
-            minimum_authority: RelationshipAuthority::Heuristic,
-            accepted_proof_kinds: None,
-        }
-    }
-}
-
-impl RelationshipProofFilter {
-    /// Returns false on malformed proof payloads whenever the filter requires proof semantics.
-    pub fn matches(&self, edge: &GraphEdge) -> bool {
-        let proofs = match edge.try_relationship_proofs() {
-            Ok(proofs) => proofs,
-            Err(_) => {
-                return self.minimum_authority == RelationshipAuthority::Heuristic
-                    && self.accepted_proof_kinds.is_none();
-            }
-        };
-        if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
-            return false;
-        }
-        match self.accepted_proof_kinds.as_ref() {
-            Some(accepted) => proofs.iter().any(|proof| accepted.contains(&proof.kind)),
-            None => true,
-        }
+        GraphEdge::has_relationship_proof_kind(self, kind)
     }
 }
 
@@ -378,10 +175,6 @@ impl<T: GraphStore + ?Sized> RelationshipGraphStoreExt for T {
             }
 
             if has_more {
-                break;
-            }
-            if batch_len < batch_limit {
-                source_exhausted = true;
                 break;
             }
         }
@@ -519,6 +312,50 @@ mod tests {
                 .filter(|edge| edge.edge_type == edge_type)
                 .skip(offset)
                 .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct CappedPageGraphStore {
+        edges: Vec<GraphEdge>,
+        page_cap: usize,
+    }
+
+    impl GraphStore for CappedPageGraphStore {
+        fn replace_graph(&self, _nodes: &[GraphNode], _edges: &[GraphEdge]) -> Result<(), OkError> {
+            Ok(())
+        }
+
+        fn neighbors(
+            &self,
+            _node: &str,
+            _limit: usize,
+        ) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), OkError> {
+            Ok((Vec::new(), Vec::new()))
+        }
+
+        fn shortest_path(
+            &self,
+            _from: &str,
+            _to: &str,
+            _max_depth: usize,
+        ) -> Result<Vec<GraphEdge>, OkError> {
+            Ok(Vec::new())
+        }
+
+        fn edges_by_type(
+            &self,
+            edge_type: GraphEdgeType,
+            limit: usize,
+            offset: usize,
+        ) -> Result<Vec<GraphEdge>, OkError> {
+            Ok(self
+                .edges
+                .iter()
+                .filter(|edge| edge.edge_type == edge_type)
+                .skip(offset)
+                .take(limit.min(self.page_cap))
                 .cloned()
                 .collect())
         }
@@ -804,6 +641,36 @@ mod tests {
         assert_eq!(result.edges.len(), 1);
         assert_eq!(result.edges[0].id.0, "a");
         assert!(result.has_more);
+        assert!(!result.scan_truncated);
+    }
+
+    #[test]
+    fn graph_store_query_continues_after_short_pages() {
+        let store = CappedPageGraphStore {
+            edges: vec![
+                legacy_reference_edge("legacy"),
+                reference_edge(
+                    "authoritative",
+                    vec![proof(RelationshipProofKind::ExactReference, 1)],
+                ),
+            ],
+            page_cap: 1,
+        };
+        let query = RelationshipEdgeQuery {
+            edge_type: GraphEdgeType::References,
+            filter: RelationshipProofFilter {
+                minimum_authority: RelationshipAuthority::Authoritative,
+                accepted_proof_kinds: None,
+            },
+            limit: 1,
+            offset: 0,
+            scan_limit: 100,
+        };
+
+        let result = store.query_relationship_edges(&query).unwrap();
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].id.0, "authoritative");
+        assert_eq!(result.scanned_edges, 2);
         assert!(!result.scan_truncated);
     }
 
