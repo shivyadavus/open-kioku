@@ -34,6 +34,46 @@ pub(crate) fn resolve_typed_receiver_outcome(
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
 
+    resolve_named_type_member_outcome(call, ctx, type_name)
+}
+
+pub(crate) fn resolve_static_member_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+) -> ResolutionOutcome {
+    let Some(receiver) = call.receiver.as_deref() else {
+        return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+    };
+    let typed = resolve_named_type_member_outcome(call, ctx, receiver);
+    match typed {
+        ResolutionOutcome::Unresolved { ref candidates, .. } if candidates.is_empty() => {
+            imported_receiver_outcome(call, ctx, receiver)
+        }
+        other => other,
+    }
+}
+
+pub(crate) fn resolve_module_member_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+) -> ResolutionOutcome {
+    let Some(receiver) = call.receiver.as_deref() else {
+        return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
+    };
+    let imported = imported_receiver_outcome(call, ctx, receiver);
+    match imported {
+        ResolutionOutcome::Unresolved { ref candidates, .. } if candidates.is_empty() => {
+            resolve_named_type_member_outcome(call, ctx, receiver)
+        }
+        other => other,
+    }
+}
+
+pub(crate) fn resolve_named_type_member_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    type_name: &str,
+) -> ResolutionOutcome {
     let type_candidates = collect_type_candidates(ctx, &call.scope_id, type_name);
     if type_candidates.is_empty() {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
@@ -68,7 +108,7 @@ pub(crate) fn resolve_typed_receiver_outcome(
     evaluate_inherited_targets(call, ctx, inherited_targets)
 }
 
-fn imported_receiver_outcome(
+pub(crate) fn imported_receiver_outcome(
     call: &CallSite,
     ctx: &ResolutionContext<'_>,
     receiver: &str,
