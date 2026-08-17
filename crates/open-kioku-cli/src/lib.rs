@@ -69,6 +69,7 @@ include!("commands/adr.rs");
 include!("reports/trust.rs");
 include!("reports/status_setup_doctor.rs");
 include!("bench/mod.rs");
+include!("bench/relationship.rs");
 include!("commands/verification.rs");
 include!("commands/contract.rs");
 include!("reports/ranking.rs");

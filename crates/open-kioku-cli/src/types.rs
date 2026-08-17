@@ -173,6 +173,7 @@ enum Command {
     Bench(BenchArgs),
     WorkflowBench(WorkflowBenchArgs),
     RetrievalBench(RetrievalBenchArgs),
+    RelationshipBench(RelationshipBenchArgs),
     ContractBench(ContractBenchArgs),
     Eval(EvalArgs),
     Prove(ProveArgs),
@@ -577,6 +578,29 @@ struct WorkflowBenchArgs {
     /// Fail unless at least this many cases are loaded.
     #[arg(long, default_value_t = 20)]
     min_cases: usize,
+}
+
+#[derive(Args)]
+struct RelationshipBenchArgs {
+    /// Versioned JSON relationship conformance corpus.
+    #[arg(long, value_name = "CORPUS_JSON")]
+    corpus: PathBuf,
+
+    /// JSON observations produced by a resolver/index run.
+    #[arg(long, value_name = "OBSERVATIONS_JSON")]
+    observations: PathBuf,
+
+    /// Optional path for the deterministic JSON score report.
+    #[arg(long, value_name = "REPORT_JSON")]
+    write: Option<PathBuf>,
+
+    /// Versioned JSON release-gate policy. When supplied, gate results are included in the report.
+    #[arg(long, value_name = "POLICY_JSON")]
+    policy: Option<PathBuf>,
+
+    /// Exit non-zero unless every configured release gate passes.
+    #[arg(long, default_value_t = false)]
+    enforce_gates: bool,
 }
 
 #[derive(Args)]
