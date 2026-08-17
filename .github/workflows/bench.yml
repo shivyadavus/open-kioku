@@ -121,6 +121,16 @@ jobs:
                 )
         print('retrieval benchmark deterministic baseline and holdout thresholds passed')
         PY
+        ./target/release/ok --json relationship-bench \
+          --corpus benchmarks/relationship-cases.json \
+          --observations @live \
+          --policy benchmarks/relationship-thresholds.json \
+          --enforce-gates \
+          --write artifacts/benchmarks/relationship-report.json \
+          > artifacts/benchmarks/relationship-stdout.json
+        python3 scripts/validate-relationship-baseline.py \
+          artifacts/benchmarks/relationship-report.json \
+          benchmarks/relationship-baseline.json
         ./target/release/ok architecture bench benchmarks/architecture-policy-fixture \
           --cases-file benchmarks/architecture-policy-cases.json \
           --min-precision 0.95 \
@@ -141,6 +151,7 @@ jobs:
           | tee artifacts/benchmarks/history-similar-bench.json
 
     - name: Upload benchmark-reports
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: benchmark-reports
