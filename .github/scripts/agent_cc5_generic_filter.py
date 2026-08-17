@@ -15,67 +15,56 @@ replace_once(
     "    pub filter_selectivity: String,\n    /// Whether any supported semantic candidate filter was enforced before top-k selection.\n    /// This is broader than `path_scope_enforced`: callers may supply a precomputed vector\n    /// allowlist for language, project, symbol, module, or another repository-validated scope.\n    #[serde(default)]\n    pub filter_scope_enforced: bool,\n    pub path_scope_enforced: bool,\n    pub routing_reason: String,\n",
     "routing telemetry field",
 )
-
 replace_once(
     "    pub fn search_with_allowlist(\n        &self,\n        query: &str,\n        limit: usize,\n        allowlist: Option<HashSet<VectorId>>,\n    ) -> Result<Vec<SearchResult>> {\n        Ok(self.search_routed(query, limit, allowlist, &[])?.results)\n    }\n",
     "    pub fn search_with_allowlist(\n        &self,\n        query: &str,\n        limit: usize,\n        allowlist: Option<HashSet<VectorId>>,\n    ) -> Result<Vec<SearchResult>> {\n        Ok(self\n            .search_with_allowlist_report(query, limit, allowlist)?\n            .results)\n    }\n\n    /// Search a repository-validated semantic candidate set and return routing diagnostics.\n    ///\n    /// The allowlist is intentionally generic: higher layers can derive it from language,\n    /// project/workspace, symbol/module, path, or another scope already represented in repository\n    /// metadata. The semantic layer treats the set as an enforced eligibility boundary and never\n    /// widens it while choosing between exact-flat and ANN.\n    pub fn search_with_allowlist_report(\n        &self,\n        query: &str,\n        limit: usize,\n        allowlist: Option<HashSet<VectorId>>,\n    ) -> Result<SemanticSearchReport> {\n        self.search_routed(query, limit, allowlist, &[])\n    }\n",
     "allowlist report API",
 )
-
 replace_once(
     "        let allowlist = intersect_allowlists(caller_allowlist, scoped_ids);\n        let eligible_candidate_count = allowlist\n",
     "        let allowlist = intersect_allowlists(caller_allowlist, scoped_ids);\n        // Any concrete allowlist is an enforced eligibility boundary, regardless of which\n        // higher-level filter produced it. Backend routing must depend on the effective candidate\n        // population, not on whether the filter happened to be a path prefix.\n        let filter_scope_enforced = allowlist.is_some();\n        let eligible_candidate_count = allowlist\n",
     "filter enforcement",
 )
-
 replace_once(
     "        let filter_selectivity = semantic_filter_selectivity(\n            total_vector_count,\n            eligible_candidate_count,\n            path_scope_enforced || allowlist.is_some(),\n        );\n",
     "        let filter_selectivity = semantic_filter_selectivity(\n            total_vector_count,\n            eligible_candidate_count,\n            filter_scope_enforced,\n        );\n",
     "selectivity input",
 )
-
 replace_once(
     "        let mut routing_reason = if path_scope_enforced {\n            format!(\n                \"validated path scope leaves {eligible_candidate_count} of {total_vector_count} semantic candidates\"\n            )\n        } else {\n            format!(\"semantic query uses the persisted {manifest_backend} backend\")\n        };\n",
     "        let mut routing_reason = if path_scope_enforced {\n            format!(\n                \"validated path scope leaves {eligible_candidate_count} of {total_vector_count} semantic candidates\"\n            )\n        } else if filter_scope_enforced {\n            format!(\n                \"validated semantic candidate filter leaves {eligible_candidate_count} of {total_vector_count} candidates\"\n            )\n        } else {\n            format!(\"semantic query uses the persisted {manifest_backend} backend\")\n        };\n",
     "routing reason",
 )
-
 replace_once(
     "        let should_use_scoped_exact = path_scope_enforced\n            && should_route_scoped_exact(&self.config, manifest_backend, eligible_candidate_count);\n",
     "        let should_use_scoped_exact = filter_scope_enforced\n            && should_route_scoped_exact(&self.config, manifest_backend, eligible_candidate_count);\n",
     "generic exact routing",
 )
-
 replace_once(
     "                      \"validated semantic path scope lost its candidate allowlist; refusing to widen retrieval\"\n",
     "                      \"validated semantic candidate filter lost its allowlist; refusing to widen retrieval\"\n",
     "fail-closed allowlist error",
 )
-
 replace_once(
     "                    routing_reason = format!(\n                        \"auto backend selected exact-flat because validated scope has {eligible_candidate_count} eligible candidates below ann_min_rows={} (total vectors {total_vector_count})\",\n                        self.config.ann_min_rows\n                    );\n",
     "                    routing_reason = format!(\n                        \"auto backend selected exact-flat because the enforced filter has {eligible_candidate_count} eligible candidates below ann_min_rows={} (total vectors {total_vector_count})\",\n                        self.config.ann_min_rows\n                    );\n",
     "generic exact reason",
 )
-
 replace_once(
     "                        \"scoped exact-flat routing could not reconstruct a complete exact subset from the local embedding cache; retained pre-filtered ANN search without widening scope\"\n",
     "                        \"filtered exact-flat routing could not reconstruct a complete exact subset from the local embedding cache; retained pre-filtered ANN search without widening scope\"\n",
     "generic cache caveat",
 )
-
 replace_once(
     "                        \"auto backend retained {manifest_backend} because the exact subset cache was incomplete; validated path scope still filters before ANN top-k\"\n",
     "                        \"auto backend retained {manifest_backend} because the exact subset cache was incomplete; the enforced candidate filter still applies before ANN top-k\"\n",
     "generic cache fallback reason",
 )
-
 replace_once(
     "            if path_scope_enforced && backend_is_ann(manifest_backend) {\n                routing_reason = if self.config.backend == \"auto\" {\n                    format!(\n                        \"auto backend retained {manifest_backend} because validated scope has {eligible_candidate_count} eligible candidates at or above ann_min_rows={} (total vectors {total_vector_count})\",\n                        self.config.ann_min_rows\n                    )\n                } else {\n                    format!(\n                        \"explicit backend `{}` retained {manifest_backend}; validated path scope filters candidates before ANN top-k\",\n                        self.config.backend\n                    )\n                };\n            }\n",
     "            if filter_scope_enforced && backend_is_ann(manifest_backend) {\n                routing_reason = if self.config.backend == \"auto\" {\n                    format!(\n                        \"auto backend retained {manifest_backend} because the enforced filter has {eligible_candidate_count} eligible candidates at or above ann_min_rows={} (total vectors {total_vector_count})\",\n                        self.config.ann_min_rows\n                    )\n                } else {\n                    format!(\n                        \"explicit backend `{}` retained {manifest_backend}; the enforced candidate filter applies before ANN top-k\",\n                        self.config.backend\n                    )\n                };\n            }\n",
     "generic ANN reason",
 )
-
 replace_once(
     "                filter_selectivity,\n                path_scope_enforced,\n                routing_reason,\n",
     "                filter_selectivity,\n                filter_scope_enforced,\n                path_scope_enforced,\n                routing_reason,\n",
@@ -146,7 +135,7 @@ test = r'''    #[test]
         let targets = read_targets(&manager.current_dir().join("ids.json")).unwrap();
         let auth_ids = targets
             .values()
-            .filter(|target| target.path == PathBuf::from("src/auth.rs"))
+            .filter(|target| target.path == std::path::Path::new("src/auth.rs"))
             .map(|target| target.vector_id)
             .collect::<HashSet<_>>();
         assert_eq!(auth_ids.len(), 2);
