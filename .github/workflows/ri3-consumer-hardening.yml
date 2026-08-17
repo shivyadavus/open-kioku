@@ -17,141 +17,11 @@ jobs:
           ref: agent/ri3-core-authority-final
           fetch-depth: 0
 
-      - name: Apply reviewed consumer and endpoint hardening
+      - name: Apply reviewed hardening
         run: |
           git fetch origin agent/ri3-core-relationship-proofs
-          git checkout origin/agent/ri3-core-relationship-proofs -- \
-            crates/open-kioku-architecture/src/lib.rs \
-            crates/open-kioku-context/src/lib.rs
-          python3 - <<'PY'
-          from pathlib import Path
-
-          identity = Path("crates/open-kioku-core/src/identity.rs")
-          text = identity.read_text()
-          old_import = "use crate::{EdgeId, GraphEdgeType, GraphNodeType, Language, NodeId, Symbol, TestTarget};\n"
-          new_import = "use crate::{\n    EdgeId, GraphEdgeType, GraphNodeType, Language, NodeId, Symbol, SymbolId, TestTarget,\n};\n"
-          if text.count(old_import) != 1:
-              raise SystemExit(f"identity import seam changed: {text.count(old_import)}")
-          text = text.replace(old_import, new_import, 1)
-          old_symbol_fn = '''pub fn symbol_node_id(symbol: &Symbol) -> NodeId {
-    NodeId::new(format!(
-        "symbol:{}",
-        escape_identity_component(&symbol.id.0)
-    ))
-}
-'''
-          new_symbol_fn = '''pub fn symbol_node_id(symbol: &Symbol) -> NodeId {
-    symbol_id_node_id(&symbol.id)
-}
-
-/// Canonical graph-node identity for a symbol ID when the full symbol record is unavailable.
-pub fn symbol_id_node_id(symbol_id: &SymbolId) -> NodeId {
-    NodeId::new(format!(
-        "symbol:{}",
-        escape_identity_component(&symbol_id.0)
-    ))
-}
-'''
-          if text.count(old_symbol_fn) != 1:
-              raise SystemExit(f"symbol identity seam changed: {text.count(old_symbol_fn)}")
-          text = text.replace(old_symbol_fn, new_symbol_fn, 1)
-          test_anchor = '''    #[test]
-    fn route_config_test_and_edge_ids_are_deterministic() {
-'''
-          identity_test = '''    #[test]
-    fn symbol_id_node_identity_matches_full_symbol_identity() {
-        let symbol = symbol("symbol:Repo.save");
-        assert_eq!(symbol_id_node_id(&symbol.id), symbol_node_id(&symbol));
-        assert_eq!(
-            symbol_id_node_id(&SymbolId::new("file:src/lib.rs")).0,
-            "symbol:file%3Asrc%2Flib.rs"
-        );
-    }
-
-'''
-          if text.count(test_anchor) != 1:
-              raise SystemExit(f"identity test anchor changed: {text.count(test_anchor)}")
-          text = text.replace(test_anchor, identity_test + test_anchor, 1)
-          identity.write_text(text)
-
-          relationship = Path("crates/open-kioku-core/src/relationship.rs")
-          text = relationship.read_text()
-          import_anchor = "use crate::{EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId};\n"
-          import_replacement = "use crate::identity::symbol_id_node_id;\nuse crate::{EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId};\n"
-          if text.count(import_anchor) != 1:
-              raise SystemExit(f"relationship import seam changed: {text.count(import_anchor)}")
-          text = text.replace(import_anchor, import_replacement, 1)
-          source_key_anchor = '''fn source_range_key(range: &Option<FileRange>) -> (String, Option<u32>, Option<u32>) {
-'''
-          edge_policy = '''fn graph_edge_relationship_authority(
-    edge: &GraphEdge,
-    proofs: &[RelationshipProof],
-) -> RelationshipAuthority {
-    if proofs
-        .iter()
-        .filter_map(|proof| proof.target_symbol_id.as_ref())
-        .any(|target| symbol_id_node_id(target) != edge.to)
-    {
-        return RelationshipAuthority::Heuristic;
-    }
-    relationship_authority(&edge.edge_type, proofs)
-}
-
-'''
-          if text.count(source_key_anchor) != 1:
-              raise SystemExit(f"relationship edge policy anchor changed: {text.count(source_key_anchor)}")
-          text = text.replace(source_key_anchor, edge_policy + source_key_anchor, 1)
-          old_edge_auth = '''        relationship_authority(&self.edge_type, &proofs)
-'''
-          new_edge_auth = '''        graph_edge_relationship_authority(self, &proofs)
-'''
-          if text.count(old_edge_auth) != 1:
-              raise SystemExit(f"GraphEdge authority seam changed: {text.count(old_edge_auth)}")
-          text = text.replace(old_edge_auth, new_edge_auth, 1)
-          old_filter = '''        if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
-'''
-          new_filter = '''        if graph_edge_relationship_authority(edge, &proofs) < self.minimum_authority {
-'''
-          if text.count(old_filter) != 1:
-              raise SystemExit(f"relationship filter seam changed: {text.count(old_filter)}")
-          text = text.replace(old_filter, new_filter, 1)
-          test_anchor = '''    #[test]
-    fn legacy_and_malformed_edges_fail_closed() {
-'''
-          endpoint_test = '''    #[test]
-    fn persisted_target_identity_must_match_claimed_proof_target() {
-        let target = SymbolId::new("symbol:Target.run");
-        let mut exact = proof(RelationshipProofKind::ExactReference, 1);
-        exact.target_symbol_id = Some(target.clone());
-
-        let mut matching = edge(GraphEdgeType::References, vec![exact.clone()]);
-        matching.to = symbol_id_node_id(&target);
-        assert!(matching.is_authoritative_relationship());
-        assert!(RelationshipProofFilter {
-            minimum_authority: RelationshipAuthority::Authoritative,
-            accepted_proof_kinds: None,
-        }
-        .matches(&matching));
-
-        let mut mismatched = edge(GraphEdgeType::References, vec![exact]);
-        mismatched.to = symbol_id_node_id(&SymbolId::new("symbol:Other.run"));
-        assert_eq!(
-            mismatched.relationship_authority(),
-            RelationshipAuthority::Heuristic
-        );
-        assert!(!RelationshipProofFilter {
-            minimum_authority: RelationshipAuthority::Authoritative,
-            accepted_proof_kinds: None,
-        }
-        .matches(&mismatched));
-    }
-
-'''
-          if text.count(test_anchor) != 1:
-              raise SystemExit(f"relationship endpoint test anchor changed: {text.count(test_anchor)}")
-          text = text.replace(test_anchor, endpoint_test + test_anchor, 1)
-          relationship.write_text(text)
-          PY
+          git checkout origin/agent/ri3-core-relationship-proofs -- crates/open-kioku-architecture/src/lib.rs crates/open-kioku-context/src/lib.rs
+          python3 scripts/ri3_consumer_hardening_tmp.py
 
       - name: Validate RI3 trust boundaries
         run: |
@@ -165,11 +35,7 @@ pub fn symbol_id_node_id(symbol_id: &SymbolId) -> NodeId {
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-consumer-hardening.yml
-          git add \
-            crates/open-kioku-core/src/identity.rs \
-            crates/open-kioku-core/src/relationship.rs \
-            crates/open-kioku-architecture/src/lib.rs \
-            crates/open-kioku-context/src/lib.rs
+          git rm .github/workflows/ri3-consumer-hardening.yml scripts/ri3_consumer_hardening_tmp.py
+          git add crates/open-kioku-core/src/identity.rs crates/open-kioku-core/src/relationship.rs crates/open-kioku-architecture/src/lib.rs crates/open-kioku-context/src/lib.rs
           git commit -m "ri3: enforce authoritative relationships at consumer boundaries"
           git push origin HEAD:agent/ri3-core-authority-final
