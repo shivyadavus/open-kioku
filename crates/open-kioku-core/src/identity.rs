@@ -12,7 +12,7 @@
 //! package names. Nested/default/anonymous symbols should pass their represented
 //! symbol name through `qualified_name` so the same module prefixing rules apply.
 
-use crate::{EdgeId, GraphEdgeType, GraphNodeType, Language, NodeId, Symbol, TestTarget};
+use crate::{EdgeId, GraphEdgeType, GraphNodeType, Language, NodeId, Symbol, SymbolId, TestTarget};
 use open_kioku_errors::{OkError, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -37,9 +37,14 @@ pub fn try_file_node_id(path: &Path) -> Result<NodeId> {
 }
 
 pub fn symbol_node_id(symbol: &Symbol) -> NodeId {
+    symbol_id_node_id(&symbol.id)
+}
+
+/// Canonical graph-node identity for a symbol ID when the full symbol record is unavailable.
+pub fn symbol_id_node_id(symbol_id: &SymbolId) -> NodeId {
     NodeId::new(format!(
         "symbol:{}",
-        escape_identity_component(&symbol.id.0)
+        escape_identity_component(&symbol_id.0)
     ))
 }
 
@@ -327,6 +332,16 @@ mod tests {
             "symbol:file%3Asrc%2Flib.rs"
         );
         assert_eq!(config_node_id("runtime:PORT").0, "config:runtime%3APORT");
+    }
+
+    #[test]
+    fn symbol_id_node_identity_matches_full_symbol_identity() {
+        let symbol = symbol("symbol:Repo.save");
+        assert_eq!(symbol_id_node_id(&symbol.id), symbol_node_id(&symbol));
+        assert_eq!(
+            symbol_id_node_id(&SymbolId::new("file:src/lib.rs")).0,
+            "symbol:file%3Asrc%2Flib.rs"
+        );
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub fn current_schema_with_manifest(
         "Contains",
         "Defines",
         "References",
+        "UsesType",
         "Calls",
         "Implements",
         "Extends",
@@ -136,6 +137,7 @@ pub fn current_schema_with_manifest(
             "routes".to_string(),
             "config_keys".to_string(),
             "service_boundaries".to_string(),
+            "relationship_proofs".to_string(),
             "read_only_graph_query".to_string(),
         ],
         property_specs: vec![
@@ -337,7 +339,14 @@ mod tests {
 
         // Verify node types has the correct counts
         assert_eq!(schema1.node_types.len(), 23);
-        assert_eq!(schema1.edge_types.len(), 27);
+        assert_eq!(schema1.edge_types.len(), 28);
+        assert!(schema1
+            .edge_types
+            .iter()
+            .any(|edge| edge.name == "UsesType"));
+        assert!(schema1
+            .feature_flags
+            .contains(&"relationship_proofs".to_string()));
 
         // Ensure count properties are absent in JSON (since they are None and skip_serializing_if is used)
         assert!(!json1.contains("\"count\":"));
