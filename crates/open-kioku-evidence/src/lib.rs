@@ -1,6 +1,8 @@
 use open_kioku_core::{
     Confidence, Evidence, EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId,
 };
+use open_kioku_errors::OkError;
+use open_kioku_storage::GraphStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -381,6 +383,141 @@ impl RelationshipProofFilter {
     }
 }
 
+pub const DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT: usize = 100;
+pub const HARD_RELATIONSHIP_EDGE_QUERY_LIMIT: usize = 500;
+pub const DEFAULT_RELATIONSHIP_EDGE_SCAN_LIMIT: usize = 10_000;
+pub const HARD_RELATIONSHIP_EDGE_SCAN_LIMIT: usize = 100_000;
+const RELATIONSHIP_EDGE_SCAN_BATCH_SIZE: usize = 512;
+
+/// Bounded, typed relationship-edge query over an existing graph store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipEdgeQuery {
+    pub edge_type: GraphEdgeType,
+    #[serde(default)]
+    pub filter: RelationshipProofFilter,
+    #[serde(default = "default_relationship_edge_query_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_relationship_edge_scan_limit")]
+    pub scan_limit: usize,
+}
+
+fn default_relationship_edge_query_limit() -> usize {
+    DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT
+}
+
+fn default_relationship_edge_scan_limit() -> usize {
+    DEFAULT_RELATIONSHIP_EDGE_SCAN_LIMIT
+}
+
+impl Default for RelationshipEdgeQuery {
+    fn default() -> Self {
+        Self {
+            edge_type: GraphEdgeType::References,
+            filter: RelationshipProofFilter::default(),
+            limit: DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT,
+            offset: 0,
+            scan_limit: DEFAULT_RELATIONSHIP_EDGE_SCAN_LIMIT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipEdgeQueryResult {
+    pub edges: Vec<GraphEdge>,
+    pub scanned_edges: usize,
+    pub matched_edges: usize,
+    pub effective_limit: usize,
+    pub effective_scan_limit: usize,
+    pub has_more: bool,
+    pub scan_truncated: bool,
+}
+
+/// Authority-aware graph-store reads without making the generic storage layer depend on RI3 policy.
+pub trait RelationshipGraphStoreExt {
+    fn query_relationship_edges(
+        &self,
+        query: &RelationshipEdgeQuery,
+    ) -> Result<RelationshipEdgeQueryResult, OkError>;
+}
+
+impl<T: GraphStore + ?Sized> RelationshipGraphStoreExt for T {
+    fn query_relationship_edges(
+        &self,
+        query: &RelationshipEdgeQuery,
+    ) -> Result<RelationshipEdgeQueryResult, OkError> {
+        let limit = query.limit.min(HARD_RELATIONSHIP_EDGE_QUERY_LIMIT);
+        let scan_limit = query.scan_limit.min(HARD_RELATIONSHIP_EDGE_SCAN_LIMIT);
+        if limit == 0 || scan_limit == 0 {
+            return Ok(RelationshipEdgeQueryResult {
+                edges: Vec::new(),
+                scanned_edges: 0,
+                matched_edges: 0,
+                effective_limit: limit,
+                effective_scan_limit: scan_limit,
+                has_more: false,
+                scan_truncated: false,
+            });
+        }
+
+        let target_matches = query.offset.saturating_add(limit).saturating_add(1);
+        let mut edges = Vec::with_capacity(limit);
+        let mut scanned_edges = 0usize;
+        let mut matched_edges = 0usize;
+        let mut source_offset = 0usize;
+        let mut source_exhausted = false;
+        let mut has_more = false;
+
+        while scanned_edges < scan_limit && matched_edges < target_matches {
+            let batch_limit = (scan_limit - scanned_edges).min(RELATIONSHIP_EDGE_SCAN_BATCH_SIZE);
+            let batch = self.edges_by_type(query.edge_type.clone(), batch_limit, source_offset)?;
+            if batch.is_empty() {
+                source_exhausted = true;
+                break;
+            }
+
+            let batch_len = batch.len();
+            source_offset = source_offset.saturating_add(batch_len);
+            for edge in batch {
+                scanned_edges = scanned_edges.saturating_add(1);
+                if query.filter.matches(&edge) {
+                    matched_edges = matched_edges.saturating_add(1);
+                    if matched_edges > query.offset {
+                        if edges.len() < limit {
+                            edges.push(edge);
+                        } else {
+                            has_more = true;
+                            break;
+                        }
+                    }
+                }
+                if scanned_edges >= scan_limit {
+                    break;
+                }
+            }
+
+            if has_more {
+                break;
+            }
+            if batch_len < batch_limit {
+                source_exhausted = true;
+                break;
+            }
+        }
+
+        Ok(RelationshipEdgeQueryResult {
+            edges,
+            scanned_edges,
+            matched_edges,
+            effective_limit: limit,
+            effective_scan_limit: scan_limit,
+            has_more,
+            scan_truncated: !source_exhausted && !has_more && scanned_edges >= scan_limit,
+        })
+    }
+}
+
 pub fn minimum_confidence(evidence: &[Evidence]) -> Confidence {
     if evidence
         .iter()
@@ -432,7 +569,7 @@ impl EvidenceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{EdgeId, LineRange, NodeId};
+    use open_kioku_core::{EdgeId, GraphNode, LineRange, NodeId};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -440,6 +577,71 @@ mod tests {
         let mut proof = RelationshipProof::new(kind, "test", candidate_count);
         proof.evidence_ids = vec![EvidenceId::new(format!("evidence:{kind:?}"))];
         proof
+    }
+
+    fn reference_edge(id: &str, proofs: Vec<RelationshipProof>) -> GraphEdge {
+        let mut edge = GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(format!("{id}:from")),
+            to: NodeId::new(format!("{id}:to")),
+            edge_type: GraphEdgeType::References,
+            ..Default::default()
+        };
+        edge.set_relationship_proofs(proofs).unwrap();
+        edge
+    }
+
+    fn legacy_reference_edge(id: &str) -> GraphEdge {
+        GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(format!("{id}:from")),
+            to: NodeId::new(format!("{id}:to")),
+            edge_type: GraphEdgeType::References,
+            ..Default::default()
+        }
+    }
+
+    struct FakeGraphStore {
+        edges: Vec<GraphEdge>,
+    }
+
+    impl GraphStore for FakeGraphStore {
+        fn replace_graph(&self, _nodes: &[GraphNode], _edges: &[GraphEdge]) -> Result<(), OkError> {
+            Ok(())
+        }
+
+        fn neighbors(
+            &self,
+            _node: &str,
+            _limit: usize,
+        ) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), OkError> {
+            Ok((Vec::new(), Vec::new()))
+        }
+
+        fn shortest_path(
+            &self,
+            _from: &str,
+            _to: &str,
+            _max_depth: usize,
+        ) -> Result<Vec<GraphEdge>, OkError> {
+            Ok(Vec::new())
+        }
+
+        fn edges_by_type(
+            &self,
+            edge_type: GraphEdgeType,
+            limit: usize,
+            offset: usize,
+        ) -> Result<Vec<GraphEdge>, OkError> {
+            Ok(self
+                .edges
+                .iter()
+                .filter(|edge| edge.edge_type == edge_type)
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
     }
 
     #[test]
@@ -631,5 +833,95 @@ mod tests {
             accepted_proof_kinds: Some(BTreeSet::from([RelationshipProofKind::ImportBinding])),
         };
         assert!(!wrong_kind.matches(&edge));
+    }
+
+    #[test]
+    fn graph_store_query_filters_before_applying_offset() {
+        let store = FakeGraphStore {
+            edges: vec![
+                legacy_reference_edge("legacy-0"),
+                reference_edge(
+                    "authoritative-1",
+                    vec![proof(RelationshipProofKind::ExactReference, 1)],
+                ),
+                legacy_reference_edge("legacy-2"),
+                reference_edge(
+                    "authoritative-3",
+                    vec![proof(RelationshipProofKind::ExactReference, 1)],
+                ),
+            ],
+        };
+        let query = RelationshipEdgeQuery {
+            edge_type: GraphEdgeType::References,
+            filter: RelationshipProofFilter {
+                minimum_authority: RelationshipAuthority::Authoritative,
+                accepted_proof_kinds: None,
+            },
+            limit: 1,
+            offset: 1,
+            scan_limit: 100,
+        };
+
+        let result = store.query_relationship_edges(&query).unwrap();
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].id.0, "authoritative-3");
+        assert_eq!(result.matched_edges, 2);
+        assert!(!result.has_more);
+        assert!(!result.scan_truncated);
+    }
+
+    #[test]
+    fn graph_store_query_reports_has_more_after_typed_filtering() {
+        let store = FakeGraphStore {
+            edges: vec![
+                reference_edge("a", vec![proof(RelationshipProofKind::ExactReference, 1)]),
+                reference_edge("b", vec![proof(RelationshipProofKind::ExactReference, 1)]),
+                reference_edge("c", vec![proof(RelationshipProofKind::ExactReference, 1)]),
+            ],
+        };
+        let query = RelationshipEdgeQuery {
+            edge_type: GraphEdgeType::References,
+            filter: RelationshipProofFilter {
+                minimum_authority: RelationshipAuthority::Authoritative,
+                accepted_proof_kinds: Some(BTreeSet::from([RelationshipProofKind::ExactReference])),
+            },
+            limit: 1,
+            offset: 0,
+            scan_limit: 100,
+        };
+
+        let result = store.query_relationship_edges(&query).unwrap();
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.edges[0].id.0, "a");
+        assert!(result.has_more);
+        assert!(!result.scan_truncated);
+    }
+
+    #[test]
+    fn graph_store_query_reports_scan_truncation() {
+        let store = FakeGraphStore {
+            edges: vec![
+                legacy_reference_edge("legacy"),
+                reference_edge(
+                    "authoritative",
+                    vec![proof(RelationshipProofKind::ExactReference, 1)],
+                ),
+            ],
+        };
+        let query = RelationshipEdgeQuery {
+            edge_type: GraphEdgeType::References,
+            filter: RelationshipProofFilter {
+                minimum_authority: RelationshipAuthority::Authoritative,
+                accepted_proof_kinds: None,
+            },
+            limit: 1,
+            offset: 0,
+            scan_limit: 1,
+        };
+
+        let result = store.query_relationship_edges(&query).unwrap();
+        assert!(result.edges.is_empty());
+        assert_eq!(result.scanned_edges, 1);
+        assert!(result.scan_truncated);
     }
 }
