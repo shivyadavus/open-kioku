@@ -467,6 +467,16 @@ fn classify_query_shape(query: &str) -> QueryShapeDecision {
             QueryShape::ExactIdentifier,
             "query is a single identifier-shaped token".into(),
         ));
+    } else if contains_qualified_symbol_reference(trimmed) {
+        structured.push((
+            QueryShape::QualifiedSymbol,
+            "natural-language query contains a qualified symbol/member reference".into(),
+        ));
+    } else if contains_named_identifier_reference(trimmed) {
+        structured.push((
+            QueryShape::ExactIdentifier,
+            "natural-language query contains an identifier-shaped code reference".into(),
+        ));
     }
     if is_api_resource_query(&lower) {
         structured.push((
@@ -628,11 +638,14 @@ fn apply_query_shape(policy: &mut RetrievalPolicy, shape: QueryShape) {
             .iter_mut()
             .find(|(candidate_source, _)| candidate_source == source)
         {
-            let refined = factor.saturating_add(*delta);
+            let original = *factor;
+            let refined = original.saturating_add(*delta);
             *factor = if flat_family {
                 refined
+            } else if original == family_max {
+                original
             } else {
-                refined.min(family_max)
+                refined.min(family_max.saturating_sub(1).max(original))
             };
         }
     }
@@ -682,22 +695,41 @@ fn is_qualified_symbol_query(query: &str) -> bool {
             }))
 }
 
+fn contains_qualified_symbol_reference(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .map(trim_query_token)
+        .any(is_qualified_symbol_query)
+}
+
+fn contains_named_identifier_reference(query: &str) -> bool {
+    query.split_whitespace().map(trim_query_token).any(|token| {
+        if !is_exact_identifier_query(token) {
+            return false;
+        }
+        let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
+        let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
+        let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+        (has_lower && has_upper) || token.contains('_') || has_digit
+    })
+}
+
+fn trim_query_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| matches!(ch, '`' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'))
+}
+
 fn contains_path_reference(query: &str) -> bool {
     query
         .split_whitespace()
-        .map(|token| {
-            token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
-                )
-            })
-        })
+        .map(trim_query_token)
         .any(is_source_path_token)
 }
 
 fn is_source_path_token(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
+    if lower.starts_with("/api/") {
+        return false;
+    }
     lower.contains('/')
         || [
             ".rs", ".java", ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".md", ".mdx", ".toml",
@@ -961,6 +993,49 @@ mod tests {
                     .candidate_cap(RetrievalSourceKind::SemanticVector, 10)
         );
         assert!(route.policy.allows(RetrievalSourceKind::SemanticVector));
+    }
+
+    #[test]
+    fn embedded_code_identifier_and_api_resource_shapes_are_not_lost_in_prose() {
+        assert_eq!(
+            classify_task("explain ContextPackBuilder selection behavior").query_shape,
+            QueryShape::MixedStructuredNaturalLanguage
+        );
+        assert_eq!(
+            classify_task("/api/v1/orders").query_shape,
+            QueryShape::ApiResource
+        );
+        assert_eq!(
+            classify_task("look at this behavior carefully").query_shape,
+            QueryShape::Conceptual
+        );
+    }
+
+    #[test]
+    fn query_shape_refinement_preserves_specialized_family_top_tier() {
+        let tests = classify_task("find tests for ContextPackBuilder");
+        assert_eq!(tests.family, TaskFamily::CodeToTest);
+        assert!(
+            tests
+                .policy
+                .candidate_cap(RetrievalSourceKind::Validation, 10)
+                > tests
+                    .policy
+                    .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+        );
+
+        let ripple = classify_task("show callers for ContextPackBuilder");
+        assert_eq!(ripple.family, TaskFamily::EditToRipple);
+        let lexical = ripple
+            .policy
+            .candidate_cap(RetrievalSourceKind::Lexical, 10);
+        assert!(
+            ripple
+                .policy
+                .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+                > lexical
+        );
+        assert!(ripple.policy.candidate_cap(RetrievalSourceKind::Graph, 10) > lexical);
     }
 
     #[test]
