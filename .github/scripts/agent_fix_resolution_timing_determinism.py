@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Branch-local validator: separate nondeterministic wall-clock telemetry from durable semantic quality.
 path = Path('crates/open-kioku-core/src/lib.rs')
 text = path.read_text()
 old = '''#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -51,7 +52,6 @@ if text.count(old) != 1:
     raise SystemExit(f'LanguageResolutionQuality marker count={text.count(old)}')
 text = text.replace(old, new, 1)
 
-# Add a regression at the end of the core tests module without depending on runtime timing values.
 marker = '\n}\n'
 pos = text.rfind(marker)
 if pos < 0:
