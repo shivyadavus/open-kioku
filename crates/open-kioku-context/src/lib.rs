@@ -486,8 +486,11 @@ impl<'a> ContextPackBuilder<'a> {
         let intent = TaskSearchIntent::parse(task);
         let routing = routing::classify_task(task);
         let candidate_limit = routing.policy.request_limit(limit).clamp(20, 200);
+        let (path_prefixes, scope_caveats) =
+            validated_candidate_path_scope(&intent.path_anchors, &files);
         let request =
-            candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit);
+            candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit)
+                .with_path_prefixes(path_prefixes);
         let routed_external_sources = external_sources
             .iter()
             .copied()
@@ -522,6 +525,9 @@ impl<'a> ContextPackBuilder<'a> {
         let fused = candidates::fuse_candidate_streams(&streams, candidate_limit, &fusion_config);
         let mut diagnostics = fused.diagnostics;
         diagnostics.routing = routing.diagnostics();
+        diagnostics.caveats.extend(scope_caveats);
+        diagnostics.caveats.sort();
+        diagnostics.caveats.dedup();
         let blocked = apply_required_evidence_policy(&routing.policy, &budget, &mut diagnostics);
         let primary = if blocked {
             Vec::new()
@@ -1759,6 +1765,52 @@ fn normalize_path(path: &std::path::Path) -> String {
         .replace('\\', "/")
         .trim_start_matches("./")
         .to_string()
+}
+
+fn validated_candidate_path_scope(
+    path_anchors: &[String],
+    files: &[File],
+) -> (Vec<String>, Vec<String>) {
+    let indexed_paths = files
+        .iter()
+        .map(|file| normalize_path(&file.path))
+        .collect::<Vec<_>>();
+    let mut validated = Vec::new();
+    let mut caveats = Vec::new();
+
+    for anchor in path_anchors {
+        let normalized = anchor
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .trim_matches('/')
+            .to_string();
+        let invalid = normalized.is_empty()
+            || normalized
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..");
+        if invalid {
+            caveats.push(format!(
+                "query path scope `{anchor}` is not a safe repository-relative prefix and was not enforced"
+            ));
+            continue;
+        }
+        let directory_prefix = format!("{normalized}/");
+        if indexed_paths
+            .iter()
+            .any(|path| path == &normalized || path.starts_with(&directory_prefix))
+        {
+            if !validated.contains(&normalized) {
+                validated.push(normalized);
+            }
+        } else {
+            caveats.push(format!(
+                "query path scope `{anchor}` did not match indexed repository paths and was not enforced"
+            ));
+        }
+    }
+    validated.sort();
+    caveats.sort();
+    (validated, caveats)
 }
 
 fn negative_evidence_count(risk: &RiskReport) -> usize {
