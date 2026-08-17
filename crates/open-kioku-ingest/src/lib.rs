@@ -544,14 +544,10 @@ impl Indexer {
                             semantics,
                         );
 
-                        let v2_result = open_kioku_resolution::resolve_call(call, &ctx);
-                        let semantic_target = match &v2_result {
-                            open_kioku_resolution::ResolutionResult::Resolved {
-                                target,
-                                confidence,
-                                evidence,
-                            } => {
-                                match confidence {
+                        let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);
+                        let semantic_target = match &v2_outcome {
+                            open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
+                                match candidate.confidence {
                                     Confidence::Exact => quality_report.resolved_exact += 1,
                                     Confidence::High => quality_report.resolved_high += 1,
                                     _ => {}
@@ -560,22 +556,26 @@ impl Indexer {
                                     resolved_relationships.push(
                                         open_kioku_resolution::ResolvedRelationship {
                                             from: caller.clone(),
-                                            to: target.clone(),
+                                            to: candidate.target_symbol_id.clone(),
                                             edge_type: GraphEdgeType::Calls,
-                                            confidence: *confidence,
+                                            confidence: candidate.confidence,
                                             call_site: Some(call.range.clone()),
-                                            evidence: evidence.clone(),
+                                            evidence: candidate.evidence.clone(),
+                                            proofs: candidate.proofs.clone(),
                                         },
                                     );
                                 }
-                                Some(target.clone())
+                                Some(candidate.target_symbol_id.clone())
                             }
-                            open_kioku_resolution::ResolutionResult::Ambiguous { .. } => {
+                            open_kioku_resolution::ResolutionOutcome::Ambiguous { .. } => {
                                 quality_report.ambiguous += 1;
                                 None
                             }
-                            open_kioku_resolution::ResolutionResult::External { .. } => None,
-                            open_kioku_resolution::ResolutionResult::Unresolved { .. } => {
+                            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                                quality_report.external += 1;
+                                None
+                            }
+                            open_kioku_resolution::ResolutionOutcome::Unresolved { .. } => {
                                 quality_report.unresolved += 1;
                                 None
                             }

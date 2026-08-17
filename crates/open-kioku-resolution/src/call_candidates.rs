@@ -4,7 +4,7 @@ use crate::pipeline::{
     evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy,
 };
 use open_kioku_core::{
-    CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
+    CallSite, Confidence, EvidenceId, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
@@ -705,6 +705,7 @@ fn proof(
     proof.source_range = Some(call_file_range(call, ctx));
     proof.source_symbol_id = call.caller_symbol_id.clone();
     proof.target_symbol_id = Some(target.clone());
+    proof.evidence_ids.push(EvidenceId::new(call.id.0.clone()));
     proof
 }
 

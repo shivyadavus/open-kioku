@@ -958,6 +958,8 @@ pub struct ResolvedRelationship {
     pub call_site: Option<SourceRange>,
     #[serde(default)]
     pub evidence: Vec<ResolutionEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proofs: Vec<RelationshipProof>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

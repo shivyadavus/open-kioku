@@ -1,8 +1,9 @@
 use chrono::Utc;
 use open_kioku_core::{
-    identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    ResolvedRelationship, Symbol, SymbolOccurrence,
+    identity, normalize_relationship_proofs, AnalysisFact, CodeChunk, Evidence, EvidenceId,
+    EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
+    Import, LineRange, NodeId, ResolvedRelationship, Symbol, SymbolOccurrence,
+    RELATIONSHIP_PROOFS_PROPERTY,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -262,6 +263,14 @@ impl InMemoryGraph {
                     .collect::<Vec<_>>();
                 if !fallback_sites.is_empty() {
                     properties.insert("call_sites".to_string(), json!(fallback_sites));
+                }
+            }
+
+            if !rel.proofs.is_empty() {
+                if let Ok(value) =
+                    serde_json::to_value(normalize_relationship_proofs(rel.proofs.clone()))
+                {
+                    properties.insert(RELATIONSHIP_PROOFS_PROPERTY.to_string(), value);
                 }
             }
 
@@ -568,9 +577,10 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdgeType,
-        GraphNodeType, Import, Language, LineRange, RepositoryId, SourceRange, Symbol, SymbolId,
-        SymbolKind, SymbolOccurrence,
+        AnalysisFact, Confidence, EdgeId, EvidenceId, EvidenceSourceType, File, FileId,
+        GraphEdgeType, GraphNodeType, Import, Language, LineRange, RelationshipProof,
+        RelationshipProofKind, RepositoryId, SourceRange, Symbol, SymbolId, SymbolKind,
+        SymbolOccurrence,
     };
     use std::path::PathBuf;
 
@@ -775,6 +785,22 @@ mod tests {
         let file = make_file("src/service");
         let caller = make_symbol("caller", "src/service", "run");
         let callee = make_symbol("callee", "src/service", "save");
+        let proofs_for = |evidence_id: &str| {
+            let mut call_site =
+                RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test_call_site", 1);
+            call_site.source_symbol_id = Some(caller.id.clone());
+            call_site.target_symbol_id = Some(callee.id.clone());
+            call_site.evidence_ids = vec![EvidenceId::new(evidence_id)];
+            let mut same_scope = RelationshipProof::new(
+                RelationshipProofKind::SameScopeDefinition,
+                "test_same_scope",
+                1,
+            );
+            same_scope.source_symbol_id = Some(caller.id.clone());
+            same_scope.target_symbol_id = Some(callee.id.clone());
+            same_scope.evidence_ids = vec![EvidenceId::new(evidence_id)];
+            vec![call_site, same_scope]
+        };
         let relationships = vec![
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -788,6 +814,7 @@ mod tests {
                     end_column: 11,
                 }),
                 evidence: Vec::new(),
+                proofs: proofs_for("call-site-a"),
             },
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -801,6 +828,7 @@ mod tests {
                     end_column: 26,
                 }),
                 evidence: Vec::new(),
+                proofs: proofs_for("call-site-b"),
             },
         ];
 
@@ -827,6 +855,17 @@ mod tests {
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0]["start_column"], 5);
         assert_eq!(sites[1]["start_column"], 20);
+        assert!(calls[0].is_authoritative_relationship());
+        let proofs = calls[0].relationship_proofs();
+        assert_eq!(proofs.len(), 4);
+        let proof_evidence = proofs
+            .iter()
+            .flat_map(|proof| proof.evidence_ids.iter().map(|id| id.0.as_str()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            proof_evidence,
+            std::collections::BTreeSet::from(["call-site-a", "call-site-b"])
+        );
     }
 
     #[test]
