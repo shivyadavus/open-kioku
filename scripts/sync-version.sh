@@ -19,6 +19,9 @@ fi
 
 echo "Syncing version $VERSION to marketplace manifests..."
 
+# Keep publishable sibling Cargo dependencies in lockstep across major releases.
+python3 "$ROOT/scripts/sync-internal-cargo-versions.py" "$VERSION"
+
 sync_json_version() {
   local file="$1"
   sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/g" "$file"

@@ -86,6 +86,31 @@ def check_npm_packages(metadata: dict, version: str, errors: list[str]) -> None:
         fail(f"missing npm platform package manifests: {', '.join(sorted(missing))}", errors)
 
 
+def check_internal_cargo_dependencies(version: str, errors: list[str]) -> None:
+    sections = ("dependencies", "dev-dependencies", "build-dependencies")
+
+    def check_table(path: Path, table: dict) -> None:
+        for section in sections:
+            for name, spec in table.get(section, {}).items():
+                if not name.startswith("open-kioku-") or not isinstance(spec, dict):
+                    continue
+                if not spec.get("path"):
+                    continue
+                found = spec.get("version")
+                if found != version:
+                    fail(
+                        f"{path.relative_to(ROOT)} internal dependency {name} has version {found!r}; expected {version}",
+                        errors,
+                    )
+
+    for path in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+        data = tomllib.loads(load_text(path))
+        check_table(path, data)
+        for target in data.get("target", {}).values():
+            if isinstance(target, dict):
+                check_table(path, target)
+
+
 def check_formula(metadata: dict, version: str, errors: list[str]) -> None:
     formula_path = ROOT / metadata["homebrew"]["formula"]
     text = load_text(formula_path)
@@ -138,6 +163,7 @@ def check_release_workflow(metadata: dict, errors: list[str]) -> None:
     required_steps = [
         "scripts/validate-versions.sh",
         "scripts/generate-release-trust-artifacts.sh",
+        "scripts/verify-release-artifact-hashes.py",
         "SHA256SUMS",
         "SBOM.cargo-metadata.json",
         "PROVENANCE.json",
@@ -236,6 +262,7 @@ def main() -> int:
         fail(f"release-metadata.json version {metadata.get('version')!r} does not match Cargo.toml {version}", errors)
 
     check_git_tag(version, metadata.get("tag"), errors)
+    check_internal_cargo_dependencies(version, errors)
     check_json_version(ROOT / ".cursor-plugin/plugin.json", version, errors)
     check_json_version(ROOT / ".cursor-plugin/marketplace.json", version, errors)
     check_json_version(ROOT / "claude_plugin.json", version, errors)
