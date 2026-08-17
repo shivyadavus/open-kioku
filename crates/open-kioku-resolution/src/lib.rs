@@ -5,6 +5,7 @@ pub mod evidence;
 pub mod index;
 pub mod inheritance;
 pub mod pipeline;
+mod self_calls;
 mod typed_calls;
 
 pub use calls::resolve_call;

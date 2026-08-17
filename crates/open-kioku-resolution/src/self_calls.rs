@@ -13,7 +13,8 @@ pub(crate) fn resolve_self_member_outcome(
 
     if let Some(receiver_member) = self_receiver_member(call) {
         let mut type_names = BTreeSet::new();
-        for field_id in crate::typed_calls::find_members_by_name(ctx, &parent_type_id, receiver_member)
+        for field_id in
+            crate::typed_calls::find_members_by_name(ctx, &parent_type_id, receiver_member)
         {
             if let Some(signature) = ctx
                 .symbols
@@ -26,12 +27,10 @@ pub(crate) fn resolve_self_member_outcome(
                 }
             }
         }
-        if let Some(binding) = ctx.bindings.resolve_before(
-            &call.scope_id,
-            receiver_member,
-            &call.range,
-            ctx.scopes,
-        ) {
+        if let Some(binding) =
+            ctx.bindings
+                .resolve_before(&call.scope_id, receiver_member, &call.range, ctx.scopes)
+        {
             if let Some(type_name) = binding
                 .declared_type
                 .as_deref()
@@ -94,10 +93,7 @@ fn self_receiver_member(call: &CallSite) -> Option<&str> {
         .trim_start_matches("this.")
         .trim_start_matches("self.")
         .trim_start_matches("Self::");
-    if stripped.is_empty()
-        || matches!(stripped, "this" | "self" | "Self")
-        || stripped == receiver
-    {
+    if stripped.is_empty() || matches!(stripped, "this" | "self" | "Self") || stripped == receiver {
         None
     } else {
         Some(stripped)
@@ -111,16 +107,11 @@ mod tests {
     use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
     use crate::inheritance::InheritanceIndex;
     use open_kioku_core::{
-        CallSiteId, Confidence, EvidenceSourceType, FileId, Language, ReceiverKind, Scope,
-        ScopeId, ScopeKind, SourceRange, Symbol, SymbolKind, Visibility,
+        CallSiteId, Confidence, EvidenceSourceType, FileId, Language, ReceiverKind, Scope, ScopeId,
+        ScopeKind, SourceRange, Symbol, SymbolKind, Visibility,
     };
 
-    fn symbol(
-        id: &str,
-        name: &str,
-        kind: SymbolKind,
-        parent: Option<&str>,
-    ) -> Symbol {
+    fn symbol(id: &str, name: &str, kind: SymbolKind, parent: Option<&str>) -> Symbol {
         Symbol {
             id: SymbolId::new(id),
             name: name.into(),
@@ -211,11 +202,13 @@ mod tests {
 
     #[test]
     fn direct_self_member_is_proven_from_containing_type() {
-        with_context(|ctx| match resolve_self_member_outcome(&self_call(ReceiverKind::Self_), ctx) {
-            ResolutionOutcome::Proven { candidate } => {
-                assert_eq!(candidate.target_symbol_id.0, "symbol:method:run");
+        with_context(|ctx| {
+            match resolve_self_member_outcome(&self_call(ReceiverKind::Self_), ctx) {
+                ResolutionOutcome::Proven { candidate } => {
+                    assert_eq!(candidate.target_symbol_id.0, "symbol:method:run");
+                }
+                other => panic!("expected proven direct self call, got {other:?}"),
             }
-            other => panic!("expected proven direct self call, got {other:?}"),
         });
     }
 }
