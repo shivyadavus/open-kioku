@@ -17,6 +17,19 @@ use open_kioku_tests::TestSelector;
 pub mod candidates;
 pub mod routing;
 
+fn is_trusted_context_dependency_edge(edge: &GraphEdge) -> bool {
+    match &edge.edge_type {
+        GraphEdgeType::Calls
+        | GraphEdgeType::References
+        | GraphEdgeType::UsesType
+        | GraphEdgeType::Implements
+        | GraphEdgeType::Extends
+        | GraphEdgeType::Imports
+        | GraphEdgeType::DependsOn => edge.is_authoritative_relationship(),
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ContextPackFormat {
     Json,
@@ -580,7 +593,8 @@ impl<'a> ContextPackBuilder<'a> {
         for result in primary.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
             if let Ok((_nodes, edges)) = self.store.neighbors(&node_id, 20) {
-                dependency_edges.extend(edges);
+                dependency_edges
+                    .extend(edges.into_iter().filter(is_trusted_context_dependency_edge));
             }
         }
         dependency_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
@@ -3539,5 +3553,34 @@ mod tests {
                 .any(|result| result.path == Path::new("crates/open-kioku-config/src/lib.rs")),
             "config crate should stay in the planner-visible context: {results:#?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod ri3_context_dependency_authority_tests {
+    use super::is_trusted_context_dependency_edge;
+    use open_kioku_core::{GraphEdge, GraphEdgeType, RelationshipProof, RelationshipProofKind};
+
+    #[test]
+    fn proof_gated_context_edges_fail_closed_but_ordinary_graph_structure_remains_available() {
+        let ordinary = GraphEdge {
+            edge_type: GraphEdgeType::Defines,
+            ..GraphEdge::default()
+        };
+        assert!(is_trusted_context_dependency_edge(&ordinary));
+
+        let mut import = GraphEdge {
+            edge_type: GraphEdgeType::Imports,
+            ..GraphEdge::default()
+        };
+        assert!(!is_trusted_context_dependency_edge(&import));
+
+        let proof = RelationshipProof::new(
+            RelationshipProofKind::ModuleOrPackageBinding,
+            "test_static_import",
+            1,
+        );
+        import.set_relationship_proofs(vec![proof]).unwrap();
+        assert!(is_trusted_context_dependency_edge(&import));
     }
 }
