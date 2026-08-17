@@ -104,22 +104,80 @@ replace_exact(
     "proof-preserving ingest resolution",
 )
 
-# Graph materialization copies typed proofs rather than reconstructing authority from messages.
+# Graph materialization uses the typed GraphEdge proof API rather than reaching through storage.
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
-    '''                source_pass: Some("open-kioku-resolution".into()),
+    '''            buffer.insert_edge(GraphEdge {
+                id: edge_id.clone(),
+                from: from_node,
+                to: to_node,
+                edge_type: rel.edge_type.clone(),
+                properties,
+                source_pass: Some("open-kioku-resolution".into()),
                 ambiguity: Vec::new(),
                 evidence: Evidence {
+                    id: EvidenceId::new(stable_id(&format!("resolved-rel-evidence:{}", edge_id.0))),
+                    source: "open-kioku-resolution".into(),
+                    source_type: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.source_type.clone())
+                        .unwrap_or(EvidenceSourceType::TreeSitter),
+                    file_range,
+                    symbol_id: Some(rel.from.clone()),
+                    confidence: rel.confidence,
+                    message: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_else(|| {
+                            format!("resolved call from {} to {}", from_sym.name, to_sym.name)
+                        }),
+                    indexed_at: Utc::now(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
 ''',
-    '''                source_pass: Some("open-kioku-resolution".into()),
+    '''            let mut edge = GraphEdge {
+                id: edge_id.clone(),
+                from: from_node,
+                to: to_node,
+                edge_type: rel.edge_type.clone(),
+                properties,
+                source_pass: Some("open-kioku-resolution".into()),
                 ambiguity: Vec::new(),
-                relationship_proofs: rel.proofs.clone(),
                 evidence: Evidence {
+                    id: EvidenceId::new(stable_id(&format!("resolved-rel-evidence:{}", edge_id.0))),
+                    source: "open-kioku-resolution".into(),
+                    source_type: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.source_type.clone())
+                        .unwrap_or(EvidenceSourceType::TreeSitter),
+                    file_range,
+                    symbol_id: Some(rel.from.clone()),
+                    confidence: rel.confidence,
+                    message: rel
+                        .evidence
+                        .first()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_else(|| {
+                            format!("resolved call from {} to {}", from_sym.name, to_sym.name)
+                        }),
+                    indexed_at: Utc::now(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            edge.set_relationship_proofs(rel.proofs.clone())
+                .expect("typed relationship proofs must serialize to JSON");
+            buffer.insert_edge(edge);
 ''',
     "graph proof materialization",
 )
 
-# Existing test literals explicitly model proofless legacy relationships.
+# Existing graph test literals now carry explicit typed proof payloads.
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
     '''                evidence: Vec::new(),
@@ -129,11 +187,10 @@ replace_exact(
                 proofs: Vec::new(),
             },
 ''',
-    "first graph relationship literal",
+    "graph relationship literals",
     count=2,
 )
 
-# Strengthen the same-line call-site regression with real typed proofs and authority checks.
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
     '''    use open_kioku_core::{
@@ -200,21 +257,20 @@ replace_exact(
     "graph proof test helper",
 )
 
-# Replace proofless values in these two literals with occurrence-specific proof sets.
-text_path = Path("crates/open-kioku-graph/src/lib.rs")
-text = text_path.read_text()
+p = Path("crates/open-kioku-graph/src/lib.rs")
+text = p.read_text()
 needle = '''                evidence: Vec::new(),
                 proofs: Vec::new(),
             },
 '''
-first = '''                evidence: Vec::new(),
+replacement = '''                evidence: Vec::new(),
                 proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
             },
 '''
 if text.count(needle) != 2:
     raise SystemExit(f"graph proof literal seam changed: expected 2, observed {text.count(needle)}")
-text = text.replace(needle, first, 2)
-text_path.write_text(text)
+text = text.replace(needle, replacement, 2)
+p.write_text(text)
 
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
@@ -224,13 +280,13 @@ replace_exact(
 ''',
     '''        assert_eq!(sites[0]["start_column"], 5);
         assert_eq!(sites[1]["start_column"], 20);
-        assert_eq!(calls[0].relationship_proofs.len(), 2);
+        let proofs = calls[0].relationship_proofs();
+        assert_eq!(proofs.len(), 2);
         assert_eq!(
             calls[0].relationship_authority(),
             RelationshipAuthority::Authoritative
         );
-        assert!(calls[0]
-            .relationship_proofs
+        assert!(proofs
             .iter()
             .all(|proof| proof.target_symbol_id.as_ref() == Some(&callee.id)));
     }
@@ -238,7 +294,8 @@ replace_exact(
     "merged relationship proof assertion",
 )
 
-# GraphBuffer must merge typed proof/evidence identity when logical edges collapse.
+# GraphBuffer captures incoming proofs before consuming properties, skips the reserved proof key in
+# generic property merge, and writes the canonical union back through the typed API.
 replace_exact(
     "crates/open-kioku-graph/src/buffer.rs",
     '''use open_kioku_core::{
@@ -246,35 +303,51 @@ replace_exact(
 };
 ''',
     '''use open_kioku_core::{
-    identity, normalize_relationship_proofs, EdgeId, Evidence, EvidenceSourceType, GraphEdge,
-    GraphEdgeType, GraphNode, NodeId,
+    identity, EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
+    RELATIONSHIP_PROOFS_PROPERTY,
 };
 ''',
-    "buffer proof-normalization import",
+    "buffer proof-property import",
 )
 
 replace_exact(
     "crates/open-kioku-graph/src/buffer.rs",
-    '''    existing.quality_notes.extend(incoming.quality_notes);
-    existing.quality_notes.sort();
-    existing.quality_notes.dedup();
-
-    if existing.schema_version.is_none() {
+    '''fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
+    let mut call_sites: Vec<serde_json::Value> = existing
 ''',
-    '''    existing.quality_notes.extend(incoming.quality_notes);
-    existing.quality_notes.sort();
-    existing.quality_notes.dedup();
-
-    existing
-        .relationship_proofs
-        .extend(incoming.relationship_proofs);
-    existing.relationship_proofs =
-        normalize_relationship_proofs(std::mem::take(&mut existing.relationship_proofs));
-    existing.evidence_ids.extend(incoming.evidence_ids);
-    existing.evidence_ids.sort();
-    existing.evidence_ids.dedup();
-
-    if existing.schema_version.is_none() {
+    '''fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
+    let incoming_relationship_proofs = incoming.relationship_proofs();
+    let mut call_sites: Vec<serde_json::Value> = existing
 ''',
-    "buffer proof merge",
+    "capture incoming proofs",
+)
+
+replace_exact(
+    "crates/open-kioku-graph/src/buffer.rs",
+    '''    for (k, v) in incoming.properties {
+        if k != "call_sites" {
+            existing.properties.entry(k).or_insert(v);
+        }
+    }
+
+    existing.ambiguity.extend(incoming.ambiguity);
+''',
+    '''    for (k, v) in incoming.properties {
+        if k != "call_sites" && k != RELATIONSHIP_PROOFS_PROPERTY {
+            existing.properties.entry(k).or_insert(v);
+        }
+    }
+
+    let mut merged_relationship_proofs = existing.relationship_proofs();
+    merged_relationship_proofs.extend(incoming_relationship_proofs);
+    if existing
+        .set_relationship_proofs(merged_relationship_proofs)
+        .is_err()
+    {
+        existing.properties.remove(RELATIONSHIP_PROOFS_PROPERTY);
+    }
+
+    existing.ambiguity.extend(incoming.ambiguity);
+''',
+    "buffer typed proof merge",
 )
