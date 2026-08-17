@@ -25,7 +25,7 @@ jobs:
 
       - name: Validate benchmark gates
         run: |
-          cargo fmt --all
+          cargo fmt --all -- --check
           cargo clippy -p open-kioku-cli --all-targets -- -D warnings
           cargo test -p open-kioku-cli relationship_bench_tests
 
@@ -41,6 +41,11 @@ jobs:
             crates/open-kioku-cli/src/bench/relationship.rs \
             crates/open-kioku-cli/src/types.rs \
             benchmarks/relationship-thresholds.json
+          if ! git diff --quiet; then
+            echo "unexpected unstaged changes after non-mutating validation:" >&2
+            git status --short >&2
+            exit 1
+          fi
           git commit -m "ri3: enforce non-vacuous relationship benchmark release gates"
           git pull --rebase origin agent/ri3-relationship-conformance-benchmark
           git push origin HEAD:agent/ri3-relationship-conformance-benchmark
