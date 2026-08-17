@@ -1,3 +1,28 @@
+fn require_current_analysis_semantics(
+    store: &SqliteStore,
+) -> anyhow::Result<()> {
+    let manifest = open_kioku_storage::MetadataStore::manifest(store)?;
+    let compatibility = open_kioku_core::classify_analysis_semantics(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &open_kioku_core::AnalysisSemanticsState::current(),
+    );
+    if compatibility.status.allows_authoritative_relationships() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
+        compatibility.status,
+        compatibility.reasons.join("; "),
+        compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+        compatibility.current_fingerprint,
+        compatibility.affected_components.join(", "),
+        compatibility.affected_languages.join(", "),
+        compatibility.recommended_action
+    )
+}
+
 fn relationship_resolution_summary_lines(
     report: &open_kioku_core::ResolutionQualityReport,
 ) -> Vec<String> {
@@ -326,6 +351,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 format,
             } => {
                 let store = open_store(&repo)?;
+                require_current_analysis_semantics(&store)?;
                 let ast = open_kioku_graph::query::parse_graph_query(&dsl)?;
                 let options = open_kioku_graph::query::GraphQueryOptions {
                     limit,
@@ -477,6 +503,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         } => {
             let store = open_store(&repo)?;
             let results = if matches!(kind, SearchKind::Graph) {
+                require_current_analysis_semantics(&store)?;
                 graph_search(&repo, &query, limit)?
             } else if semantic {
                 semantic_search(&repo, &store, &query, limit)?

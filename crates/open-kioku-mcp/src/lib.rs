@@ -591,12 +591,17 @@ async fn dispatch(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
         }
-        "detect_architecture" => Ok(json!(ArchitectureDetector::new(store, None).detect()?)),
+        "detect_architecture" => {
+            require_authoritative_relationships(store)?;
+            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
+        }
         "architecture_boundaries" | "architecture_violations" => {
+            require_authoritative_relationships(store)?;
             architecture_summary_tool(repo, store)
         }
         "architecture_policy_validate" => architecture_policy_validate_tool(repo, &params),
         "architecture_policy_check" => {
+            require_authoritative_relationships(store)?;
             let Some(policy) = load_architecture_policy(repo)? else {
                 return Ok(json!(open_kioku_core::PolicyCheckReport {
                     configured: false,
@@ -611,6 +616,7 @@ async fn dispatch(
             Ok(json!(evaluate_policy(store, &resolver, &policy)?))
         }
         "architecture_policy_explain" => {
+            require_authoritative_relationships(store)?;
             let Some(policy) = load_architecture_policy(repo)? else {
                 return Ok(json!({
                     "configured": false,
@@ -702,7 +708,10 @@ async fn dispatch(
             Ok(json!({"file": file, "chunks": chunks}))
         }
         "explain_flow" => explain_flow_tool(store, &params),
-        "summarize_architecture" => architecture_summary_tool(repo, store),
+        "summarize_architecture" => {
+            require_authoritative_relationships(store)?;
+            architecture_summary_tool(repo, store)
+        }
         "explain_test_coverage" => {
             let path = params
                 .get("path")
