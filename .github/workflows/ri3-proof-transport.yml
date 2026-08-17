@@ -17,7 +17,7 @@ jobs:
           ref: agent/ri3-resolution-foundation
           fetch-depth: 0
 
-      - name: Apply proof transport patch
+      - name: Apply current proof transport patch
         run: |
           python3 -m py_compile scripts/ri3_proof_transport_tmp.py scripts/ri3_proof_transport_test_fix_tmp.py
           python3 scripts/ri3_proof_transport_tmp.py
