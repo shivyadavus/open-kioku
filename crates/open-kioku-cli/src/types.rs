@@ -593,6 +593,14 @@ struct RelationshipBenchArgs {
     /// Optional path for the deterministic JSON score report.
     #[arg(long, value_name = "REPORT_JSON")]
     write: Option<PathBuf>,
+
+    /// Versioned JSON release-gate policy. When supplied, gate results are included in the report.
+    #[arg(long, value_name = "POLICY_JSON")]
+    policy: Option<PathBuf>,
+
+    /// Exit non-zero unless every configured release gate passes.
+    #[arg(long, default_value_t = false)]
+    enforce_gates: bool,
 }
 
 #[derive(Args)]
