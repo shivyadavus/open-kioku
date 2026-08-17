@@ -30,6 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/v3-mainline-platform-compat.py
+          python3 scripts/v3-mainline-platform-plumbing.py
           git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
       - name: Validate supported-platform release surface
         run: |
@@ -50,8 +51,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git reset .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py
+          git reset .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py scripts/v3-mainline-platform-plumbing.py
           git commit -m "release: align v3 with supported runtime platforms"
-          git rm .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py
+          git rm .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py scripts/v3-mainline-platform-plumbing.py
           git commit -m "chore: remove v3 platform compatibility gate"
           git push origin HEAD:release/v3.0.0-mainline
