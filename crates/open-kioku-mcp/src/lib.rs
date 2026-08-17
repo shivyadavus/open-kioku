@@ -255,6 +255,35 @@ fn store_idle_expired(last_request: Instant) -> bool {
     last_request.elapsed() > STORE_IDLE_TTL
 }
 
+fn analysis_semantics_compatibility_for_store(
+    store: &SqliteStore,
+) -> anyhow::Result<open_kioku_core::AnalysisSemanticsCompatibility> {
+    let manifest = store.manifest()?;
+    Ok(open_kioku_core::classify_analysis_semantics(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &open_kioku_core::AnalysisSemanticsState::current(),
+    ))
+}
+
+fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()> {
+    let compatibility = analysis_semantics_compatibility_for_store(store)?;
+    if compatibility.status.allows_authoritative_relationships() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
+        compatibility.status,
+        compatibility.reasons.join("; "),
+        compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+        compatibility.current_fingerprint,
+        compatibility.affected_components.join(", "),
+        compatibility.affected_languages.join(", "),
+        compatibility.recommended_action
+    )
+}
+
 async fn dispatch(
     repo: &Path,
     store: &SqliteStore,
@@ -298,7 +327,18 @@ async fn dispatch(
             tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(json!({"slept": true}))
         }
-        "repo_status" => Ok(json!(store.manifest()?)),
+        "repo_status" => {
+            let manifest = store.manifest()?;
+            let compatibility = analysis_semantics_compatibility_for_store(store)?;
+            let mut status = serde_json::to_value(&manifest)?;
+            if let Some(object) = status.as_object_mut() {
+                object.insert(
+                    "analysis_semantics_status".into(),
+                    serde_json::to_value(compatibility)?,
+                );
+            }
+            Ok(status)
+        }
         "list_languages" => {
             let files = store.list_files(usize::MAX, 0)?;
             let mut languages = files
@@ -460,6 +500,7 @@ async fn dispatch(
             ))
         }
         "impact_analysis" => {
+            require_authoritative_relationships(store)?;
             let path = required_str(&params, "path")?;
             let mut report = ImpactEngine::new(store)
                 .with_history_store(Some(store))
@@ -586,12 +627,14 @@ async fn dispatch(
             Ok(json!(SymbolEngine::new(store).definition(query)?))
         }
         "get_references" => {
+            require_authoritative_relationships(store)?;
             let query = required_str(&params, "query")?;
             Ok(json!(
                 SymbolEngine::new(store).references(query, limit(&params))?
             ))
         }
         "get_callers" | "get_callees" => {
+            require_authoritative_relationships(store)?;
             let query = required_str(&params, "query")?;
             let symbol = SymbolEngine::new(store).definition(query)?;
             let node = format!("symbol:{}", symbol.id.0);
@@ -624,8 +667,12 @@ async fn dispatch(
         "hybrid_search" => hybrid_search_tool(repo, store, config, &params),
         "explain_search_result" => hybrid_search_tool(repo, store, config, &params),
         "structural_search" => search_tool(repo, store, &params),
-        "get_implementations" => implementation_lookup_tool(store, &params),
+        "get_implementations" => {
+            require_authoritative_relationships(store)?;
+            implementation_lookup_tool(store, &params)
+        }
         "dependency_path" => {
+            require_authoritative_relationships(store)?;
             let from = required_str(&params, "from")?;
             let to = required_str(&params, "to")?;
             let from = resolve_graph_node(store, from)?;
@@ -638,6 +685,7 @@ async fn dispatch(
             }))
         }
         "module_dependencies" => {
+            require_authoritative_relationships(store)?;
             let node = required_str(&params, "node")?;
             let node = resolve_graph_node(store, node)?;
             let (nodes, edges) = store.neighbors(&node, limit(&params))?;
@@ -810,9 +858,14 @@ async fn dispatch(
                 "relationship_semantic_capabilities".into(),
                 json!(capabilities),
             );
+            object.insert(
+                "analysis_semantics_status".into(),
+                serde_json::to_value(analysis_semantics_compatibility_for_store(store)?)?,
+            );
             Ok(schema)
         }
         "query_evidence_graph" => {
+            require_authoritative_relationships(store)?;
             let query_str = params
                 .get("query")
                 .and_then(serde_json::Value::as_str)
@@ -3265,7 +3318,7 @@ paths = ["src/**"]
     }
 
     fn fixture_manifest() -> IndexManifest {
-        serde_json::from_value(json!({
+        let mut manifest: IndexManifest = serde_json::from_value(json!({
             "repository": {
                 "id": "repo",
                 "name": "mcp-fixture",
@@ -3282,7 +3335,9 @@ paths = ["src/**"]
             "index_mode": "full",
             "phase_reports": []
         }))
-        .unwrap()
+        .unwrap();
+        manifest.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::current());
+        manifest
     }
 
     fn fixture_history_snapshot() -> HistorySnapshot {
@@ -3383,9 +3438,78 @@ paths = ["src/**"]
     }
 
     #[tokio::test]
+    async fn legacy_analysis_semantics_are_reported_and_relationship_reads_fail_closed() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let mut manifest = fixture_manifest();
+        manifest.analysis_semantics = None;
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let status = dispatch(Path::new("."), &store, &config, "repo_status", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            status["analysis_semantics_status"]["status"],
+            "rebuild_required"
+        );
+        assert!(status["analysis_semantics_status"]["recommended_action"]
+            .as_str()
+            .unwrap()
+            .contains("ok index"));
+
+        let graph = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "query_evidence_graph",
+            json!({"query": "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 1"}),
+        )
+        .await
+        .unwrap_err();
+        let message = graph.to_string();
+        assert!(message.contains("authoritative relationship evidence unavailable"));
+        assert!(message.contains("RebuildRequired"));
+
+        let files = dispatch(Path::new("."), &store, &config, "list_files", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(files["returned"], 0);
+    }
+
+    #[tokio::test]
     async fn query_evidence_graph_returns_metadata_and_continuation() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
+        let manifest = fixture_manifest();
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
         let root = GraphNode {
             id: NodeId::new("file:root"),
             node_type: GraphNodeType::File,

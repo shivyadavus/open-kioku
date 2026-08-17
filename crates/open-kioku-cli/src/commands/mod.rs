@@ -189,7 +189,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     println!("{rendered}");
                 }
             } else if cli.json {
-                println!("{}", serde_json::to_string_pretty(&manifest)?);
+                let compatibility = analysis_semantics_compatibility_for_manifest(manifest.as_ref());
+                let mut status = serde_json::to_value(&manifest)?;
+                if let Some(object) = status.as_object_mut() {
+                    object.insert("analysis_semantics_status".into(), serde_json::to_value(compatibility)?);
+                }
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else if let Some(manifest) = manifest {
                 println!(
                     "Healthy index: {} files, {} symbols, {} skipped, mode {}, indexed at {}",
@@ -199,6 +204,17 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     manifest.index_mode,
                     manifest.indexed_at
                 );
+                let semantics = analysis_semantics_compatibility_for_manifest(Some(&manifest));
+                println!(
+                    "Analysis semantics: {:?}; stored={}, current={}",
+                    semantics.status,
+                    semantics.stored_fingerprint.as_deref().unwrap_or("missing"),
+                    semantics.current_fingerprint
+                );
+                if !semantics.status.allows_authoritative_relationships() {
+                    println!("Relationship authority unavailable: {}", semantics.reasons.join("; "));
+                    println!("Recommended action: {}", semantics.recommended_action);
+                }
                 if let Some(report) = manifest.quality.resolution_quality.as_ref() {
                     for line in relationship_resolution_summary_lines(report) {
                         println!("{line}");
