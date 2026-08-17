@@ -1,0 +1,39 @@
+name: agent-fix-resolution-timing-determinism
+on:
+  push:
+    branches: [agent/ri3-language-semantics-complete]
+    paths:
+      - '.github/scripts/agent_fix_resolution_timing_determinism.py'
+      - '.github/workflows/agent-fix-resolution-timing-determinism.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-language-semantics-complete
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply deterministic timing separation
+        run: python3 .github/scripts/agent_fix_resolution_timing_determinism.py
+      - name: Validate exact product tree
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product repair and remove temporary tooling
+        run: |
+          rm .github/scripts/agent_fix_resolution_timing_determinism.py
+          rm .github/workflows/agent-fix-resolution-timing-determinism.yml
+          git config user.name 'Shiv Yadav'
+          git config user.email '155265880+shivyadavus@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(resolution): keep wall-clock timing out of durable quality'
+          git push origin HEAD:agent/ri3-language-semantics-complete
