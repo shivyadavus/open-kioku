@@ -85,3 +85,14 @@ test = '''
 '''
 text = text[:pos] + test + text[pos:]
 path.write_text(text)
+
+# The MCP tool-list snapshot is a public contract. PR #263 intentionally enriches the
+# get_evidence_schema description, so keep the integration snapshot in lock-step rather than
+# weakening the golden test or regenerating unrelated entries.
+path = Path('crates/open-kioku-tests/snapshots/tools_list.json')
+text = path.read_text()
+old = '''Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph. Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.'''
+new = '''Retrieve the versioned schema defining supported graph types, query properties, and the Tier-1 relationship-semantic capability matrix. Use before query_evidence_graph to learn available graph node types, edge types, properties, and the versioned Tier-1 relationship-semantic capability matrix. This is read-only and does not query graph data.'''
+if text.count(old) != 1:
+    raise SystemExit(f'tools_list get_evidence_schema snapshot marker count={text.count(old)}')
+path.write_text(text.replace(old, new, 1))
