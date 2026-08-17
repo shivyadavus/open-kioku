@@ -29,13 +29,13 @@ jobs:
           cargo fmt --all
           cargo fmt --all -- --check
           cargo clippy --all-targets --all-features -- -D warnings
-          cargo test -p open-kioku-impact -p open-kioku-storage-sqlite
+          cargo test -p open-kioku-impact -p open-kioku-storage-sqlite -p open-kioku-tests
           git diff --check
       - name: Commit validated product fix and self-clean
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git add crates/open-kioku-impact/src/lib.rs crates/open-kioku-storage-sqlite/src/lib.rs
+          git add crates/open-kioku-impact/src/lib.rs crates/open-kioku-storage-sqlite/src/lib.rs crates/open-kioku-tests/src/lib.rs
           git diff --cached --quiet && { echo "expected product change missing" >&2; exit 1; }
           git commit -m "fix: preserve occurrence range compatibility"
           git rm scripts/ri3_source_range_compat_tmp.py .github/workflows/ri3-source-range-compat.yml
