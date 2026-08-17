@@ -17,17 +17,7 @@ pub const RELATIONSHIP_PROOFS_PROPERTY: &str = "relationship_proofs";
 /// This vocabulary intentionally excludes fuzzy-name, semantic-similarity, and candidate-rank
 /// signals. Those signals may remain useful for retrieval, but they are not structural proof.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipProofKind {
@@ -211,7 +201,9 @@ pub fn relationship_authority(
     let external_exact = has_unique(proofs, RelationshipProofKind::ExternalExactIndex);
 
     let authoritative = match edge_type {
-        GraphEdgeType::References => exact_target || import_binding || (qualified_name && same_scope),
+        GraphEdgeType::References => {
+            exact_target || import_binding || (qualified_name && same_scope)
+        }
         GraphEdgeType::Calls => {
             exact_call_site
                 && (exact_target
@@ -247,7 +239,9 @@ pub fn normalize_relationship_proofs(mut proofs: Vec<RelationshipProof>) -> Vec<
             .then_with(|| left.candidate_count.cmp(&right.candidate_count))
             .then_with(|| left.source_symbol_id.cmp(&right.source_symbol_id))
             .then_with(|| left.target_symbol_id.cmp(&right.target_symbol_id))
-            .then_with(|| source_range_key(&left.source_range).cmp(&source_range_key(&right.source_range)))
+            .then_with(|| {
+                source_range_key(&left.source_range).cmp(&source_range_key(&right.source_range))
+            })
             .then_with(|| left.ambiguity.cmp(&right.ambiguity))
             .then_with(|| left.evidence_ids.cmp(&right.evidence_ids))
             .then_with(|| {
@@ -363,11 +357,11 @@ impl RelationshipProofFilter {
         if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
             return false;
         }
-        self.accepted_proof_kinds.as_ref().map_or(true, |accepted| {
-            proofs
-                .iter()
-                .any(|proof| accepted.contains(&proof.kind))
-        })
+        self.accepted_proof_kinds
+            .as_ref()
+            .map_or(true, |accepted| {
+                proofs.iter().any(|proof| accepted.contains(&proof.kind))
+            })
     }
 }
 
@@ -496,9 +490,7 @@ mod tests {
             .set_relationship_proofs(vec![left.clone(), right.clone()])
             .unwrap();
         let mut second = GraphEdge::default();
-        second
-            .set_relationship_proofs(vec![right, left])
-            .unwrap();
+        second.set_relationship_proofs(vec![right, left]).unwrap();
 
         assert_eq!(
             first.properties.get(RELATIONSHIP_PROOFS_PROPERTY),
