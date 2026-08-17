@@ -1,0 +1,56 @@
+name: RI3 adversarial hardening
+
+on:
+  push:
+    branches:
+      - agent/ri3-frozen-conformance
+    paths:
+      - .github/workflows/ri3-adversarial-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-frozen-conformance
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Apply executable adversarial hardening
+        run: |
+          set -euo pipefail
+          python3 scripts/ri3-hardening-stage.py
+          cargo fmt --all
+      - name: Strict changed-surface gate
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+          cargo test -p open-kioku-cli relationship_bench -- --nocapture
+          cargo test -p open-kioku-cli relationship_live -- --nocapture
+      - name: Full hardened 336-case release gate
+        run: |
+          set -euo pipefail
+          cargo run -p open-kioku-cli -- --json relationship-bench \
+            --corpus benchmarks/relationship-cases.json \
+            --observations @live \
+            --policy benchmarks/relationship-thresholds.json \
+            --enforce-gates \
+            --write /tmp/relationship-hardened-report.json
+      - name: Commit hardened product tree
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-cli/src/bench/relationship_live.rs \
+                  benchmarks/relationship-cases.json \
+                  benchmarks/relationship-ci-cases.json
+          git diff --cached --check
+          git commit -m "test(ri3): harden adversarial and metamorphic relationship corpus"
+          git push origin HEAD:agent/ri3-frozen-conformance
