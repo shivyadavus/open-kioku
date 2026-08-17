@@ -10,7 +10,10 @@
   "minimum_exact_range_compliance": 1.0,
   "minimum_proof_compliance": 1.0,
   "minimum_outcome_compliance": 1.0,
+  "minimum_metamorphic_groups": 35,
+  "minimum_metamorphic_equivalence": 1.0,
   "require_zero_false_negatives": true,
   "require_positive_and_negative_per_language_relationship": true,
+  "require_metamorphic_group_per_language_relationship": true,
   "require_frozen_corpus": true
 }
