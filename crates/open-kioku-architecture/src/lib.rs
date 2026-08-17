@@ -159,9 +159,10 @@ where
         ));
     }
     if report.evaluated_edge_count == 0 {
-        report
-            .uncertainty
-            .push("no import, reference, or call graph edges were available to evaluate".into());
+        report.uncertainty.push(
+            "no authoritative import, reference, or call graph edges were available to evaluate"
+                .into(),
+        );
     }
     if report.unknown_edge_count > 0 {
         report.uncertainty.push(format!(
@@ -287,9 +288,10 @@ where
         ));
     }
     if report.evaluated_edge_count == 0 {
-        report
-            .uncertainty
-            .push("no import, reference, or call graph edges were available to evaluate".into());
+        report.uncertainty.push(
+            "no authoritative import, reference, or call graph edges were available to evaluate"
+                .into(),
+        );
     }
     Ok(PublicApiBoundaryReport {
         configured: true,
