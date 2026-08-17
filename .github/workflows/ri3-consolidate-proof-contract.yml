@@ -1,0 +1,32 @@
+name: RI3 consolidate proof contract
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-relationship-proofs
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-relationship-proofs
+          fetch-depth: 0
+      - name: Apply consolidation
+        run: python3 scripts/ri3_consolidate_tmp.py
+      - name: Format and validate focused contract
+        run: |
+          cargo fmt --all
+          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp
+      - name: Commit consolidated contract
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-consolidate-proof-contract.yml scripts/ri3_consolidate_tmp.py
+          git add crates/open-kioku-core/src/lib.rs crates/open-kioku-core/src/relationship.rs crates/open-kioku-evidence/src/lib.rs crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
+          git commit -m "refactor(ri3): consolidate relationship proof domain contract"
+          git push origin HEAD:agent/ri3-core-relationship-proofs
