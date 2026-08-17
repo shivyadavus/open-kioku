@@ -355,13 +355,15 @@ impl RelationshipProofFilter {
     pub fn matches(&self, edge: &GraphEdge) -> bool {
         let proofs = match edge.try_relationship_proofs() {
             Ok(proofs) => proofs,
-            Err(_) => return self.minimum_authority == RelationshipAuthority::Heuristic
-                && self.accepted_proof_kinds.is_none(),
+            Err(_) => {
+                return self.minimum_authority == RelationshipAuthority::Heuristic
+                    && self.accepted_proof_kinds.is_none();
+            }
         };
         if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
             return false;
         }
-        self.accepted_proof_kinds.as_ref().is_none_or(|accepted| {
+        self.accepted_proof_kinds.as_ref().map_or(true, |accepted| {
             proofs
                 .iter()
                 .any(|proof| accepted.contains(&proof.kind))
