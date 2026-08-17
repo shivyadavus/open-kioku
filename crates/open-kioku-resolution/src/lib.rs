@@ -1,3 +1,4 @@
+mod bare_calls;
 pub mod calls;
 pub mod context;
 pub mod evidence;

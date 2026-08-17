@@ -240,6 +240,7 @@ pub fn relationship_authority(
         GraphEdgeType::Calls => {
             exact_call_site
                 && (exact_target
+                    || same_scope
                     || (receiver_type && (qualified_name || same_scope || containing_type))
                     || (import_binding && (qualified_name || same_scope)))
         }

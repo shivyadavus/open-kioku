@@ -1,8 +1,8 @@
 use crate::context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use open_kioku_core::{
-    CallSite, Confidence, EvidenceSourceType, FileRange, Language, LineRange, ReceiverKind,
-    SymbolId, SymbolKind,
+    CallSite, Confidence, EvidenceSourceType, FileRange, LineRange, ReceiverKind, SymbolId,
+    SymbolKind,
 };
 
 fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> Option<FileRange> {
@@ -21,7 +21,9 @@ pub fn resolve_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionR
         ReceiverKind::Super => resolve_super_member(call, ctx),
         ReceiverKind::Type => resolve_static_member(call, ctx),
         ReceiverKind::Value => resolve_typed_receiver(call, ctx),
-        ReceiverKind::None => resolve_bare_call(call, ctx),
+        ReceiverKind::None => {
+            crate::bare_calls::resolve_bare_call_outcome(call, ctx).into_legacy_result()
+        }
         ReceiverKind::Module => resolve_module_member(call, ctx),
         ReceiverKind::Unknown => ResolutionResult::Unresolved {
             reason: UnresolvedReason::UnsupportedDynamicDispatch,
@@ -401,190 +403,6 @@ fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resol
 
     ResolutionResult::Unresolved {
         reason: UnresolvedReason::UnknownReceiverType,
-        evidence: vec![],
-    }
-}
-
-fn resolve_bare_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionResult {
-    // Step 1: Lexical scope & enclosing scopes — walk up scope chain
-    let mut current_scope_id = Some(call.scope_id.clone());
-    let mut visited_scopes = std::collections::HashSet::new();
-    while let Some(sid) = current_scope_id {
-        if !visited_scopes.insert(sid.clone()) {
-            break;
-        }
-        let scope_symbols: Vec<SymbolId> = ctx
-            .symbols
-            .by_file
-            .get(ctx.file_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .filter(|id| {
-                if let Some(sym) = ctx.symbols.get(id) {
-                    sym.name == call.callee_name
-                        && matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
-                        && sym.scope_id.as_ref() == Some(&sid)
-                } else {
-                    false
-                }
-            })
-            .cloned()
-            .collect();
-
-        if scope_symbols.len() == 1 {
-            return ResolutionResult::Resolved {
-                target: scope_symbols[0].clone(),
-                confidence: Confidence::Exact,
-                evidence: vec![ResolutionEvidence {
-                    kind: ResolutionEvidenceKind::LexicalScope,
-                    source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call, ctx),
-                    symbol_id: Some(scope_symbols[0].clone()),
-                    message: "resolved bare call via lexical scope".into(),
-                }],
-            };
-        } else if scope_symbols.len() > 1 {
-            return ResolutionResult::Ambiguous {
-                candidates: scope_symbols,
-                reason: "multiple bare call candidates in lexical scope".into(),
-                evidence: vec![],
-            };
-        }
-
-        // Walk to enclosing parent scope
-        current_scope_id = ctx.scopes.get(&sid).and_then(|s| s.parent_id.clone());
-    }
-
-    // Step 2: Implicit self / containing type check (where language permits)
-    if ctx.semantics.implicit_self_dispatch() {
-        if let Some(caller_id) = &call.caller_symbol_id {
-            if let Some(caller_symbol) = ctx.symbols.get(caller_id) {
-                if let Some(parent_id) = &caller_symbol.parent_symbol_id {
-                    let self_members = find_members_by_name(ctx, parent_id, &call.callee_name);
-
-                    if self_members.len() == 1 {
-                        return ResolutionResult::Resolved {
-                            target: self_members[0].clone(),
-                            confidence: Confidence::Exact,
-                            evidence: vec![ResolutionEvidence {
-                                kind: ResolutionEvidenceKind::ImplicitSelf,
-                                source_type: EvidenceSourceType::TreeSitter,
-                                file_range: call_file_range(call, ctx),
-                                symbol_id: Some(self_members[0].clone()),
-                                message: "resolved bare call via implicit self dispatch".into(),
-                            }],
-                        };
-                    } else if self_members.len() > 1 {
-                        return ResolutionResult::Ambiguous {
-                            candidates: self_members,
-                            reason: "multiple implicit self candidates".into(),
-                            evidence: vec![],
-                        };
-                    }
-
-                    // Also check inherited members on containing type
-                    if let Some(target) = ctx.inheritance.resolve_inherited_member(
-                        parent_id,
-                        &call.callee_name,
-                        ctx.symbols,
-                    ) {
-                        return ResolutionResult::Resolved {
-                            target: target.clone(),
-                            confidence: Confidence::Exact,
-                            evidence: vec![ResolutionEvidence {
-                                kind: ResolutionEvidenceKind::InheritanceGraph,
-                                source_type: EvidenceSourceType::TreeSitter,
-                                file_range: call_file_range(call, ctx),
-                                symbol_id: Some(target),
-                                message: "resolved bare call via implicit self inheritance".into(),
-                            }],
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    // Step 3: Explicit import binding lookup
-    let import_bindings =
-        ctx.repository
-            .imports
-            .lookup(ctx.file_id, Some(&call.scope_id), &call.callee_name);
-
-    let resolved_imports: Vec<&SymbolId> = import_bindings
-        .iter()
-        .filter_map(|imp| imp.target_symbol.as_ref())
-        .collect();
-
-    if resolved_imports.len() == 1 {
-        let target = resolved_imports[0];
-        return ResolutionResult::Resolved {
-            target: target.clone(),
-            confidence: Confidence::Exact,
-            evidence: vec![ResolutionEvidence {
-                kind: ResolutionEvidenceKind::ExplicitImport,
-                source_type: EvidenceSourceType::TreeSitter,
-                file_range: call_file_range(call, ctx),
-                symbol_id: Some(target.clone()),
-                message: "resolved bare call via explicit import binding".into(),
-            }],
-        };
-    } else if resolved_imports.len() > 1 {
-        return ResolutionResult::Ambiguous {
-            candidates: resolved_imports.into_iter().cloned().collect(),
-            reason: "multiple import bindings match".into(),
-            evidence: vec![],
-        };
-    }
-
-    // Step 4: Strict same file / module check.
-    // In class-based OOP languages like Java, do NOT resolve bare calls to an arbitrary
-    // method of an unrelated class in the same file!
-    if ctx.language != Language::Java {
-        let same_file_candidates: Vec<SymbolId> = ctx
-            .symbols
-            .by_file
-            .get(ctx.file_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-            .iter()
-            .filter(|id| {
-                ctx.symbols
-                    .get(id)
-                    .map(|s| {
-                        s.name == call.callee_name
-                            && s.parent_symbol_id.is_none()
-                            && matches!(s.kind, SymbolKind::Function)
-                    })
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-
-        if same_file_candidates.len() == 1 {
-            return ResolutionResult::Resolved {
-                target: same_file_candidates[0].clone(),
-                confidence: Confidence::High,
-                evidence: vec![ResolutionEvidence {
-                    kind: ResolutionEvidenceKind::SameFile,
-                    source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call, ctx),
-                    symbol_id: Some(same_file_candidates[0].clone()),
-                    message: "resolved bare call via same file function".into(),
-                }],
-            };
-        } else if same_file_candidates.len() > 1 {
-            return ResolutionResult::Ambiguous {
-                candidates: same_file_candidates,
-                reason: "multiple bare call candidates in same file".into(),
-                evidence: vec![],
-            };
-        }
-    }
-
-    ResolutionResult::Unresolved {
-        reason: UnresolvedReason::NoCandidate,
         evidence: vec![],
     }
 }

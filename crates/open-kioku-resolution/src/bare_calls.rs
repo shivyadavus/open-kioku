@@ -207,7 +207,7 @@ fn target_proof(
     proof.source_range = call_file_range(call, ctx);
     proof.source_symbol_id = call.caller_symbol_id.clone();
     proof.target_symbol_id = Some(target.clone());
-    proof.ambiguity = ambiguity.to_vec();
+    proof.ambiguity = ambiguity.iter().map(|id| id.0.clone()).collect();
     proof
 }
 
