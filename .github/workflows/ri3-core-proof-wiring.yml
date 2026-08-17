@@ -61,6 +61,10 @@ jobs:
               "}\n\n"
           )
           text = text[:start] + wrapper + text[end:]
+          text = text.replace(
+              "    Confidence, Evidence, EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId,\n",
+              "    Confidence, Evidence, FileRange, GraphEdge, GraphEdgeType, SymbolId,\n",
+          )
           text = text.replace("use std::collections::{BTreeMap, BTreeSet};", "use std::collections::BTreeSet;")
           evidence.write_text(text)
 
