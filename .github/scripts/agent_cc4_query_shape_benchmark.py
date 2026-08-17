@@ -170,20 +170,46 @@ replace_once('''        assert_eq!(comparisons[1].scope, "task_family:issue_to_c
     }''', 'comparison shape assertion')
 path.write_text(text)
 
+# Freeze query-shape annotations as reviewable corpus data. They are deliberately *not* derived
+# at benchmark runtime: the routed benchmark separately runs the production classifier and fails
+# closed on drift. This keeps the benchmark label independent from the implementation under test.
 path = Path('benchmarks/retrieval-cases.json')
 data = json.loads(path.read_text())
-labels = {}
+labels = {
+    'java-issue-token-persistence': 'conceptual',
+    'java-code-to-test-auth': 'mixed_structured_natural_language',
+    'java-trace-login-audit': 'mixed_structured_natural_language',
+    'java-comment-login-rejection-audit': 'mixed_structured_natural_language',
+    'java-edit-tokenstore-contract': 'mixed_structured_natural_language',
+    'java-no-gold-password-reset': 'conceptual',
+    'ts-issue-invoice-tax': 'conceptual',
+    'ts-code-to-test-invoice': 'mixed_structured_natural_language',
+    'ts-comment-webhook-retry': 'conceptual',
+    'ts-edit-webhook-contract': 'mixed_structured_natural_language',
+    'ts-trace-invoice-created': 'mixed_structured_natural_language',
+    'ts-no-gold-subscription-renewal': 'conceptual',
+    'python-issue-order-persistence': 'conceptual',
+    'python-code-to-test-order': 'mixed_structured_natural_language',
+    'python-comment-order-trace': 'mixed_structured_natural_language',
+    'python-no-gold-video': 'conceptual',
+    'python-trace-order-created': 'mixed_structured_natural_language',
+    'python-edit-repository-contract': 'mixed_structured_natural_language',
+    'go-issue-shipping-quote': 'conceptual',
+    'go-code-to-test-quote': 'mixed_structured_natural_language',
+    'go-comment-timeout': 'mixed_structured_natural_language',
+    'go-trace-quote-handler': 'mixed_structured_natural_language',
+    'go-no-gold-thumbnail': 'conceptual',
+    'go-edit-carrier-contract': 'mixed_structured_natural_language',
+    'rust-issue-cache-miss': 'conceptual',
+    'rust-code-to-test-cache': 'mixed_structured_natural_language',
+    'rust-comment-cache-trace': 'mixed_structured_natural_language',
+    'rust-edit-store-contract': 'mixed_structured_natural_language',
+    'rust-no-gold-http-session': 'conceptual',
+    'rust-trace-cache-miss': 'mixed_structured_natural_language',
+}
+actual = {case['id'] for case in data['cases']}
+if actual != set(labels):
+    raise SystemExit(f'frozen query-shape label coverage mismatch missing={sorted(actual-set(labels))} extra={sorted(set(labels)-actual)}')
 for case in data['cases']:
-    cid = case['id']
-    if '-trace-' in cid or cid.endswith('-trace'):
-        label = 'error_trace'
-    elif 'no-gold' in cid:
-        label = 'conceptual'
-    else:
-        q = case['query']
-        structured_markers = ['_', '.', 'AuthService', 'TokenStore', 'finalizeInvoice', 'publishInvoiceCreated', 'OrderService', 'OrderRepository', 'QuoteHandler', 'CacheStore', 'Service Quote', 'Carrier Rate', 'HTTP 504']
-        label = 'mixed_structured_natural_language' if any(m in q for m in structured_markers) else 'conceptual'
-    labels[cid] = label
-    case['query_shape'] = label
+    case['query_shape'] = labels[case['id']]
 path.write_text(json.dumps(data, indent=2) + '\n')
-print(json.dumps(labels, indent=2, sort_keys=True))
