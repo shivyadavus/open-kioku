@@ -6,6 +6,7 @@ on:
       - agent/ri3-frozen-conformance
     paths:
       - .github/workflows/ri3-complete-240.yml
+      - .tmp-ri3/**
 
 permissions:
   contents: write
