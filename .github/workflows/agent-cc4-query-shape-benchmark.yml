@@ -1,0 +1,55 @@
+name: agent-cc4-query-shape-benchmark
+
+on:
+  push:
+    branches: [agent/cc4-query-shape-benchmark]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC4 benchmark patch
+        run: python3 .github/scripts/agent_cc4_query_shape_benchmark.py
+      - name: Validate focused and full workspace contracts
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-cli retrieval_bench_tests
+          cargo test --all
+          cargo test -p open-kioku-tests
+          cargo run --release -p open-kioku-cli -- --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-json /tmp/retrieval-report.json \
+            --write-markdown /tmp/retrieval-report.md \
+            --write-baseline /tmp/retrieval-baseline.json \
+            > /tmp/retrieval-stdout.json
+          cmp benchmarks/retrieval-baseline.json /tmp/retrieval-baseline.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/retrieval-report.json'))
+          routed = next(x for x in report['stream_ablations'] if x['strategy'] == 'cc4:routed_contextpack')
+          assert routed['by_query_shape'], 'missing query-shape breakdown'
+          assert routed['by_task_family_query_shape'], 'missing task-family/query-shape breakdown'
+          cases = next(x for x in report['strategies'] if x['strategy'] == 'fusion')['cases']
+          assert all('query_shape' in x and 'classified_query_shape' in x and 'query_shape_match' in x for x in cases)
+          assert any(not x['query_shape_match'] for x in cases) or all(x['query_shape_match'] for x in cases)
+          print('query-shape report contract passed')
+          PY
+      - name: Commit product change and remove temporary tooling
+        run: |
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-cli/src/bench/retrieval.rs benchmarks/retrieval-cases.json
+          git rm .github/scripts/agent_cc4_query_shape_benchmark.py .github/workflows/agent-cc4-query-shape-benchmark.yml
+          git commit -m "bench(context): measure retrieval by query shape"
+          git push origin HEAD:agent/cc4-query-shape-benchmark
