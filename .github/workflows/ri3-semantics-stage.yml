@@ -38,10 +38,10 @@ jobs:
           from pathlib import Path
           path = Path('crates/open-kioku-cli/src/bench/relationship_live.rs')
           text = path.read_text()
-          old = '    corpus: &RelationshipBenchCorpus,\n'
-          new = '    _corpus: &RelationshipBenchCorpus,\n'
-          if old not in text:
-              raise SystemExit('relationship benchmark corpus parameter patch point missing')
+          old = '''fn live_relationship_run_metadata(\n    corpus: &RelationshipBenchCorpus,\n) -> anyhow::Result<RelationshipBenchRunMetadata> {\n'''
+          new = '''fn live_relationship_run_metadata(\n    _corpus: &RelationshipBenchCorpus,\n) -> anyhow::Result<RelationshipBenchRunMetadata> {\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'relationship benchmark metadata parameter patch count={text.count(old)}')
           path.write_text(text.replace(old, new, 1))
           PY
       - name: Format
