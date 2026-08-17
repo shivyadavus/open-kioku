@@ -203,7 +203,7 @@ fn merged_candidate_evidence(candidates: &[ResolutionCandidate]) -> Vec<Resoluti
 }
 
 fn normalize_resolution_evidence(evidence: &mut Vec<ResolutionEvidence>) {
-    evidence.sort_by(|left, right| evidence_key(left).cmp(&evidence_key(right)));
+    evidence.sort_by_key(evidence_key);
     evidence.dedup();
 }
 
@@ -270,7 +270,7 @@ fn evidence_source_rank(source: &EvidenceSourceType) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{RelationshipProofKind, RelationshipProof};
+    use open_kioku_core::{RelationshipProof, RelationshipProofKind};
 
     fn proof(kind: RelationshipProofKind, target: &SymbolId, strategy: &str) -> RelationshipProof {
         let mut proof = RelationshipProof::new(kind, strategy, 1);
