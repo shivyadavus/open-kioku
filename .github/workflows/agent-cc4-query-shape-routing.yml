@@ -37,7 +37,7 @@ jobs:
                   repaired.append(r'''    ) || (lower.contains('\n') && contains_any(lower, &["error", "exception", "panic", "traceback"]))''')
                   index += 2
                   continue
-              repaired.append(line)
+              repaired.append(line.rstrip())
               index += 1
           path.write_text('\n'.join(repaired) + '\n')
           PY
