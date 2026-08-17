@@ -1,8 +1,8 @@
 use chrono::Utc;
 use open_kioku_core::{
-    identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,
-    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    ResolvedRelationship, Symbol, SymbolOccurrence,
+    identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,
+    FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
+    RelationshipProof, RelationshipProofKind, ResolvedRelationship, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -137,16 +137,47 @@ impl InMemoryGraph {
             };
             let from = identity::file_node_id(&file.path);
             let to = identity::symbol_node_id(symbol);
-            buffer.insert_edge(GraphEdge {
+            let occurrence_key = occurrence
+                .source_range
+                .as_ref()
+                .map(|range| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        range.start_line, range.start_column, range.end_line, range.end_column
+                    )
+                })
+                .unwrap_or_else(|| {
+                    occurrence
+                        .range
+                        .as_ref()
+                        .map(|range| format!("{}:{}", range.start, range.end))
+                        .unwrap_or_else(|| "unknown".into())
+                });
+            let evidence_id = EvidenceId::new(stable_id(&format!(
+                "occurrence-evidence:{}:{}:{}",
+                file.id.0, symbol.id.0, occurrence_key
+            )));
+            let mut properties = BTreeMap::new();
+            if let Some(range) = &occurrence.source_range {
+                properties.insert(
+                    "reference_sites".into(),
+                    json!([{
+                        "path": file.path.to_string_lossy(),
+                        "start_line": range.start_line,
+                        "start_column": range.start_column,
+                        "end_line": range.end_line,
+                        "end_column": range.end_column,
+                    }]),
+                );
+            }
+            let mut edge = GraphEdge {
                 id: identity::edge_id(GraphEdgeType::References, &from, &to, None),
                 from,
                 to,
                 edge_type: GraphEdgeType::References,
+                properties,
                 evidence: Evidence {
-                    id: EvidenceId::new(stable_id(&format!(
-                        "occurrence-evidence:{}:{}",
-                        file.id.0, symbol.id.0
-                    ))),
+                    id: evidence_id.clone(),
                     source: "open-kioku-graph".into(),
                     source_type: occurrence.provenance.clone(),
                     file_range: Some(FileRange {
@@ -160,7 +191,39 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            if occurrence.provenance == EvidenceSourceType::Scip
+                && occurrence.confidence == Confidence::Exact
+            {
+                if let Some(range) = &occurrence.source_range {
+                    let mut proof = RelationshipProof::new(
+                        RelationshipProofKind::ExactOccurrence,
+                        "scip_exact_occurrence",
+                        1,
+                    );
+                    proof.source_range = Some(FileRange {
+                        path: file.path.clone(),
+                        line_range: occurrence.range.clone(),
+                    });
+                    proof.target_symbol_id = Some(symbol.id.clone());
+                    proof.evidence_ids.push(evidence_id);
+                    proof
+                        .details
+                        .insert("start_line".into(), json!(range.start_line));
+                    proof
+                        .details
+                        .insert("start_column".into(), json!(range.start_column));
+                    proof
+                        .details
+                        .insert("end_line".into(), json!(range.end_line));
+                    proof
+                        .details
+                        .insert("end_column".into(), json!(range.end_column));
+                    edge.set_relationship_proofs(vec![proof])
+                        .expect("SCIP occurrence proof must serialize to JSON");
+                }
+            }
+            buffer.insert_edge(edge);
         }
         for import in imports {
             let Some(file) = files_by_id.get(import.file_id.0.as_str()) else {
@@ -177,19 +240,21 @@ impl InMemoryGraph {
             buffer.upsert_node(target_node.clone());
             let from = identity::file_node_id(&file.path);
             let edge_id = identity::edge_id(GraphEdgeType::Imports, &from, &target_node.id, None);
-            buffer.insert_edge(GraphEdge {
+            let evidence_id = EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0)));
+            let file_range = FileRange {
+                path: file.path.clone(),
+                line_range: import.range.clone(),
+            };
+            let mut edge = GraphEdge {
                 id: edge_id.clone(),
                 from,
                 to: target_node.id,
                 edge_type: GraphEdgeType::Imports,
                 evidence: Evidence {
-                    id: EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0))),
+                    id: evidence_id.clone(),
                     source: "open-kioku-static/imports".into(),
                     source_type: EvidenceSourceType::StaticAnalysis,
-                    file_range: Some(FileRange {
-                        path: file.path.clone(),
-                        line_range: import.range.clone(),
-                    }),
+                    file_range: Some(file_range.clone()),
                     symbol_id: None,
                     confidence: import.confidence,
                     message: format!("{} imports {}", file.path.display(), import.imported),
@@ -197,7 +262,17 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            let mut proof = RelationshipProof::new(
+                RelationshipProofKind::ModuleOrPackageBinding,
+                "static_import_syntax",
+                1,
+            );
+            proof.source_range = Some(file_range);
+            proof.evidence_ids.push(evidence_id);
+            edge.set_relationship_proofs(vec![proof])
+                .expect("static import proof must serialize to JSON");
+            buffer.insert_edge(edge);
         }
         for rel in resolved_relationships {
             let Some(from_sym) = symbols_by_id.get(rel.from.0.as_str()) else {
@@ -265,7 +340,7 @@ impl InMemoryGraph {
                 }
             }
 
-            buffer.insert_edge(GraphEdge {
+            let mut edge = GraphEdge {
                 id: edge_id.clone(),
                 from: from_node,
                 to: to_node,
@@ -295,7 +370,10 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            edge.set_relationship_proofs(rel.proofs.clone())
+                .expect("typed relationship proofs must serialize to JSON");
+            buffer.insert_edge(edge);
         }
         for fact in analysis_facts {
             let Some(file) = files_by_id.get(fact.file_id.0.as_str()) else {
@@ -331,7 +409,9 @@ impl InMemoryGraph {
                 Some(&fact.id),
             );
 
-            buffer.insert_edge(GraphEdge {
+            let evidence_id =
+                EvidenceId::new(stable_id(&format!("analysis-evidence:{}", edge_id.0)));
+            let mut edge = GraphEdge {
                 id: edge_id.clone(),
                 from: source_node,
                 to: target_node.id,
@@ -340,7 +420,7 @@ impl InMemoryGraph {
                 source_pass: Some(fact.source.clone()),
                 ambiguity: analysis_fact_ambiguity(fact),
                 evidence: Evidence {
-                    id: EvidenceId::new(stable_id(&format!("analysis-evidence:{}", edge_id.0))),
+                    id: evidence_id.clone(),
                     source: fact.source.clone(),
                     source_type: fact.source_type.clone(),
                     file_range: fact.range.as_ref().map(|range| FileRange {
@@ -354,7 +434,29 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            if fact.edge_type == GraphEdgeType::Imports
+                && fact.target_kind == GraphNodeType::File
+                && fact.source.starts_with("open-kioku-import-resolver/")
+                && matches!(fact.confidence, Confidence::High | Confidence::Exact)
+            {
+                let mut proof = RelationshipProof::new(
+                    RelationshipProofKind::ImportBinding,
+                    fact.source.clone(),
+                    1,
+                );
+                proof.source_range = fact.range.as_ref().map(|range| FileRange {
+                    path: file.path.clone(),
+                    line_range: Some(range.clone()),
+                });
+                proof.evidence_ids.push(evidence_id);
+                proof
+                    .details
+                    .insert("target_path".into(), json!(fact.target));
+                edge.set_relationship_proofs(vec![proof])
+                    .expect("resolved import binding proof must serialize to JSON");
+            }
+            buffer.insert_edge(edge);
         }
 
         let (nodes_vec, edges) = buffer.into_parts();
@@ -568,8 +670,9 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdgeType,
-        GraphNodeType, Import, Language, LineRange, RepositoryId, SourceRange, Symbol, SymbolId,
+        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, FileRange,
+        GraphEdgeType, GraphNodeType, Import, Language, LineRange, RelationshipAuthority,
+        RelationshipProof, RelationshipProofKind, RepositoryId, SourceRange, Symbol, SymbolId,
         SymbolKind, SymbolOccurrence,
     };
     use std::path::PathBuf;
@@ -770,11 +873,41 @@ mod tests {
         );
     }
 
+    fn call_relationship_proofs(
+        caller: &SymbolId,
+        callee: &SymbolId,
+        start_line: u32,
+    ) -> Vec<RelationshipProof> {
+        let range = Some(FileRange {
+            path: PathBuf::from("src/service.rs"),
+            line_range: Some(LineRange {
+                start: start_line,
+                end: start_line,
+            }),
+        });
+        let mut call_site =
+            RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test_call_site", 1);
+        call_site.source_range = range.clone();
+        call_site.source_symbol_id = Some(caller.clone());
+        call_site.target_symbol_id = Some(callee.clone());
+
+        let mut target = RelationshipProof::new(
+            RelationshipProofKind::SameScopeDefinition,
+            "test_same_scope",
+            1,
+        );
+        target.source_range = range;
+        target.source_symbol_id = Some(caller.clone());
+        target.target_symbol_id = Some(callee.clone());
+        vec![call_site, target]
+    }
+
     #[test]
     fn resolved_relationships_preserve_same_line_call_columns() {
         let file = make_file("src/service");
         let caller = make_symbol("caller", "src/service", "run");
         let callee = make_symbol("callee", "src/service", "save");
+        let callee_id = callee.id.clone();
         let relationships = vec![
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -788,6 +921,7 @@ mod tests {
                     end_column: 11,
                 }),
                 evidence: Vec::new(),
+                proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
             },
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -801,6 +935,7 @@ mod tests {
                     end_column: 26,
                 }),
                 evidence: Vec::new(),
+                proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
             },
         ];
 
@@ -827,6 +962,15 @@ mod tests {
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0]["start_column"], 5);
         assert_eq!(sites[1]["start_column"], 20);
+        let proofs = calls[0].relationship_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(
+            calls[0].relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+        assert!(proofs
+            .iter()
+            .all(|proof| proof.target_symbol_id.as_ref() == Some(&callee_id)));
     }
 
     #[test]
@@ -903,6 +1047,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 10, end: 10 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
@@ -911,6 +1056,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 12, end: 12 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
@@ -931,6 +1077,91 @@ mod tests {
             .filter(|e| e.edge_type == GraphEdgeType::References)
             .collect::<Vec<_>>();
         assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+    }
+
+    #[test]
+    fn exact_scip_references_preserve_columns_and_become_authoritative() {
+        let file = make_file("src/reference");
+        let symbol = make_symbol("target", "src/reference", "target");
+        let make_occurrence = |start_column| SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange::single(10)),
+            source_range: Some(SourceRange {
+                start_line: 10,
+                start_column,
+                end_line: 10,
+                end_column: start_column + 4,
+            }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Scip,
+        };
+        let graph = InMemoryGraph::from_index_with_occurrences(
+            std::slice::from_ref(&file),
+            std::slice::from_ref(&symbol),
+            &[],
+            &[make_occurrence(5), make_occurrence(20)],
+        );
+        let refs = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == GraphEdgeType::References)
+            .collect::<Vec<_>>();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+        let sites = refs[0]
+            .properties
+            .get("reference_sites")
+            .and_then(serde_json::Value::as_array)
+            .expect("exact reference edge should retain structured sites");
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0]["start_column"], 5);
+        assert_eq!(sites[1]["start_column"], 20);
+        let proofs = refs[0].relationship_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert!(proofs
+            .iter()
+            .all(|proof| proof.kind == RelationshipProofKind::ExactOccurrence));
+    }
+
+    #[test]
+    fn exact_non_scip_reference_range_does_not_create_structural_authority() {
+        let file = make_file("src/reference_lsp");
+        let symbol = make_symbol("target_lsp", "src/reference_lsp", "target");
+        let occurrence = SymbolOccurrence {
+            symbol_id: symbol.id.clone(),
+            file_id: file.id.clone(),
+            range: Some(LineRange::single(10)),
+            source_range: Some(SourceRange {
+                start_line: 10,
+                start_column: 5,
+                end_line: 10,
+                end_column: 9,
+            }),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Lsp,
+        };
+        let graph =
+            InMemoryGraph::from_index_with_occurrences(&[file], &[symbol], &[], &[occurrence]);
+        let reference = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::References)
+            .expect("reference edge should exist as non-authoritative evidence");
+        assert_eq!(
+            reference.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+        assert!(reference.relationship_proofs().is_empty());
     }
 
     #[test]
@@ -1048,6 +1279,7 @@ mod tests {
             symbol_id: symbol.id.clone(),
             file_id: file.id.clone(),
             range: Some(LineRange { start: 10, end: 10 }),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Lsp,
@@ -1113,5 +1345,141 @@ mod tests {
             .nodes
             .values()
             .any(|n| n.node_type == GraphNodeType::Endpoint));
+    }
+}
+
+#[cfg(test)]
+mod ri3_static_import_authority_tests {
+    use super::InMemoryGraph;
+    use open_kioku_core::{
+        Confidence, File, FileId, GraphEdgeType, Import, Language, LineRange,
+        RelationshipProofKind, RepositoryId,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn explicit_static_import_emits_authoritative_module_binding_proof() {
+        let file = File {
+            id: FileId::new("file:src/lib.rs"),
+            repository_id: RepositoryId::new("repo:test"),
+            path: PathBuf::from("src/lib.rs"),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let import = Import {
+            file_id: file.id.clone(),
+            imported: "crate::domain".into(),
+            range: Some(LineRange::single(3)),
+            confidence: Confidence::Exact,
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(
+            std::slice::from_ref(&file),
+            &[],
+            &[],
+            &[],
+            &[import],
+            &[],
+        );
+        let edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::Imports)
+            .expect("explicit import should emit an imports edge");
+
+        assert!(edge.is_authoritative_relationship());
+        assert!(edge.has_relationship_proof_kind(RelationshipProofKind::ModuleOrPackageBinding));
+        assert_eq!(edge.relationship_proofs().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ri3_import_resolution_authority_tests {
+    use super::InMemoryGraph;
+    use open_kioku_core::{
+        AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType, GraphNodeType,
+        Language, LineRange, RelationshipProofKind, RepositoryId,
+    };
+    use std::path::PathBuf;
+
+    fn file(id: &str, path: &str) -> File {
+        File {
+            id: FileId::new(id),
+            repository_id: RepositoryId::new("repo:test"),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: format!("hash:{path}"),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    #[test]
+    fn resolved_import_analysis_fact_is_authoritative() {
+        let source = file("source", "src/domain/mod.rs");
+        let target = file("target", "src/api/internal/mod.rs");
+        let fact = AnalysisFact {
+            id: "resolved-import".into(),
+            file_id: source.id.clone(),
+            symbol_id: None,
+            target: target.path.to_string_lossy().into_owned(),
+            target_kind: GraphNodeType::File,
+            edge_type: GraphEdgeType::Imports,
+            range: Some(LineRange::single(1)),
+            confidence: Confidence::High,
+            source: "open-kioku-import-resolver/rust-module".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "resolved import to an exact repository file".into(),
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[source.clone(), target.clone()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[fact],
+        );
+        let target_node = open_kioku_core::identity::file_node_id(&target.path);
+        let edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::Imports && edge.to == target_node)
+            .expect("resolved import should target the concrete repository file");
+
+        assert!(edge.is_authoritative_relationship());
+        assert!(edge.has_relationship_proof_kind(RelationshipProofKind::ImportBinding));
+    }
+
+    #[test]
+    fn unresolved_import_analysis_fact_remains_untrusted() {
+        let source = file("source", "src/domain/mod.rs");
+        let fact = AnalysisFact {
+            id: "unresolved-import".into(),
+            file_id: source.id.clone(),
+            symbol_id: None,
+            target: "crate::missing".into(),
+            target_kind: GraphNodeType::Module,
+            edge_type: GraphEdgeType::Imports,
+            range: Some(LineRange::single(1)),
+            confidence: Confidence::Low,
+            source: "open-kioku-import-resolver/unresolved".into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "unresolved import".into(),
+        };
+
+        let graph = InMemoryGraph::from_index_with_analysis(&[source], &[], &[], &[], &[], &[fact]);
+        let edge = graph
+            .edges
+            .iter()
+            .find(|edge| edge.edge_type == GraphEdgeType::Imports)
+            .expect("unresolved import should remain inspectable evidence");
+
+        assert!(!edge.is_authoritative_relationship());
+        assert!(!edge.has_relationship_proof_kind(RelationshipProofKind::ImportBinding));
     }
 }

@@ -20,6 +20,10 @@ use std::path::{Path, PathBuf};
 
 const MAX_UNKNOWN_EDGE_SAMPLES: usize = 100;
 
+fn is_authoritative_policy_edge(edge: &GraphEdge) -> bool {
+    edge.is_authoritative_relationship()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitectureSummary {
     pub components: Vec<ArchitectureComponent>,
@@ -80,6 +84,9 @@ where
                 break;
             }
             for edge in &batch {
+                if !is_authoritative_policy_edge(edge) {
+                    continue;
+                }
                 report.evaluated_edge_count += 1;
                 evaluate_edge(
                     &mut report,
@@ -110,9 +117,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -151,9 +155,10 @@ where
         .count();
     report.exempted_violation_count = report.exemptions.len();
     if report.evaluated_edge_count == 0 {
-        report
-            .uncertainty
-            .push("no import, reference, or call graph edges were available to evaluate".into());
+        report.uncertainty.push(
+            "no authoritative import, reference, or call graph edges were available to evaluate"
+                .into(),
+        );
     }
     if report.unknown_edge_count > 0 {
         report.uncertainty.push(format!(
@@ -229,6 +234,9 @@ where
                 break;
             }
             for edge in &batch {
+                if !is_authoritative_policy_edge(edge) {
+                    continue;
+                }
                 if let Some(evidence) = edge_evidence(
                     store,
                     edge,
@@ -248,9 +256,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -271,9 +276,10 @@ where
     });
     report.exemptions.dedup();
     if report.evaluated_edge_count == 0 {
-        report
-            .uncertainty
-            .push("no import, reference, or call graph edges were available to evaluate".into());
+        report.uncertainty.push(
+            "no authoritative import, reference, or call graph edges were available to evaluate"
+                .into(),
+        );
     }
     Ok(PublicApiBoundaryReport {
         configured: true,
@@ -809,7 +815,8 @@ mod tests {
     };
     use open_kioku_core::{
         Confidence, EdgeId, Evidence, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest,
-        IndexMode, IndexQuality, Language, NodeId, Repository, RepositoryId,
+        IndexMode, IndexQuality, Language, NodeId, RelationshipProof, RelationshipProofKind,
+        Repository, RepositoryId,
     };
     use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
@@ -879,7 +886,24 @@ mod tests {
     }
 
     fn edge(id: &str, from: &GraphNode, to: &GraphNode, edge_type: GraphEdgeType) -> GraphEdge {
-        GraphEdge {
+        let proofs = match &edge_type {
+            GraphEdgeType::Calls => vec![
+                RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test", 1),
+                RelationshipProof::new(RelationshipProofKind::SameScopeDefinition, "test", 1),
+            ],
+            GraphEdgeType::References => vec![RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "test",
+                1,
+            )],
+            GraphEdgeType::Imports => vec![RelationshipProof::new(
+                RelationshipProofKind::ModuleOrPackageBinding,
+                "test",
+                1,
+            )],
+            _ => Vec::new(),
+        };
+        let mut edge = GraphEdge {
             id: EdgeId::new(id),
             from: from.id.clone(),
             to: to.id.clone(),
@@ -892,7 +916,22 @@ mod tests {
                 ..Evidence::default()
             },
             ..GraphEdge::default()
-        }
+        };
+        edge.set_relationship_proofs(proofs)
+            .expect("architecture test relationship proofs must serialize");
+        edge
+    }
+
+    fn unproved_edge(
+        id: &str,
+        from: &GraphNode,
+        to: &GraphNode,
+        edge_type: GraphEdgeType,
+    ) -> GraphEdge {
+        let mut edge = edge(id, from, to, edge_type);
+        edge.set_relationship_proofs(Vec::new())
+            .expect("clearing relationship proofs must serialize");
+        edge
     }
 
     fn policy(rules: Vec<DependencyRule>) -> ArchitecturePolicy {
@@ -941,6 +980,41 @@ mod tests {
         let store = store_with_graph(files, nodes, edges);
         let resolver = PolicyResolver::new(policy).expect("resolver");
         evaluate_policy(&store, &resolver, policy).expect("policy evaluation")
+    }
+
+    #[test]
+    fn confidence_without_structural_proof_is_ignored() {
+        let domain = file("domain", "src/domain/order.rs");
+        let api = file("api", "src/api/http.rs");
+        let domain_node = file_node(&domain);
+        let api_node = file_node(&api);
+        let policy = policy(vec![DependencyRule {
+            id: "domain-must-not-call-api".into(),
+            from: "domain".into(),
+            to: "api".into(),
+            action: DependencyAction::Forbid,
+            severity: Severity::Error,
+            reason: "domain cannot depend on api".into(),
+        }]);
+
+        let report = evaluate(
+            &[domain.clone(), api.clone()],
+            &[domain_node.clone(), api_node.clone()],
+            &[unproved_edge(
+                "high-confidence-without-proof",
+                &domain_node,
+                &api_node,
+                GraphEdgeType::Calls,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.evaluated_edge_count, 0);
+        assert_eq!(report.violation_count, 0);
+        assert!(report
+            .uncertainty
+            .iter()
+            .any(|message| message.contains("no authoritative")));
     }
 
     #[test]
@@ -1215,5 +1289,28 @@ mod tests {
         assert_eq!(report.exemptions[0].exemption_id, "contract-tests");
         assert_eq!(report.exemptions[0].rule_id, "api-internals-are-private");
         assert_eq!(report.exemptions[0].scope, "tests");
+    }
+}
+
+#[cfg(test)]
+mod ri3_authoritative_policy_edge_tests {
+    use super::is_authoritative_policy_edge;
+    use open_kioku_core::{GraphEdge, GraphEdgeType, RelationshipProof, RelationshipProofKind};
+
+    #[test]
+    fn policy_edges_fail_closed_without_typed_authority() {
+        let mut edge = GraphEdge {
+            edge_type: GraphEdgeType::Imports,
+            ..GraphEdge::default()
+        };
+        assert!(!is_authoritative_policy_edge(&edge));
+
+        let proof = RelationshipProof::new(
+            RelationshipProofKind::ModuleOrPackageBinding,
+            "test_static_import",
+            1,
+        );
+        edge.set_relationship_proofs(vec![proof]).unwrap();
+        assert!(is_authoritative_policy_edge(&edge));
     }
 }

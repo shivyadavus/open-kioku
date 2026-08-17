@@ -4481,6 +4481,7 @@ mod tests {
                     symbol_id: sym1.id.clone(),
                     file_id: file1.id.clone(),
                     range: Some(LineRange::single(1)),
+                    source_range: None,
                     is_definition: true,
                     confidence: Confidence::Exact,
                     provenance: EvidenceSourceType::StaticAnalysis,

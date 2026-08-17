@@ -1,3 +1,24 @@
+fn relationship_resolution_summary_lines(
+    report: &open_kioku_core::ResolutionQualityReport,
+) -> Vec<String> {
+    if report.by_relationship.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["Relationship resolution:".to_string()];
+    for (relationship, metrics) in &report.by_relationship {
+        lines.push(format!(
+            "  {relationship}: {} proven / {} candidates, {} ambiguous, {} unresolved, {} external, {} heuristic candidates retained",
+            metrics.proven,
+            metrics.candidates_considered,
+            metrics.ambiguous,
+            metrics.unresolved,
+            metrics.external,
+            metrics.heuristic_candidates_retained,
+        ));
+    }
+    lines
+}
+
 pub async fn run_cli() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let cli = Cli::parse();
@@ -78,6 +99,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                             "SCIP {}: {:?} - {}",
                             attempt.language, attempt.status, attempt.message
                         );
+                    }
+                }
+                if let Some(report) = snapshot.manifest.quality.resolution_quality.as_ref() {
+                    for line in relationship_resolution_summary_lines(report) {
+                        println!("{line}");
                     }
                 }
             }
@@ -173,6 +199,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     manifest.index_mode,
                     manifest.indexed_at
                 );
+                if let Some(report) = manifest.quality.resolution_quality.as_ref() {
+                    for line in relationship_resolution_summary_lines(report) {
+                        println!("{line}");
+                    }
+                }
             } else {
                 println!("No index found. Run `ok index .`.");
             }

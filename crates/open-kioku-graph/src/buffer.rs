@@ -1,5 +1,6 @@
 use open_kioku_core::{
     identity, EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
+    RELATIONSHIP_PROOFS_PROPERTY,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -83,10 +84,33 @@ fn merge_messages(a: &str, b: &str) -> String {
     messages.into_iter().take(8).collect::<Vec<_>>().join("\n")
 }
 
-fn push_unique_call_site(call_sites: &mut Vec<serde_json::Value>, site: serde_json::Value) {
-    if !call_sites.contains(&site) {
-        call_sites.push(site);
+fn push_unique_site(sites: &mut Vec<serde_json::Value>, site: serde_json::Value) {
+    if !sites.contains(&site) {
+        sites.push(site);
     }
+}
+
+fn structured_site_key(site: &serde_json::Value) -> (String, u64, u64, u64, u64) {
+    let number = |key: &str| {
+        site.get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(u64::MAX)
+    };
+    (
+        site.get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        number("start_line"),
+        number("start_column"),
+        number("end_line"),
+        number("end_column"),
+    )
+}
+
+fn normalize_structured_sites(sites: &mut Vec<serde_json::Value>) {
+    sites.sort_by_key(structured_site_key);
+    sites.dedup();
 }
 
 fn file_range_call_site(file_range: &open_kioku_core::FileRange) -> serde_json::Value {
@@ -105,6 +129,7 @@ fn file_range_call_site(file_range: &open_kioku_core::FileRange) -> serde_json::
 }
 
 fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
+    let incoming_relationship_proofs = incoming.relationship_proofs();
     let mut call_sites: Vec<serde_json::Value> = existing
         .properties
         .get("call_sites")
@@ -114,7 +139,7 @@ fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
 
     if call_sites.is_empty() {
         if let Some(existing_fr) = &existing.evidence.file_range {
-            push_unique_call_site(&mut call_sites, file_range_call_site(existing_fr));
+            push_unique_site(&mut call_sites, file_range_call_site(existing_fr));
         }
     }
 
@@ -124,23 +149,56 @@ fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
         .and_then(|value| value.as_array())
     {
         for site in incoming_sites {
-            push_unique_call_site(&mut call_sites, site.clone());
+            push_unique_site(&mut call_sites, site.clone());
         }
     } else if let Some(incoming_fr) = &incoming.evidence.file_range {
-        push_unique_call_site(&mut call_sites, file_range_call_site(incoming_fr));
+        push_unique_site(&mut call_sites, file_range_call_site(incoming_fr));
     }
 
     if !call_sites.is_empty() {
+        normalize_structured_sites(&mut call_sites);
         existing.properties.insert(
             "call_sites".to_string(),
             serde_json::Value::Array(call_sites),
         );
     }
 
+    let mut reference_sites = existing
+        .properties
+        .get("reference_sites")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(incoming_sites) = incoming
+        .properties
+        .get("reference_sites")
+        .and_then(|value| value.as_array())
+    {
+        for site in incoming_sites {
+            push_unique_site(&mut reference_sites, site.clone());
+        }
+    }
+    if !reference_sites.is_empty() {
+        normalize_structured_sites(&mut reference_sites);
+        existing.properties.insert(
+            "reference_sites".to_string(),
+            serde_json::Value::Array(reference_sites),
+        );
+    }
+
     for (k, v) in incoming.properties {
-        if k != "call_sites" {
+        if k != "call_sites" && k != "reference_sites" && k != RELATIONSHIP_PROOFS_PROPERTY {
             existing.properties.entry(k).or_insert(v);
         }
+    }
+
+    let mut merged_relationship_proofs = existing.relationship_proofs();
+    merged_relationship_proofs.extend(incoming_relationship_proofs);
+    if existing
+        .set_relationship_proofs(merged_relationship_proofs)
+        .is_err()
+    {
+        existing.properties.remove(RELATIONSHIP_PROOFS_PROPERTY);
     }
 
     existing.ambiguity.extend(incoming.ambiguity);

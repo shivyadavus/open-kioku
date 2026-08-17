@@ -236,17 +236,22 @@ pub fn relationship_authority(
             exact_target
                 || (receiver_type && (qualified_name || same_scope))
                 || (import_binding && qualified_name)
+                || (inheritance_binding && (qualified_name || same_scope || import_binding))
         }
         GraphEdgeType::Calls => {
             exact_call_site
                 && (exact_target
+                    || same_scope
                     || (receiver_type && (qualified_name || same_scope || containing_type))
-                    || (import_binding && (qualified_name || same_scope)))
+                    || (import_binding && (qualified_name || same_scope))
+                    || (module_binding && qualified_name))
         }
         GraphEdgeType::Implements => {
             inheritance_binding && (trait_binding || exact_target || qualified_name)
         }
-        GraphEdgeType::Extends => inheritance_binding && (exact_target || qualified_name),
+        GraphEdgeType::Extends => {
+            inheritance_binding && (exact_target || qualified_name || same_scope || import_binding)
+        }
         GraphEdgeType::Imports => import_binding || module_binding || external_exact,
         GraphEdgeType::DependsOn => module_binding || import_binding || external_exact,
         _ => false,
@@ -423,6 +428,19 @@ mod tests {
         };
         edge.set_relationship_proofs(proofs).unwrap();
         edge
+    }
+
+    #[test]
+    fn exact_module_qualified_call_is_authoritative() {
+        let proofs = vec![
+            proof(RelationshipProofKind::ExactCallSite, 1),
+            proof(RelationshipProofKind::ModuleOrPackageBinding, 1),
+            proof(RelationshipProofKind::QualifiedName, 1),
+        ];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::Calls, &proofs),
+            RelationshipAuthority::Authoritative
+        );
     }
 
     #[test]

@@ -62,6 +62,7 @@ impl<'a> SymbolEngine<'a> {
                         symbol_id: symbol.id.clone(),
                         file_id: chunk.file_id.clone(),
                         range: Some(chunk.range.clone()),
+                        source_range: None,
                         is_definition: false,
                         confidence: Confidence::Low,
                         provenance: EvidenceSourceType::Lexical,

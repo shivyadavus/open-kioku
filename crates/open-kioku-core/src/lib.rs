@@ -958,6 +958,8 @@ pub struct ResolvedRelationship {
     pub call_site: Option<SourceRange>,
     #[serde(default)]
     pub evidence: Vec<ResolutionEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proofs: Vec<RelationshipProof>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -989,6 +991,8 @@ pub struct SymbolOccurrence {
     pub symbol_id: SymbolId,
     pub file_id: FileId,
     pub range: Option<LineRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_range: Option<SourceRange>,
     pub is_definition: bool,
     pub confidence: Confidence,
     pub provenance: EvidenceSourceType,
@@ -1841,6 +1845,35 @@ pub struct SkippedPath {
     pub safe_to_show: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipResolutionQuality {
+    pub candidates_considered: usize,
+    pub proven: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub heuristic_candidates_retained: usize,
+    #[serde(default)]
+    pub proof_kind_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub resolver_strategy_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResolutionQualityReport {
+    pub call_sites: usize,
+    pub resolved_exact: usize,
+    pub resolved_high: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub legacy_only: usize,
+    pub semantic_only: usize,
+    pub disagreement: usize,
+    #[serde(default)]
+    pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct IndexQuality {
     #[serde(default)]
@@ -1877,6 +1910,8 @@ pub struct IndexQuality {
     pub skip_counts: BTreeMap<SkipReason, usize>,
     #[serde(default)]
     pub skipped_paths: Vec<SkippedPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_quality: Option<ResolutionQualityReport>,
     pub quality_notes: Vec<String>,
 }
 
@@ -3051,5 +3086,52 @@ mod tests {
         assert_eq!(range.start_column, 5);
         assert_eq!(range.end_line, 2);
         assert_eq!(range.end_column, 15);
+    }
+}
+
+#[cfg(test)]
+mod ri3_resolution_quality_core_tests {
+    use super::*;
+
+    #[test]
+    fn old_index_quality_without_resolution_report_remains_readable() {
+        let encoded = serde_json::to_value(IndexQuality::default()).unwrap();
+        assert!(encoded.get("resolution_quality").is_none());
+        let decoded: IndexQuality = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.resolution_quality.is_none());
+    }
+
+    #[test]
+    fn resolution_report_round_trips_with_deterministic_relationship_order() {
+        let mut report = ResolutionQualityReport::default();
+        report.by_relationship.insert(
+            "uses_type".into(),
+            RelationshipResolutionQuality {
+                candidates_considered: 2,
+                proven: 1,
+                heuristic_candidates_retained: 1,
+                ..RelationshipResolutionQuality::default()
+            },
+        );
+        report.by_relationship.insert(
+            "calls".into(),
+            RelationshipResolutionQuality {
+                candidates_considered: 1,
+                proven: 1,
+                ..RelationshipResolutionQuality::default()
+            },
+        );
+        let quality = IndexQuality {
+            resolution_quality: Some(report.clone()),
+            ..IndexQuality::default()
+        };
+
+        let first = serde_json::to_string(&quality).unwrap();
+        let second = serde_json::to_string(&quality).unwrap();
+        assert_eq!(first, second);
+        assert!(first.find("\"calls\"").unwrap() < first.find("\"uses_type\"").unwrap());
+
+        let decoded: IndexQuality = serde_json::from_str(&first).unwrap();
+        assert_eq!(decoded.resolution_quality, Some(report));
     }
 }

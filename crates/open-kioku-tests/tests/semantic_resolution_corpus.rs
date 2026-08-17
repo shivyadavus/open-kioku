@@ -152,13 +152,19 @@ func Handle() int {
         "expected all calls to have attributed caller symbols"
     );
 
-    // Verify V2 resolution populated resolved relationships with exact evidence
+    // V3 resolution can emit multiple authoritative structural relationship families.
+    // This corpus section specifically validates resolved CALLS evidence, so filter by
+    // relationship type instead of assuming every resolved relationship is a call.
+    let call_relationships = snapshot
+        .resolved_relationships
+        .iter()
+        .filter(|rel| rel.edge_type == GraphEdgeType::Calls)
+        .collect::<Vec<_>>();
     assert!(
-        !snapshot.resolved_relationships.is_empty(),
-        "expected V2 resolved relationships"
+        !call_relationships.is_empty(),
+        "expected resolved Calls relationships"
     );
-    for rel in &snapshot.resolved_relationships {
-        assert_eq!(rel.edge_type, GraphEdgeType::Calls);
+    for rel in call_relationships {
         assert!(matches!(
             rel.confidence,
             Confidence::Exact | Confidence::High
@@ -211,20 +217,22 @@ func Handle() int {
         .find(|s| s.name == "save" && s.file_id == java_repo_file.id)
         .expect("expected Repository.save symbol");
 
-    let java_self_call_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == java_run_symbol.id && r.to == java_execute_symbol.id);
+    let java_self_call_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == java_run_symbol.id
+            && r.to == java_execute_symbol.id
+    });
 
     assert!(
         java_self_call_edge.is_some(),
         "expected resolved Calls edge from Service.run to Service.execute"
     );
 
-    let java_cross_file_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == java_run_symbol.id && r.to == java_repo_save_symbol.id);
+    let java_cross_file_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == java_run_symbol.id
+            && r.to == java_repo_save_symbol.id
+    });
 
     assert!(
         java_cross_file_edge.is_some(),
@@ -250,10 +258,9 @@ func Handle() int {
         .find(|s| s.name == "calculate" && s.file_id == ts_file.id)
         .expect("expected calculate symbol in math.ts");
 
-    let ts_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == ts_calc_sym.id && r.to == ts_add_sym.id);
+    let ts_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls && r.from == ts_calc_sym.id && r.to == ts_add_sym.id
+    });
 
     assert!(
         ts_edge.is_some(),
@@ -279,10 +286,11 @@ func Handle() int {
         .find(|s| s.name == "process" && s.file_id == py_file.id)
         .expect("expected process symbol in app.py");
 
-    let py_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == py_process_sym.id && r.to == py_compute_sym.id);
+    let py_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == py_process_sym.id
+            && r.to == py_compute_sym.id
+    });
 
     assert!(
         py_edge.is_some(),
@@ -308,10 +316,11 @@ func Handle() int {
         .find(|s| s.name == "Handle" && s.file_id == go_file.id)
         .expect("expected Handle symbol in handler.go");
 
-    let go_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == go_handle_sym.id && r.to == go_helper_sym.id);
+    let go_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == go_handle_sym.id
+            && r.to == go_helper_sym.id
+    });
 
     assert!(
         go_edge.is_some(),
@@ -367,20 +376,22 @@ func Handle() int {
         })
         .expect("expected Other.save method symbol properly parented to Other struct");
 
-    let rust_impl_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == rust_repo_run.id && r.to == rust_repo_save.id);
+    let rust_impl_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == rust_repo_run.id
+            && r.to == rust_repo_save.id
+    });
 
     assert!(
         rust_impl_edge.is_some(),
         "expected resolved Calls edge from Repo.run to Repo.save"
     );
 
-    let rust_wrong_edge = snapshot
-        .resolved_relationships
-        .iter()
-        .find(|r| r.from == rust_repo_run.id && r.to == rust_other_save.id);
+    let rust_wrong_edge = snapshot.resolved_relationships.iter().find(|r| {
+        r.edge_type == GraphEdgeType::Calls
+            && r.from == rust_repo_run.id
+            && r.to == rust_other_save.id
+    });
 
     assert!(
         rust_wrong_edge.is_none(),

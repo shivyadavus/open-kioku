@@ -175,3 +175,72 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod ri3_resolution_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn relationship_quality_persists_into_index_and_status_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"ri3-diagnostics-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn callee() {}\npub fn caller() { callee(); }\n",
+        )
+        .unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        let mut config = OkConfig::load_from_repo(repo).unwrap();
+        config.index.resolution_mode = open_kioku_config::ResolutionMode::V2;
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        config.semantic.enabled = false;
+
+        let snapshot = index_repo_with_config(repo, config, IndexMode::Full).unwrap();
+        let report = snapshot
+            .manifest
+            .quality
+            .resolution_quality
+            .as_ref()
+            .expect("V2 indexing should expose relationship resolution diagnostics");
+        let persisted = load_index_manifest(repo)
+            .unwrap()
+            .expect("index manifest should be persisted for status");
+        let persisted_report = persisted
+            .quality
+            .resolution_quality
+            .as_ref()
+            .expect("status manifest should retain relationship diagnostics");
+        assert_eq!(persisted_report, report);
+
+        let json = serde_json::to_value(&persisted).unwrap();
+        assert!(json.pointer("/quality/resolution_quality").is_some());
+
+        let mut display_report = open_kioku_core::ResolutionQualityReport::default();
+        display_report.by_relationship.insert(
+            "calls".into(),
+            open_kioku_core::RelationshipResolutionQuality {
+                candidates_considered: 3,
+                proven: 1,
+                ambiguous: 1,
+                unresolved: 1,
+                heuristic_candidates_retained: 2,
+                ..open_kioku_core::RelationshipResolutionQuality::default()
+            },
+        );
+        let lines = relationship_resolution_summary_lines(&display_report);
+        assert!(lines.iter().any(|line| {
+            line.contains("calls:")
+                && line.contains("1 proven / 3 candidates")
+                && line.contains("1 ambiguous")
+                && line.contains("1 unresolved")
+                && line.contains("2 heuristic candidates retained")
+        }));
+    }
+}

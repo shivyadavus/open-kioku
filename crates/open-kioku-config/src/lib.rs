@@ -68,7 +68,7 @@ impl Default for OkConfig {
                     "bun.lockb".into(),
                     "**/bun.lockb".into(),
                 ],
-                resolution_mode: ResolutionMode::Legacy,
+                resolution_mode: ResolutionMode::Shadow,
             },
             documents: DocumentsConfig::default(),
             languages: LanguagesConfig {
@@ -167,8 +167,8 @@ pub struct RepoConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionMode {
-    #[default]
     Legacy,
+    #[default]
     Shadow,
     V2,
 }
@@ -553,8 +553,8 @@ pub fn parse_size(value: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::ScipMode;
     use super::{load_architecture_policy, parse_size, OkConfig, PolicySource};
+    use super::{ResolutionMode, ScipMode};
     use std::env;
 
     #[test]
@@ -571,6 +571,7 @@ mod tests {
         let config = OkConfig::default();
         assert!(config.validate().is_ok());
         assert_eq!(config.scip.mode, ScipMode::Consume);
+        assert_eq!(config.index.resolution_mode, ResolutionMode::Shadow);
         assert_eq!(config.semantic.ann_min_rows, 10_000);
         assert!(config
             .scip
@@ -706,6 +707,7 @@ rules = ".ok/architecture-rules.yml"
         .unwrap();
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
         assert_eq!(loaded.scip.mode, ScipMode::Auto);
+        assert_eq!(loaded.index.resolution_mode, ResolutionMode::Shadow);
         assert_eq!(loaded.ranking.text_relevance, 1.0);
         assert_eq!(loaded.ranking.graph_proximity, 0.35);
     }

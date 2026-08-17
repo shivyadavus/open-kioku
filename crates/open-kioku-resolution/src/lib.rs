@@ -1,22 +1,33 @@
+mod bare_calls;
 pub mod calls;
 pub mod context;
 pub mod evidence;
 pub mod index;
 pub mod inheritance;
+pub mod pipeline;
+mod self_calls;
+mod type_relations;
+mod typed_calls;
 
-pub use calls::resolve_call;
+pub use calls::{resolve_call, resolve_call_outcome};
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
 pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
+pub use pipeline::{
+    evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+};
+pub use type_relations::{
+    resolve_declared_type_use_outcome, resolve_inheritance_relationship_outcome,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use open_kioku_core::{
         Binding, BindingId, CallSite, CallSiteId, Confidence, EvidenceSourceType, FileId, Language,
-        LineRange, ReceiverKind, Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolId,
-        SymbolKind, Visibility,
+        LineRange, ReceiverKind, RelationshipAuthority, Scope, ScopeId, ScopeKind, SourceRange,
+        Symbol, SymbolId, SymbolKind, Visibility,
     };
 
     #[test]
@@ -137,6 +148,22 @@ mod tests {
                 end_column: 15,
             },
         };
+
+        let outcome = resolve_call_outcome(&call, &ctx);
+        match outcome {
+            ResolutionOutcome::Proven { candidate } => {
+                assert_eq!(
+                    candidate.target_symbol_id,
+                    SymbolId::new("symbol:Repo.save")
+                );
+                assert_eq!(
+                    candidate.authority(&open_kioku_core::GraphEdgeType::Calls),
+                    RelationshipAuthority::Authoritative
+                );
+                assert!(!candidate.proofs.is_empty());
+            }
+            other => panic!("expected proven call outcome, got {other:?}"),
+        }
 
         let res = resolve_call(&call, &ctx);
         match res {
