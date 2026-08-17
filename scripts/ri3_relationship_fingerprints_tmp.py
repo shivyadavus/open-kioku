@@ -35,7 +35,6 @@ replace_exact(
     '''            require_metamorphic_group_per_language_relationship: false,\n            require_reproducibility_metadata: false,\n            require_frozen_corpus: false,\n''',
     "test policy metadata default",
 )
-# The strict-policy parser regression literal must include the newly wired field.
 replace_exact(
     path,
     '''          "require_metamorphic_group_per_language_relationship":false,\n          "require_frozen_corpus":false,\n''',
@@ -53,8 +52,18 @@ mod ri3_reproducibility_metadata_tests {
 
     #[test]
     fn release_gate_fails_closed_when_reproducibility_metadata_is_missing() {
-        let corpus = relationship_bench_tests::corpus(Vec::new());
-        let mut report = score_relationship_bench(&corpus, &[]).unwrap();
+        let case = relationship_bench_tests::case(
+            "metadata-fixture",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        let corpus = relationship_bench_tests::corpus(vec![case]);
+        let observations = vec![RelationshipBenchObservation {
+            case_id: "metadata-fixture".into(),
+            outcome: RelationshipBenchObservedOutcome::Unresolved,
+            candidate_count: 0,
+            relationships: Vec::new(),
+        }];
+        let mut report = score_relationship_bench(&corpus, &observations).unwrap();
         let mut policy = relationship_bench_tests::permissive_test_policy();
         policy.require_reproducibility_metadata = true;
         let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);
