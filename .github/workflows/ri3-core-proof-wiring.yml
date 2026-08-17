@@ -65,6 +65,10 @@ jobs:
               "    Confidence, Evidence, EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId,\n",
               "    Confidence, Evidence, FileRange, GraphEdge, GraphEdgeType, SymbolId,\n",
           )
+          text = text.replace(
+              "use open_kioku_core::{EdgeId, GraphNode, LineRange, NodeId};",
+              "use open_kioku_core::{EdgeId, EvidenceId, GraphNode, LineRange, NodeId};",
+          )
           text = text.replace("use std::collections::{BTreeMap, BTreeSet};", "use std::collections::BTreeSet;")
           evidence.write_text(text)
 
