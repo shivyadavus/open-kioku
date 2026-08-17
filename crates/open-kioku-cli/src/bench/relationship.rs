@@ -75,6 +75,8 @@ struct RelationshipBenchCase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     candidate_count_expected: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    metamorphic_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
 }
 
@@ -195,6 +197,7 @@ struct RelationshipBenchDiagnostic {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelationshipBenchPolicy {
     schema_version: String,
     minimum_cases: usize,
@@ -207,8 +210,11 @@ struct RelationshipBenchPolicy {
     minimum_exact_range_compliance: f64,
     minimum_proof_compliance: f64,
     minimum_outcome_compliance: f64,
+    minimum_metamorphic_groups: usize,
+    minimum_metamorphic_equivalence: f64,
     require_zero_false_negatives: bool,
     require_positive_and_negative_per_language_relationship: bool,
+    require_metamorphic_group_per_language_relationship: bool,
     require_frozen_corpus: bool,
 }
 
@@ -234,6 +240,9 @@ struct RelationshipBenchScoreReport {
     by_proof_kind: BTreeMap<String, RelationshipBenchStrategyMetrics>,
     observed_proof_kind_counts: BTreeMap<String, usize>,
     wrong_target_counts: BTreeMap<String, usize>,
+    metamorphic_groups: usize,
+    metamorphic_equivalent_groups: usize,
+    metamorphic_equivalence: f64,
     diagnostics: Vec<RelationshipBenchDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gate: Option<RelationshipBenchGateReport>,
@@ -279,6 +288,10 @@ fn load_relationship_bench_policy(path: &Path) -> anyhow::Result<RelationshipBen
         (
             "minimum_outcome_compliance",
             policy.minimum_outcome_compliance,
+        ),
+        (
+            "minimum_metamorphic_equivalence",
+            policy.minimum_metamorphic_equivalence,
         ),
     ] {
         if !(0.0..=1.0).contains(&value) {
@@ -359,6 +372,18 @@ fn evaluate_relationship_bench_gates(
             report.overall.outcome_compliance, policy.minimum_outcome_compliance
         ));
     }
+    if report.metamorphic_groups < policy.minimum_metamorphic_groups {
+        failures.push(format!(
+            "corpus has {} metamorphic groups, below required {}",
+            report.metamorphic_groups, policy.minimum_metamorphic_groups
+        ));
+    }
+    if report.metamorphic_equivalence < policy.minimum_metamorphic_equivalence {
+        failures.push(format!(
+            "metamorphic equivalence {:.4} is below required {:.4}",
+            report.metamorphic_equivalence, policy.minimum_metamorphic_equivalence
+        ));
+    }
 
     const LANGUAGES: [&str; 5] = [
         "rust",
@@ -413,6 +438,15 @@ fn evaluate_relationship_bench_gates(
                 failures.push(format!(
                     "cohort {key} must contain both positive and negative/ambiguous cases"
                 ));
+            }
+            if policy.require_metamorphic_group_per_language_relationship
+                && !corpus.cases.iter().any(|case| {
+                    language_name(case.language) == language
+                        && edge_type_name(&case.relationship) == relationship
+                        && case.metamorphic_group.is_some()
+                })
+            {
+                failures.push(format!("cohort {key} has no metamorphic group"));
             }
             if metrics.true_positives + metrics.false_positives == 0 {
                 failures.push(format!(
@@ -547,6 +581,11 @@ fn validate_relationship_bench_corpus(corpus: &RelationshipBenchCorpus) -> anyho
     }
 
     let mut ids = BTreeSet::new();
+    let mut metamorphic_contracts = BTreeMap::<
+        String,
+        (RelationshipBenchLanguage, String, RelationshipBenchExpectedOutcome),
+    >::new();
+    let mut metamorphic_sizes = BTreeMap::<String, usize>::new();
     for case in &corpus.cases {
         if case.id.trim().is_empty() {
             anyhow::bail!("relationship benchmark case id must not be empty");
@@ -566,6 +605,26 @@ fn validate_relationship_bench_corpus(corpus: &RelationshipBenchCorpus) -> anyho
                 case.id,
                 case.relationship
             );
+        }
+        if let Some(group) = case.metamorphic_group.as_deref() {
+            if group.trim().is_empty() {
+                anyhow::bail!("case {} has an empty metamorphic_group", case.id);
+            }
+            *metamorphic_sizes.entry(group.to_string()).or_default() += 1;
+            let contract = (
+                case.language,
+                edge_type_name(&case.relationship).to_string(),
+                case.expected_outcome,
+            );
+            if let Some(existing) = metamorphic_contracts.get(group) {
+                if existing != &contract {
+                    anyhow::bail!(
+                        "metamorphic group {group} mixes language, relationship, or expected outcome contracts"
+                    );
+                }
+            } else {
+                metamorphic_contracts.insert(group.to_string(), contract);
+            }
         }
         match case.expected_outcome {
             RelationshipBenchExpectedOutcome::MustEmit => {
@@ -592,6 +651,11 @@ fn validate_relationship_bench_corpus(corpus: &RelationshipBenchCorpus) -> anyho
                     );
                 }
             }
+        }
+    }
+    for (group, size) in metamorphic_sizes {
+        if size < 2 {
+            anyhow::bail!("metamorphic group {group} must contain at least two cases");
         }
     }
     Ok(())
@@ -642,6 +706,7 @@ fn score_relationship_bench_with_metadata(
     let mut by_resolver_strategy = BTreeMap::<String, RelationshipBenchStrategyMetrics>::new();
     let mut by_proof_kind = BTreeMap::<String, RelationshipBenchStrategyMetrics>::new();
     let mut wrong_target_counts = BTreeMap::<String, usize>::new();
+    let mut metamorphic_verdicts = BTreeMap::<String, Vec<bool>>::new();
     let mut diagnostics = Vec::new();
 
     let mut cases = corpus.cases.iter().collect::<Vec<_>>();
@@ -663,6 +728,12 @@ fn score_relationship_bench_with_metadata(
             .iter()
             .find(|observation| observation.case_id == case.id);
         let outcome = score_relationship_case(case, observation, relationships);
+        if let Some(group) = case.metamorphic_group.as_ref() {
+            metamorphic_verdicts
+                .entry(group.clone())
+                .or_default()
+                .push(case_conformance_verdict(&outcome.metrics));
+        }
         for relationship in relationships.iter().filter(|relationship| {
             relationship.authority == open_kioku_core::RelationshipAuthority::Authoritative
         }) {
@@ -737,6 +808,18 @@ fn score_relationship_bench_with_metadata(
     diagnostics.sort_by(|left, right| {
         (&left.case_id, &left.kind, &left.message).cmp(&(&right.case_id, &right.kind, &right.message))
     });
+    let metamorphic_groups = metamorphic_verdicts.len();
+    let metamorphic_equivalent_groups = metamorphic_verdicts
+        .values()
+        .filter(|verdicts| {
+            verdicts
+                .first()
+                .map(|first| verdicts.iter().all(|verdict| verdict == first))
+                .unwrap_or(false)
+        })
+        .count();
+    let metamorphic_equivalence =
+        relationship_ratio(metamorphic_equivalent_groups, metamorphic_groups);
 
     Ok(RelationshipBenchScoreReport {
         schema_version: corpus.schema_version.clone(),
@@ -752,6 +835,9 @@ fn score_relationship_bench_with_metadata(
         by_proof_kind,
         observed_proof_kind_counts,
         wrong_target_counts,
+        metamorphic_groups,
+        metamorphic_equivalent_groups,
+        metamorphic_equivalence,
         diagnostics,
         gate: None,
     })
@@ -1110,6 +1196,17 @@ fn finalize_relationship_metrics(metrics: &mut RelationshipBenchMetrics) {
     metrics.proof_compliance = relationship_ratio(metrics.proof_matches, metrics.proof_cases);
 }
 
+fn case_conformance_verdict(metrics: &RelationshipBenchMetrics) -> bool {
+    metrics.false_positives == 0
+        && metrics.false_negatives == 0
+        && metrics.outcome_matches == metrics.outcome_cases
+        && (metrics.candidate_count_expected_cases == 0
+            || metrics.candidate_count_matches == metrics.candidate_count_expected_cases)
+        && (metrics.exact_range_cases == 0
+            || metrics.exact_range_matches == metrics.exact_range_cases)
+        && (metrics.proof_cases == 0 || metrics.proof_matches == metrics.proof_cases)
+}
+
 fn update_strategy_metrics(metrics: &mut RelationshipBenchStrategyMetrics, correct: bool) {
     metrics.authoritative_emissions += 1;
     if correct {
@@ -1232,7 +1329,7 @@ mod relationship_bench_tests {
     use super::*;
     use open_kioku_core::{RelationshipAuthority, RelationshipProofKind, SourceRange};
 
-    fn case(
+    pub(super) fn case(
         id: &str,
         expected_outcome: RelationshipBenchExpectedOutcome,
     ) -> RelationshipBenchCase {
@@ -1253,11 +1350,12 @@ mod relationship_bench_tests {
             expected_proof_kinds: BTreeSet::new(),
             forbidden_proof_kinds: BTreeSet::new(),
             candidate_count_expected: None,
+            metamorphic_group: None,
             notes: None,
         }
     }
 
-    fn corpus(cases: Vec<RelationshipBenchCase>) -> RelationshipBenchCorpus {
+    pub(super) fn corpus(cases: Vec<RelationshipBenchCase>) -> RelationshipBenchCorpus {
         RelationshipBenchCorpus {
             schema_version: RELATIONSHIP_BENCH_SCHEMA_VERSION.into(),
             corpus_version: "dev-1".into(),
@@ -1266,7 +1364,10 @@ mod relationship_bench_tests {
         }
     }
 
-    fn observed(target: &str, authority: RelationshipAuthority) -> RelationshipBenchObservedRelationship {
+    pub(super) fn observed(
+        target: &str,
+        authority: RelationshipAuthority,
+    ) -> RelationshipBenchObservedRelationship {
         RelationshipBenchObservedRelationship {
             source_symbol_id: SymbolId::new("symbol:caller"),
             target_symbol_id: SymbolId::new(target),
@@ -1350,7 +1451,7 @@ mod relationship_bench_tests {
         assert_eq!(report.overall.recall, 1.0);
     }
 
-    fn permissive_test_policy() -> RelationshipBenchPolicy {
+    pub(super) fn permissive_test_policy() -> RelationshipBenchPolicy {
         RelationshipBenchPolicy {
             schema_version: RELATIONSHIP_BENCH_POLICY_SCHEMA_VERSION.into(),
             minimum_cases: 0,
@@ -1363,8 +1464,11 @@ mod relationship_bench_tests {
             minimum_exact_range_compliance: 0.0,
             minimum_proof_compliance: 0.0,
             minimum_outcome_compliance: 0.0,
+            minimum_metamorphic_groups: 0,
+            minimum_metamorphic_equivalence: 0.0,
             require_zero_false_negatives: false,
             require_positive_and_negative_per_language_relationship: false,
+            require_metamorphic_group_per_language_relationship: false,
             require_frozen_corpus: false,
         }
     }
@@ -1444,5 +1548,92 @@ mod relationship_bench_tests {
         assert_eq!(first_report.observation_digest, second_report.observation_digest);
         assert_eq!(first_report.overall.true_positives, second_report.overall.true_positives);
         assert_eq!(first_report.overall.false_positives, second_report.overall.false_positives);
+    }
+}
+
+
+#[cfg(test)]
+mod ri3_metamorphic_bench_tests {
+    use super::*;
+
+    #[test]
+    fn policy_rejects_unknown_threshold_fields() {
+        let raw = r#"{
+          "schema_version":"1.0.0",
+          "minimum_cases":0,
+          "minimum_cases_per_language":0,
+          "minimum_cases_per_language_relationship":0,
+          "minimum_negative_fraction":0.0,
+          "minimum_overall_precision":0.0,
+          "minimum_language_relationship_precision":0.0,
+          "maximum_must_not_emit_false_positive_rate":1.0,
+          "minimum_exact_range_compliance":0.0,
+          "minimum_proof_compliance":0.0,
+          "minimum_outcome_compliance":0.0,
+          "minimum_metamorphic_groups":0,
+          "minimum_metamorphic_equivalence":0.0,
+          "require_zero_false_negatives":false,
+          "require_positive_and_negative_per_language_relationship":false,
+          "require_metamorphic_group_per_language_relationship":false,
+          "require_frozen_corpus":false,
+          "future_unwired_threshold":1
+        }"#;
+        assert!(serde_json::from_str::<RelationshipBenchPolicy>(raw).is_err());
+    }
+
+    #[test]
+    fn corpus_rejects_singleton_metamorphic_group() {
+        let mut c = relationship_bench_tests::case(
+            "singleton",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        c.metamorphic_group = Some("group:singleton".into());
+        let corpus = relationship_bench_tests::corpus(vec![c]);
+        assert!(validate_relationship_bench_corpus(&corpus).is_err());
+    }
+
+    #[test]
+    fn gate_enforces_metamorphic_thresholds_from_policy() {
+        let mut a = relationship_bench_tests::case(
+            "meta-a",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        let mut b = relationship_bench_tests::case(
+            "meta-b",
+            RelationshipBenchExpectedOutcome::MustNotEmit,
+        );
+        a.metamorphic_group = Some("group:stable".into());
+        b.metamorphic_group = Some("group:stable".into());
+        let corpus = relationship_bench_tests::corpus(vec![a, b]);
+        let observations = vec![
+            RelationshipBenchObservation {
+                case_id: "meta-a".into(),
+                outcome: RelationshipBenchObservedOutcome::Unresolved,
+                candidate_count: 0,
+                relationships: Vec::new(),
+            },
+            RelationshipBenchObservation {
+                case_id: "meta-b".into(),
+                outcome: RelationshipBenchObservedOutcome::Proven,
+                candidate_count: 1,
+                relationships: vec![relationship_bench_tests::observed(
+                    "symbol:wrong",
+                    open_kioku_core::RelationshipAuthority::Authoritative,
+                )],
+            },
+        ];
+        let report = score_relationship_bench(&corpus, &observations).unwrap();
+        assert_eq!(report.metamorphic_groups, 1);
+        assert_eq!(report.metamorphic_equivalent_groups, 0);
+        assert_eq!(report.metamorphic_equivalence, 0.0);
+        let mut policy = relationship_bench_tests::permissive_test_policy();
+        policy.minimum_metamorphic_groups = 1;
+        policy.minimum_metamorphic_equivalence = 1.0;
+        let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);
+        assert!(!gate.passed);
+        assert!(gate
+            .failures
+            .iter()
+            .any(|failure| failure.contains("metamorphic equivalence")));
     }
 }
