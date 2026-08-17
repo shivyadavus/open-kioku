@@ -242,13 +242,21 @@ impl InMemoryGraph {
                         .map(|file| file.path.clone())
                 })
                 .unwrap_or_default();
-            let file_range = rel.call_site.as_ref().map(|sr| FileRange {
-                path: source_path.clone(),
-                line_range: Some(LineRange {
-                    start: sr.start_line,
-                    end: sr.end_line,
-                }),
-            });
+            let file_range = rel
+                .call_site
+                .as_ref()
+                .map(|sr| FileRange {
+                    path: source_path.clone(),
+                    line_range: Some(LineRange {
+                        start: sr.start_line,
+                        end: sr.end_line,
+                    }),
+                })
+                .or_else(|| {
+                    rel.evidence
+                        .iter()
+                        .find_map(|evidence| evidence.file_range.clone())
+                });
 
             let mut properties = BTreeMap::new();
             if let Some(sr) = &rel.call_site {

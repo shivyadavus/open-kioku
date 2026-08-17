@@ -483,6 +483,116 @@ impl Indexer {
         {
             quality_report.call_sites = call_sites.len();
 
+            for edge in inheritance_index.resolved_edges() {
+                let Some(parent_id) = edge.parent_id.clone() else {
+                    continue;
+                };
+                let Some(child_symbol) = symbol_index.get(&edge.child) else {
+                    continue;
+                };
+                let Some(parent_symbol) = symbol_index.get(&parent_id) else {
+                    continue;
+                };
+                let Some(file) = file_lookup.get(&child_symbol.file_id) else {
+                    continue;
+                };
+                let edge_type = match edge.kind {
+                    open_kioku_core::InheritanceKind::Extends => GraphEdgeType::Extends,
+                    open_kioku_core::InheritanceKind::Implements
+                    | open_kioku_core::InheritanceKind::TraitImpl => GraphEdgeType::Implements,
+                    open_kioku_core::InheritanceKind::Embeds => continue,
+                };
+                if edge_type == GraphEdgeType::Implements
+                    && !matches!(
+                        parent_symbol.kind,
+                        open_kioku_core::SymbolKind::Trait | open_kioku_core::SymbolKind::Interface
+                    )
+                {
+                    continue;
+                }
+                let file_range = open_kioku_core::FileRange {
+                    path: file.path.clone(),
+                    line_range: Some(open_kioku_core::LineRange {
+                        start: edge.range.start_line,
+                        end: edge.range.end_line,
+                    }),
+                };
+                let evidence_ids = edge.evidence.clone();
+                let mut proofs = Vec::new();
+                let mut inheritance_proof = open_kioku_core::RelationshipProof::new(
+                    open_kioku_core::RelationshipProofKind::InheritanceBinding,
+                    "inheritance_binding",
+                    edge.binding_candidate_count,
+                );
+                inheritance_proof.source_range = Some(file_range.clone());
+                inheritance_proof.source_symbol_id = Some(edge.child.clone());
+                inheritance_proof.target_symbol_id = Some(parent_id.clone());
+                inheritance_proof.evidence_ids = evidence_ids.clone();
+                proofs.push(inheritance_proof);
+
+                if let Some(strategy) = edge.binding_strategy {
+                    let (kind, resolver_strategy) = match strategy {
+                        open_kioku_resolution::TypeDiscovery::SameFile => (
+                            open_kioku_core::RelationshipProofKind::SameScopeDefinition,
+                            "inheritance_same_file",
+                        ),
+                        open_kioku_resolution::TypeDiscovery::ImportBinding => (
+                            open_kioku_core::RelationshipProofKind::ImportBinding,
+                            "inheritance_import_binding",
+                        ),
+                        open_kioku_resolution::TypeDiscovery::QualifiedName => (
+                            open_kioku_core::RelationshipProofKind::QualifiedName,
+                            "inheritance_qualified_name",
+                        ),
+                    };
+                    let mut strategy_proof = open_kioku_core::RelationshipProof::new(
+                        kind,
+                        resolver_strategy,
+                        edge.binding_candidate_count,
+                    );
+                    strategy_proof.source_range = Some(file_range.clone());
+                    strategy_proof.source_symbol_id = Some(edge.child.clone());
+                    strategy_proof.target_symbol_id = Some(parent_id.clone());
+                    strategy_proof.evidence_ids = evidence_ids.clone();
+                    proofs.push(strategy_proof);
+                }
+
+                if edge_type == GraphEdgeType::Implements {
+                    let mut trait_proof = open_kioku_core::RelationshipProof::new(
+                        open_kioku_core::RelationshipProofKind::TraitOrInterfaceBinding,
+                        "trait_or_interface_target",
+                        1,
+                    );
+                    trait_proof.source_range = Some(file_range.clone());
+                    trait_proof.source_symbol_id = Some(edge.child.clone());
+                    trait_proof.target_symbol_id = Some(parent_id.clone());
+                    trait_proof.evidence_ids = evidence_ids.clone();
+                    proofs.push(trait_proof);
+                }
+
+                resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                    from: edge.child.clone(),
+                    to: parent_id.clone(),
+                    edge_type,
+                    confidence: Confidence::Exact,
+                    call_site: None,
+                    evidence: vec![open_kioku_core::ResolutionEvidence {
+                        kind: open_kioku_core::ResolutionEvidenceKind::InheritanceGraph,
+                        source_type: EvidenceSourceType::TreeSitter,
+                        file_range: Some(file_range),
+                        symbol_id: Some(parent_id),
+                        message: format!(
+                            "resolved {:?} relationship from `{}` to `{}` using {:?}",
+                            edge.kind,
+                            child_symbol.qualified_name,
+                            parent_symbol.qualified_name,
+                            edge.binding_strategy
+                        ),
+                    }],
+                    proofs,
+                });
+            }
+
             for binding in &bindings {
                 if binding.declared_type.is_none() {
                     continue;

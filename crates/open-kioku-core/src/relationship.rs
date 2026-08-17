@@ -248,9 +248,12 @@ pub fn relationship_authority(
                     || (inheritance_binding && (receiver_type || containing_type)))
         }
         GraphEdgeType::Implements => {
-            inheritance_binding && (trait_binding || exact_target || qualified_name)
+            inheritance_binding
+                && (trait_binding || exact_target || qualified_name || same_scope || import_binding)
         }
-        GraphEdgeType::Extends => inheritance_binding && (exact_target || qualified_name),
+        GraphEdgeType::Extends => {
+            inheritance_binding && (exact_target || qualified_name || same_scope || import_binding)
+        }
         GraphEdgeType::Imports => import_binding || module_binding || external_exact,
         GraphEdgeType::DependsOn => module_binding || import_binding || external_exact,
         _ => false,
@@ -533,6 +536,46 @@ mod tests {
                 proof(RelationshipProofKind::ExactCallSite, 1),
                 proof(RelationshipProofKind::InheritanceBinding, 2),
                 proof(RelationshipProofKind::ContainingType, 2),
+            ],
+        );
+        assert_ne!(
+            ambiguous.relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn same_file_inheritance_proofs_authorize_extends() {
+        let proved = edge(
+            GraphEdgeType::Extends,
+            vec![
+                proof(RelationshipProofKind::InheritanceBinding, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 1),
+            ],
+        );
+        assert!(proved.is_authoritative_relationship());
+    }
+
+    #[test]
+    fn imported_trait_inheritance_proofs_authorize_implements() {
+        let proved = edge(
+            GraphEdgeType::Implements,
+            vec![
+                proof(RelationshipProofKind::InheritanceBinding, 1),
+                proof(RelationshipProofKind::ImportBinding, 1),
+                proof(RelationshipProofKind::TraitOrInterfaceBinding, 1),
+            ],
+        );
+        assert!(proved.is_authoritative_relationship());
+    }
+
+    #[test]
+    fn ambiguous_inheritance_target_cannot_authorize_extends() {
+        let ambiguous = edge(
+            GraphEdgeType::Extends,
+            vec![
+                proof(RelationshipProofKind::InheritanceBinding, 2),
+                proof(RelationshipProofKind::SameScopeDefinition, 2),
             ],
         );
         assert_ne!(

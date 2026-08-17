@@ -1,9 +1,10 @@
 use crate::context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::index::SymbolIndex;
+use crate::type_candidates::{discover_type_candidates, TypeDiscovery};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceId, EvidenceSourceType, FileRange, InheritanceKind,
-    InheritanceSite, LineRange, SymbolId, SymbolKind,
+    InheritanceSite, LineRange, SourceRange, SymbolId, SymbolKind,
 };
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -25,6 +26,9 @@ pub struct InheritanceEdge {
     pub parent_id: Option<SymbolId>,
     pub kind: InheritanceKind,
     pub order: u16,
+    pub range: SourceRange,
+    pub binding_strategy: Option<TypeDiscovery>,
+    pub binding_candidate_count: usize,
     pub evidence: Vec<EvidenceId>,
 }
 
@@ -37,33 +41,39 @@ impl InheritanceIndex {
     pub fn build(sites: Vec<InheritanceSite>) -> Self {
         let mut index = Self::default();
         for site in sites {
-            index
-                .edges_by_child
-                .entry(site.child_symbol_id.clone())
-                .or_default()
-                .push(InheritanceEdge {
-                    child: site.child_symbol_id,
-                    parent_name: site.parent_name,
-                    parent_id: None,
-                    kind: site.kind,
-                    order: site.order,
-                    evidence: Vec::new(),
-                });
+            let parents = split_top_level_parent_names(&site.parent_name);
+            for (offset, parent_name) in parents.into_iter().enumerate() {
+                let order_offset = u16::try_from(offset).unwrap_or(u16::MAX);
+                let order = site.order.saturating_add(order_offset);
+                index
+                    .edges_by_child
+                    .entry(site.child_symbol_id.clone())
+                    .or_default()
+                    .push(InheritanceEdge {
+                        child: site.child_symbol_id.clone(),
+                        parent_name: parent_name.clone(),
+                        parent_id: None,
+                        kind: site.kind,
+                        order,
+                        range: site.range.clone(),
+                        binding_strategy: None,
+                        binding_candidate_count: 0,
+                        evidence: vec![EvidenceId::new(format!(
+                            "inheritance:{}:{:?}:{order}:{parent_name}",
+                            site.child_symbol_id.0, site.kind
+                        ))],
+                    });
+            }
         }
         for edges in index.edges_by_child.values_mut() {
-            edges.sort_by(|left, right| {
-                inheritance_kind_order(&left.kind)
-                    .cmp(&inheritance_kind_order(&right.kind))
-                    .then_with(|| left.order.cmp(&right.order))
-                    .then_with(|| left.parent_name.cmp(&right.parent_name))
-                    .then_with(|| left.child.0.cmp(&right.child.0))
-            });
+            edges.sort_by(inheritance_edge_order);
         }
         index
     }
 
-    /// Resolves string parent names into SymbolIds using only scoped structural evidence.
-    /// Ambiguous imports remain unbound instead of accepting the first binding returned by storage.
+    /// Resolves parent names through the same deterministic type-candidate contract used by calls
+    /// and declared type uses. Resolution is precedence-aware and fail-closed: ambiguity at a
+    /// stronger scoped strategy does not fall through to a weaker strategy.
     pub fn bind_parents_with_repository(
         &mut self,
         symbols: &SymbolIndex,
@@ -75,64 +85,62 @@ impl InheritanceIndex {
             };
 
             for edge in edges {
-                let parent_name = &edge.parent_name;
+                edge.parent_id = None;
+                edge.binding_strategy = None;
+                edge.binding_candidate_count = 0;
 
-                let same_file = symbols
-                    .by_file
-                    .get(&child_sym.file_id)
-                    .into_iter()
-                    .flatten()
-                    .filter(|id| is_named_parent_type(symbols, id, parent_name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if same_file.len() == 1 {
-                    edge.parent_id = same_file.first().cloned();
-                    continue;
-                }
-                if same_file.len() > 1 {
-                    continue;
-                }
-
-                let mut imported = BTreeMap::<String, SymbolId>::new();
-                for binding in repository
-                    .imports
-                    .lookup(&child_sym.file_id, None, parent_name)
-                {
-                    if let Some(target) = &binding.target_symbol {
-                        if is_parent_type(symbols, target) {
-                            imported.insert(target.0.clone(), target.clone());
-                        }
-                    }
-                    if let Some(target_file) = &binding.target_file {
-                        if let Some(file_symbols) = symbols.by_file.get(target_file) {
-                            for target in file_symbols {
-                                if is_named_parent_type(symbols, target, parent_name) {
-                                    imported.insert(target.0.clone(), target.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                if imported.len() == 1 {
-                    edge.parent_id = imported.into_values().next();
-                    continue;
-                }
-                if imported.len() > 1 {
-                    continue;
-                }
-
-                if let Some(qualified) = symbols.by_qualified.get(parent_name) {
-                    let exact = qualified
+                let discovered = discover_type_candidates(
+                    &child_sym.file_id,
+                    child_sym.scope_id.as_ref(),
+                    &edge.parent_name,
+                    repository,
+                    symbols,
+                );
+                for strategy in [
+                    TypeDiscovery::SameFile,
+                    TypeDiscovery::ImportBinding,
+                    TypeDiscovery::QualifiedName,
+                ] {
+                    let candidates = discovered
                         .iter()
-                        .filter(|id| is_parent_type(symbols, id))
-                        .cloned()
+                        .filter(|candidate| candidate.discoveries.contains(&strategy))
+                        .map(|candidate| candidate.target.clone())
                         .collect::<Vec<_>>();
-                    if exact.len() == 1 {
-                        edge.parent_id = exact.first().cloned();
+                    if candidates.is_empty() {
+                        continue;
                     }
+                    edge.binding_strategy = Some(strategy);
+                    edge.binding_candidate_count = candidates.len();
+                    if candidates.len() == 1 {
+                        edge.parent_id = candidates.first().cloned();
+                    }
+                    break;
                 }
             }
         }
+    }
+
+    /// Deterministic view of uniquely bound inheritance declarations for structural emission.
+    pub fn resolved_edges(&self) -> Vec<&InheritanceEdge> {
+        let mut edges = self
+            .edges_by_child
+            .values()
+            .flatten()
+            .filter(|edge| {
+                edge.parent_id.is_some()
+                    && edge.binding_strategy.is_some()
+                    && edge.binding_candidate_count == 1
+            })
+            .collect::<Vec<_>>();
+        edges.sort_by(|left, right| {
+            inheritance_edge_order(left, right).then_with(|| {
+                left.parent_id
+                    .as_ref()
+                    .map(|id| id.0.as_str())
+                    .cmp(&right.parent_id.as_ref().map(|id| id.0.as_str()))
+            })
+        });
+        edges
     }
 
     /// Returns every viable inherited member at the nearest inheritance depth containing a match.
@@ -218,6 +226,15 @@ impl InheritanceIndex {
     }
 }
 
+fn inheritance_edge_order(left: &InheritanceEdge, right: &InheritanceEdge) -> std::cmp::Ordering {
+    left.child
+        .0
+        .cmp(&right.child.0)
+        .then_with(|| inheritance_kind_order(&left.kind).cmp(&inheritance_kind_order(&right.kind)))
+        .then_with(|| left.order.cmp(&right.order))
+        .then_with(|| left.parent_name.cmp(&right.parent_name))
+}
+
 fn inheritance_kind_order(kind: &InheritanceKind) -> u8 {
     match kind {
         InheritanceKind::Extends => 0,
@@ -227,25 +244,40 @@ fn inheritance_kind_order(kind: &InheritanceKind) -> u8 {
     }
 }
 
-fn is_named_parent_type(symbols: &SymbolIndex, id: &SymbolId, name: &str) -> bool {
-    symbols
-        .get(id)
-        .map(|symbol| symbol.name == name && is_parent_kind(&symbol.kind))
-        .unwrap_or(false)
-}
-
-fn is_parent_type(symbols: &SymbolIndex, id: &SymbolId) -> bool {
-    symbols
-        .get(id)
-        .map(|symbol| is_parent_kind(&symbol.kind))
-        .unwrap_or(false)
-}
-
-fn is_parent_kind(kind: &SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Module
-    )
+/// Split comma-separated parent clauses only at top level. Generic argument commas, function-type
+/// punctuation, and nested tuple/list syntax remain within the same parent expression.
+fn split_top_level_parent_names(raw: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut start = 0usize;
+    let mut angle = 0i32;
+    let mut paren = 0i32;
+    let mut square = 0i32;
+    let mut brace = 0i32;
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '<' => angle += 1,
+            '>' => angle = (angle - 1).max(0),
+            '(' => paren += 1,
+            ')' => paren = (paren - 1).max(0),
+            '[' => square += 1,
+            ']' => square = (square - 1).max(0),
+            '{' => brace += 1,
+            '}' => brace = (brace - 1).max(0),
+            ',' if angle == 0 && paren == 0 && square == 0 && brace == 0 => {
+                let value = raw[start..index].trim();
+                if !value.is_empty() {
+                    result.push(value.to_string());
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let value = raw[start..].trim();
+    if !value.is_empty() {
+        result.push(value.to_string());
+    }
+    result
 }
 
 pub fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionResult {
@@ -293,26 +325,45 @@ pub fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Res
 mod tests {
     use super::*;
     use open_kioku_core::{
-        Confidence, EvidenceSourceType, FileId, Language, LineRange, Symbol, Visibility,
+        Confidence, EvidenceSourceType, FileId, Language, LineRange, ScopeId, Symbol, Visibility,
     };
 
-    fn symbol(id: &str, name: &str, kind: SymbolKind, parent: Option<&str>) -> Symbol {
+    fn range(line: u32) -> SourceRange {
+        SourceRange {
+            start_line: line,
+            start_column: 1,
+            end_line: line,
+            end_column: 20,
+        }
+    }
+
+    fn symbol_in_file(
+        id: &str,
+        name: &str,
+        kind: SymbolKind,
+        parent: Option<&str>,
+        file: &str,
+    ) -> Symbol {
         Symbol {
             id: SymbolId::new(id),
             name: name.into(),
-            qualified_name: format!("pkg::{id}"),
+            qualified_name: format!("pkg::{name}"),
             kind,
-            file_id: FileId::new(format!("file:{id}")),
+            file_id: FileId::new(file),
             range: Some(LineRange { start: 1, end: 2 }),
             language: Language::Java,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::TreeSitter,
             module_id: None,
             parent_symbol_id: parent.map(SymbolId::new),
-            scope_id: None,
+            scope_id: Some(ScopeId::new(format!("scope:{id}"))),
             signature: None,
             visibility: Visibility::Public,
         }
+    }
+
+    fn symbol(id: &str, name: &str, kind: SymbolKind, parent: Option<&str>) -> Symbol {
+        symbol_in_file(id, name, kind, parent, &format!("file:{id}"))
     }
 
     fn bound_edge(child: &str, parent: &str, order: u16) -> InheritanceEdge {
@@ -322,8 +373,82 @@ mod tests {
             parent_id: Some(SymbolId::new(parent)),
             kind: InheritanceKind::Extends,
             order,
+            range: range(1),
+            binding_strategy: Some(TypeDiscovery::SameFile),
+            binding_candidate_count: 1,
             evidence: Vec::new(),
         }
+    }
+
+    #[test]
+    fn build_splits_only_top_level_parent_commas() {
+        let index = InheritanceIndex::build(vec![InheritanceSite {
+            child_symbol_id: SymbolId::new("Child"),
+            parent_name: "Alpha, Beta<Map<Key, Value>>, Gamma".into(),
+            kind: InheritanceKind::Implements,
+            order: 0,
+            range: range(8),
+        }]);
+        let edges = index.edges_by_child.get(&SymbolId::new("Child")).unwrap();
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.parent_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "Beta<Map<Key, Value>>", "Gamma"]
+        );
+        assert_eq!(
+            edges.iter().map(|edge| edge.order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn unique_same_file_parent_records_binding_strategy_and_range() {
+        let file = "file:types";
+        let child = symbol_in_file("Child", "Child", SymbolKind::Class, None, file);
+        let parent = symbol_in_file("Base", "Base", SymbolKind::Class, None, file);
+        let symbols = SymbolIndex::build(vec![child, parent]);
+        let repository = SemanticRepository::new();
+        let mut index = InheritanceIndex::build(vec![InheritanceSite {
+            child_symbol_id: SymbolId::new("Child"),
+            parent_name: "Base".into(),
+            kind: InheritanceKind::Extends,
+            order: 0,
+            range: range(12),
+        }]);
+
+        index.bind_parents_with_repository(&symbols, &repository);
+        let resolved = index.resolved_edges();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].parent_id, Some(SymbolId::new("Base")));
+        assert_eq!(resolved[0].binding_strategy, Some(TypeDiscovery::SameFile));
+        assert_eq!(resolved[0].binding_candidate_count, 1);
+        assert_eq!(resolved[0].range.start_line, 12);
+    }
+
+    #[test]
+    fn ambiguous_same_file_parent_does_not_fall_through() {
+        let file = "file:types";
+        let child = symbol_in_file("Child", "Child", SymbolKind::Class, None, file);
+        let first = symbol_in_file("BaseA", "Base", SymbolKind::Class, None, file);
+        let second = symbol_in_file("BaseB", "Base", SymbolKind::Class, None, file);
+        let symbols = SymbolIndex::build(vec![child, first, second]);
+        let repository = SemanticRepository::new();
+        let mut index = InheritanceIndex::build(vec![InheritanceSite {
+            child_symbol_id: SymbolId::new("Child"),
+            parent_name: "Base".into(),
+            kind: InheritanceKind::Extends,
+            order: 0,
+            range: range(12),
+        }]);
+
+        index.bind_parents_with_repository(&symbols, &repository);
+        let edge = &index.edges_by_child[&SymbolId::new("Child")][0];
+        assert_eq!(edge.parent_id, None);
+        assert_eq!(edge.binding_strategy, Some(TypeDiscovery::SameFile));
+        assert_eq!(edge.binding_candidate_count, 2);
+        assert!(index.resolved_edges().is_empty());
     }
 
     #[test]
