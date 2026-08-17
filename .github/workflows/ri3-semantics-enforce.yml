@@ -23,7 +23,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Stage semantic read-safety integration
-        run: python3 scripts/ri3-semantics-enforce.py
+        run: |
+          python3 scripts/ri3-semantics-enforce.py
+          python3 scripts/ri3-semantics-regressions.py
       - name: Format
         run: cargo fmt --all
       - name: Format check
@@ -44,7 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm -f .github/workflows/ri3-semantics-enforce.yml scripts/ri3-semantics-enforce.py
+          git rm -f .github/workflows/ri3-semantics-enforce.yml scripts/ri3-semantics-enforce.py scripts/ri3-semantics-regressions.py
           if git diff --quiet && git diff --cached --quiet; then
             echo "No durable changes to commit"
             exit 1
