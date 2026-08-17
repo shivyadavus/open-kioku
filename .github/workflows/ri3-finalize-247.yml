@@ -1,0 +1,287 @@
+name: RI3 finalize 247
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-relationship-proofs
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-relationship-proofs
+          fetch-depth: 0
+
+      - name: Consolidate authority policy and query behavior
+        shell: python
+        run: |
+          from pathlib import Path
+
+          evidence = Path("crates/open-kioku-evidence/src/lib.rs")
+          text = evidence.read_text()
+
+          old_imports = '''use open_kioku_core::{Confidence, Evidence, FileRange, GraphEdge, GraphEdgeType, SymbolId};
+          pub use open_kioku_core::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
+          use open_kioku_errors::OkError;
+          use open_kioku_storage::GraphStore;
+          use schemars::JsonSchema;
+          use serde::{Deserialize, Serialize};
+          use std::collections::BTreeSet;
+          '''
+          old_imports = old_imports.replace("          ", "")
+          new_imports = '''use open_kioku_core::{Confidence, Evidence, GraphEdge, GraphEdgeType};
+          pub use open_kioku_core::{
+              normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
+              RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
+              RELATIONSHIP_PROOFS_PROPERTY,
+          };
+          use open_kioku_errors::OkError;
+          use open_kioku_storage::GraphStore;
+          use schemars::JsonSchema;
+          use serde::{Deserialize, Serialize};
+          #[cfg(test)]
+          use std::collections::BTreeSet;
+          '''
+          new_imports = new_imports.replace("          ", "")
+          if text.count(old_imports) != 1:
+              raise SystemExit(f"evidence import seam changed: {text.count(old_imports)}")
+          text = text.replace(old_imports, new_imports, 1)
+
+          start_marker = "/// Structured property key used to persist relationship proofs on existing graph edges."
+          end_marker = "pub const DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT: usize = 100;"
+          start = text.find(start_marker)
+          end = text.find(end_marker)
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit(f"evidence compatibility block anchors invalid: start={start}, end={end}")
+
+          compatibility = '''/// Compatibility wrapper for callers that imported this policy helper from the evidence crate.
+          pub fn proof_kind_authority(kind: RelationshipProofKind) -> RelationshipAuthority {
+              kind.maximum_authority()
+          }
+
+          /// Backward-compatible trait facade over the core-owned inherent `GraphEdge` proof API.
+          ///
+          /// Existing callers may continue importing this trait while new consumers can use the
+          /// inherent methods directly without depending on `open-kioku-evidence`.
+          pub trait GraphEdgeRelationshipProofExt {
+              fn try_relationship_proofs(&self) -> Result<Vec<RelationshipProof>, serde_json::Error>;
+              fn relationship_proofs(&self) -> Vec<RelationshipProof>;
+              fn set_relationship_proofs(
+                  &mut self,
+                  proofs: Vec<RelationshipProof>,
+              ) -> Result<(), serde_json::Error>;
+              fn relationship_authority(&self) -> RelationshipAuthority;
+              fn is_authoritative_relationship(&self) -> bool;
+              fn has_relationship_proof_kind(&self, kind: RelationshipProofKind) -> bool;
+          }
+
+          impl GraphEdgeRelationshipProofExt for GraphEdge {
+              fn try_relationship_proofs(&self) -> Result<Vec<RelationshipProof>, serde_json::Error> {
+                  GraphEdge::try_relationship_proofs(self)
+              }
+
+              fn relationship_proofs(&self) -> Vec<RelationshipProof> {
+                  GraphEdge::relationship_proofs(self)
+              }
+
+              fn set_relationship_proofs(
+                  &mut self,
+                  proofs: Vec<RelationshipProof>,
+              ) -> Result<(), serde_json::Error> {
+                  GraphEdge::set_relationship_proofs(self, proofs)
+              }
+
+              fn relationship_authority(&self) -> RelationshipAuthority {
+                  GraphEdge::relationship_authority(self)
+              }
+
+              fn is_authoritative_relationship(&self) -> bool {
+                  GraphEdge::is_authoritative_relationship(self)
+              }
+
+              fn has_relationship_proof_kind(&self, kind: RelationshipProofKind) -> bool {
+                  GraphEdge::has_relationship_proof_kind(self, kind)
+              }
+          }
+
+          '''.replace("          ", "")
+          text = text[:start] + compatibility + text[end:]
+
+          short_page = '''            if batch_len < batch_limit {
+              source_exhausted = true;
+              break;
+          }
+          '''.replace("          ", "")
+          if text.count(short_page) != 1:
+              raise SystemExit(f"short-page seam changed: {text.count(short_page)}")
+          text = text.replace(short_page, "", 1)
+
+          if "struct CappedPageGraphStore" not in text:
+              seam = '''    #[test]
+              fn exact_occurrence_proves_reference_relationship() {'''.replace("              ", "")
+              if text.count(seam) != 1:
+                  raise SystemExit(f"test fixture seam changed: {text.count(seam)}")
+              fixture = '''    struct CappedPageGraphStore {
+                  edges: Vec<GraphEdge>,
+                  page_cap: usize,
+              }
+
+              impl GraphStore for CappedPageGraphStore {
+                  fn replace_graph(&self, _nodes: &[GraphNode], _edges: &[GraphEdge]) -> Result<(), OkError> {
+                      Ok(())
+                  }
+
+                  fn neighbors(
+                      &self,
+                      _node: &str,
+                      _limit: usize,
+                  ) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), OkError> {
+                      Ok((Vec::new(), Vec::new()))
+                  }
+
+                  fn shortest_path(
+                      &self,
+                      _from: &str,
+                      _to: &str,
+                      _max_depth: usize,
+                  ) -> Result<Vec<GraphEdge>, OkError> {
+                      Ok(Vec::new())
+                  }
+
+                  fn edges_by_type(
+                      &self,
+                      edge_type: GraphEdgeType,
+                      limit: usize,
+                      offset: usize,
+                  ) -> Result<Vec<GraphEdge>, OkError> {
+                      Ok(self
+                          .edges
+                          .iter()
+                          .filter(|edge| edge.edge_type == edge_type)
+                          .skip(offset)
+                          .take(limit.min(self.page_cap))
+                          .cloned()
+                          .collect())
+                  }
+              }
+
+              #[test]
+              fn exact_occurrence_proves_reference_relationship() {'''.replace("              ", "")
+              text = text.replace(seam, fixture, 1)
+
+          if "fn graph_store_query_continues_after_short_pages()" not in text:
+              seam = '''    #[test]
+              fn graph_store_query_reports_scan_truncation() {'''.replace("              ", "")
+              if text.count(seam) != 1:
+                  raise SystemExit(f"pagination test seam changed: {text.count(seam)}")
+              regression = '''    #[test]
+              fn graph_store_query_continues_after_short_pages() {
+                  let store = CappedPageGraphStore {
+                      edges: vec![
+                          legacy_reference_edge("legacy"),
+                          reference_edge(
+                              "authoritative",
+                              vec![proof(RelationshipProofKind::ExactReference, 1)],
+                          ),
+                      ],
+                      page_cap: 1,
+                  };
+                  let query = RelationshipEdgeQuery {
+                      edge_type: GraphEdgeType::References,
+                      filter: RelationshipProofFilter {
+                          minimum_authority: RelationshipAuthority::Authoritative,
+                          accepted_proof_kinds: None,
+                      },
+                      limit: 1,
+                      offset: 0,
+                      scan_limit: 100,
+                  };
+
+                  let result = store.query_relationship_edges(&query).unwrap();
+                  assert_eq!(result.edges.len(), 1);
+                  assert_eq!(result.edges[0].id.0, "authoritative");
+                  assert_eq!(result.scanned_edges, 2);
+                  assert!(!result.scan_truncated);
+              }
+
+              #[test]
+              fn graph_store_query_reports_scan_truncation() {'''.replace("              ", "")
+              text = text.replace(seam, regression, 1)
+
+          evidence.write_text(text)
+
+          snapshot = Path("crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json")
+          text = snapshot.read_text()
+          if '"name": "UsesType"' not in text:
+              old = '''      {
+                "count": 0,
+                "description": "Edge of type References",
+                "evidence_available": false,
+                "name": "References",
+                "required_evidence": [],
+                "source_types": [],
+                "stable": true,
+                "target_types": []
+              },
+              {
+                "count": 1,
+                "description": "Edge of type Calls",'''
+              new = '''      {
+                "count": 0,
+                "description": "Edge of type References",
+                "evidence_available": false,
+                "name": "References",
+                "required_evidence": [],
+                "source_types": [],
+                "stable": true,
+                "target_types": []
+              },
+              {
+                "count": 0,
+                "description": "Edge of type UsesType",
+                "evidence_available": false,
+                "name": "UsesType",
+                "required_evidence": [],
+                "source_types": [],
+                "stable": true,
+                "target_types": []
+              },
+              {
+                "count": 1,
+                "description": "Edge of type Calls",'''
+              if text.count(old) != 1:
+                  raise SystemExit(f"MCP edge snapshot seam changed: {text.count(old)}")
+              text = text.replace(old, new, 1)
+
+          if '"relationship_proofs"' not in text:
+              old = '''      "config_keys",
+                "service_boundaries",
+                "read_only_graph_query"'''
+              new = '''      "config_keys",
+                "service_boundaries",
+                "relationship_proofs",
+                "read_only_graph_query"'''
+              if text.count(old) != 1:
+                  raise SystemExit(f"MCP feature flag seam changed: {text.count(old)}")
+              text = text.replace(old, new, 1)
+          snapshot.write_text(text)
+
+      - name: Validate consolidated contract
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp --all-targets -- -D warnings
+          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp
+
+      - name: Commit and remove helper
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-finalize-247.yml
+          git add crates/open-kioku-evidence/src/lib.rs crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
+          git commit -m "refactor(ri3): use one core relationship authority policy"
+          git push origin HEAD:agent/ri3-core-relationship-proofs
