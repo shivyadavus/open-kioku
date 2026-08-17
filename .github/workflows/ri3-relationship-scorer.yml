@@ -17,16 +17,8 @@ jobs:
           ref: agent/ri3-relationship-conformance-benchmark
           fetch-depth: 0
 
-      - name: Repair scorer namespace
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('crates/open-kioku-cli/src/bench/relationship.rs')
-          text = path.read_text()
-          if 'fn ratio(' not in text:
-              raise SystemExit('relationship scorer ratio helper seam changed')
-          path.write_text(text.replace('ratio(', 'relationship_ratio('))
-          PY
+      - name: Wire relationship benchmark command
+        run: python3 scripts/ri3_relationship_scorer_tmp.py
 
       - name: Validate relationship benchmark scorer
         run: |
@@ -38,7 +30,7 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-relationship-scorer.yml
-          git add crates/open-kioku-cli/src/lib.rs crates/open-kioku-cli/src/bench/relationship.rs
-          git commit -m "ri3: validate relationship conformance scorer foundation"
+          git rm .github/workflows/ri3-relationship-scorer.yml scripts/ri3_relationship_scorer_tmp.py
+          git add crates/open-kioku-cli/src/lib.rs crates/open-kioku-cli/src/types.rs crates/open-kioku-cli/src/commands/mod.rs crates/open-kioku-cli/src/bench/relationship.rs
+          git commit -m "ri3: add relationship conformance scorer command"
           git push origin HEAD:agent/ri3-relationship-conformance-benchmark
