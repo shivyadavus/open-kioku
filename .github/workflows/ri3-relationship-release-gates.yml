@@ -33,6 +33,8 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
+          git checkout -- Cargo.lock
+          rm -rf scripts/__pycache__
           git rm -f \
             .github/workflows/ri3-relationship-release-gates.yml \
             scripts/ri3_relationship_gates_tmp.py \
@@ -42,8 +44,13 @@ jobs:
             crates/open-kioku-cli/src/types.rs \
             benchmarks/relationship-thresholds.json
           if ! git diff --quiet; then
-            echo "unexpected unstaged changes after non-mutating validation:" >&2
+            echo "unexpected unstaged tracked changes after validation cleanup:" >&2
             git status --short >&2
+            exit 1
+          fi
+          if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            echo "unexpected untracked files after validation cleanup:" >&2
+            git ls-files --others --exclude-standard >&2
             exit 1
           fi
           git commit -m "ri3: enforce non-vacuous relationship benchmark release gates"
