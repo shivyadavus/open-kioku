@@ -34,6 +34,16 @@ if start < 0 or end < 0 or end <= start:
 text = text[:start] + text[end:]
 calls.write_text(text)
 
+bare_calls = Path("crates/open-kioku-resolution/src/bare_calls.rs")
+text = bare_calls.read_text()
+text = replace_exact(
+    text,
+    "    proof.ambiguity = ambiguity.to_vec();\n",
+    "    proof.ambiguity = ambiguity.iter().map(|id| id.0.clone()).collect();\n",
+    "relationship proof ambiguity serialization",
+)
+bare_calls.write_text(text)
+
 relationship = Path("crates/open-kioku-core/src/relationship.rs")
 text = relationship.read_text()
 old = '''        GraphEdgeType::Calls => {
