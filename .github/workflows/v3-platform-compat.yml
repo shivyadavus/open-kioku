@@ -1,0 +1,64 @@
+name: V3 platform compatibility
+
+on:
+  push:
+    branches:
+      - release/v3.0.0
+    paths:
+      - .github/workflows/v3-platform-compat.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v3.0.0
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Apply supported-platform migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/v3-platform-compat.py
+          git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
+
+      - name: Validate platform metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 >/dev/null
+          cargo fmt --all -- --check
+          scripts/validate-docs.sh
+          scripts/validate-versions.sh
+          scripts/verify-npm-package.sh
+          git diff --check
+          if git grep -nE 'ok-macos-x86_64|@open-kioku/darwin-x64|x86_64-apple-darwin|unknown-linux-musl' -- \
+              release-metadata.json Formula crates/open-kioku-cli packages/npm docs/release-checklist.md CHANGELOG.md scripts/validate-release-metadata.py; then
+            echo 'unsupported V3 platform reference remains' >&2
+            exit 1
+          fi
+
+      - name: Commit supported-platform surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm scripts/v3-platform-compat.py
+          git add -A
+          git reset .github/workflows/v3-platform-compat.yml
+          git commit -m "release: align v3 packages with supported runtime targets"
+          git push origin HEAD:release/v3.0.0
