@@ -18,72 +18,71 @@ jobs:
           fetch-depth: 0
 
       - name: Make proof identities fail closed
-        shell: python
         run: |
+          python3 - <<'PY'
           from pathlib import Path
 
           path = Path("crates/open-kioku-core/src/relationship.rs")
           text = path.read_text()
-
           function_start_marker = "fn proof_targets_are_coherent(proofs: &[RelationshipProof]) -> bool {"
           function_end_marker = "/// Compute effective relationship authority from typed proofs using one fail-closed policy."
           if text.count(function_start_marker) != 1 or text.count(function_end_marker) != 1:
               raise SystemExit("coherence function anchors changed")
           start = text.index(function_start_marker)
           end = text.index(function_end_marker)
-          replacement = '''fn proof_identities_are_coherent(proofs: &[RelationshipProof]) -> bool {
-    let mut expected_source: Option<&SymbolId> = None;
-    let mut expected_target: Option<&SymbolId> = None;
-    for proof in proofs {
-        if let Some(source) = proof.source_symbol_id.as_ref() {
-            match expected_source {
-                Some(expected) if expected != source => return false,
-                None => expected_source = Some(source),
-                _ => {}
-            }
-        }
-        if let Some(target) = proof.target_symbol_id.as_ref() {
-            match expected_target {
-                Some(expected) if expected != target => return false,
-                None => expected_target = Some(target),
-                _ => {}
-            }
-        }
-    }
-    true
-}
-
-'''
+          replacement = "\n".join([
+              "fn proof_identities_are_coherent(proofs: &[RelationshipProof]) -> bool {",
+              "    let mut expected_source: Option<&SymbolId> = None;",
+              "    let mut expected_target: Option<&SymbolId> = None;",
+              "    for proof in proofs {",
+              "        if let Some(source) = proof.source_symbol_id.as_ref() {",
+              "            match expected_source {",
+              "                Some(expected) if expected != source => return false,",
+              "                None => expected_source = Some(source),",
+              "                _ => {}",
+              "            }",
+              "        }",
+              "        if let Some(target) = proof.target_symbol_id.as_ref() {",
+              "            match expected_target {",
+              "                Some(expected) if expected != target => return false,",
+              "                None => expected_target = Some(target),",
+              "                _ => {}",
+              "            }",
+              "        }",
+              "    }",
+              "    true",
+              "}",
+              "",
+              "",
+          ])
           text = text[:start] + replacement + text[end:]
 
           old_guard = "if proofs.is_empty() || !proof_targets_are_coherent(proofs) {"
           if text.count(old_guard) != 1:
               raise SystemExit(f"coherence guard count={text.count(old_guard)}")
-          text = text.replace(
-              old_guard,
-              "if proofs.is_empty() || !proof_identities_are_coherent(proofs) {",
-              1,
-          )
+          text = text.replace(old_guard, "if proofs.is_empty() || !proof_identities_are_coherent(proofs) {", 1)
 
-          anchor = '''    #[test]
-    fn legacy_and_malformed_edges_fail_closed() {'''
+          anchor = "    #[test]\n    fn legacy_and_malformed_edges_fail_closed() {"
           if text.count(anchor) != 1:
               raise SystemExit(f"legacy test anchor count={text.count(anchor)}")
-          regression = '''    #[test]
-    fn conflicting_source_ids_fail_closed() {
-        let mut call_site = proof(RelationshipProofKind::ExactCallSite, 1);
-        call_site.source_symbol_id = Some(SymbolId::new("caller-a"));
-        call_site.target_symbol_id = Some(SymbolId::new("callee"));
-        let mut exact_target = proof(RelationshipProofKind::ExactReference, 1);
-        exact_target.source_symbol_id = Some(SymbolId::new("caller-b"));
-        exact_target.target_symbol_id = Some(SymbolId::new("callee"));
-        let edge = edge(GraphEdgeType::Calls, vec![call_site, exact_target]);
-        assert_eq!(edge.relationship_authority(), RelationshipAuthority::Heuristic);
-    }
-
-'''
+          regression = "\n".join([
+              "    #[test]",
+              "    fn conflicting_source_ids_fail_closed() {",
+              "        let mut call_site = proof(RelationshipProofKind::ExactCallSite, 1);",
+              "        call_site.source_symbol_id = Some(SymbolId::new(\"caller-a\"));",
+              "        call_site.target_symbol_id = Some(SymbolId::new(\"callee\"));",
+              "        let mut exact_target = proof(RelationshipProofKind::ExactReference, 1);",
+              "        exact_target.source_symbol_id = Some(SymbolId::new(\"caller-b\"));",
+              "        exact_target.target_symbol_id = Some(SymbolId::new(\"callee\"));",
+              "        let edge = edge(GraphEdgeType::Calls, vec![call_site, exact_target]);",
+              "        assert_eq!(edge.relationship_authority(), RelationshipAuthority::Heuristic);",
+              "    }",
+              "",
+              "",
+          ])
           text = text.replace(anchor, regression + anchor, 1)
           path.write_text(text)
+          PY
 
       - name: Validate core trust boundary
         run: |
