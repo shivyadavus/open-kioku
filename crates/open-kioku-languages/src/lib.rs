@@ -106,7 +106,7 @@ mod tests {
     use open_kioku_core::{GraphEdgeType, Language, ReceiverKind, SymbolKind};
 
     #[test]
-    fn registers_all_five_major_languages() {
+    fn registers_all_six_tier_one_languages() {
         let langs = [
             Language::Java,
             Language::TypeScript,
@@ -124,11 +124,37 @@ mod tests {
     fn classifies_receivers_correctly() {
         let java_sem = semantics_for(&Language::Java).unwrap();
         assert_eq!(java_sem.classify_receiver("this"), ReceiverKind::Self_);
+        assert_eq!(java_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
+        assert_eq!(java_sem.classify_receiver("super"), ReceiverKind::Super);
+        assert_eq!(
+            java_sem.classify_receiver("super.repo"),
+            ReceiverKind::Value
+        );
         assert_eq!(java_sem.classify_receiver("Repo"), ReceiverKind::Type);
+        assert_eq!(java_sem.classify_receiver("Super"), ReceiverKind::Type);
+
+        let ts_sem = semantics_for(&Language::TypeScript).unwrap();
+        assert_eq!(ts_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
+        assert_eq!(ts_sem.classify_receiver("super"), ReceiverKind::Super);
+        assert_eq!(ts_sem.classify_receiver("super.repo"), ReceiverKind::Value);
+        assert_eq!(ts_sem.classify_receiver("Super"), ReceiverKind::Type);
+
+        let js_sem = semantics_for(&Language::JavaScript).unwrap();
+        assert_eq!(js_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
+        assert_eq!(js_sem.classify_receiver("super"), ReceiverKind::Super);
+        assert_eq!(js_sem.classify_receiver("super.repo"), ReceiverKind::Value);
+        assert_eq!(js_sem.classify_receiver("Super"), ReceiverKind::Type);
 
         let py_sem = semantics_for(&Language::Python).unwrap();
         assert_eq!(py_sem.classify_receiver("self"), ReceiverKind::Self_);
+        assert_eq!(py_sem.classify_receiver("self.repo"), ReceiverKind::Self_);
         assert_eq!(py_sem.classify_receiver("cls"), ReceiverKind::Self_);
+        assert_eq!(py_sem.classify_receiver("cls.repo"), ReceiverKind::Self_);
+        assert_eq!(py_sem.classify_receiver("super()"), ReceiverKind::Super);
+        assert_eq!(
+            py_sem.classify_receiver("super().repo"),
+            ReceiverKind::Value
+        );
     }
 
     #[test]

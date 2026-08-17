@@ -17,6 +17,7 @@ pub fn resolve_call_outcome(call: &CallSite, ctx: &ResolutionContext<'_>) -> Res
         ReceiverKind::Unknown => ResolutionOutcome::Unresolved {
             candidates: Vec::new(),
             reason: "unsupported dynamic/unknown receiver cannot be proven structurally".into(),
+            candidates_considered: 0,
         },
     }
 }

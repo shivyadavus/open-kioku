@@ -6,6 +6,11 @@ use open_kioku_core::{
 };
 use std::collections::BTreeMap;
 
+/// Maximum unique structural targets considered for one semantic relationship occurrence.
+/// Oversized sets fail closed as ambiguous; they are never truncated and then re-evaluated for
+/// authority because doing so could manufacture a false unique winner.
+pub const MAX_RESOLUTION_CANDIDATES: usize = 256;
+
 /// One plausible structural target discovered by one or more resolver strategies.
 ///
 /// `confidence` remains retrieval/ranking metadata. Structural truth is decided only from
@@ -70,10 +75,13 @@ pub enum ResolutionOutcome {
     Ambiguous {
         candidates: Vec<ResolutionCandidate>,
         reason: String,
+        candidates_considered: usize,
+        candidate_cap_hit: bool,
     },
     Unresolved {
         candidates: Vec<ResolutionCandidate>,
         reason: String,
+        candidates_considered: usize,
     },
     External {
         identity: String,
@@ -108,6 +116,20 @@ pub fn evaluate_candidates(
 ) -> ResolutionOutcome {
     let candidates = normalize_candidates(candidates);
     let candidates_considered = candidates.len();
+    if candidates_considered > MAX_RESOLUTION_CANDIDATES {
+        let retained_candidates = candidates
+            .into_iter()
+            .take(MAX_RESOLUTION_CANDIDATES)
+            .collect();
+        return ResolutionOutcome::Ambiguous {
+            candidates: retained_candidates,
+            reason: format!(
+                "candidate cap hit: {candidates_considered} unique structural candidates exceed the safe maximum {MAX_RESOLUTION_CANDIDATES}; authoritative emission suppressed and retained diagnostics bounded"
+            ),
+            candidates_considered,
+            candidate_cap_hit: true,
+        };
+    }
     let heuristic_candidates_retained = candidates
         .iter()
         .filter(|candidate| candidate.authority(edge_type) != RelationshipAuthority::Authoritative)
@@ -137,6 +159,8 @@ pub fn evaluate_candidates(
                 "{} candidates satisfy authoritative relationship proof policy",
                 authoritative.len()
             ),
+            candidates_considered,
+            candidate_cap_hit: false,
         };
     }
 
@@ -147,6 +171,8 @@ pub fn evaluate_candidates(
                 candidates.len()
             ),
             candidates,
+            candidates_considered,
+            candidate_cap_hit: false,
         };
     }
 
@@ -157,10 +183,36 @@ pub fn evaluate_candidates(
             "candidate discovered but relationship proof policy did not authorize it".into()
         },
         candidates,
+        candidates_considered,
     }
 }
 
 impl ResolutionOutcome {
+    pub fn candidates_considered(&self) -> usize {
+        match self {
+            Self::Proven { candidate } => candidate.candidates_considered,
+            Self::Ambiguous {
+                candidates_considered,
+                ..
+            }
+            | Self::Unresolved {
+                candidates_considered,
+                ..
+            } => *candidates_considered,
+            Self::External { .. } => 0,
+        }
+    }
+
+    pub fn candidate_cap_hit(&self) -> bool {
+        matches!(
+            self,
+            Self::Ambiguous {
+                candidate_cap_hit: true,
+                ..
+            }
+        )
+    }
+
     /// Compatibility adapter for the existing public resolver result while callers migrate to the
     /// richer proof-gated outcome.
     pub fn into_legacy_result(self) -> ResolutionResult {
@@ -170,7 +222,9 @@ impl ResolutionOutcome {
                 confidence: candidate.confidence,
                 evidence: candidate.evidence,
             },
-            Self::Ambiguous { candidates, reason } => ResolutionResult::Ambiguous {
+            Self::Ambiguous {
+                candidates, reason, ..
+            } => ResolutionResult::Ambiguous {
                 candidates: candidates
                     .iter()
                     .map(|candidate| candidate.target_symbol_id.clone())
@@ -178,7 +232,9 @@ impl ResolutionOutcome {
                 reason,
                 evidence: merged_candidate_evidence(&candidates),
             },
-            Self::Unresolved { candidates, reason } => {
+            Self::Unresolved {
+                candidates, reason, ..
+            } => {
                 let mut evidence = merged_candidate_evidence(&candidates);
                 evidence.push(ResolutionEvidence {
                     kind: ResolutionEvidenceKind::FallbackHeuristic,
@@ -365,6 +421,45 @@ mod tests {
             }
             other => panic!("expected ambiguity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pathological_candidate_sets_fail_closed_before_authority_selection() {
+        let candidates = (0..=MAX_RESOLUTION_CANDIDATES)
+            .map(|index| {
+                let target = SymbolId::new(format!("symbol:{index:04}"));
+                let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+                candidate.proofs.push(proof(
+                    RelationshipProofKind::ExactReference,
+                    &target,
+                    "pathological_exact",
+                ));
+                candidate
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = evaluate_candidates(&GraphEdgeType::References, candidates.clone());
+        let reversed = evaluate_candidates(
+            &GraphEdgeType::References,
+            candidates.into_iter().rev().collect(),
+        );
+        for observed in [&outcome, &reversed] {
+            let ResolutionOutcome::Ambiguous {
+                candidates,
+                candidates_considered,
+                candidate_cap_hit,
+                reason,
+            } = observed
+            else {
+                panic!("oversized candidate set must fail closed as ambiguous");
+            };
+            assert_eq!(*candidates_considered, MAX_RESOLUTION_CANDIDATES + 1);
+            assert!(*candidate_cap_hit);
+            assert_eq!(candidates.len(), MAX_RESOLUTION_CANDIDATES);
+            assert!(reason.contains("authoritative emission suppressed"));
+            assert!(reason.contains("retained diagnostics bounded"));
+        }
+        assert_eq!(outcome, reversed);
     }
 
     #[test]

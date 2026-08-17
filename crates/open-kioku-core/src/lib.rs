@@ -1860,6 +1860,18 @@ pub struct RelationshipResolutionQuality {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LanguageResolutionQuality {
+    pub occurrences: usize,
+    pub candidates_considered: usize,
+    pub proven: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub candidate_cap_hits: usize,
+    pub enrichment_time_us: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolutionQualityReport {
     pub call_sites: usize,
     pub resolved_exact: usize,
@@ -1870,6 +1882,10 @@ pub struct ResolutionQualityReport {
     pub legacy_only: usize,
     pub semantic_only: usize,
     pub disagreement: usize,
+    #[serde(default)]
+    pub candidate_cap_hits: usize,
+    #[serde(default)]
+    pub by_language: BTreeMap<String, LanguageResolutionQuality>,
     #[serde(default)]
     pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
 }

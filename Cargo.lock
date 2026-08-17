@@ -2823,6 +2823,7 @@ dependencies = [
  "open-kioku-memory",
  "open-kioku-patch",
  "open-kioku-plan",
+ "open-kioku-resolution",
  "open-kioku-search-regex",
  "open-kioku-search-tantivy",
  "open-kioku-semantic",
@@ -3095,6 +3096,7 @@ version = "2.4.0"
 dependencies = [
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-languages",
  "sha2",
  "tree-sitter",
  "tree-sitter-go",
@@ -3124,6 +3126,7 @@ version = "2.4.0"
 dependencies = [
  "notify",
  "open-kioku-config",
+ "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-graph",
  "open-kioku-ingest",
