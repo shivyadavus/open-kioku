@@ -62,7 +62,20 @@ jobs:
           )
           if text.count(legacy) != 1:
               raise SystemExit(f"unexpected legacy proof re-export count: {text.count(legacy)}")
-          path.write_text(text.replace(legacy, "", 1))
+          text = text.replace(legacy, "", 1)
+          old_test_import = (
+              "    use open_kioku_core::{EdgeId, EvidenceId, GraphNode, LineRange, NodeId};\n"
+          )
+          new_test_import = (
+              "    use open_kioku_core::{\n"
+              "        EdgeId, EvidenceId, FileRange, GraphNode, LineRange, NodeId, SymbolId,\n"
+              "    };\n"
+          )
+          if text.count(old_test_import) != 1:
+              raise SystemExit(
+                  f"unexpected evidence test import count: {text.count(old_test_import)}"
+              )
+          path.write_text(text.replace(old_test_import, new_test_import, 1))
           PY
 
       - name: Format and validate trust boundaries
