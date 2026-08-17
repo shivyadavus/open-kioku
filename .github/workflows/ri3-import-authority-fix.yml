@@ -27,8 +27,10 @@ jobs:
       - name: Apply resolved import authority repair
         run: python3 .github/scripts/ri3_import_authority_fix.py
 
-      - name: Format
-        run: cargo fmt --all -- --check
+      - name: Format and verify
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
 
       - name: Validate graph authority regressions
         run: |
