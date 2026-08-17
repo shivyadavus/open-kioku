@@ -33,6 +33,8 @@ pub mod runtime;
 pub mod symbol_registry;
 pub mod validation;
 
+pub use open_kioku_core::{RelationshipResolutionQuality, ResolutionQualityReport};
+
 const MAX_HISTORY_COCHANGE_EDGES: usize = 5000;
 
 #[derive(Debug, Clone)]
@@ -68,17 +70,123 @@ pub struct ResolutionDiff {
     pub agreement: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResolutionQualityReport {
-    pub call_sites: usize,
-    pub resolved_exact: usize,
-    pub resolved_high: usize,
-    pub ambiguous: usize,
-    pub unresolved: usize,
-    pub external: usize,
-    pub legacy_only: usize,
-    pub semantic_only: usize,
-    pub disagreement: usize,
+trait ResolutionQualityReportExt {
+    fn record_outcome(
+        &mut self,
+        edge_type: &GraphEdgeType,
+        outcome: &open_kioku_resolution::ResolutionOutcome,
+    );
+
+    fn record_reference_occurrence(&mut self, occurrence: &SymbolOccurrence);
+}
+
+impl ResolutionQualityReportExt for ResolutionQualityReport {
+    fn record_outcome(
+        &mut self,
+        edge_type: &GraphEdgeType,
+        outcome: &open_kioku_resolution::ResolutionOutcome,
+    ) {
+        let key = relationship_metric_key(edge_type);
+        let metrics = self.by_relationship.entry(key).or_default();
+        match outcome {
+            open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
+                metrics.candidates_considered += candidate.candidates_considered;
+                metrics.proven += 1;
+                metrics.heuristic_candidates_retained += candidate.heuristic_candidates_retained;
+                record_candidate_evidence(metrics, candidate);
+            }
+            open_kioku_resolution::ResolutionOutcome::Ambiguous { candidates, .. } => {
+                metrics.candidates_considered += candidates.len();
+                metrics.ambiguous += 1;
+                metrics.heuristic_candidates_retained += candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.authority(edge_type)
+                            != open_kioku_core::RelationshipAuthority::Authoritative
+                    })
+                    .count();
+                for candidate in candidates {
+                    record_candidate_evidence(metrics, candidate);
+                }
+            }
+            open_kioku_resolution::ResolutionOutcome::Unresolved { candidates, .. } => {
+                metrics.candidates_considered += candidates.len();
+                metrics.unresolved += 1;
+                metrics.heuristic_candidates_retained += candidates.len();
+                for candidate in candidates {
+                    record_candidate_evidence(metrics, candidate);
+                }
+            }
+            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                metrics.external += 1;
+            }
+        }
+    }
+
+    fn record_reference_occurrence(&mut self, occurrence: &SymbolOccurrence) {
+        if occurrence.is_definition {
+            return;
+        }
+        let metrics = self
+            .by_relationship
+            .entry(relationship_metric_key(&GraphEdgeType::References))
+            .or_default();
+        metrics.candidates_considered += 1;
+        if occurrence.provenance == EvidenceSourceType::Scip
+            && occurrence.confidence == Confidence::Exact
+            && occurrence.source_range.is_some()
+        {
+            metrics.proven += 1;
+            *metrics
+                .proof_kind_counts
+                .entry("exact_occurrence".into())
+                .or_default() += 1;
+            *metrics
+                .resolver_strategy_counts
+                .entry("scip_exact_occurrence".into())
+                .or_default() += 1;
+        } else {
+            metrics.unresolved += 1;
+            metrics.heuristic_candidates_retained += 1;
+        }
+    }
+}
+
+fn relationship_metric_key(edge_type: &GraphEdgeType) -> String {
+    serde_json::to_value(edge_type)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{edge_type:?}"))
+}
+
+fn proof_kind_metric_key(kind: &open_kioku_core::RelationshipProofKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
+
+fn record_candidate_evidence(
+    metrics: &mut RelationshipResolutionQuality,
+    candidate: &open_kioku_resolution::ResolutionCandidate,
+) {
+    let mut proof_kinds = BTreeSet::new();
+    let mut strategies = BTreeSet::new();
+    for proof in &candidate.proofs {
+        proof_kinds.insert(proof_kind_metric_key(&proof.kind));
+        if !proof.resolver_strategy.is_empty() {
+            strategies.insert(proof.resolver_strategy.clone());
+        }
+    }
+    for kind in proof_kinds {
+        *metrics.proof_kind_counts.entry(kind).or_default() += 1;
+    }
+    for strategy in strategies {
+        *metrics
+            .resolver_strategy_counts
+            .entry(strategy)
+            .or_default() += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -419,7 +527,7 @@ impl Indexer {
         let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
-            open_kioku_resolution::InheritanceIndex::build(inheritance_sites);
+            open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
 
         let mut semantic_repo = open_kioku_semantic_model::SemanticRepository::new();
         semantic_repo.project = project_model;
@@ -544,14 +652,11 @@ impl Indexer {
                             semantics,
                         );
 
-                        let v2_result = open_kioku_resolution::resolve_call(call, &ctx);
-                        let semantic_target = match &v2_result {
-                            open_kioku_resolution::ResolutionResult::Resolved {
-                                target,
-                                confidence,
-                                evidence,
-                            } => {
-                                match confidence {
+                        let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);
+                        quality_report.record_outcome(&GraphEdgeType::Calls, &v2_outcome);
+                        let semantic_target = match &v2_outcome {
+                            open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
+                                match candidate.confidence {
                                     Confidence::Exact => quality_report.resolved_exact += 1,
                                     Confidence::High => quality_report.resolved_high += 1,
                                     _ => {}
@@ -560,22 +665,26 @@ impl Indexer {
                                     resolved_relationships.push(
                                         open_kioku_resolution::ResolvedRelationship {
                                             from: caller.clone(),
-                                            to: target.clone(),
+                                            to: candidate.target_symbol_id.clone(),
                                             edge_type: GraphEdgeType::Calls,
-                                            confidence: *confidence,
+                                            confidence: candidate.confidence,
                                             call_site: Some(call.range.clone()),
-                                            evidence: evidence.clone(),
+                                            evidence: candidate.evidence.clone(),
+                                            proofs: candidate.proofs.clone(),
                                         },
                                     );
                                 }
-                                Some(target.clone())
+                                Some(candidate.target_symbol_id.clone())
                             }
-                            open_kioku_resolution::ResolutionResult::Ambiguous { .. } => {
+                            open_kioku_resolution::ResolutionOutcome::Ambiguous { .. } => {
                                 quality_report.ambiguous += 1;
                                 None
                             }
-                            open_kioku_resolution::ResolutionResult::External { .. } => None,
-                            open_kioku_resolution::ResolutionResult::Unresolved { .. } => {
+                            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                                quality_report.external += 1;
+                                None
+                            }
+                            open_kioku_resolution::ResolutionOutcome::Unresolved { .. } => {
                                 quality_report.unresolved += 1;
                                 None
                             }
@@ -635,6 +744,86 @@ impl Indexer {
                             agreement,
                         });
                     }
+                }
+            }
+        }
+
+        if resolution_mode == open_kioku_config::ResolutionMode::Shadow
+            || resolution_mode == open_kioku_config::ResolutionMode::V2
+        {
+            for site in &inheritance_sites {
+                let Some(child) = symbol_index.get(&site.child_symbol_id) else {
+                    continue;
+                };
+                let Some(file) = file_lookup.get(&child.file_id) else {
+                    continue;
+                };
+                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
+                    continue;
+                };
+                let ctx = open_kioku_resolution::ResolutionContext::new(
+                    &child.file_id,
+                    &file.path,
+                    child.module_id.as_ref(),
+                    file.language.clone(),
+                    &semantic_repo,
+                    &symbol_index,
+                    &scope_index,
+                    &binding_index,
+                    &inheritance_index,
+                    semantics,
+                );
+                let (edge_type, outcome) =
+                    open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);
+                quality_report.record_outcome(&edge_type, &outcome);
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
+                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                        from: site.child_symbol_id.clone(),
+                        to: candidate.target_symbol_id,
+                        edge_type,
+                        confidence: candidate.confidence,
+                        call_site: None,
+                        evidence: candidate.evidence,
+                        proofs: candidate.proofs,
+                    });
+                }
+            }
+
+            for binding in &bindings {
+                let Some(file) = file_lookup.get(&binding.file_id) else {
+                    continue;
+                };
+                let Some(semantics) = open_kioku_languages::semantics_for(&file.language) else {
+                    continue;
+                };
+                let ctx = open_kioku_resolution::ResolutionContext::new(
+                    &binding.file_id,
+                    &file.path,
+                    None,
+                    file.language.clone(),
+                    &semantic_repo,
+                    &symbol_index,
+                    &scope_index,
+                    &binding_index,
+                    &inheritance_index,
+                    semantics,
+                );
+                let Some((source, outcome)) =
+                    open_kioku_resolution::resolve_declared_type_use_outcome(binding, &ctx)
+                else {
+                    continue;
+                };
+                quality_report.record_outcome(&GraphEdgeType::UsesType, &outcome);
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
+                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                        from: source,
+                        to: candidate.target_symbol_id,
+                        edge_type: GraphEdgeType::UsesType,
+                        confidence: candidate.confidence,
+                        call_site: None,
+                        evidence: candidate.evidence,
+                        proofs: candidate.proofs,
+                    });
                 }
             }
         }
@@ -754,6 +943,9 @@ impl Indexer {
             );
             scip_report = Some(report);
         }
+        for occurrence in &occurrences {
+            quality_report.record_reference_occurrence(occurrence);
+        }
         let repository = Repository {
             id: repo_id,
             name: config.repo.name.clone(),
@@ -766,7 +958,7 @@ impl Indexer {
         resolver_quality_notes.extend(registry_report.quality_notes);
         let mut mode_notes = mode_quality_notes(mode);
         mode_notes.extend(resolver_quality_notes);
-        let quality = index_quality(IndexQualityInput {
+        let mut quality = index_quality(IndexQualityInput {
             root: &root,
             config,
             scip_report: scip_report.as_ref(),
@@ -787,6 +979,12 @@ impl Indexer {
             phase_reports: &phase_reports,
             skipped_paths: &scan.skipped_paths,
         });
+        let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
+            None
+        } else {
+            Some(quality_report)
+        };
+        quality.resolution_quality = resolution_quality.clone();
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -818,12 +1016,7 @@ impl Indexer {
                 call_sites,
                 resolved_relationships,
                 resolution_diffs,
-                resolution_quality: if resolution_mode == open_kioku_config::ResolutionMode::Legacy
-                {
-                    None
-                } else {
-                    Some(quality_report)
-                },
+                resolution_quality,
             },
             git_history.snapshot,
         ))
@@ -1448,6 +1641,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             git_history_facts: analysis.git_history_facts,
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
+            resolution_quality: None,
             quality_notes,
         }
     } else {
@@ -1477,6 +1671,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             git_history_facts: analysis.git_history_facts,
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
+            resolution_quality: None,
             quality_notes,
         }
     }
@@ -2372,6 +2567,7 @@ fn derive_occurrences(_chunks: &[CodeChunk], symbols: &[Symbol]) -> Vec<SymbolOc
             symbol_id: symbol.id.clone(),
             file_id: symbol.file_id.clone(),
             range: symbol.range.clone(),
+            source_range: None,
             is_definition: true,
             confidence: symbol.confidence,
             provenance: symbol.provenance.clone(),
