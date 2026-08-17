@@ -51,6 +51,19 @@ jobs:
           PY
           python3 -m py_compile scripts/ri3_finish_contract_tmp.py
           python3 scripts/ri3_finish_contract_tmp.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/open-kioku-evidence/src/lib.rs")
+          text = path.read_text()
+          legacy = (
+              "pub use open_kioku_core::{RelationshipAuthority, RelationshipProof, "
+              "RelationshipProofKind};\n"
+          )
+          if text.count(legacy) != 1:
+              raise SystemExit(f"unexpected legacy proof re-export count: {text.count(legacy)}")
+          path.write_text(text.replace(legacy, "", 1))
+          PY
 
       - name: Format and validate trust boundaries
         run: |
