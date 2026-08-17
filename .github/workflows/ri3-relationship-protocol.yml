@@ -1,0 +1,38 @@
+name: RI3 relationship benchmark protocol
+
+on:
+  push:
+    branches:
+      - agent/ri3-relationship-conformance-benchmark
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-relationship-conformance-benchmark
+          fetch-depth: 0
+
+      - name: Apply protocol hardening
+        run: |
+          python3 -m py_compile scripts/ri3_relationship_protocol_tmp.py
+          python3 scripts/ri3_relationship_protocol_tmp.py
+
+      - name: Validate scorer protocol
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+          cargo test -p open-kioku-cli relationship_bench_tests
+
+      - name: Commit validated protocol
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-relationship-protocol.yml scripts/ri3_relationship_protocol_tmp.py
+          git add crates/open-kioku-cli/src/bench/relationship.rs
+          git commit -m "ri3: harden relationship conformance benchmark protocol"
+          git push origin HEAD:agent/ri3-relationship-conformance-benchmark
