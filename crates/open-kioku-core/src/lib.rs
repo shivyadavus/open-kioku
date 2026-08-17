@@ -2352,6 +2352,20 @@ pub enum TaskFamily {
     General,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryShape {
+    ExactIdentifier,
+    QualifiedSymbol,
+    PathReference,
+    ErrorTrace,
+    ApiResource,
+    Conceptual,
+    MixedStructuredNaturalLanguage,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RetrievalRoutingDiagnostics {
     pub task_family: TaskFamily,
@@ -2362,6 +2376,16 @@ pub struct RetrievalRoutingDiagnostics {
     pub enabled_sources: Vec<RetrievalSourceKind>,
     #[serde(default)]
     pub required_evidence: Vec<RetrievalSourceKind>,
+    #[serde(default)]
+    pub query_shape: QueryShape,
+    #[serde(default)]
+    pub query_shape_confidence: f32,
+    #[serde(default)]
+    pub query_shape_signals: Vec<String>,
+    #[serde(default)]
+    pub query_shape_ambiguities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_shape_fallback_reason: Option<String>,
 }
 
 impl Default for RetrievalRoutingDiagnostics {
@@ -2372,6 +2396,11 @@ impl Default for RetrievalRoutingDiagnostics {
             reasons: Vec::new(),
             enabled_sources: Vec::new(),
             required_evidence: Vec::new(),
+            query_shape: QueryShape::Unknown,
+            query_shape_confidence: 0.0,
+            query_shape_signals: Vec::new(),
+            query_shape_ambiguities: Vec::new(),
+            query_shape_fallback_reason: None,
         }
     }
 }
