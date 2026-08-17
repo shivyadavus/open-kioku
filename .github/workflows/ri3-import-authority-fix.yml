@@ -1,0 +1,56 @@
+name: RI3 import authority repair
+
+on:
+  push:
+    branches:
+      - agent/ri3-resolution-foundation
+    paths:
+      - .github/workflows/ri3-import-authority-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-resolution-foundation
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Apply resolved import authority repair
+        run: python3 .github/scripts/ri3_import_authority_fix.py
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Validate graph authority regressions
+        run: |
+          cargo test -p open-kioku-graph resolved_import_analysis_fact_is_authoritative
+          cargo test -p open-kioku-graph unresolved_import_analysis_fact_remains_untrusted
+
+      - name: Validate architecture CLI integration
+        run: |
+          cargo test -p open-kioku-cli --test cli_smoke architecture_policy_check_and_explain_public_api_boundaries
+          cargo test -p open-kioku-cli --test cli_smoke architecture_policy_bench_scores_checked_in_corpus
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit repair and self-clean gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-graph/src/lib.rs
+          git commit -m "RI3.2: preserve authority for resolved import bindings"
+          git rm .github/workflows/ri3-import-authority-fix.yml .github/scripts/ri3_import_authority_fix.py
+          git commit -m "chore: remove RI3 import authority repair gate"
+          git push origin HEAD:agent/ri3-resolution-foundation
