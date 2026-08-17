@@ -202,7 +202,9 @@ pub fn relationship_authority(
 
     let authoritative = match edge_type {
         GraphEdgeType::References => {
-            exact_target || import_binding || (qualified_name && same_scope)
+            exact_target
+                || (import_binding && (qualified_name || same_scope))
+                || (qualified_name && same_scope)
         }
         GraphEdgeType::Calls => {
             exact_call_site
@@ -448,6 +450,27 @@ mod tests {
         let proofs = vec![proof(RelationshipProofKind::ImportBinding, 1)];
         assert_eq!(
             relationship_authority(&GraphEdgeType::Imports, &proofs),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn import_binding_alone_does_not_prove_reference_target() {
+        let proofs = vec![proof(RelationshipProofKind::ImportBinding, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::References, &proofs),
+            RelationshipAuthority::Corroborating
+        );
+    }
+
+    #[test]
+    fn import_binding_plus_unique_symbol_proves_reference_target() {
+        let proofs = vec![
+            proof(RelationshipProofKind::ImportBinding, 1),
+            proof(RelationshipProofKind::QualifiedName, 1),
+        ];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::References, &proofs),
             RelationshipAuthority::Authoritative
         );
     }
