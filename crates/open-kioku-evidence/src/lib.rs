@@ -883,9 +883,7 @@ mod tests {
             edge_type: GraphEdgeType::References,
             filter: RelationshipProofFilter {
                 minimum_authority: RelationshipAuthority::Authoritative,
-                accepted_proof_kinds: Some(BTreeSet::from([
-                    RelationshipProofKind::ExactReference,
-                ])),
+                accepted_proof_kinds: Some(BTreeSet::from([RelationshipProofKind::ExactReference])),
             },
             limit: 1,
             offset: 0,
