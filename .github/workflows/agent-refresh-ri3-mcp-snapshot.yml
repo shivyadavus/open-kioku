@@ -1,0 +1,38 @@
+name: agent-refresh-ri3-mcp-snapshot
+
+on:
+  push:
+    branches:
+      - agent/ri3-language-semantics-complete
+    paths:
+      - .github/workflows/agent-refresh-ri3-mcp-snapshot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-language-semantics-complete
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Regenerate and verify MCP protocol snapshot
+        env:
+          UPDATE_GOLDEN_SNAPSHOTS: "1"
+        run: |
+          set -euo pipefail
+          cargo test -p open-kioku-mcp golden_mcp_protocol_snapshots_are_stable
+          git diff --check
+          git diff -- crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
+      - name: Commit intended contract update and remove temporary workflow
+        run: |
+          set -euo pipefail
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
+          git rm .github/workflows/agent-refresh-ri3-mcp-snapshot.yml
+          git commit -m "test(mcp): refresh relationship capability snapshot"
+          git push origin HEAD:agent/ri3-language-semantics-complete
