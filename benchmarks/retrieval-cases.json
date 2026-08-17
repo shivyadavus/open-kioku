@@ -22,7 +22,8 @@
       "gold_symbols": [
         "AuthService.issueToken",
         "TokenStore.saveDigest"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "java-code-to-test-auth",
@@ -34,7 +35,8 @@
       "query": "tests covering AuthService issueToken invalid credentials",
       "gold_files": [
         "java/test/com/acme/auth/AuthServiceTest.java"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "java-trace-login-audit",
@@ -47,7 +49,8 @@
       "gold_files": [
         "java/src/com/acme/auth/AuthService.java",
         "java/src/com/acme/auth/AuditTrail.java"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "java-comment-login-rejection-audit",
@@ -60,7 +63,8 @@
       "gold_files": [
         "java/src/com/acme/auth/AuthService.java",
         "java/src/com/acme/auth/AuditTrail.java"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "java-edit-tokenstore-contract",
@@ -74,7 +78,8 @@
         "java/src/com/acme/auth/TokenStore.java",
         "java/src/com/acme/auth/AuthService.java",
         "java/test/com/acme/auth/AuthServiceTest.java"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "java-no-gold-password-reset",
@@ -85,7 +90,8 @@
       "split": "holdout",
       "query": "password reset should email a one-time code and throttle repeated reset attempts",
       "gold_files": [],
-      "no_gold_expected": true
+      "no_gold_expected": true,
+      "query_shape": "conceptual"
     },
     {
       "id": "ts-issue-invoice-tax",
@@ -98,7 +104,8 @@
       "gold_files": [
         "typescript/src/billing/invoiceService.ts",
         "typescript/src/billing/taxPolicy.ts"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "ts-code-to-test-invoice",
@@ -110,7 +117,8 @@
       "query": "test coverage for finalizeInvoice jurisdiction tax calculation",
       "gold_files": [
         "typescript/src/billing/invoiceService.test.ts"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "ts-comment-webhook-retry",
@@ -123,7 +131,8 @@
       "gold_files": [
         "typescript/src/billing/webhook.ts",
         "typescript/src/billing/invoiceService.ts"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "ts-edit-webhook-contract",
@@ -137,7 +146,8 @@
         "typescript/src/billing/webhook.ts",
         "typescript/src/billing/invoiceService.ts",
         "typescript/src/billing/invoiceService.test.ts"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "ts-trace-invoice-created",
@@ -151,7 +161,8 @@
         "typescript/src/billing/webhook.ts",
         "typescript/src/billing/invoiceService.ts",
         "typescript/src/billing/taxPolicy.ts"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "ts-no-gold-subscription-renewal",
@@ -162,7 +173,8 @@
       "split": "holdout",
       "query": "subscription renewals should prorate annual plans and retry failed card payments",
       "gold_files": [],
-      "no_gold_expected": true
+      "no_gold_expected": true,
+      "query_shape": "conceptual"
     },
     {
       "id": "python-issue-order-persistence",
@@ -175,7 +187,8 @@
       "gold_files": [
         "python/orders/service.py",
         "python/orders/repository.py"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "python-code-to-test-order",
@@ -187,7 +200,8 @@
       "query": "test for OrderService place_order reservation persistence",
       "gold_files": [
         "python/orders/test_service.py"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "python-comment-order-trace",
@@ -201,7 +215,8 @@
         "python/orders/tracing.py",
         "python/orders/service.py",
         "python/orders/repository.py"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "python-no-gold-video",
@@ -212,7 +227,8 @@
       "split": "development",
       "query": "add websocket video transcoding with adaptive bitrate manifests",
       "gold_files": [],
-      "no_gold_expected": true
+      "no_gold_expected": true,
+      "query_shape": "conceptual"
     },
     {
       "id": "python-trace-order-created",
@@ -226,7 +242,8 @@
         "python/orders/service.py",
         "python/orders/tracing.py",
         "python/orders/repository.py"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "python-edit-repository-contract",
@@ -240,7 +257,8 @@
         "python/orders/repository.py",
         "python/orders/service.py",
         "python/orders/test_service.py"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "go-issue-shipping-quote",
@@ -253,7 +271,8 @@
       "gold_files": [
         "go/shipping/service.go",
         "go/shipping/carrier.go"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "go-code-to-test-quote",
@@ -265,7 +284,8 @@
       "query": "test coverage for Service Quote carrier selection",
       "gold_files": [
         "go/shipping/service_test.go"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "go-comment-timeout",
@@ -278,7 +298,8 @@
       "gold_files": [
         "go/shipping/handler.go",
         "go/shipping/service.go"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "go-trace-quote-handler",
@@ -292,7 +313,8 @@
         "go/shipping/handler.go",
         "go/shipping/service.go",
         "go/shipping/carrier.go"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "go-no-gold-thumbnail",
@@ -303,7 +325,8 @@
       "split": "holdout",
       "query": "implement asynchronous image thumbnail generation with EXIF rotation",
       "gold_files": [],
-      "no_gold_expected": true
+      "no_gold_expected": true,
+      "query_shape": "conceptual"
     },
     {
       "id": "go-edit-carrier-contract",
@@ -317,7 +340,8 @@
         "go/shipping/carrier.go",
         "go/shipping/service.go",
         "go/shipping/service_test.go"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "rust-issue-cache-miss",
@@ -330,7 +354,8 @@
       "gold_files": [
         "rust/src/cache/service.rs",
         "rust/src/cache/store.rs"
-      ]
+      ],
+      "query_shape": "conceptual"
     },
     {
       "id": "rust-code-to-test-cache",
@@ -342,7 +367,8 @@
       "query": "test for get_or_load writing cache misses into CacheStore",
       "gold_files": [
         "rust/src/cache/tests.rs"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "rust-comment-cache-trace",
@@ -355,7 +381,8 @@
       "gold_files": [
         "rust/src/cache/trace.rs",
         "rust/src/cache/service.rs"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "rust-trace-cache-miss",
@@ -369,7 +396,8 @@
         "rust/src/cache/trace.rs",
         "rust/src/cache/service.rs",
         "rust/src/cache/store.rs"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "rust-edit-store-contract",
@@ -383,7 +411,8 @@
         "rust/src/cache/store.rs",
         "rust/src/cache/service.rs",
         "rust/src/cache/tests.rs"
-      ]
+      ],
+      "query_shape": "mixed_structured_natural_language"
     },
     {
       "id": "rust-no-gold-http-session",
@@ -394,7 +423,8 @@
       "split": "holdout",
       "query": "encrypt HTTP session cookies and rotate signing keys without logging users out",
       "gold_files": [],
-      "no_gold_expected": true
+      "no_gold_expected": true,
+      "query_shape": "conceptual"
     }
   ]
 }

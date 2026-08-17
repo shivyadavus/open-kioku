@@ -1,5 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.3.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.4.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -69,6 +69,7 @@ struct RetrievalCorpus {
 struct RetrievalCase {
     id: String,
     task_family: RetrievalTaskFamily,
+    query_shape: open_kioku_core::QueryShape,
     language: String,
     repo_fixture: PathBuf,
     base_revision: String,
@@ -103,6 +104,21 @@ impl RetrievalTaskFamily {
             Self::CommentToContext => "comment_to_context",
             Self::EditToRipple => "edit_to_ripple",
         }
+    }
+}
+
+fn query_shape_label(shape: open_kioku_core::QueryShape) -> &'static str {
+    match shape {
+        open_kioku_core::QueryShape::ExactIdentifier => "exact_identifier",
+        open_kioku_core::QueryShape::QualifiedSymbol => "qualified_symbol",
+        open_kioku_core::QueryShape::PathReference => "path_reference",
+        open_kioku_core::QueryShape::ErrorTrace => "error_trace",
+        open_kioku_core::QueryShape::ApiResource => "api_resource",
+        open_kioku_core::QueryShape::Conceptual => "conceptual",
+        open_kioku_core::QueryShape::MixedStructuredNaturalLanguage => {
+            "mixed_structured_natural_language"
+        }
+        open_kioku_core::QueryShape::Unknown => "unknown",
     }
 }
 
@@ -196,6 +212,7 @@ struct RetrievalStrategyReport {
     summary: RetrievalMetricSummary,
     by_language: BTreeMap<String, RetrievalMetricSummary>,
     by_task_family: BTreeMap<String, RetrievalMetricSummary>,
+    by_query_shape: BTreeMap<String, RetrievalMetricSummary>,
     by_split: BTreeMap<String, RetrievalMetricSummary>,
     cases: Vec<RetrievalCaseReport>,
 }
@@ -235,6 +252,7 @@ struct RetrievalMetricSummary {
 struct RetrievalCaseReport {
     id: String,
     task_family: RetrievalTaskFamily,
+    query_shape: open_kioku_core::QueryShape,
     language: String,
     split: RetrievalSplit,
     repo_fixture: PathBuf,
@@ -813,6 +831,18 @@ fn run_routed_contextpack_retrieval_case(
     token_budgets: &[usize],
     limit: usize,
 ) -> anyhow::Result<RetrievalCaseReport> {
+    let routing = open_kioku_context::routing::classify_task(&case.query);
+    if routing.query_shape != case.query_shape {
+        anyhow::bail!(
+            "retrieval case `{}` query-shape label mismatch: frozen={} classifier={} signals={:?} ambiguities={:?} fallback={:?}",
+            case.id,
+            query_shape_label(case.query_shape),
+            query_shape_label(routing.query_shape),
+            routing.query_shape_signals,
+            routing.query_shape_ambiguities,
+            routing.query_shape_fallback_reason,
+        );
+    }
     let builder = open_kioku_context::ContextPackBuilder::new(
         store as &dyn open_kioku_storage::OkStore,
     )
@@ -966,6 +996,7 @@ fn score_retrieval_case(
     RetrievalCaseReport {
         id: case.id.clone(),
         task_family: case.task_family,
+        query_shape: case.query_shape,
         language: case.language.clone(),
         split: case.split,
         repo_fixture: case.repo_fixture.clone(),
@@ -1028,6 +1059,9 @@ fn build_named_retrieval_strategy_report(
         by_language: summarize_retrieval_groups(&cases, |case| case.language.clone()),
         by_task_family: summarize_retrieval_groups(&cases, |case| {
             case.task_family.label().into()
+        }),
+        by_query_shape: summarize_retrieval_groups(&cases, |case| {
+            query_shape_label(case.query_shape).into()
         }),
         by_split: summarize_retrieval_groups(&cases, |case| match case.split {
             RetrievalSplit::Development => "development".into(),
@@ -1146,6 +1180,16 @@ fn routed_contextpack_comparisons(
         };
         comparisons.push(retrieval_strategy_comparison(
             &format!("task_family:{family}"),
+            &routed_summary.quality,
+            &fusion_summary.quality,
+        ));
+    }
+    for (shape, routed_summary) in &routed.by_query_shape {
+        let Some(fusion_summary) = fusion.by_query_shape.get(shape) else {
+            continue;
+        };
+        comparisons.push(retrieval_strategy_comparison(
+            &format!("query_shape:{shape}"),
             &routed_summary.quality,
             &fusion_summary.quality,
         ));
@@ -1623,6 +1667,38 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             out.push('\n');
         }
     }
+    if let Some(routed) = report
+        .stream_ablations
+        .iter()
+        .find(|strategy| strategy.strategy == "cc4:routed_contextpack")
+    {
+        out.push_str("### Routed ContextPack by query shape
+
+| Query shape | R@10 | MRR | F1@10 | No-gold FP | p95 ms | Token-budget gold-file yield |
+|---|---:|---:|---:|---:|---:|---|
+");
+        for (shape, summary) in &routed.by_query_shape {
+            let budgets = summary
+                .quality
+                .token_budget_gold_yield
+                .iter()
+                .map(|(budget, value)| format!("{budget}={value:.3}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} | {} |
+",
+                shape,
+                summary.quality.recall_at_10,
+                summary.quality.mean_reciprocal_rank,
+                summary.quality.file_f1_at_10,
+                summary.quality.no_gold_false_positive_rate,
+                summary.latency.p95_ms,
+                budgets
+            ));
+        }
+        out.push('\n');
+    }
     out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory retrieval measurements are also excluded until explicitly promoted.\n");
     out
 }
@@ -1682,6 +1758,7 @@ mod retrieval_bench_tests {
         RetrievalCaseReport {
             id: id.into(),
             task_family: RetrievalTaskFamily::IssueToCode,
+            query_shape: open_kioku_core::QueryShape::Conceptual,
             language: "rust".into(),
             split: RetrievalSplit::Development,
             repo_fixture: "fixture".into(),
@@ -1722,7 +1799,7 @@ mod retrieval_bench_tests {
 
         let comparisons = routed_contextpack_comparisons(&strategies, &advisory);
 
-        assert_eq!(comparisons.len(), 2);
+        assert_eq!(comparisons.len(), 3);
         assert_eq!(comparisons[0].scope, "overall");
         assert!(comparisons[0].delta_mean_reciprocal_rank < 0.0);
         assert_eq!(
@@ -1732,6 +1809,7 @@ mod retrieval_bench_tests {
             Some(&0.0)
         );
         assert_eq!(comparisons[1].scope, "task_family:issue_to_code");
+        assert_eq!(comparisons[2].scope, "query_shape:conceptual");
     }
 
     #[test]
