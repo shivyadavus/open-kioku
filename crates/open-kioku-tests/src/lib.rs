@@ -1330,6 +1330,7 @@ mod tests {
             symbol_id: SymbolId::new(symbol),
             file_id: file_id.clone(),
             range: Some(LineRange::single(1)),
+            source_range: None,
             is_definition: false,
             confidence: Confidence::Exact,
             provenance: EvidenceSourceType::Scip,
