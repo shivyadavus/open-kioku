@@ -6,6 +6,7 @@ on:
       - agent/ri3-resolution-foundation
     paths:
       - scripts/ri3_resolution_diagnostics_tmp.py
+      - scripts/ri3_resolution_diagnostics_compat_tmp.py
       - .github/workflows/ri3-resolution-diagnostics.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply persisted diagnostics slice
-        run: python3 scripts/ri3_resolution_diagnostics_tmp.py
+        run: |
+          python3 scripts/ri3_resolution_diagnostics_tmp.py
+          python3 scripts/ri3_resolution_diagnostics_compat_tmp.py
       - name: Validate persisted diagnostics contract
         run: |
           cargo fmt --all
@@ -39,6 +42,6 @@ jobs:
           git add crates/open-kioku-core/src/lib.rs crates/open-kioku-ingest/src/lib.rs crates/open-kioku-cli/src/commands/mod.rs crates/open-kioku-cli/src/lib.rs
           git diff --cached --quiet && { echo "expected diagnostics product changes missing" >&2; exit 1; }
           git commit -m "feat: persist RI3 relationship resolution diagnostics"
-          git rm scripts/ri3_resolution_diagnostics_tmp.py .github/workflows/ri3-resolution-diagnostics.yml
+          git rm scripts/ri3_resolution_diagnostics_tmp.py scripts/ri3_resolution_diagnostics_compat_tmp.py .github/workflows/ri3-resolution-diagnostics.yml
           git commit -m "chore: remove RI3 resolution diagnostics gate"
           git push origin HEAD:agent/ri3-resolution-foundation
