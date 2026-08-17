@@ -1,0 +1,36 @@
+name: RI3 edge identity hardening
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-authority-final
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-authority-final
+          fetch-depth: 0
+
+      - name: Apply persisted-edge identity hardening
+        run: python3 scripts/ri3_edge_identity_tmp.py
+
+      - name: Validate core relationship contract
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp --all-targets -- -D warnings
+          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp
+
+      - name: Commit validated hardening
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-edge-identity.yml scripts/ri3_edge_identity_tmp.py
+          git add crates/open-kioku-core/src/identity.rs crates/open-kioku-core/src/relationship.rs
+          git commit -m "ri3: validate persisted relationship proof target identity"
+          git push origin HEAD:agent/ri3-core-authority-final
