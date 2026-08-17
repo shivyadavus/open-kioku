@@ -24,6 +24,12 @@ replace_exact(
 )
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
+    '''    identity, AnalysisFact, CodeChunk, Evidence, EvidenceId, EvidenceSourceType, File, FileRange,\n    GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,\n    ResolvedRelationship, Symbol, SymbolOccurrence,\n''',
+    '''    identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,\n    FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,\n    RelationshipProof, RelationshipProofKind, ResolvedRelationship, Symbol, SymbolOccurrence,\n''',
+    "exact reference graph imports",
+)
+replace_exact(
+    "crates/open-kioku-graph/src/lib.rs",
     '''                    format!(\n                        "{}:{}:{}:{}",\n                        range.start_line,\n                        range.start_column,\n                        range.end_line,\n                        range.end_column\n                    )\n''',
     '''                    format!(\n                        "{}:{}:{}:{}",\n                        range.start_line, range.start_column, range.end_line, range.end_column\n                    )\n''',
     "occurrence key formatting",
@@ -33,6 +39,12 @@ replace_exact(
     '''                    proof.details.insert("start_line".into(), json!(range.start_line));\n                    proof\n                        .details\n                        .insert("start_column".into(), json!(range.start_column));\n                    proof.details.insert("end_line".into(), json!(range.end_line));\n''',
     '''                    proof\n                        .details\n                        .insert("start_line".into(), json!(range.start_line));\n                    proof\n                        .details\n                        .insert("start_column".into(), json!(range.start_column));\n                    proof\n                        .details\n                        .insert("end_line".into(), json!(range.end_line));\n''',
     "proof detail formatting",
+)
+replace_exact(
+    "crates/open-kioku-graph/src/lib.rs",
+    '''        let graph = InMemoryGraph::from_index_with_occurrences(\n            &[file],\n            &[symbol],\n            &[],\n            &[make_occurrence(5), make_occurrence(20)],\n        );\n''',
+    '''        let graph = InMemoryGraph::from_index_with_occurrences(\n            &[file.clone()],\n            &[symbol.clone()],\n            &[],\n            &[make_occurrence(5), make_occurrence(20)],\n        );\n''',
+    "exact reference test borrow lifetime",
 )
 replace_exact(
     "crates/open-kioku-scip/src/lib.rs",
