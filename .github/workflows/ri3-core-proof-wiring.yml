@@ -1,0 +1,80 @@
+name: RI3 core proof wiring
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-relationship-proofs
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-relationship-proofs
+          fetch-depth: 0
+
+      - name: Wire core proof types into evidence policy
+        shell: python
+        run: |
+          from pathlib import Path
+
+          core = Path("crates/open-kioku-core/src/lib.rs")
+          text = core.read_text()
+          old = "pub mod identity;\n"
+          new = (
+              "pub mod identity;\n"
+              "pub mod relationship;\n\n"
+              "pub use relationship::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};\n"
+          )
+          if text.count(old) != 1:
+              raise SystemExit(f"core module anchor count={text.count(old)}")
+          if "pub mod relationship;" not in text:
+              text = text.replace(old, new, 1)
+          core.write_text(text)
+
+          evidence = Path("crates/open-kioku-evidence/src/lib.rs")
+          text = evidence.read_text()
+          import_anchor = "use open_kioku_errors::OkError;\n"
+          reexport = (
+              "pub use open_kioku_core::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};\n"
+          )
+          if reexport not in text:
+              if text.count(import_anchor) != 1:
+                  raise SystemExit(f"evidence import anchor count={text.count(import_anchor)}")
+              text = text.replace(import_anchor, reexport + import_anchor, 1)
+
+          start_marker = "/// A typed fact that can contribute to proving a structural repository relationship.\n"
+          end_marker = "fn normalized_effective_authority(proof: &RelationshipProof) -> RelationshipAuthority {\n"
+          start = text.find(start_marker)
+          end = text.find(end_marker)
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit(f"proof block anchors invalid: start={start} end={end}")
+          wrapper = (
+              "/// Maximum authority a single proof kind can contribute before relationship-specific combination\n"
+              "/// rules are evaluated. The intrinsic ceiling is owned by the core domain type.\n"
+              "pub fn proof_kind_authority(kind: RelationshipProofKind) -> RelationshipAuthority {\n"
+              "    kind.maximum_authority()\n"
+              "}\n\n"
+          )
+          text = text[:start] + wrapper + text[end:]
+          text = text.replace("use std::collections::{BTreeMap, BTreeSet};", "use std::collections::BTreeSet;")
+          evidence.write_text(text)
+
+      - name: Format and validate focused RI3 crates
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph --all-targets -- -D warnings
+          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph
+
+      - name: Commit wiring and remove one-shot workflow
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-core-proof-wiring.yml
+          git add crates/open-kioku-core/src/lib.rs crates/open-kioku-core/src/relationship.rs crates/open-kioku-evidence/src/lib.rs
+          git commit -m "refactor(ri3): make relationship proof vocabulary core-owned"
+          git push origin HEAD:agent/ri3-core-relationship-proofs
