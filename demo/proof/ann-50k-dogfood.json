@@ -1,0 +1,52 @@
+{
+  "proof_kind": "synthetic_ann_scale_dogfood",
+  "source_sha": "acbc5bcb387551501b3bc350247d25c133116d75",
+  "binary_sha256": "3b74eeb17ea49a76b06e8bf4fac00834180ab88d2947ef2bd30a2db0824b82f6",
+  "binary_version": "ok 2.4.0",
+  "corpus": {
+    "files": 68,
+    "symbols": 25673,
+    "chunks": 25676
+  },
+  "fresh_semantic_build": {
+    "elapsed_seconds": 21.7,
+    "peak_rss_kb": 567240,
+    "embedded_count": 51349,
+    "reused_embeddings": 0,
+    "indexed_count": 51349
+  },
+  "status": {
+    "state": "ready",
+    "ready": true,
+    "provider": "local",
+    "backend": "usearch-hnsw-f32",
+    "ann_active": true,
+    "ann_profile": "usearch-2.21.1-hnsw-meta3-c32-a256-s1024",
+    "model": "local-hash",
+    "embedding_implementation": "open-kioku-local-hash-v1",
+    "dimensions": 384,
+    "distance": "cosine",
+    "vector_count": 51349,
+    "indexed_count": 51349,
+    "stale_count": 0,
+    "failed_count": 0,
+    "disk_usage_bytes": 426000686
+  },
+  "fresh_process_reopen": {
+    "elapsed_seconds": 0.13,
+    "peak_rss_kb": 22196
+  },
+  "cold_semantic_query": {
+    "elapsed_seconds": 1.07,
+    "peak_rss_kb": 180344,
+    "query": "token validation gateway policy",
+    "limit": 5,
+    "hits": [
+      {"path": "src/gateway_14.rs", "line_range": {"start": 177, "end": 180}, "match_reason": "semantic vector similarity"},
+      {"path": "src/gateway_22.rs", "line_range": {"start": 177, "end": 180}, "match_reason": "semantic vector similarity"},
+      {"path": "src/gateway_54.rs", "line_range": {"start": 1953, "end": 1956}, "match_reason": "semantic vector similarity"},
+      {"path": "src/policy_15.rs", "line_range": {"start": 177, "end": 180}, "match_reason": "semantic vector similarity"},
+      {"path": "src/policy_55.rs", "line_range": {"start": 177, "end": 180}, "match_reason": "semantic vector similarity"}
+    ]
+  }
+}
