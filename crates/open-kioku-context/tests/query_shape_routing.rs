@@ -113,6 +113,16 @@ fn query_shape_refinement_never_weakens_task_family_required_evidence() {
             .required_evidence
             .contains(&RetrievalSourceKind::Graph));
     }
+
+    let validation = classify_task(
+        "find regression tests for ContextPackBuilder in crates/open-kioku-context/src/lib.rs",
+    );
+    assert_eq!(validation.family, TaskFamily::CodeToTest);
+    assert_eq!(
+        validation.policy.required_evidence,
+        vec![RetrievalSourceKind::Validation]
+    );
+    assert!(validation.policy.missing_required_evidence_is_blocker);
 }
 
 #[test]
@@ -142,10 +152,19 @@ fn query_shape_refinement_cannot_enable_sources_forbidden_by_task_family() {
 }
 
 #[test]
-fn unknown_shape_preserves_conservative_fallback_metadata() {
-    let decision = classify_task("x");
+fn unknown_shape_preserves_conservative_fallback_metadata_and_allocation() {
+    let decision = classify_task("authentication");
 
     assert_eq!(decision.query_shape, QueryShape::Unknown);
     assert!(decision.query_shape_fallback_reason.is_some());
     assert!(decision.query_shape_signals.is_empty());
+    assert_eq!(
+        decision
+            .policy
+            .candidate_cap(RetrievalSourceKind::ExactSemantic, 10),
+        decision
+            .policy
+            .candidate_cap(RetrievalSourceKind::SemanticVector, 10),
+        "unknown shape must preserve the conservative general candidate allocation"
+    );
 }
