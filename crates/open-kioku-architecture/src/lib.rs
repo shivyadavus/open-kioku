@@ -117,9 +117,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -259,9 +256,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -928,6 +922,18 @@ mod tests {
         edge
     }
 
+    fn unproved_edge(
+        id: &str,
+        from: &GraphNode,
+        to: &GraphNode,
+        edge_type: GraphEdgeType,
+    ) -> GraphEdge {
+        let mut edge = edge(id, from, to, edge_type);
+        edge.set_relationship_proofs(Vec::new())
+            .expect("clearing relationship proofs must serialize");
+        edge
+    }
+
     fn policy(rules: Vec<DependencyRule>) -> ArchitecturePolicy {
         ArchitecturePolicy {
             version: PolicyVersion::V1,
@@ -974,6 +980,41 @@ mod tests {
         let store = store_with_graph(files, nodes, edges);
         let resolver = PolicyResolver::new(policy).expect("resolver");
         evaluate_policy(&store, &resolver, policy).expect("policy evaluation")
+    }
+
+    #[test]
+    fn confidence_without_structural_proof_is_ignored() {
+        let domain = file("domain", "src/domain/order.rs");
+        let api = file("api", "src/api/http.rs");
+        let domain_node = file_node(&domain);
+        let api_node = file_node(&api);
+        let policy = policy(vec![DependencyRule {
+            id: "domain-must-not-call-api".into(),
+            from: "domain".into(),
+            to: "api".into(),
+            action: DependencyAction::Forbid,
+            severity: Severity::Error,
+            reason: "domain cannot depend on api".into(),
+        }]);
+
+        let report = evaluate(
+            &[domain.clone(), api.clone()],
+            &[domain_node.clone(), api_node.clone()],
+            &[unproved_edge(
+                "high-confidence-without-proof",
+                &domain_node,
+                &api_node,
+                GraphEdgeType::Calls,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.evaluated_edge_count, 0);
+        assert_eq!(report.violation_count, 0);
+        assert!(report
+            .uncertainty
+            .iter()
+            .any(|message| message.contains("no authoritative")));
     }
 
     #[test]
