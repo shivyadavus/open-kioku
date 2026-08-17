@@ -456,7 +456,7 @@ mod tests {
     fn call_site_needs_unique_target_binding() {
         let call_site = proof(RelationshipProofKind::ExactCallSite, 1);
         assert_eq!(
-            relationship_authority(&GraphEdgeType::Calls, &[call_site.clone()]),
+            relationship_authority(&GraphEdgeType::Calls, std::slice::from_ref(&call_site)),
             RelationshipAuthority::Corroborating
         );
 
@@ -545,8 +545,10 @@ mod tests {
 
     #[test]
     fn malformed_proof_payload_fails_closed() {
-        let mut edge = GraphEdge::default();
-        edge.edge_type = GraphEdgeType::References;
+        let mut edge = GraphEdge {
+            edge_type: GraphEdgeType::References,
+            ..Default::default()
+        };
         edge.properties
             .insert(RELATIONSHIP_PROOFS_PROPERTY.into(), json!({"bad": true}));
 
@@ -560,8 +562,10 @@ mod tests {
 
     #[test]
     fn typed_filter_respects_authority_and_proof_kind() {
-        let mut edge = GraphEdge::default();
-        edge.edge_type = GraphEdgeType::References;
+        let mut edge = GraphEdge {
+            edge_type: GraphEdgeType::References,
+            ..Default::default()
+        };
         edge.set_relationship_proofs(vec![proof(RelationshipProofKind::ExactReference, 1)])
             .unwrap();
 
