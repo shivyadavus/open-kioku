@@ -1,0 +1,80 @@
+name: RI3 relationship reporting and development contract
+
+on:
+  push:
+    branches:
+      - agent/ri3-relationship-conformance-benchmark
+    paths:
+      - .github/workflows/ri3-relationship-reporting-dev-fixture.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-relationship-conformance-benchmark
+          fetch-depth: 0
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ri3-relationship-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Apply reporting and development fixture
+        run: python3 .github/scripts/ri3_relationship_reporting_dev_fixture.py
+
+      - name: Format
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+
+      - name: Validate reporting and scorer contract
+        run: |
+          cargo test -p open-kioku-cli ri3_relationship_markdown_tests
+          cargo test -p open-kioku-cli relationship_bench_tests
+          cargo test -p open-kioku-cli ri3_metamorphic_identity_tests
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+          cargo run -q -p open-kioku-cli --bin ok -- relationship-bench \
+            --corpus benchmarks/relationship-development-corpus.json \
+            --observations benchmarks/relationship-development-observations.json \
+            --policy benchmarks/relationship-development-thresholds.json \
+            --enforce-gates \
+            --write target/relationship-development-report.json \
+            --write-markdown target/relationship-development-report.md
+          test -s target/relationship-development-report.json
+          test -s target/relationship-development-report.md
+          grep -q '## Capability matrix' target/relationship-development-report.md
+          grep -q '| go | DEPENDS_ON | 0 |' target/relationship-development-report.md
+          git diff --check
+
+      - name: Commit product changes and self-clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            .github/workflows/ci.yml \
+            benchmarks/relationship-development-corpus.json \
+            benchmarks/relationship-development-observations.json \
+            benchmarks/relationship-development-thresholds.json \
+            crates/open-kioku-cli/src/bench/relationship.rs \
+            crates/open-kioku-cli/src/types.rs
+          git commit -m "RI3.4: add deterministic capability report and development gate"
+          git rm \
+            .github/workflows/ri3-relationship-reporting-dev-fixture.yml \
+            .github/scripts/ri3_relationship_reporting_dev_fixture.py
+          git commit -m "chore: remove RI3 reporting migration gate"
+          git push origin HEAD:agent/ri3-relationship-conformance-benchmark
