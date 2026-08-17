@@ -351,17 +351,10 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     let root = absolutize(&args.path)?;
     let cases_file = absolutize(&args.cases_file)?;
     let mut corpus = load_retrieval_corpus(&cases_file)?;
-    let query_shape_labels_path = cases_file
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("retrieval-query-shape-labels.json");
-    let query_shape_labels = if query_shape_labels_path.is_file() {
-        Some(load_and_apply_query_shape_labels(
-            &query_shape_labels_path,
-            &mut corpus,
-        )?)
-    } else {
-        None
+    let query_shape_labels_path = query_shape_labels_path(&cases_file);
+    let query_shape_labels = match query_shape_labels_path.as_ref() {
+        Some(path) if path.is_file() => Some(load_and_apply_query_shape_labels(path, &mut corpus)?),
+        _ => None,
     };
     if corpus.cases.len() < args.min_cases {
         anyhow::bail!(
@@ -484,10 +477,10 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
         .collect::<Vec<_>>();
     let advisory_comparisons = routed_contextpack_comparisons(&strategies, &stream_ablations);
-    let query_shape_benchmark = query_shape_labels
-        .as_ref()
-        .map(|labels| build_query_shape_benchmark(&corpus, labels, &query_shape_labels_path))
-        .transpose()?;
+    let query_shape_benchmark = match (&query_shape_labels, &query_shape_labels_path) {
+        (Some(labels), Some(path)) => Some(build_query_shape_benchmark(&corpus, labels, path)?),
+        _ => None,
+    };
     let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
     let mut caveats = Vec::new();
     if let Some(caveat) = revision_caveat {
@@ -624,6 +617,17 @@ fn load_retrieval_corpus(path: &Path) -> anyhow::Result<RetrievalCorpus> {
     Ok(corpus)
 }
 
+fn query_shape_labels_path(cases_file: &Path) -> Option<PathBuf> {
+    let stem = cases_file.file_stem()?.to_str()?;
+    let prefix = stem.strip_suffix("-cases")?;
+    Some(
+        cases_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{prefix}-query-shape-labels.json")),
+    )
+}
+
 fn load_and_apply_query_shape_labels(
     path: &Path,
     corpus: &mut RetrievalCorpus,
@@ -749,8 +753,12 @@ fn build_query_shape_benchmark(
     let probe_count = labels.adversarial_probes.len();
     let probe_correct = probe_count.saturating_sub(probe_mismatches.len());
 
+    let report_labels_file = labels_path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("query-shape-labels.json"));
     Ok(RetrievalQueryShapeBenchmark {
-        labels_file: labels_path.to_path_buf(),
+        labels_file: report_labels_file,
         labels_sha256: sha256_file(labels_path)?,
         labeled_case_count,
         classification_accuracy: retrieval_ratio(correct, labeled_case_count),
@@ -2089,6 +2097,19 @@ mod retrieval_bench_tests {
             comparisons[3].scope,
             "task_family_query_shape:issue_to_code:conceptual"
         );
+    }
+
+    #[test]
+    fn query_shape_sidecar_discovery_is_corpus_derived_and_report_path_is_portable() {
+        assert_eq!(
+            query_shape_labels_path(Path::new("benchmarks/retrieval-cases.json")),
+            Some(PathBuf::from("benchmarks/retrieval-query-shape-labels.json"))
+        );
+        assert_eq!(
+            query_shape_labels_path(Path::new("benchmarks/custom-cases.json")),
+            Some(PathBuf::from("benchmarks/custom-query-shape-labels.json"))
+        );
+        assert_eq!(query_shape_labels_path(Path::new("benchmarks/custom.json")), None);
     }
 
     #[test]
