@@ -10,9 +10,18 @@ pub trait LanguageSemantics: Send + Sync {
 
     fn classify_receiver(&self, receiver: &str) -> ReceiverKind {
         let trimmed = receiver.trim();
-        if self.self_receivers().contains(&trimmed) {
+        if self.self_receivers().iter().any(|self_receiver| {
+            trimmed == *self_receiver
+                || trimmed
+                    .strip_prefix(self_receiver)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        }) {
             ReceiverKind::Self_
-        } else if trimmed == "super" || trimmed == "Super" {
+        } else if matches!(trimmed, "super" | "Super" | "super()")
+            || trimmed.starts_with("super.")
+            || trimmed.starts_with("Super.")
+            || trimmed.starts_with("super().")
+        {
             ReceiverKind::Super
         } else if trimmed
             .chars()
