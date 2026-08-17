@@ -14,7 +14,7 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      prepared_sha: ${{ steps.commit.outputs.prepared_sha }}
+      prepared_sha: ${{ steps.candidate.outputs.prepared_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,18 +26,11 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Apply deterministic V3 source migration
+      - name: Validate prepared V3 source tree
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/v3-release-prep.py
-          scripts/sync-version.sh
-          cargo metadata --format-version 1 >/dev/null
-
-      - name: Validate prepared source tree
-        shell: bash
-        run: |
-          set -euo pipefail
+          test "$(awk '/^\[workspace.package\]/{f=1;next} f && /^version = /{gsub(/\"/,"",$3); print $3; exit}' Cargo.toml)" = "3.0.0"
           python3 - <<'PY'
           from pathlib import Path
           for path in [
@@ -48,25 +41,17 @@ jobs:
               compile(Path(path).read_text(encoding="utf-8"), path, "exec")
           print("Python release tooling syntax validated.")
           PY
+          cargo metadata --format-version 1 >/dev/null
           cargo fmt --all -- --check
           scripts/validate-docs.sh
           scripts/validate-versions.sh
           scripts/check-no-ignored-tests.py
           git diff --check
 
-      - name: Commit prepared V3 source tree
-        id: commit
+      - name: Pin candidate source SHA
+        id: candidate
         shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm scripts/v3-release-prep.py
-          git add -A
-          git reset .github/workflows/v3-release-prep-v3.yml
-          git commit -m "release: prepare Open Kioku 3.0.0"
-          git push origin HEAD:release/v3.0.0
-          echo "prepared_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "prepared_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -80,7 +65,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             binary_name: ok-linux-arm64
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             binary_name: ok-macos-x86_64
           - os: macos-latest
