@@ -24,7 +24,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Apply resolved import authority repair
+      - name: Apply RI3 structural authority repair
         run: python3 .github/scripts/ri3_import_authority_fix.py
 
       - name: Format and verify
@@ -32,8 +32,10 @@ jobs:
           cargo fmt --all
           cargo fmt --all -- --check
 
-      - name: Validate graph authority regressions
+      - name: Validate authority regressions
         run: |
+          cargo test -p open-kioku-core exact_module_qualified_call_is_authoritative
+          cargo test -p open-kioku-resolution rust_module_symbol_names_match_tree_sitter_qualified_names
           cargo test -p open-kioku-graph resolved_import_analysis_fact_is_authoritative
           cargo test -p open-kioku-graph unresolved_import_analysis_fact_remains_untrusted
 
@@ -51,8 +53,11 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/open-kioku-graph/src/lib.rs
-          git commit -m "RI3.2: preserve authority for resolved import bindings"
+          git add \
+            crates/open-kioku-core/src/relationship.rs \
+            crates/open-kioku-resolution/src/typed_calls.rs \
+            crates/open-kioku-graph/src/lib.rs
+          git commit -m "RI3.2: preserve authority for exact module relationships"
           git rm .github/workflows/ri3-import-authority-fix.yml .github/scripts/ri3_import_authority_fix.py
-          git commit -m "chore: remove RI3 import authority repair gate"
+          git commit -m "chore: remove RI3 structural authority repair gate"
           git push origin HEAD:agent/ri3-resolution-foundation
