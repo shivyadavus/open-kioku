@@ -45,6 +45,8 @@ jobs:
           use schemars::JsonSchema;
           use serde::{Deserialize, Serialize};
           #[cfg(test)]
+          use open_kioku_core::{FileRange, SymbolId};
+          #[cfg(test)]
           use std::collections::BTreeSet;
           """.replace("          ", "")
           if text.count(old_imports) != 1:
@@ -223,11 +225,10 @@ jobs:
           cargo clippy -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp --all-targets -- -D warnings
           cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-mcp
 
-      - name: Commit validated result
+      - name: Commit validated product result
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-authority-finalize.yml .github/workflows/ri3-authority-finalize-json.yml
           git add crates/open-kioku-evidence/src/lib.rs crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
           git commit -m "refactor(ri3): finalize single authority contract"
           git push origin HEAD:agent/ri3-core-authority-final
