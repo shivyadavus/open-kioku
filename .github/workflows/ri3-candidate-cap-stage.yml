@@ -19,24 +19,7 @@ jobs:
       - name: Apply candidate guardrail
         run: |
           python3 scripts/ri3-candidate-cap-stage.py
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("crates/open-kioku-resolution/src/calls.rs")
-          text = path.read_text()
-          old = '''        ReceiverKind::Unknown => ResolutionOutcome::Unresolved {
-              candidates: Vec::new(),
-              reason: "unsupported dynamic/unknown receiver cannot be proven structurally".into(),
-          },
-          '''
-          new = '''        ReceiverKind::Unknown => ResolutionOutcome::Unresolved {
-              candidates: Vec::new(),
-              reason: "unsupported dynamic/unknown receiver cannot be proven structurally".into(),
-              candidates_considered: 0,
-          },
-          '''
-          assert text.count(old) == 1, "unknown receiver outcome changed unexpectedly"
-          path.write_text(text.replace(old, new))
-          PY
+          python3 scripts/ri3-candidate-cap-fix.py
 
       - name: Validate candidate guardrail
         run: |
@@ -44,6 +27,7 @@ jobs:
           cargo fmt --all -- --check
           cargo test -p open-kioku-resolution pathological_candidate_sets_fail_closed_before_authority_selection
           cargo test -p open-kioku-resolution normalization_is_independent_of_candidate_generation_order
+          cargo test -p open-kioku-resolution
           cargo test -p open-kioku-ingest candidate_cap_hits_are_visible_in_index_quality
           cargo test -p open-kioku-ingest resolution_quality
           cargo test -p open-kioku-core resolution_report_round_trips_with_deterministic_relationship_order
@@ -55,6 +39,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/ri3-candidate-cap-stage.yml
           git rm scripts/ri3-candidate-cap-stage.py
+          git rm scripts/ri3-candidate-cap-fix.py
           git add \
             crates/open-kioku-core/src/lib.rs \
             crates/open-kioku-resolution/src/pipeline.rs \
