@@ -54,6 +54,11 @@ jobs:
           marker_pos = text.find(marker)
           if marker_pos < 0:
               raise SystemExit('resolved import proof marker not found')
+          prior_push = text.rfind('proof.evidence_ids.push(evidence_id);', 0, marker_pos)
+          if prior_push < 0:
+              raise SystemExit('resolved import evidence push not found')
+          text = text[:prior_push] + 'proof.evidence_ids.push(evidence_id.clone());' + text[prior_push + len('proof.evidence_ids.push(evidence_id);'):]
+          marker_pos = text.find(marker)
           insertion_pos = text.find('            buffer.insert_edge(edge);', marker_pos)
           if insertion_pos < 0:
               raise SystemExit('buffer insertion marker not found after resolved import proof')
