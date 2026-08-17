@@ -25,7 +25,7 @@ jobs:
 
       - name: Validate trust boundary
         run: |
-          cargo fmt --all
+          cargo fmt --all -- --check
           cargo clippy -p open-kioku-core -p open-kioku-resolution -p open-kioku-ingest -p open-kioku-graph --all-targets -- -D warnings
           cargo test -p open-kioku-core -p open-kioku-resolution -p open-kioku-ingest -p open-kioku-graph
 
@@ -39,6 +39,11 @@ jobs:
             crates/open-kioku-ingest/src/lib.rs \
             crates/open-kioku-graph/src/lib.rs \
             crates/open-kioku-graph/src/buffer.rs
+          if ! git diff --quiet; then
+            echo "unexpected unstaged changes after non-mutating validation:" >&2
+            git status --short >&2
+            exit 1
+          fi
           git commit -m "ri3: transport typed relationship proofs into graph edges"
           git pull --rebase origin agent/ri3-resolution-foundation
           git push origin HEAD:agent/ri3-resolution-foundation
