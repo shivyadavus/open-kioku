@@ -16,7 +16,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted product patch
-        run: python3 .github/scripts/agent_cc4_query_shape_benchmark.py
+        run: |
+          python3 .github/scripts/agent_cc4_query_shape_benchmark.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-cli/src/bench/retrieval.rs')
+          text = path.read_text()
+          broken = "out.push('" + "\n" + "');"
+          fixed = r"out.push('\n');"
+          if text.count(broken) != 1:
+              raise SystemExit(f'generated newline marker count={text.count(broken)}')
+          path.write_text(text.replace(broken, fixed, 1))
+          PY
       - name: Validate
         run: |
           cargo fmt --all -- --check
