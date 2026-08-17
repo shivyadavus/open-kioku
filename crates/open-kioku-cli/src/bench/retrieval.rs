@@ -1,5 +1,6 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.3.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.4.0";
+const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -69,6 +70,8 @@ struct RetrievalCorpus {
 struct RetrievalCase {
     id: String,
     task_family: RetrievalTaskFamily,
+    #[serde(skip)]
+    expected_query_shape: Option<open_kioku_core::QueryShape>,
     language: String,
     repo_fixture: PathBuf,
     base_revision: String,
@@ -104,6 +107,67 @@ impl RetrievalTaskFamily {
             Self::EditToRipple => "edit_to_ripple",
         }
     }
+}
+
+fn query_shape_label(shape: open_kioku_core::QueryShape) -> &'static str {
+    match shape {
+        open_kioku_core::QueryShape::ExactIdentifier => "exact_identifier",
+        open_kioku_core::QueryShape::QualifiedSymbol => "qualified_symbol",
+        open_kioku_core::QueryShape::PathReference => "path_reference",
+        open_kioku_core::QueryShape::ErrorTrace => "error_trace",
+        open_kioku_core::QueryShape::ApiResource => "api_resource",
+        open_kioku_core::QueryShape::Conceptual => "conceptual",
+        open_kioku_core::QueryShape::MixedStructuredNaturalLanguage => {
+            "mixed_structured_natural_language"
+        }
+        open_kioku_core::QueryShape::Unknown => "unknown",
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalQueryShapeLabels {
+    schema_version: String,
+    corpus_id: String,
+    cases: Vec<RetrievalQueryShapeCaseLabel>,
+    #[serde(default)]
+    adversarial_probes: Vec<RetrievalQueryShapeProbe>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalQueryShapeCaseLabel {
+    id: String,
+    expected_query_shape: open_kioku_core::QueryShape,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalQueryShapeProbe {
+    id: String,
+    query: String,
+    expected_query_shape: open_kioku_core::QueryShape,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetrievalQueryShapeMismatch {
+    id: String,
+    expected: open_kioku_core::QueryShape,
+    actual: open_kioku_core::QueryShape,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct RetrievalQueryShapeBenchmark {
+    labels_file: PathBuf,
+    labels_sha256: String,
+    labeled_case_count: usize,
+    classification_accuracy: f64,
+    misclassification_rate: f64,
+    confusion_matrix: BTreeMap<String, BTreeMap<String, usize>>,
+    mismatches: Vec<RetrievalQueryShapeMismatch>,
+    adversarial_probe_count: usize,
+    adversarial_probe_accuracy: f64,
+    adversarial_probe_mismatches: Vec<RetrievalQueryShapeMismatch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -183,6 +247,8 @@ struct RetrievalBenchReport {
     strategy_identities: BTreeMap<String, RetrievalStrategyIdentity>,
     baseline_deltas: Vec<RetrievalBaselineDelta>,
     advisory_comparisons: Vec<RetrievalStrategyComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_shape_benchmark: Option<RetrievalQueryShapeBenchmark>,
     caveats: Vec<String>,
     strategies: Vec<RetrievalStrategyReport>,
     /// Advisory source/fusion/routing measurements. Excluded from the frozen generic retrieval
@@ -196,6 +262,8 @@ struct RetrievalStrategyReport {
     summary: RetrievalMetricSummary,
     by_language: BTreeMap<String, RetrievalMetricSummary>,
     by_task_family: BTreeMap<String, RetrievalMetricSummary>,
+    by_query_shape: BTreeMap<String, RetrievalMetricSummary>,
+    by_task_family_query_shape: BTreeMap<String, RetrievalMetricSummary>,
     by_split: BTreeMap<String, RetrievalMetricSummary>,
     cases: Vec<RetrievalCaseReport>,
 }
@@ -235,6 +303,8 @@ struct RetrievalMetricSummary {
 struct RetrievalCaseReport {
     id: String,
     task_family: RetrievalTaskFamily,
+    expected_query_shape: Option<open_kioku_core::QueryShape>,
+    actual_query_shape: open_kioku_core::QueryShape,
     language: String,
     split: RetrievalSplit,
     repo_fixture: PathBuf,
@@ -280,7 +350,12 @@ fn default_retrieval_token_budgets() -> Vec<usize> {
 fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenchReport> {
     let root = absolutize(&args.path)?;
     let cases_file = absolutize(&args.cases_file)?;
-    let corpus = load_retrieval_corpus(&cases_file)?;
+    let mut corpus = load_retrieval_corpus(&cases_file)?;
+    let query_shape_labels_path = query_shape_labels_path(&cases_file);
+    let query_shape_labels = match query_shape_labels_path.as_ref() {
+        Some(path) if path.is_file() => Some(load_and_apply_query_shape_labels(path, &mut corpus)?),
+        _ => None,
+    };
     if corpus.cases.len() < args.min_cases {
         anyhow::bail!(
             "retrieval benchmark loaded {} cases, below required {}",
@@ -402,6 +477,10 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         .map(|(label, cases)| build_named_retrieval_strategy_report(label, cases))
         .collect::<Vec<_>>();
     let advisory_comparisons = routed_contextpack_comparisons(&strategies, &stream_ablations);
+    let query_shape_benchmark = match (&query_shape_labels, &query_shape_labels_path) {
+        (Some(labels), Some(path)) => Some(build_query_shape_benchmark(&corpus, labels, path)?),
+        _ => None,
+    };
     let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
     let mut caveats = Vec::new();
     if let Some(caveat) = revision_caveat {
@@ -411,8 +490,13 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         "abstention precision/recall is not reported until calibrated abstention ships; no-gold false-positive rate remains the active negative-case signal".into(),
     );
     caveats.push(
-        "cc4:routed_contextpack is advisory and executes task classification, routing policy, routed candidate caps, fusion, budget selection, and ContextPack construction; it does not alter the frozen generic-fusion release gate".into(),
+        "cc4:routed_contextpack is advisory and executes task classification, query-shape classification, routing policy, routed candidate caps, fusion, budget selection, and ContextPack construction; it does not alter the frozen generic-fusion release gate".into(),
     );
+    if query_shape_benchmark.is_none() {
+        caveats.push(
+            "query-shape labels are unavailable beside the retrieval corpus; query-shape quality and misclassification reporting are omitted".into(),
+        );
+    }
     let baseline_path = absolutize(&args.baseline_file)?;
     let baseline_deltas = if baseline_path.is_file() {
         let baseline = load_retrieval_quality_baseline(&baseline_path)?;
@@ -453,6 +537,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         strategy_identities: retrieval_strategy_identities(&semantic_config),
         baseline_deltas,
         advisory_comparisons,
+        query_shape_benchmark,
         caveats,
         strategies,
         stream_ablations,
@@ -530,6 +615,160 @@ fn load_retrieval_corpus(path: &Path) -> anyhow::Result<RetrievalCorpus> {
         anyhow::bail!("retrieval corpus must reserve at least one holdout case");
     }
     Ok(corpus)
+}
+
+fn query_shape_labels_path(cases_file: &Path) -> Option<PathBuf> {
+    let stem = cases_file.file_stem()?.to_str()?;
+    let prefix = stem.strip_suffix("-cases")?;
+    Some(
+        cases_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{prefix}-query-shape-labels.json")),
+    )
+}
+
+fn load_and_apply_query_shape_labels(
+    path: &Path,
+    corpus: &mut RetrievalCorpus,
+) -> anyhow::Result<RetrievalQueryShapeLabels> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read query-shape labels {}", path.display()))?;
+    let labels: RetrievalQueryShapeLabels = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse query-shape labels {}", path.display()))?;
+    if labels.schema_version != RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported query-shape label schema {}; expected {}",
+            labels.schema_version,
+            RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION
+        );
+    }
+    if labels.corpus_id != corpus.corpus_id {
+        anyhow::bail!(
+            "query-shape labels target corpus `{}` but retrieval corpus is `{}`",
+            labels.corpus_id,
+            corpus.corpus_id
+        );
+    }
+
+    let mut by_id = BTreeMap::new();
+    for label in &labels.cases {
+        if label.id.trim().is_empty() {
+            anyhow::bail!("query-shape case label id must be non-empty");
+        }
+        if by_id
+            .insert(label.id.clone(), label.expected_query_shape)
+            .is_some()
+        {
+            anyhow::bail!("duplicate query-shape case label `{}`", label.id);
+        }
+    }
+    let corpus_ids = corpus
+        .cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let unknown = by_id
+        .keys()
+        .filter(|id| !corpus_ids.contains(id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "query-shape labels contain unknown retrieval case(s): {}",
+            unknown.join(", ")
+        );
+    }
+    let missing = corpus
+        .cases
+        .iter()
+        .filter(|case| !by_id.contains_key(&case.id))
+        .map(|case| case.id.clone())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "query-shape labels are incomplete; missing retrieval case(s): {}",
+            missing.join(", ")
+        );
+    }
+    for case in &mut corpus.cases {
+        case.expected_query_shape = by_id.get(&case.id).copied();
+    }
+
+    let mut probe_ids = BTreeSet::new();
+    for probe in &labels.adversarial_probes {
+        if probe.id.trim().is_empty() || probe.query.trim().is_empty() {
+            anyhow::bail!("query-shape adversarial probes require non-empty id and query");
+        }
+        if !probe_ids.insert(probe.id.clone()) {
+            anyhow::bail!("duplicate query-shape adversarial probe `{}`", probe.id);
+        }
+    }
+    Ok(labels)
+}
+
+fn build_query_shape_benchmark(
+    corpus: &RetrievalCorpus,
+    labels: &RetrievalQueryShapeLabels,
+    labels_path: &Path,
+) -> anyhow::Result<RetrievalQueryShapeBenchmark> {
+    let mut confusion_matrix = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    let mut mismatches = Vec::new();
+    for case in &corpus.cases {
+        let Some(expected) = case.expected_query_shape else {
+            continue;
+        };
+        let actual = open_kioku_context::routing::classify_task(&case.query).query_shape;
+        *confusion_matrix
+            .entry(query_shape_label(expected).into())
+            .or_default()
+            .entry(query_shape_label(actual).into())
+            .or_default() += 1;
+        if expected != actual {
+            mismatches.push(RetrievalQueryShapeMismatch {
+                id: case.id.clone(),
+                expected,
+                actual,
+            });
+        }
+    }
+    let labeled_case_count = corpus
+        .cases
+        .iter()
+        .filter(|case| case.expected_query_shape.is_some())
+        .count();
+    let correct = labeled_case_count.saturating_sub(mismatches.len());
+
+    let mut probe_mismatches = Vec::new();
+    for probe in &labels.adversarial_probes {
+        let actual = open_kioku_context::routing::classify_task(&probe.query).query_shape;
+        if actual != probe.expected_query_shape {
+            probe_mismatches.push(RetrievalQueryShapeMismatch {
+                id: probe.id.clone(),
+                expected: probe.expected_query_shape,
+                actual,
+            });
+        }
+    }
+    let probe_count = labels.adversarial_probes.len();
+    let probe_correct = probe_count.saturating_sub(probe_mismatches.len());
+
+    let report_labels_file = labels_path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("query-shape-labels.json"));
+    Ok(RetrievalQueryShapeBenchmark {
+        labels_file: report_labels_file,
+        labels_sha256: sha256_file(labels_path)?,
+        labeled_case_count,
+        classification_accuracy: retrieval_ratio(correct, labeled_case_count),
+        misclassification_rate: retrieval_ratio(mismatches.len(), labeled_case_count),
+        confusion_matrix,
+        mismatches,
+        adversarial_probe_count: probe_count,
+        adversarial_probe_accuracy: retrieval_ratio(probe_correct, probe_count),
+        adversarial_probe_mismatches: probe_mismatches,
+    })
 }
 
 fn validate_token_budgets(budgets: &[usize], label: &str) -> anyhow::Result<()> {
@@ -966,6 +1205,8 @@ fn score_retrieval_case(
     RetrievalCaseReport {
         id: case.id.clone(),
         task_family: case.task_family,
+        expected_query_shape: case.expected_query_shape,
+        actual_query_shape: open_kioku_context::routing::classify_task(&case.query).query_shape,
         language: case.language.clone(),
         split: case.split,
         repo_fixture: case.repo_fixture.clone(),
@@ -1029,6 +1270,14 @@ fn build_named_retrieval_strategy_report(
         by_task_family: summarize_retrieval_groups(&cases, |case| {
             case.task_family.label().into()
         }),
+        by_query_shape: summarize_retrieval_groups_optional(&cases, |case| {
+            case.expected_query_shape.map(|shape| query_shape_label(shape).into())
+        }),
+        by_task_family_query_shape: summarize_retrieval_groups_optional(&cases, |case| {
+            case.expected_query_shape.map(|shape| {
+                format!("{}:{}", case.task_family.label(), query_shape_label(shape))
+            })
+        }),
         by_split: summarize_retrieval_groups(&cases, |case| match case.split {
             RetrievalSplit::Development => "development".into(),
             RetrievalSplit::Holdout => "holdout".into(),
@@ -1047,6 +1296,25 @@ where
     let mut grouped = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();
     for case in cases {
         grouped.entry(key(case)).or_default().push(case.clone());
+    }
+    grouped
+        .into_iter()
+        .map(|(name, cases)| (name, summarize_retrieval_cases(&cases)))
+        .collect()
+}
+
+fn summarize_retrieval_groups_optional<F>(
+    cases: &[RetrievalCaseReport],
+    key: F,
+) -> BTreeMap<String, RetrievalMetricSummary>
+where
+    F: Fn(&RetrievalCaseReport) -> Option<String>,
+{
+    let mut grouped = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();
+    for case in cases {
+        if let Some(name) = key(case) {
+            grouped.entry(name).or_default().push(case.clone());
+        }
     }
     grouped
         .into_iter()
@@ -1146,6 +1414,26 @@ fn routed_contextpack_comparisons(
         };
         comparisons.push(retrieval_strategy_comparison(
             &format!("task_family:{family}"),
+            &routed_summary.quality,
+            &fusion_summary.quality,
+        ));
+    }
+    for (shape, routed_summary) in &routed.by_query_shape {
+        let Some(fusion_summary) = fusion.by_query_shape.get(shape) else {
+            continue;
+        };
+        comparisons.push(retrieval_strategy_comparison(
+            &format!("query_shape:{shape}"),
+            &routed_summary.quality,
+            &fusion_summary.quality,
+        ));
+    }
+    for (scope, routed_summary) in &routed.by_task_family_query_shape {
+        let Some(fusion_summary) = fusion.by_task_family_query_shape.get(scope) else {
+            continue;
+        };
+        comparisons.push(retrieval_strategy_comparison(
+            &format!("task_family_query_shape:{scope}"),
             &routed_summary.quality,
             &fusion_summary.quality,
         ));
@@ -1533,6 +1821,41 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             out.push_str("No holdout cases.\n\n");
         }
     }
+    if let Some(query_shape) = &report.query_shape_benchmark {
+        out.push_str(&format!(
+            "## Query-shape classification (frozen labels)\n\n- Labeled retrieval cases: `{}`\n- Classification accuracy: `{:.3}`\n- Misclassification rate: `{:.3}`\n- Adversarial probe accuracy: `{:.3}` (`{}` probes)\n- Label digest: `{}`\n\n",
+            query_shape.labeled_case_count,
+            query_shape.classification_accuracy,
+            query_shape.misclassification_rate,
+            query_shape.adversarial_probe_accuracy,
+            query_shape.adversarial_probe_count,
+            query_shape.labels_sha256
+        ));
+        if !query_shape.mismatches.is_empty() {
+            out.push_str("Case-label mismatches:\n\n");
+            for mismatch in &query_shape.mismatches {
+                out.push_str(&format!(
+                    "- `{}` expected `{}` but classified `{}`\n",
+                    mismatch.id,
+                    query_shape_label(mismatch.expected),
+                    query_shape_label(mismatch.actual)
+                ));
+            }
+            out.push('\n');
+        }
+        if !query_shape.adversarial_probe_mismatches.is_empty() {
+            out.push_str("Adversarial probe mismatches:\n\n");
+            for mismatch in &query_shape.adversarial_probe_mismatches {
+                out.push_str(&format!(
+                    "- `{}` expected `{}` but classified `{}`\n",
+                    mismatch.id,
+                    query_shape_label(mismatch.expected),
+                    query_shape_label(mismatch.actual)
+                ));
+            }
+            out.push('\n');
+        }
+    }
     if !report.baseline_deltas.is_empty() {
         out.push_str("## Regression deltas vs checked-in baseline\n\nPositive Recall/MRR/F1 is improvement; negative no-gold FP is improvement.\n\n| Strategy | Split | Δ R@10 | Δ MRR | Δ F1@10 | Δ no-gold FP |\n|---|---|---:|---:|---:|---:|\n");
         for delta in &report.baseline_deltas {
@@ -1621,6 +1944,41 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
                 ));
             }
             out.push('\n');
+            out.push_str("### Routed ContextPack by expected query shape\n\n| Query shape | R@10 | MRR | F1@10 | No-gold FP | p50 ms | p95 ms | Token-budget gold-file yield |\n|---|---:|---:|---:|---:|---:|---:|---|\n");
+            for (shape, summary) in &routed.by_query_shape {
+                let budgets = summary
+                    .quality
+                    .token_budget_gold_yield
+                    .iter()
+                    .map(|(budget, value)| format!("{budget}={value:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} | {:.2} | {} |\n",
+                    shape,
+                    summary.quality.recall_at_10,
+                    summary.quality.mean_reciprocal_rank,
+                    summary.quality.file_f1_at_10,
+                    summary.quality.no_gold_false_positive_rate,
+                    summary.latency.p50_ms,
+                    summary.latency.p95_ms,
+                    budgets
+                ));
+            }
+            out.push('\n');
+            out.push_str("### Routed ContextPack by task family × expected query shape\n\n| Task family × query shape | R@10 | MRR | F1@10 | No-gold FP | p95 ms |\n|---|---:|---:|---:|---:|---:|\n");
+            for (scope, summary) in &routed.by_task_family_query_shape {
+                out.push_str(&format!(
+                    "| {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.2} |\n",
+                    scope,
+                    summary.quality.recall_at_10,
+                    summary.quality.mean_reciprocal_rank,
+                    summary.quality.file_f1_at_10,
+                    summary.quality.no_gold_false_positive_rate,
+                    summary.latency.p95_ms
+                ));
+            }
+            out.push('\n');
         }
     }
     out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory retrieval measurements are also excluded until explicitly promoted.\n");
@@ -1682,6 +2040,8 @@ mod retrieval_bench_tests {
         RetrievalCaseReport {
             id: id.into(),
             task_family: RetrievalTaskFamily::IssueToCode,
+            expected_query_shape: Some(open_kioku_core::QueryShape::Conceptual),
+            actual_query_shape: open_kioku_core::QueryShape::Conceptual,
             language: "rust".into(),
             split: RetrievalSplit::Development,
             repo_fixture: "fixture".into(),
@@ -1722,7 +2082,7 @@ mod retrieval_bench_tests {
 
         let comparisons = routed_contextpack_comparisons(&strategies, &advisory);
 
-        assert_eq!(comparisons.len(), 2);
+        assert_eq!(comparisons.len(), 4);
         assert_eq!(comparisons[0].scope, "overall");
         assert!(comparisons[0].delta_mean_reciprocal_rank < 0.0);
         assert_eq!(
@@ -1732,6 +2092,86 @@ mod retrieval_bench_tests {
             Some(&0.0)
         );
         assert_eq!(comparisons[1].scope, "task_family:issue_to_code");
+        assert_eq!(comparisons[2].scope, "query_shape:conceptual");
+        assert_eq!(
+            comparisons[3].scope,
+            "task_family_query_shape:issue_to_code:conceptual"
+        );
+    }
+
+    #[test]
+    fn query_shape_sidecar_discovery_is_corpus_derived_and_report_path_is_portable() {
+        assert_eq!(
+            query_shape_labels_path(Path::new("benchmarks/retrieval-cases.json")),
+            Some(PathBuf::from("benchmarks/retrieval-query-shape-labels.json"))
+        );
+        assert_eq!(
+            query_shape_labels_path(Path::new("benchmarks/custom-cases.json")),
+            Some(PathBuf::from("benchmarks/custom-query-shape-labels.json"))
+        );
+        assert_eq!(query_shape_labels_path(Path::new("benchmarks/custom.json")), None);
+    }
+
+    #[test]
+    fn query_shape_labels_fail_closed_for_missing_or_unknown_case_ids() {
+        let mut corpus: RetrievalCorpus = serde_json::from_str(r#"{
+            "schema_version":"1.0.0",
+            "corpus_id":"fixture",
+            "token_budgets":[2000],
+            "cases":[{
+                "id":"known",
+                "task_family":"issue_to_code",
+                "language":"rust",
+                "repo_fixture":"fixture",
+                "base_revision":"sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+                "split":"holdout",
+                "query":"how caching works",
+                "gold_files":["src/lib.rs"]
+            }]
+        }"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.json");
+        fs::write(&path, r#"{
+            "schema_version":"1.0.0",
+            "corpus_id":"fixture",
+            "cases":[{"id":"unknown","expected_query_shape":"conceptual"}]
+        }"#).unwrap();
+        let error = load_and_apply_query_shape_labels(&path, &mut corpus).unwrap_err();
+        assert!(error.to_string().contains("unknown retrieval case"));
+    }
+
+    #[test]
+    fn query_shape_benchmark_measures_misclassification_without_changing_gold() {
+        let mut corpus: RetrievalCorpus = serde_json::from_str(r#"{
+            "schema_version":"1.0.0",
+            "corpus_id":"fixture",
+            "token_budgets":[2000],
+            "cases":[{
+                "id":"known",
+                "task_family":"issue_to_code",
+                "language":"rust",
+                "repo_fixture":"fixture",
+                "base_revision":"sha256:a817b28e702d6f5e830fd02b0aa1c94a2c583c0a5406fa38151729dc41b074b6",
+                "split":"holdout",
+                "query":"AuthService",
+                "gold_files":["src/lib.rs"]
+            }]
+        }"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("labels.json");
+        fs::write(&path, r#"{
+            "schema_version":"1.0.0",
+            "corpus_id":"fixture",
+            "cases":[{"id":"known","expected_query_shape":"conceptual"}],
+            "adversarial_probes":[{"id":"probe","query":"AuthService","expected_query_shape":"exact_identifier"}]
+        }"#).unwrap();
+        let labels = load_and_apply_query_shape_labels(&path, &mut corpus).unwrap();
+        let benchmark = build_query_shape_benchmark(&corpus, &labels, &path).unwrap();
+        assert_eq!(benchmark.labeled_case_count, 1);
+        assert_eq!(benchmark.classification_accuracy, 0.0);
+        assert_eq!(benchmark.misclassification_rate, 1.0);
+        assert_eq!(benchmark.adversarial_probe_accuracy, 1.0);
+        assert_eq!(corpus.cases[0].gold_files, vec![PathBuf::from("src/lib.rs")]);
     }
 
     #[test]
@@ -1810,6 +2250,7 @@ mod retrieval_bench_tests {
             strategy_identities: BTreeMap::new(),
             baseline_deltas: Vec::new(),
             advisory_comparisons: Vec::new(),
+            query_shape_benchmark: None,
             caveats: Vec::new(),
             strategies: vec![strategy],
             stream_ablations: vec![build_named_retrieval_strategy_report(
