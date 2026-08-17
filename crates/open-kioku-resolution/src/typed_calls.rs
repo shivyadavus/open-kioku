@@ -3,7 +3,7 @@ use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
-    RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
+    RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
 
@@ -19,9 +19,9 @@ pub(crate) fn resolve_typed_receiver_outcome(
         .trim_start_matches("self.")
         .trim_start_matches("Self::");
 
-    let Some(binding) = ctx
-        .bindings
-        .resolve_before(&call.scope_id, lookup_name, &call.range, ctx.scopes)
+    let Some(binding) =
+        ctx.bindings
+            .resolve_before(&call.scope_id, lookup_name, &call.range, ctx.scopes)
     else {
         return imported_receiver_outcome(call, ctx, lookup_name);
     };
@@ -34,7 +34,7 @@ pub(crate) fn resolve_typed_receiver_outcome(
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
 
-    let type_candidates = collect_type_candidates(ctx, type_name);
+    let type_candidates = collect_type_candidates(ctx, &call.scope_id, type_name);
     if type_candidates.is_empty() {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     }
@@ -237,7 +237,11 @@ fn evaluate_inherited_targets(
     evaluate_candidates(&GraphEdgeType::Calls, candidates)
 }
 
-fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<SymbolId> {
+fn collect_type_candidates(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    type_name: &str,
+) -> Vec<SymbolId> {
     let mut candidates = BTreeMap::<String, SymbolId>::new();
 
     if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
@@ -245,7 +249,7 @@ fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<
             if ctx
                 .symbols
                 .get(id)
-                .map(|symbol| is_type_symbol(symbol.kind.clone()) && symbol.name == type_name)
+                .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
                 .unwrap_or(false)
             {
                 candidates.insert(id.0.clone(), id.clone());
@@ -256,13 +260,13 @@ fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<
     for binding in ctx
         .repository
         .imports
-        .lookup(ctx.file_id, Some(&ctx.scopes.innermost_scope_for_file(ctx.file_id).unwrap_or_else(|| open_kioku_core::ScopeId::new(""))), type_name)
+        .lookup(ctx.file_id, Some(scope_id), type_name)
     {
         if let Some(target) = &binding.target_symbol {
             if ctx
                 .symbols
                 .get(target)
-                .map(|symbol| is_type_symbol(symbol.kind.clone()))
+                .map(|symbol| is_type_symbol(&symbol.kind))
                 .unwrap_or(false)
             {
                 candidates.insert(target.0.clone(), target.clone());
@@ -274,7 +278,7 @@ fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<
                     if ctx
                         .symbols
                         .get(id)
-                        .map(|symbol| is_type_symbol(symbol.kind.clone()) && symbol.name == type_name)
+                        .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
                         .unwrap_or(false)
                     {
                         candidates.insert(id.0.clone(), id.clone());
@@ -289,7 +293,7 @@ fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<
             if ctx
                 .symbols
                 .get(id)
-                .map(|symbol| is_type_symbol(symbol.kind.clone()))
+                .map(|symbol| is_type_symbol(&symbol.kind))
                 .unwrap_or(false)
             {
                 candidates.insert(id.0.clone(), id.clone());
@@ -300,7 +304,7 @@ fn collect_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<
     candidates.into_values().collect()
 }
 
-fn is_type_symbol(kind: SymbolKind) -> bool {
+fn is_type_symbol(kind: &SymbolKind) -> bool {
     matches!(
         kind,
         SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Module

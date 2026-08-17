@@ -5,6 +5,7 @@ pub mod evidence;
 pub mod index;
 pub mod inheritance;
 pub mod pipeline;
+mod typed_calls;
 
 pub use calls::resolve_call;
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};

@@ -20,7 +20,9 @@ pub fn resolve_call(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionR
         ReceiverKind::Self_ => resolve_self_member(call, ctx),
         ReceiverKind::Super => resolve_super_member(call, ctx),
         ReceiverKind::Type => resolve_static_member(call, ctx),
-        ReceiverKind::Value => resolve_typed_receiver(call, ctx),
+        ReceiverKind::Value => {
+            crate::typed_calls::resolve_typed_receiver_outcome(call, ctx).into_legacy_result()
+        }
         ReceiverKind::None => {
             crate::bare_calls::resolve_bare_call_outcome(call, ctx).into_legacy_result()
         }
@@ -288,121 +290,6 @@ fn resolve_static_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Resolu
 
     ResolutionResult::Unresolved {
         reason: UnresolvedReason::NoCandidate,
-        evidence: vec![],
-    }
-}
-
-fn resolve_typed_receiver(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionResult {
-    let recv = match call.receiver.as_deref() {
-        Some(r) => r,
-        None => {
-            return ResolutionResult::Unresolved {
-                reason: UnresolvedReason::UnknownReceiverType,
-                evidence: vec![],
-            }
-        }
-    };
-
-    let lookup_name = recv
-        .trim_start_matches("this.")
-        .trim_start_matches("self.")
-        .trim_start_matches("Self::");
-
-    let binding =
-        match ctx
-            .bindings
-            .resolve_before(&call.scope_id, lookup_name, &call.range, ctx.scopes)
-        {
-            Some(b) => b,
-            None => {
-                let candidates = imported_module_member_candidates(call, ctx, lookup_name);
-                if candidates.len() == 1 {
-                    return ResolutionResult::Resolved {
-                        target: candidates[0].clone(),
-                        confidence: Confidence::Exact,
-                        evidence: vec![ResolutionEvidence {
-                            kind: ResolutionEvidenceKind::ExplicitImport,
-                            source_type: EvidenceSourceType::TreeSitter,
-                            file_range: call_file_range(call, ctx),
-                            symbol_id: Some(candidates[0].clone()),
-                            message: "resolved receiver via exact import/module evidence".into(),
-                        }],
-                    };
-                } else if candidates.len() > 1 {
-                    return ResolutionResult::Ambiguous {
-                        candidates,
-                        reason: "multiple imported module members match receiver call".into(),
-                        evidence: vec![],
-                    };
-                }
-
-                return ResolutionResult::Unresolved {
-                    reason: UnresolvedReason::UnknownReceiverType,
-                    evidence: vec![],
-                };
-            }
-        };
-
-    let type_name = match binding
-        .declared_type
-        .as_deref()
-        .or(binding.inferred_type.as_deref())
-    {
-        Some(t) => t,
-        None => {
-            return ResolutionResult::Unresolved {
-                reason: UnresolvedReason::UnknownReceiverType,
-                evidence: vec![],
-            }
-        }
-    };
-
-    let type_id = resolve_type_with_evidence(ctx, type_name);
-
-    if let Some(type_id) = type_id {
-        let method_candidates = find_members_by_name(ctx, &type_id, &call.callee_name);
-
-        if method_candidates.len() == 1 {
-            return ResolutionResult::Resolved {
-                target: method_candidates[0].clone(),
-                confidence: Confidence::Exact,
-                evidence: vec![ResolutionEvidence {
-                    kind: ResolutionEvidenceKind::TypedBinding,
-                    source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call, ctx),
-                    symbol_id: Some(method_candidates[0].clone()),
-                    message: "resolved method via typed local variable binding".into(),
-                }],
-            };
-        } else if method_candidates.len() > 1 {
-            return ResolutionResult::Ambiguous {
-                candidates: method_candidates,
-                reason: "multiple matching methods on receiver type".into(),
-                evidence: vec![],
-            };
-        }
-
-        // Try inherited members
-        if let Some(target) =
-            ctx.inheritance
-                .resolve_inherited_member(&type_id, &call.callee_name, ctx.symbols)
-        {
-            return ResolutionResult::Resolved {
-                target: target.clone(),
-                confidence: Confidence::Exact,
-                evidence: vec![ResolutionEvidence {
-                    kind: ResolutionEvidenceKind::InheritanceGraph,
-                    source_type: EvidenceSourceType::TreeSitter,
-                    file_range: call_file_range(call, ctx),
-                    symbol_id: Some(target),
-                    message: "resolved receiver method via inheritance chain".into(),
-                }],
-            };
-        }
-    }
-
-    ResolutionResult::Unresolved {
-        reason: UnresolvedReason::UnknownReceiverType,
         evidence: vec![],
     }
 }
