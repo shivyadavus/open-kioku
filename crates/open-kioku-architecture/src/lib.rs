@@ -821,7 +821,8 @@ mod tests {
     };
     use open_kioku_core::{
         Confidence, EdgeId, Evidence, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest,
-        IndexMode, IndexQuality, Language, NodeId, Repository, RepositoryId,
+        IndexMode, IndexQuality, Language, NodeId, RelationshipProof, RelationshipProofKind,
+        Repository, RepositoryId,
     };
     use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
@@ -891,7 +892,24 @@ mod tests {
     }
 
     fn edge(id: &str, from: &GraphNode, to: &GraphNode, edge_type: GraphEdgeType) -> GraphEdge {
-        GraphEdge {
+        let proofs = match &edge_type {
+            GraphEdgeType::Calls => vec![
+                RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test", 1),
+                RelationshipProof::new(RelationshipProofKind::SameScopeDefinition, "test", 1),
+            ],
+            GraphEdgeType::References => vec![RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "test",
+                1,
+            )],
+            GraphEdgeType::Imports => vec![RelationshipProof::new(
+                RelationshipProofKind::ModuleOrPackageBinding,
+                "test",
+                1,
+            )],
+            _ => Vec::new(),
+        };
+        let mut edge = GraphEdge {
             id: EdgeId::new(id),
             from: from.id.clone(),
             to: to.id.clone(),
@@ -904,7 +922,10 @@ mod tests {
                 ..Evidence::default()
             },
             ..GraphEdge::default()
-        }
+        };
+        edge.set_relationship_proofs(proofs)
+            .expect("architecture test relationship proofs must serialize");
+        edge
     }
 
     fn policy(rules: Vec<DependencyRule>) -> ArchitecturePolicy {
