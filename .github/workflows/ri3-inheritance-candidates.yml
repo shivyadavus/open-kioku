@@ -21,6 +21,16 @@ jobs:
         run: |
           python3 -m py_compile scripts/ri3_inheritance_candidates_tmp.py
           python3 scripts/ri3_inheritance_candidates_tmp.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-resolution/src/inheritance.rs')
+          text = path.read_text()
+          old = 'use std::collections::{HashMap, HashSet, VecDeque};\n'
+          new = 'use std::collections::{HashMap, HashSet};\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'unexpected collection import seam: {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Validate resolver
         run: |
