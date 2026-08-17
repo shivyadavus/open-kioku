@@ -148,7 +148,10 @@ mod tests {
         let outcome = resolve_call_outcome(&call, &ctx);
         match outcome {
             ResolutionOutcome::Proven { candidate } => {
-                assert_eq!(candidate.target_symbol_id, SymbolId::new("symbol:Repo.save"));
+                assert_eq!(
+                    candidate.target_symbol_id,
+                    SymbolId::new("symbol:Repo.save")
+                );
                 assert_eq!(
                     candidate.authority(&open_kioku_core::GraphEdgeType::Calls),
                     RelationshipAuthority::Authoritative
