@@ -87,8 +87,25 @@ jobs:
         run: cargo fmt --all
       - name: Verify rustfmt
         run: cargo fmt --all -- --check
+      - name: Compile changed crates
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p open-kioku-cli -p open-kioku-graph --all-targets 2>&1 | tee /tmp/cargo-check.log
       - name: Strict Clippy for changed crates
-        run: cargo clippy -p open-kioku-cli -p open-kioku-graph --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy -p open-kioku-cli -p open-kioku-graph --all-targets -- -D warnings 2>&1 | tee /tmp/clippy.log
+      - name: Upload compiler diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ri3-compiler-diagnostics
+          path: |
+            /tmp/cargo-check.log
+            /tmp/clippy.log
+          if-no-files-found: ignore
       - name: Relationship scorer tests
         run: cargo test -p open-kioku-cli relationship_bench -- --nocapture
       - name: Live producer tests
