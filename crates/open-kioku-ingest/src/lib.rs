@@ -7,8 +7,8 @@ use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, DocumentSection, DocumentType, EvidenceSourceType, File,
     FileId, GitCochangeEdge, GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType,
     HistoryRecordId, HistorySnapshot, Import, IndexManifest, IndexMode, IndexPhaseReport,
-    IndexQuality, LineRange, Repository, RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol,
-    SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
+    IndexQuality, Language, LineRange, Repository, RepositoryId, SkipReason, SkipSource,
+    SkippedPath, Symbol, SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -73,8 +73,10 @@ pub struct ResolutionDiff {
 trait ResolutionQualityReportExt {
     fn record_outcome(
         &mut self,
+        language: &Language,
         edge_type: &GraphEdgeType,
         outcome: &open_kioku_resolution::ResolutionOutcome,
+        enrichment_time_us: u64,
     );
 
     fn record_reference_occurrence(&mut self, occurrence: &SymbolOccurrence);
@@ -83,9 +85,39 @@ trait ResolutionQualityReportExt {
 impl ResolutionQualityReportExt for ResolutionQualityReport {
     fn record_outcome(
         &mut self,
+        language: &Language,
         edge_type: &GraphEdgeType,
         outcome: &open_kioku_resolution::ResolutionOutcome,
+        enrichment_time_us: u64,
     ) {
+        let language_metrics = self
+            .by_language
+            .entry(language_metric_key(language))
+            .or_default();
+        language_metrics.occurrences += 1;
+        language_metrics.candidates_considered += outcome.candidates_considered();
+        language_metrics.enrichment_time_us = language_metrics
+            .enrichment_time_us
+            .saturating_add(enrichment_time_us);
+        if outcome.candidate_cap_hit() {
+            self.candidate_cap_hits += 1;
+            language_metrics.candidate_cap_hits += 1;
+        }
+        match outcome {
+            open_kioku_resolution::ResolutionOutcome::Proven { .. } => {
+                language_metrics.proven += 1;
+            }
+            open_kioku_resolution::ResolutionOutcome::Ambiguous { .. } => {
+                language_metrics.ambiguous += 1;
+            }
+            open_kioku_resolution::ResolutionOutcome::Unresolved { .. } => {
+                language_metrics.unresolved += 1;
+            }
+            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                language_metrics.external += 1;
+            }
+        }
+
         let key = relationship_metric_key(edge_type);
         let metrics = self.by_relationship.entry(key).or_default();
         match outcome {
@@ -95,8 +127,12 @@ impl ResolutionQualityReportExt for ResolutionQualityReport {
                 metrics.heuristic_candidates_retained += candidate.heuristic_candidates_retained;
                 record_candidate_evidence(metrics, candidate);
             }
-            open_kioku_resolution::ResolutionOutcome::Ambiguous { candidates, .. } => {
-                metrics.candidates_considered += candidates.len();
+            open_kioku_resolution::ResolutionOutcome::Ambiguous {
+                candidates,
+                candidates_considered,
+                ..
+            } => {
+                metrics.candidates_considered += *candidates_considered;
                 metrics.ambiguous += 1;
                 metrics.heuristic_candidates_retained += candidates
                     .iter()
@@ -109,8 +145,12 @@ impl ResolutionQualityReportExt for ResolutionQualityReport {
                     record_candidate_evidence(metrics, candidate);
                 }
             }
-            open_kioku_resolution::ResolutionOutcome::Unresolved { candidates, .. } => {
-                metrics.candidates_considered += candidates.len();
+            open_kioku_resolution::ResolutionOutcome::Unresolved {
+                candidates,
+                candidates_considered,
+                ..
+            } => {
+                metrics.candidates_considered += *candidates_considered;
                 metrics.unresolved += 1;
                 metrics.heuristic_candidates_retained += candidates.len();
                 for candidate in candidates {
@@ -150,6 +190,32 @@ impl ResolutionQualityReportExt for ResolutionQualityReport {
             metrics.heuristic_candidates_retained += 1;
         }
     }
+}
+
+fn language_metric_key(language: &Language) -> String {
+    serde_json::to_value(language)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{language:?}"))
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn attach_resolution_quality(quality: &mut IndexQuality, report: Option<ResolutionQualityReport>) {
+    if let Some(report) = report.as_ref() {
+        if report.candidate_cap_hits > 0 {
+            quality.quality_notes.push(format!(
+                "semantic relationship candidate cap ({}) hit for {} occurrence(s); authoritative emission was suppressed for every capped occurrence",
+                open_kioku_resolution::MAX_RESOLUTION_CANDIDATES,
+                report.candidate_cap_hits
+            ));
+            quality.quality_notes.sort();
+            quality.quality_notes.dedup();
+        }
+    }
+    quality.resolution_quality = report;
 }
 
 fn relationship_metric_key(edge_type: &GraphEdgeType) -> String {
@@ -652,8 +718,14 @@ impl Indexer {
                             semantics,
                         );
 
+                        let enrichment_started = Instant::now();
                         let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);
-                        quality_report.record_outcome(&GraphEdgeType::Calls, &v2_outcome);
+                        quality_report.record_outcome(
+                            &file.language,
+                            &GraphEdgeType::Calls,
+                            &v2_outcome,
+                            elapsed_micros(enrichment_started),
+                        );
                         let semantic_target = match &v2_outcome {
                             open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
                                 match candidate.confidence {
@@ -773,9 +845,15 @@ impl Indexer {
                     &inheritance_index,
                     semantics,
                 );
+                let enrichment_started = Instant::now();
                 let (edge_type, outcome) =
                     open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);
-                quality_report.record_outcome(&edge_type, &outcome);
+                quality_report.record_outcome(
+                    &file.language,
+                    &edge_type,
+                    &outcome,
+                    elapsed_micros(enrichment_started),
+                );
                 if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
                     resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
                         from: site.child_symbol_id.clone(),
@@ -808,12 +886,18 @@ impl Indexer {
                     &inheritance_index,
                     semantics,
                 );
+                let enrichment_started = Instant::now();
                 let Some((source, outcome)) =
                     open_kioku_resolution::resolve_declared_type_use_outcome(binding, &ctx)
                 else {
                     continue;
                 };
-                quality_report.record_outcome(&GraphEdgeType::UsesType, &outcome);
+                quality_report.record_outcome(
+                    &file.language,
+                    &GraphEdgeType::UsesType,
+                    &outcome,
+                    elapsed_micros(enrichment_started),
+                );
                 if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
                     resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
                         from: source,
@@ -984,7 +1068,7 @@ impl Indexer {
         } else {
             Some(quality_report)
         };
-        quality.resolution_quality = resolution_quality.clone();
+        attach_resolution_quality(&mut quality, resolution_quality.clone());
         let manifest = IndexManifest {
             repository,
             file_count: files.len(),
@@ -2692,7 +2776,7 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_occurrences, map_symbol_touches, Indexer};
+    use super::{attach_resolution_quality, derive_occurrences, map_symbol_touches, Indexer};
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
@@ -2719,6 +2803,29 @@ mod tests {
             signature: None,
             visibility: open_kioku_core::Visibility::Unknown,
         }
+    }
+
+    #[test]
+    fn candidate_cap_hits_are_visible_in_index_quality() {
+        let mut quality = open_kioku_core::IndexQuality::default();
+        let report = open_kioku_core::ResolutionQualityReport {
+            candidate_cap_hits: 2,
+            ..Default::default()
+        };
+        attach_resolution_quality(&mut quality, Some(report));
+
+        assert_eq!(
+            quality
+                .resolution_quality
+                .as_ref()
+                .map(|report| report.candidate_cap_hits),
+            Some(2)
+        );
+        assert!(quality.quality_notes.iter().any(|note| {
+            note.contains("candidate cap")
+                && note.contains("2 occurrence(s)")
+                && note.contains("authoritative emission was suppressed")
+        }));
     }
 
     #[test]
