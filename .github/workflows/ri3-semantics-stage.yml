@@ -1,19 +1,23 @@
 name: RI3 semantics staging
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/ri3-analysis-semantics-fingerprint
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   stage-and-validate:
+    if: github.head_ref == 'agent/ri3-analysis-semantics-fingerprint'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Stage durable semantic compatibility changes
