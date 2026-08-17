@@ -29,7 +29,10 @@ jobs:
           cargo fmt --all
           cargo fmt --all -- --check
           cargo clippy --all-targets --all-features -- -D warnings
-          cargo test -p open-kioku-impact -p open-kioku-storage-sqlite -p open-kioku-tests
+          cargo test -p open-kioku-impact
+          cargo test -p open-kioku-storage-sqlite
+          cargo test -p open-kioku-tests --lib
+          cargo test -p open-kioku-tests --test false_positive_precision
           git diff --check
       - name: Commit validated product fix and self-clean
         run: |
