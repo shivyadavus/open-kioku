@@ -1,0 +1,43 @@
+name: RI3 fix finalizer test imports
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-authority-final
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-authority-final
+          fetch-depth: 0
+      - name: Patch structured finalizer
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path(".github/workflows/ri3-authority-finalize-json.yml")
+          text = path.read_text()
+          old = '''          #[cfg(test)]
+          use std::collections::BTreeSet;
+          '''
+          new = '''          #[cfg(test)]
+          use open_kioku_core::{FileRange, SymbolId};
+          #[cfg(test)]
+          use std::collections::BTreeSet;
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"test import seam count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+      - name: Commit fix and remove helper
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-fix-finalizer-test-imports.yml
+          git add .github/workflows/ri3-authority-finalize-json.yml
+          git commit -m "chore: preserve RI3 evidence test-only imports"
+          git push origin HEAD:agent/ri3-core-authority-final
