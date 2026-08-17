@@ -46,7 +46,9 @@ if text.count(old) != 1:
     raise SystemExit(f"routing.rs: collapsible-if marker count={text.count(old)}")
 text = text.replace(old, new, 1)
 
-old = '''    loop {
+old = '''fn normalize_scope_path(raw: &str) -> Option<String> {
+    let mut token = trim_query_token(raw).to_string();
+    loop {
         let Some((prefix, suffix)) = token.rsplit_once(':') else {
             break;
         };
@@ -57,7 +59,17 @@ old = '''    loop {
         }
     }
 '''
-new = '''    while let Some((prefix, suffix)) = token.rsplit_once(':') {
+new = '''fn normalize_scope_path(raw: &str) -> Option<String> {
+    // Keep leading `./`, path separators, and filename dots intact. `trim_query_token` is
+    // intentionally broader for lexical classification and would turn `./src/lib.rs` into an
+    // absolute-looking `/src/lib.rs`, causing a valid repository-relative scope to be rejected.
+    let mut token = raw
+        .trim_matches(|ch: char| {
+            matches!(ch, '`' | '"' | ',' | ';' | '(' | ')' | '[' | ']' | '!' | '?')
+        })
+        .trim_end_matches('.')
+        .to_string();
+    while let Some((prefix, suffix)) = token.rsplit_once(':') {
         if suffix.chars().all(|ch| ch.is_ascii_digit()) && !suffix.is_empty() {
             token = prefix.to_string();
         } else {
@@ -66,6 +78,6 @@ new = '''    while let Some((prefix, suffix)) = token.rsplit_once(':') {
     }
 '''
 if text.count(old) != 1:
-    raise SystemExit(f"routing.rs: while-let marker count={text.count(old)}")
+    raise SystemExit(f"routing.rs: normalize/while-let marker count={text.count(old)}")
 text = text.replace(old, new, 1)
 routing.write_text(text)
