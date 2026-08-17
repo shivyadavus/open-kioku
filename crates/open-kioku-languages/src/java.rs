@@ -1,5 +1,5 @@
 use crate::semantics::LanguageSemantics;
-use open_kioku_core::{Language, ReceiverKind};
+use open_kioku_core::Language;
 
 pub struct JavaSemantics;
 
@@ -18,23 +18,5 @@ impl LanguageSemantics for JavaSemantics {
 
     fn implicit_self_dispatch(&self) -> bool {
         true
-    }
-
-    fn classify_receiver(&self, receiver: &str) -> ReceiverKind {
-        let trimmed = receiver.trim();
-        if trimmed == "this" {
-            ReceiverKind::Self_
-        } else if trimmed == "super" {
-            ReceiverKind::Super
-        } else if trimmed
-            .chars()
-            .next()
-            .map(|c| c.is_uppercase())
-            .unwrap_or(false)
-        {
-            ReceiverKind::Type
-        } else {
-            ReceiverKind::Value
-        }
     }
 }
