@@ -1,0 +1,56 @@
+name: V3 mainline platform compatibility
+
+on:
+  push:
+    branches:
+      - release/v3.0.0-mainline
+    paths:
+      - .github/workflows/v3-mainline-platform-compat.yml
+
+permissions:
+  contents: write
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v3.0.0-mainline
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply supported-platform contract
+        run: |
+          set -euo pipefail
+          python3 scripts/v3-mainline-platform-compat.py
+          git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
+      - name: Validate supported-platform release surface
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 >/dev/null
+          cargo fmt --all -- --check
+          scripts/validate-docs.sh
+          scripts/validate-versions.sh
+          scripts/verify-npm-package.sh
+          git diff --check
+          if git grep -nE 'ok-macos-x86_64|@open-kioku/darwin-x64|x86_64-apple-darwin' -- release-metadata.json Formula crates/open-kioku-cli packages/npm docs/release-checklist.md scripts/validate-release-metadata.py .github/workflows/release.yml .github/workflows/v3-mainline-candidate.yml; then
+            echo 'unsupported V3 Intel macOS reference remains' >&2
+            exit 1
+          fi
+      - name: Commit alignment and self-clean
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git reset .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py
+          git commit -m "release: align v3 with supported runtime platforms"
+          git rm .github/workflows/v3-mainline-platform-compat.yml scripts/v3-mainline-platform-compat.py
+          git commit -m "chore: remove v3 platform compatibility gate"
+          git push origin HEAD:release/v3.0.0-mainline
