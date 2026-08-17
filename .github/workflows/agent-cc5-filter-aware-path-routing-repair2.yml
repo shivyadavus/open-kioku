@@ -1,0 +1,88 @@
+name: agent-cc5-filter-aware-path-routing-repair2
+
+on:
+  push:
+    branches:
+      - agent/cc5-filter-aware-path-routing
+
+permissions:
+  contents: write
+
+jobs:
+  implement-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc5-filter-aware-path-routing
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted implementation and clippy repair
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/agent-cc5-filter-aware-path-routing.yml').read_text().splitlines()
+          start = next(i for i, line in enumerate(workflow) if "python3 - <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(workflow)) if workflow[i].strip() == 'PY')
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in workflow[start:end]) + '\n'
+          script = script.replace("'''                let should_use_scoped_exact = path_scope_enforced", "'''        let should_use_scoped_exact = path_scope_enforced")
+          exec(compile(script, '<cc5-asserted-patch>', 'exec'), {'__name__': '__main__'})
+
+          path = Path('crates/open-kioku-semantic/src/lib.rs')
+          text = path.read_text()
+          old = '.all(|result| result.path == PathBuf::from("src/auth.rs")));'
+          new = '.all(|result| result.path.as_path() == std::path::Path::new("src/auth.rs")));'
+          if text.count(old) != 1:
+              raise SystemExit(f'clippy comparison marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          # Self-review hardening: avoid a logically-unreachable production panic. If scope bookkeeping
+          # ever becomes inconsistent, fail closed rather than panic or widen retrieval.
+          old = '''                    match build_scoped_exact_index(
+                        &self.current_dir(),
+                        &targets,
+                        allowlist.as_ref().expect("scoped search has an allowlist"),
+                        &self.config,
+                    )? {'''
+          new = '''                    let scoped_allowlist = allowlist.as_ref().ok_or_else(|| {
+                        OkError::Storage(
+                            "validated semantic path scope lost its candidate allowlist; refusing to widen retrieval"
+                                .into(),
+                        )
+                    })?;
+                    match build_scoped_exact_index(
+                        &self.current_dir(),
+                        &targets,
+                        scoped_allowlist,
+                        &self.config,
+                    )? {'''
+          if text.count(old) != 1:
+              raise SystemExit(f'panic hardening marker count={text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format and validate full workspace
+        shell: bash
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-semantic
+          cargo test -p open-kioku-context
+          cargo test -p open-kioku-mcp
+          cargo test -p open-kioku-cli
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit clean product tree
+        shell: bash
+        run: |
+          rm .github/workflows/agent-cc5-filter-aware-path-routing.yml
+          rm .github/workflows/agent-cc5-filter-aware-path-routing-repair.yml
+          rm .github/workflows/agent-cc5-filter-aware-path-routing-repair2.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(context): route scoped semantic retrieval by eligible set"
+          git push origin HEAD:agent/cc5-filter-aware-path-routing
