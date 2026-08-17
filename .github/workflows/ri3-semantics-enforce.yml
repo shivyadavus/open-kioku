@@ -30,6 +30,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Context regression tests
         run: cargo test -p open-kioku-context
+      - name: Refresh MCP semantic-status golden snapshots
+        env:
+          UPDATE_GOLDEN_SNAPSHOTS: "1"
+        run: cargo test -p open-kioku-mcp golden_mcp_protocol_snapshots_are_stable
       - name: MCP regression tests
         run: cargo test -p open-kioku-mcp
       - name: CLI regression tests
