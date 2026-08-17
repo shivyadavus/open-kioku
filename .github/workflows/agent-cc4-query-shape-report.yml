@@ -1,0 +1,79 @@
+name: agent-cc4-query-shape-report
+
+on:
+  push:
+    branches: ["agent/cc4-query-shape-benchmark-v2"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply asserted query-shape report patch
+        run: python3 .github/scripts/agent_cc4_query_shape_report.py
+      - name: Validate workspace and frozen retrieval contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+          cargo build --release -p open-kioku-cli
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --min-cases 30 \
+            --write-json /tmp/retrieval-query-shape-report.json \
+            --write-markdown /tmp/retrieval-query-shape-report.md \
+            --write-baseline /tmp/retrieval-baseline-first.json \
+            > /tmp/retrieval-first.json
+          ./target/release/ok --json retrieval-bench . \
+            --cases-file benchmarks/retrieval-cases.json \
+            --no-index \
+            --min-cases 30 \
+            --write-baseline /tmp/retrieval-baseline-second.json \
+            > /tmp/retrieval-second.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          expected = json.loads(Path('benchmarks/retrieval-baseline.json').read_text())
+          first = json.loads(Path('/tmp/retrieval-baseline-first.json').read_text())
+          second = json.loads(Path('/tmp/retrieval-baseline-second.json').read_text())
+          report = json.loads(Path('/tmp/retrieval-query-shape-report.json').read_text())
+          if first != expected or second != expected:
+              raise SystemExit('frozen generic retrieval baseline changed')
+          qs = report.get('query_shape_benchmark')
+          if not qs:
+              raise SystemExit('query-shape benchmark missing from report')
+          if qs['labeled_case_count'] != 30:
+              raise SystemExit(f"expected 30 labeled cases, got {qs['labeled_case_count']}")
+          if qs['adversarial_probe_count'] < 8:
+              raise SystemExit('adversarial query-shape probe coverage is incomplete')
+          routed = next(s for s in report['stream_ablations'] if s['strategy'] == 'cc4:routed_contextpack')
+          if not routed.get('by_query_shape') or not routed.get('by_task_family_query_shape'):
+              raise SystemExit('routed ContextPack query-shape breakdowns are missing')
+          print('frozen generic baseline unchanged; query-shape telemetry present')
+          PY
+      - name: Commit product changes and remove temporary tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/scripts/agent_cc4_query_shape_report.py
+          rm -f .github/workflows/agent-cc4-query-shape-report.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "bench(context): measure query-shape routing quality"
+          git push origin HEAD:agent/cc4-query-shape-benchmark-v2
