@@ -2686,13 +2686,10 @@ name = "open-kioku-embeddings"
 version = "2.4.0"
 dependencies = [
  "candle-core",
- "candle-nn",
  "fastembed",
- "hf-hub",
  "open-kioku-errors",
  "serde",
  "serde_json",
- "tokenizers",
 ]
 
 [[package]]
@@ -2708,6 +2705,11 @@ name = "open-kioku-evidence"
 version = "2.4.0"
 dependencies = [
  "open-kioku-core",
+ "open-kioku-errors",
+ "open-kioku-storage",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2925,6 +2927,7 @@ dependencies = [
  "open-kioku-languages",
  "open-kioku-semantic-model",
  "serde",
+ "serde_json",
  "smallvec",
  "tracing",
 ]
