@@ -17,10 +17,10 @@ pub trait LanguageSemantics: Send + Sync {
                     .is_some_and(|suffix| suffix.starts_with('.'))
         }) {
             ReceiverKind::Self_
-        } else if matches!(trimmed, "super" | "super()")
-            || trimmed.starts_with("super.")
-            || trimmed.starts_with("super().")
-        {
+        } else if matches!(trimmed, "super" | "super()") {
+            // Only direct super dispatch is structurally proven here. Nested member chains such as
+            // `super.repo.save()` require the intermediate member's type; treating them as direct
+            // super calls could manufacture an authoritative target on the parent type.
             ReceiverKind::Super
         } else if trimmed
             .chars()
