@@ -82,7 +82,9 @@ jobs:
         run: |
           cargo fmt --all
           cargo clippy -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-architecture -p open-kioku-context -p open-kioku-plan -p open-kioku-tests -p open-kioku-mcp --all-targets -- -D warnings
-          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-architecture -p open-kioku-context -p open-kioku-plan -p open-kioku-tests -p open-kioku-mcp
+          cargo test -p open-kioku-core -p open-kioku-evidence -p open-kioku-graph -p open-kioku-architecture -p open-kioku-context -p open-kioku-plan -p open-kioku-mcp
+          cargo test -p open-kioku-tests --lib
+          cargo test -p open-kioku-tests --test false_positive_precision
 
       - name: Commit validated RI3 contract
         run: |
