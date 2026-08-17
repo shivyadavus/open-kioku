@@ -357,11 +357,10 @@ impl RelationshipProofFilter {
         if relationship_authority(&edge.edge_type, &proofs) < self.minimum_authority {
             return false;
         }
-        self.accepted_proof_kinds
-            .as_ref()
-            .map_or(true, |accepted| {
-                proofs.iter().any(|proof| accepted.contains(&proof.kind))
-            })
+        match self.accepted_proof_kinds.as_ref() {
+            Some(accepted) => proofs.iter().any(|proof| accepted.contains(&proof.kind)),
+            None => true,
+        }
     }
 }
 
@@ -427,10 +426,28 @@ mod tests {
     }
 
     #[test]
+    fn exact_occurrence_proves_reference_relationship() {
+        let proofs = vec![proof(RelationshipProofKind::ExactOccurrence, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::References, &proofs),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
     fn exact_reference_proves_reference_relationship() {
         let proofs = vec![proof(RelationshipProofKind::ExactReference, 1)];
         assert_eq!(
             relationship_authority(&GraphEdgeType::References, &proofs),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn unique_import_binding_proves_import_relationship() {
+        let proofs = vec![proof(RelationshipProofKind::ImportBinding, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::Imports, &proofs),
             RelationshipAuthority::Authoritative
         );
     }
@@ -451,6 +468,14 @@ mod tests {
         assert_eq!(
             relationship_authority(&GraphEdgeType::Calls, &proofs),
             RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn proofless_name_only_signal_cannot_authorize_relationship() {
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::References, &[]),
+            RelationshipAuthority::Heuristic
         );
     }
 
