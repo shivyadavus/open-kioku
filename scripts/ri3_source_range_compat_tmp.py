@@ -28,3 +28,9 @@ replace_exact(
     '''                    range: Some(LineRange::single(1)),\n                    source_range: None,\n                    is_definition: true,\n''',
     "sqlite definition occurrence fixture",
 )
+replace_exact(
+    "crates/open-kioku-tests/src/lib.rs",
+    '''            range: Some(LineRange::single(1)),\n            is_definition: false,\n            confidence: Confidence::Exact,\n            provenance: EvidenceSourceType::Scip,\n''',
+    '''            range: Some(LineRange::single(1)),\n            source_range: None,\n            is_definition: false,\n            confidence: Confidence::Exact,\n            provenance: EvidenceSourceType::Scip,\n''',
+    "shared SCIP occurrence fixture",
+)
