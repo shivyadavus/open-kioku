@@ -6,6 +6,7 @@ on:
       - agent/ri3-permanent-gates
     paths:
       - .github/workflows/ri3-incremental-test.yml
+      - scripts/ri3-incremental-stage.py
 
 permissions:
   contents: write
@@ -24,65 +25,8 @@ jobs:
           components: rustfmt,clippy
       - name: Add incremental vs clean graph regression
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('crates/open-kioku-watch/src/lib.rs')
-          s = p.read_text()
-          anchor = '    fn git(root: &Path, args: &[&str]) {'
-          test = r'''    #[test]
-    fn incremental_relationship_graph_matches_clean_final_rebuild() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path();
-        fs::create_dir_all(repo.join("src")).unwrap();
-        fs::write(
-            repo.join("src/lib.rs"),
-            "pub fn target() {}\npub fn caller() { target(); }\n",
-        )
-        .unwrap();
-        fs::write(repo.join("src/other.rs"), "pub fn unrelated() {}\n").unwrap();
-        OkConfig::write_default(repo.join("ok.toml")).unwrap();
-        git(repo, &["init", "--quiet"]);
-        git(repo, &["config", "user.email", "watch@example.com"]);
-        git(repo, &["config", "user.name", "Watch Test"]);
-        git(repo, &["config", "commit.gpgsign", "false"]);
-        git(repo, &["add", "."]);
-        git(repo, &["commit", "--quiet", "-m", "initial source"]);
-
-        reindex_repo(repo).unwrap();
-        fs::write(
-            repo.join("src/other.rs"),
-            "pub fn unrelated() { let _stable = 1; }\n",
-        )
-        .unwrap();
-        let changed = repo.join("src/other.rs");
-        let status = reindex_repo_after_changes(repo, [changed.as_path()]).unwrap();
-        assert!(status.partial);
-
-        let incremental_store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
-        let mut incremental = incremental_store
-            .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
-            .unwrap();
-        incremental.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-        assert!(!incremental.is_empty(), "fixture should emit a CALLS edge");
-
-        fs::remove_dir_all(repo.join(".ok")).unwrap();
-        reindex_repo(repo).unwrap();
-        let clean_store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
-        let mut clean = clean_store
-            .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
-            .unwrap();
-        clean.sort_by(|left, right| left.id.0.cmp(&right.id.0));
-
-        assert_eq!(incremental, clean, "incremental and clean CALLS truth diverged");
-    }
-
-'''
-          if anchor not in s:
-              raise SystemExit('watch test insertion anchor missing')
-          if 'incremental_relationship_graph_matches_clean_final_rebuild' not in s:
-              s = s.replace(anchor, test + anchor, 1)
-          p.write_text(s)
-          PY
+          set -euo pipefail
+          python3 scripts/ri3-incremental-stage.py
           cargo fmt --all
       - name: Validate incremental relationship equivalence
         run: |
