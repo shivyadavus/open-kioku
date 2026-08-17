@@ -49,6 +49,53 @@ jobs:
       - name: Claude starter smoke
         run: OK_BIN=target/debug/ok examples/claude/smoke.sh
 
+  relationship-conformance-compact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ri3-compact-${{ hashFiles('**/Cargo.lock') }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Build relationship benchmark CLI
+        run: cargo build -p open-kioku-cli
+      - name: Run one live case per language relationship cohort
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/relationships
+          target/debug/ok --json relationship-bench \
+            --corpus benchmarks/relationship-ci-cases.json \
+            --observations @live \
+            --write artifacts/relationships/compact-report.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open('artifacts/relationships/compact-report.json'))
+          diagnostics = report.get('diagnostics', [])
+          if report.get('overall', {}).get('cases') != 42:
+              raise SystemExit(f"expected 42 compact cases, got {report.get('overall', {}).get('cases')}")
+          if diagnostics:
+              for item in diagnostics[:50]:
+                  print(item)
+              raise SystemExit(f"compact relationship conformance produced {len(diagnostics)} diagnostics")
+          if report.get('overall', {}).get('false_positives', 0) != 0:
+              raise SystemExit('compact relationship conformance produced a false positive')
+          if report.get('overall', {}).get('false_negatives', 0) != 0:
+              raise SystemExit('compact relationship conformance produced a false negative')
+          PY
+      - name: Upload compact relationship report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relationship-conformance-compact
+          path: artifacts/relationships
+          if-no-files-found: error
+
   coverage:
     runs-on: ubuntu-latest
     steps:
