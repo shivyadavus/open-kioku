@@ -125,7 +125,10 @@ mod tests {
         let java_sem = semantics_for(&Language::Java).unwrap();
         assert_eq!(java_sem.classify_receiver("this"), ReceiverKind::Self_);
         assert_eq!(java_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
-        assert_eq!(java_sem.classify_receiver("super.repo"), ReceiverKind::Super);
+        assert_eq!(
+            java_sem.classify_receiver("super.repo"),
+            ReceiverKind::Super
+        );
         assert_eq!(java_sem.classify_receiver("Repo"), ReceiverKind::Type);
         assert_eq!(java_sem.classify_receiver("Super"), ReceiverKind::Type);
 
@@ -142,7 +145,10 @@ mod tests {
         assert_eq!(py_sem.classify_receiver("self.repo"), ReceiverKind::Self_);
         assert_eq!(py_sem.classify_receiver("cls"), ReceiverKind::Self_);
         assert_eq!(py_sem.classify_receiver("cls.repo"), ReceiverKind::Self_);
-        assert_eq!(py_sem.classify_receiver("super().save"), ReceiverKind::Super);
+        assert_eq!(
+            py_sem.classify_receiver("super().save"),
+            ReceiverKind::Super
+        );
     }
 
     #[test]
