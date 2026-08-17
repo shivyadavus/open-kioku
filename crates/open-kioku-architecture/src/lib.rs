@@ -27,10 +27,51 @@ pub struct ArchitectureSummary {
     pub violations: Vec<PolicyViolation>,
 }
 
+/// Controls whether architecture-policy evaluation consumes every persisted structural edge or
+/// only relationships that satisfy the typed RI3 authority contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RelationshipEvidenceMode {
+    #[default]
+    All,
+    AuthoritativeOnly,
+}
+
 pub fn evaluate_policy<S>(
     store: &S,
     resolver: &PolicyResolver,
     policy: &ArchitecturePolicy,
+) -> Result<PolicyCheckReport>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    evaluate_policy_with_relationship_mode(store, resolver, policy, RelationshipEvidenceMode::All)
+}
+
+/// Evaluate architecture policy using only proof-authorized structural relationships.
+///
+/// This explicit opt-in preserves pre-RI3 behavior for existing callers until the resolver emits
+/// typed proof for all supported structural relationships.
+pub fn evaluate_policy_authoritative<S>(
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+) -> Result<PolicyCheckReport>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    evaluate_policy_with_relationship_mode(
+        store,
+        resolver,
+        policy,
+        RelationshipEvidenceMode::AuthoritativeOnly,
+    )
+}
+
+pub fn evaluate_policy_with_relationship_mode<S>(
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+    relationship_mode: RelationshipEvidenceMode,
 ) -> Result<PolicyCheckReport>
 where
     S: MetadataStore + GraphStore + ?Sized,
@@ -81,7 +122,9 @@ where
                 break;
             }
             for edge in &batch {
-                if !edge.is_authoritative_relationship() {
+                if relationship_mode == RelationshipEvidenceMode::AuthoritativeOnly
+                    && !edge.is_authoritative_relationship()
+                {
                     ignored_non_authoritative_edges += 1;
                     continue;
                 }
@@ -154,14 +197,21 @@ where
     report.exempted_violation_count = report.exemptions.len();
     if ignored_non_authoritative_edges > 0 {
         report.uncertainty.push(format!(
-            "ignored {} non-authoritative structural edge(s); architecture enforcement requires typed relationship proof",
+            "ignored {} non-authoritative structural edge(s); authoritative-only architecture evaluation requires typed relationship proof",
             ignored_non_authoritative_edges
         ));
     }
     if report.evaluated_edge_count == 0 {
         report.uncertainty.push(
-            "no authoritative import, reference, or call graph edges were available to evaluate"
-                .into(),
+            match relationship_mode {
+                RelationshipEvidenceMode::All => {
+                    "no import, reference, or call graph edges were available to evaluate"
+                }
+                RelationshipEvidenceMode::AuthoritativeOnly => {
+                    "no authoritative import, reference, or call graph edges were available to evaluate"
+                }
+            }
+            .into(),
         );
     }
     if report.unknown_edge_count > 0 {
@@ -189,6 +239,40 @@ pub fn evaluate_public_api_boundary<S>(
     store: &S,
     resolver: &PolicyResolver,
     policy: &ArchitecturePolicy,
+) -> Result<PublicApiBoundaryReport>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    evaluate_public_api_boundary_with_relationship_mode(
+        store,
+        resolver,
+        policy,
+        RelationshipEvidenceMode::All,
+    )
+}
+
+/// Evaluate public-API boundaries using only proof-authorized structural relationships.
+pub fn evaluate_public_api_boundary_authoritative<S>(
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+) -> Result<PublicApiBoundaryReport>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
+    evaluate_public_api_boundary_with_relationship_mode(
+        store,
+        resolver,
+        policy,
+        RelationshipEvidenceMode::AuthoritativeOnly,
+    )
+}
+
+pub fn evaluate_public_api_boundary_with_relationship_mode<S>(
+    store: &S,
+    resolver: &PolicyResolver,
+    policy: &ArchitecturePolicy,
+    relationship_mode: RelationshipEvidenceMode,
 ) -> Result<PublicApiBoundaryReport>
 where
     S: MetadataStore + GraphStore + ?Sized,
@@ -239,7 +323,9 @@ where
                 break;
             }
             for edge in &batch {
-                if !edge.is_authoritative_relationship() {
+                if relationship_mode == RelationshipEvidenceMode::AuthoritativeOnly
+                    && !edge.is_authoritative_relationship()
+                {
                     ignored_non_authoritative_edges += 1;
                     continue;
                 }
@@ -283,14 +369,21 @@ where
     report.exemptions.dedup();
     if ignored_non_authoritative_edges > 0 {
         report.uncertainty.push(format!(
-            "ignored {} non-authoritative structural edge(s); architecture enforcement requires typed relationship proof",
+            "ignored {} non-authoritative structural edge(s); authoritative-only public API evaluation requires typed relationship proof",
             ignored_non_authoritative_edges
         ));
     }
     if report.evaluated_edge_count == 0 {
         report.uncertainty.push(
-            "no authoritative import, reference, or call graph edges were available to evaluate"
-                .into(),
+            match relationship_mode {
+                RelationshipEvidenceMode::All => {
+                    "no import, reference, or call graph edges were available to evaluate"
+                }
+                RelationshipEvidenceMode::AuthoritativeOnly => {
+                    "no authoritative import, reference, or call graph edges were available to evaluate"
+                }
+            }
+            .into(),
         );
     }
     Ok(PublicApiBoundaryReport {
@@ -988,6 +1081,18 @@ mod tests {
         evaluate_policy(&store, &resolver, policy).expect("policy evaluation")
     }
 
+    fn evaluate_authoritative(
+        files: &[File],
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        policy: &ArchitecturePolicy,
+    ) -> PolicyCheckReport {
+        let store = store_with_graph(files, nodes, edges);
+        let resolver = PolicyResolver::new(policy).expect("resolver");
+        evaluate_policy_authoritative(&store, &resolver, policy)
+            .expect("authoritative policy evaluation")
+    }
+
     #[test]
     fn confidence_without_structural_proof_is_ignored() {
         let domain = file("domain", "src/domain/order.rs");
@@ -1003,7 +1108,7 @@ mod tests {
             reason: "domain cannot depend on api".into(),
         }]);
 
-        let report = evaluate(
+        let report = evaluate_authoritative(
             &[domain.clone(), api.clone()],
             &[domain_node.clone(), api_node.clone()],
             &[unproved_edge(
@@ -1021,6 +1126,37 @@ mod tests {
             .uncertainty
             .iter()
             .any(|message| message.contains("non-authoritative structural edge")));
+    }
+
+    #[test]
+    fn default_policy_evaluation_preserves_legacy_structural_edges() {
+        let domain = file("domain", "src/domain/order.rs");
+        let api = file("api", "src/api/http.rs");
+        let domain_node = file_node(&domain);
+        let api_node = file_node(&api);
+        let policy = policy(vec![DependencyRule {
+            id: "domain-must-not-call-api".into(),
+            from: "domain".into(),
+            to: "api".into(),
+            action: DependencyAction::Forbid,
+            severity: Severity::Error,
+            reason: "domain cannot depend on api".into(),
+        }]);
+
+        let report = evaluate(
+            &[domain.clone(), api.clone()],
+            &[domain_node.clone(), api_node.clone()],
+            &[unproved_edge(
+                "legacy-high-confidence",
+                &domain_node,
+                &api_node,
+                GraphEdgeType::Calls,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.evaluated_edge_count, 1);
+        assert_eq!(report.violation_count, 1);
     }
 
     #[test]

@@ -156,12 +156,17 @@ fn retrieval_trace_for_result<'a>(
     }
 }
 
-fn extend_authoritative_relationships(target: &mut Vec<GraphEdge>, edges: Vec<GraphEdge>) {
-    target.extend(
-        edges
-            .into_iter()
-            .filter(GraphEdge::is_authoritative_relationship),
-    );
+/// Return only dependency edges that satisfy the typed structural relationship authority contract.
+///
+/// ContextPack generation keeps legacy graph behavior until proof-bearing resolver emission is the
+/// default. Consumers that require structural truth can explicitly request this fail-closed view.
+pub fn authoritative_dependency_edges(
+    edges: impl IntoIterator<Item = GraphEdge>,
+) -> Vec<GraphEdge> {
+    edges
+        .into_iter()
+        .filter(GraphEdge::is_authoritative_relationship)
+        .collect()
 }
 
 fn refresh_context_pack_retrieval_telemetry(
@@ -588,7 +593,7 @@ impl<'a> ContextPackBuilder<'a> {
         for result in primary.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
             if let Ok((_nodes, edges)) = self.store.neighbors(&node_id, 20) {
-                extend_authoritative_relationships(&mut dependency_edges, edges);
+                dependency_edges.extend(edges);
             }
         }
         dependency_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
@@ -2433,8 +2438,7 @@ mod tests {
             )])
             .unwrap();
 
-        let mut selected = Vec::new();
-        extend_authoritative_relationships(&mut selected, vec![legacy, proved]);
+        let selected = authoritative_dependency_edges(vec![legacy, proved]);
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id.0, "proved");
