@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/v3-platform-compat.py
+          python3 scripts/v3-platform-compat-v2.py
           git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
 
       - name: Validate platform metadata
@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm scripts/v3-platform-compat.py
+          git rm scripts/v3-platform-compat.py scripts/v3-platform-compat-v2.py
           git add -A
           git reset .github/workflows/v3-platform-compat.yml
           git commit -m "release: align v3 packages with supported runtime targets"
