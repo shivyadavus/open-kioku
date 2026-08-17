@@ -17,8 +17,35 @@ jobs:
           ref: agent/ri3-core-relationship-proofs
           fetch-depth: 0
 
-      - name: Apply final RI3 contract consolidation
-        run: python3 scripts/ri3_finish_contract_tmp.py
+      - name: Repair and apply final RI3 contract consolidation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/ri3_finish_contract_tmp.py")
+          lines = path.read_text().splitlines()
+          repaired = []
+          open_blocks = 0
+          close_blocks = 0
+          for line in lines:
+              if '"""      "config_keys",' in line:
+                  line = line.replace('"""', "'''", 1)
+                  open_blocks += 1
+              if '"read_only_graph_query"' in line:
+                  prefix, marker, suffix = line.partition('"read_only_graph_query"')
+                  if '"""' in suffix:
+                      suffix = suffix.replace('"""', "'''", 1)
+                      close_blocks += 1
+                  line = prefix + marker + suffix
+              repaired.append(line)
+          if open_blocks != 2 or close_blocks != 2:
+              raise SystemExit(
+                  f"unexpected snapshot string blocks: opened={open_blocks} closed={close_blocks}"
+              )
+          path.write_text("\n".join(repaired) + "\n")
+          PY
+          python3 -m py_compile scripts/ri3_finish_contract_tmp.py
+          python3 scripts/ri3_finish_contract_tmp.py
 
       - name: Format and validate trust boundaries
         run: |
