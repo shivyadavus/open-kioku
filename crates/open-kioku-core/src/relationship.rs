@@ -433,7 +433,9 @@ mod tests {
     #[test]
     fn exact_reference_authorizes_reference_and_type_use() {
         let proof = proof(RelationshipProofKind::ExactReference, 1);
-        assert!(edge(GraphEdgeType::References, vec![proof.clone()]).is_authoritative_relationship());
+        assert!(
+            edge(GraphEdgeType::References, vec![proof.clone()]).is_authoritative_relationship()
+        );
         assert!(edge(GraphEdgeType::UsesType, vec![proof]).is_authoritative_relationship());
     }
 
@@ -464,7 +466,10 @@ mod tests {
         let mut second = proof(RelationshipProofKind::QualifiedName, 1);
         second.target_symbol_id = Some(SymbolId::new("two"));
         let edge = edge(GraphEdgeType::References, vec![first, second]);
-        assert_eq!(edge.relationship_authority(), RelationshipAuthority::Heuristic);
+        assert_eq!(
+            edge.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
     }
 
     #[test]
@@ -473,7 +478,10 @@ mod tests {
             edge_type: GraphEdgeType::References,
             ..Default::default()
         };
-        assert_eq!(legacy.relationship_authority(), RelationshipAuthority::Heuristic);
+        assert_eq!(
+            legacy.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
 
         let mut malformed = legacy;
         malformed.properties.insert(

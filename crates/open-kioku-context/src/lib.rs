@@ -156,6 +156,14 @@ fn retrieval_trace_for_result<'a>(
     }
 }
 
+fn extend_authoritative_relationships(target: &mut Vec<GraphEdge>, edges: Vec<GraphEdge>) {
+    target.extend(
+        edges
+            .into_iter()
+            .filter(GraphEdge::is_authoritative_relationship),
+    );
+}
+
 fn refresh_context_pack_retrieval_telemetry(
     diagnostics: &mut RetrievalDiagnostics,
     selected: &[SearchResult],
@@ -580,7 +588,7 @@ impl<'a> ContextPackBuilder<'a> {
         for result in primary.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
             if let Ok((_nodes, edges)) = self.store.neighbors(&node_id, 20) {
-                dependency_edges.extend(edges);
+                extend_authoritative_relationships(&mut dependency_edges, edges);
             }
         }
         dependency_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
@@ -2395,8 +2403,42 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{FileId, Language, LineRange, RepositoryId, SymbolId, SymbolKind};
+    use open_kioku_core::{
+        EdgeId, FileId, Language, LineRange, NodeId, RelationshipProof, RelationshipProofKind,
+        RepositoryId, SymbolId, SymbolKind,
+    };
     use std::path::Path;
+
+    #[test]
+    fn dependency_edges_require_authoritative_relationship_proof() {
+        let legacy = GraphEdge {
+            id: EdgeId::new("legacy"),
+            from: NodeId::new("from"),
+            to: NodeId::new("to"),
+            edge_type: GraphEdgeType::References,
+            ..GraphEdge::default()
+        };
+        let mut proved = GraphEdge {
+            id: EdgeId::new("proved"),
+            from: NodeId::new("from"),
+            to: NodeId::new("to"),
+            edge_type: GraphEdgeType::References,
+            ..GraphEdge::default()
+        };
+        proved
+            .set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "context-test",
+                1,
+            )])
+            .unwrap();
+
+        let mut selected = Vec::new();
+        extend_authoritative_relationships(&mut selected, vec![legacy, proved]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id.0, "proved");
+    }
 
     #[test]
     fn primary_edit_anchor_outranks_reference_pattern_anchor() {

@@ -66,6 +66,7 @@ where
         configured: true,
         ..PolicyCheckReport::default()
     };
+    let mut ignored_non_authoritative_edges = 0usize;
 
     for edge_type in [
         EnforcedEdgeType::Imports,
@@ -80,6 +81,10 @@ where
                 break;
             }
             for edge in &batch {
+                if !edge.is_authoritative_relationship() {
+                    ignored_non_authoritative_edges += 1;
+                    continue;
+                }
                 report.evaluated_edge_count += 1;
                 evaluate_edge(
                     &mut report,
@@ -110,9 +115,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -150,6 +152,12 @@ where
         })
         .count();
     report.exempted_violation_count = report.exemptions.len();
+    if ignored_non_authoritative_edges > 0 {
+        report.uncertainty.push(format!(
+            "ignored {} non-authoritative structural edge(s); architecture enforcement requires typed relationship proof",
+            ignored_non_authoritative_edges
+        ));
+    }
     if report.evaluated_edge_count == 0 {
         report
             .uncertainty
@@ -215,6 +223,7 @@ where
         configured: true,
         ..PolicyCheckReport::default()
     };
+    let mut ignored_non_authoritative_edges = 0usize;
 
     for edge_type in [
         EnforcedEdgeType::Imports,
@@ -229,6 +238,10 @@ where
                 break;
             }
             for edge in &batch {
+                if !edge.is_authoritative_relationship() {
+                    ignored_non_authoritative_edges += 1;
+                    continue;
+                }
                 if let Some(evidence) = edge_evidence(
                     store,
                     edge,
@@ -248,9 +261,6 @@ where
                 }
             }
             offset += batch.len();
-            if batch.len() < 1_000 {
-                break;
-            }
         }
     }
 
@@ -270,6 +280,12 @@ where
             .then_with(|| left.target_path.cmp(&right.target_path))
     });
     report.exemptions.dedup();
+    if ignored_non_authoritative_edges > 0 {
+        report.uncertainty.push(format!(
+            "ignored {} non-authoritative structural edge(s); architecture enforcement requires typed relationship proof",
+            ignored_non_authoritative_edges
+        ));
+    }
     if report.evaluated_edge_count == 0 {
         report
             .uncertainty
@@ -809,7 +825,8 @@ mod tests {
     };
     use open_kioku_core::{
         Confidence, EdgeId, Evidence, File, FileId, GraphEdgeType, GraphNodeType, IndexManifest,
-        IndexMode, IndexQuality, Language, NodeId, Repository, RepositoryId,
+        IndexMode, IndexQuality, Language, NodeId, RelationshipProof, RelationshipProofKind,
+        Repository, RepositoryId,
     };
     use open_kioku_storage::{GraphStore, IndexData, MetadataStore};
     use open_kioku_storage_sqlite::SqliteStore;
@@ -878,7 +895,12 @@ mod tests {
         }
     }
 
-    fn edge(id: &str, from: &GraphNode, to: &GraphNode, edge_type: GraphEdgeType) -> GraphEdge {
+    fn unproved_edge(
+        id: &str,
+        from: &GraphNode,
+        to: &GraphNode,
+        edge_type: GraphEdgeType,
+    ) -> GraphEdge {
         GraphEdge {
             id: EdgeId::new(id),
             from: from.id.clone(),
@@ -893,6 +915,27 @@ mod tests {
             },
             ..GraphEdge::default()
         }
+    }
+
+    fn edge(id: &str, from: &GraphNode, to: &GraphNode, edge_type: GraphEdgeType) -> GraphEdge {
+        let proof_kinds = match &edge_type {
+            GraphEdgeType::Imports => vec![RelationshipProofKind::ImportBinding],
+            GraphEdgeType::References => vec![RelationshipProofKind::ExactReference],
+            GraphEdgeType::Calls => vec![
+                RelationshipProofKind::ExactCallSite,
+                RelationshipProofKind::ExactReference,
+            ],
+            _ => Vec::new(),
+        };
+        let mut edge = unproved_edge(id, from, to, edge_type);
+        edge.set_relationship_proofs(
+            proof_kinds
+                .into_iter()
+                .map(|kind| RelationshipProof::new(kind, "architecture-test", 1))
+                .collect(),
+        )
+        .unwrap();
+        edge
     }
 
     fn policy(rules: Vec<DependencyRule>) -> ArchitecturePolicy {
@@ -941,6 +984,41 @@ mod tests {
         let store = store_with_graph(files, nodes, edges);
         let resolver = PolicyResolver::new(policy).expect("resolver");
         evaluate_policy(&store, &resolver, policy).expect("policy evaluation")
+    }
+
+    #[test]
+    fn confidence_without_structural_proof_is_ignored() {
+        let domain = file("domain", "src/domain/order.rs");
+        let api = file("api", "src/api/http.rs");
+        let domain_node = file_node(&domain);
+        let api_node = file_node(&api);
+        let policy = policy(vec![DependencyRule {
+            id: "domain-must-not-call-api".into(),
+            from: "domain".into(),
+            to: "api".into(),
+            action: DependencyAction::Forbid,
+            severity: Severity::Error,
+            reason: "domain cannot depend on api".into(),
+        }]);
+
+        let report = evaluate(
+            &[domain.clone(), api.clone()],
+            &[domain_node.clone(), api_node.clone()],
+            &[unproved_edge(
+                "high-confidence-without-proof",
+                &domain_node,
+                &api_node,
+                GraphEdgeType::Calls,
+            )],
+            &policy,
+        );
+
+        assert_eq!(report.evaluated_edge_count, 0);
+        assert_eq!(report.violation_count, 0);
+        assert!(report
+            .uncertainty
+            .iter()
+            .any(|message| message.contains("non-authoritative structural edge")));
     }
 
     #[test]

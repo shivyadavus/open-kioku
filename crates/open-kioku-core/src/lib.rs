@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 pub mod identity;
 pub mod relationship;
 
-pub use relationship::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
+pub use relationship::{
+    normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
+    RelationshipProof, RelationshipProofFilter, RelationshipProofKind,
+    RELATIONSHIP_PROOFS_PROPERTY,
+};
 
 macro_rules! id_type {
     ($name:ident) => {
