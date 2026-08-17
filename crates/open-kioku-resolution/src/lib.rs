@@ -4,6 +4,7 @@ pub mod context;
 pub mod evidence;
 pub mod index;
 pub mod inheritance;
+pub mod language_capabilities;
 pub mod pipeline;
 mod self_calls;
 mod type_relations;
@@ -14,6 +15,10 @@ pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
 pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
+pub use language_capabilities::{
+    semantic_capabilities_for, CapabilityState, LanguageSemanticCapabilities, SemanticCapability,
+    LANGUAGE_SEMANTIC_CAPABILITY_VERSION,
+};
 pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
 };
