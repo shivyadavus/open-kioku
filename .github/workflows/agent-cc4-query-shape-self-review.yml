@@ -1,0 +1,41 @@
+name: agent-cc4-query-shape-self-review
+
+on:
+  push:
+    branches: ["agent/cc4-query-shape-benchmark-v2"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply asserted self-review patch
+        run: python3 .github/scripts/agent_cc4_query_shape_self_review.py
+      - name: Validate focused change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-cli --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-cli retrieval_bench_tests
+      - name: Commit clean product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/scripts/agent_cc4_query_shape_self_review.py
+          rm -f .github/workflows/agent-cc4-query-shape-self-review.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(context): make query-shape label discovery portable"
+          git push origin HEAD:agent/cc4-query-shape-benchmark-v2
