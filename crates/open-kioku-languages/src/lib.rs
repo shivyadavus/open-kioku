@@ -127,12 +127,15 @@ mod tests {
         assert_eq!(java_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
         assert_eq!(java_sem.classify_receiver("super.repo"), ReceiverKind::Super);
         assert_eq!(java_sem.classify_receiver("Repo"), ReceiverKind::Type);
+        assert_eq!(java_sem.classify_receiver("Super"), ReceiverKind::Type);
 
         let ts_sem = semantics_for(&Language::TypeScript).unwrap();
         assert_eq!(ts_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
+        assert_eq!(ts_sem.classify_receiver("Super"), ReceiverKind::Type);
 
         let js_sem = semantics_for(&Language::JavaScript).unwrap();
         assert_eq!(js_sem.classify_receiver("this.repo"), ReceiverKind::Self_);
+        assert_eq!(js_sem.classify_receiver("Super"), ReceiverKind::Type);
 
         let py_sem = semantics_for(&Language::Python).unwrap();
         assert_eq!(py_sem.classify_receiver("self"), ReceiverKind::Self_);
