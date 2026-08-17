@@ -50,14 +50,14 @@ jobs:
           from pathlib import Path
           path = Path('crates/open-kioku-graph/src/lib.rs')
           text = path.read_text()
-          anchor = '''                edge.set_relationship_proofs(vec![proof])
-                    .expect("resolved import binding proof must serialize to JSON");
-            }
-            buffer.insert_edge(edge);'''
-          replacement = '''                edge.set_relationship_proofs(vec![proof])
-                    .expect("resolved import binding proof must serialize to JSON");
-            }
-            if fact.edge_type == GraphEdgeType::DependsOn
+          marker = '.expect("resolved import binding proof must serialize to JSON");'
+          marker_pos = text.find(marker)
+          if marker_pos < 0:
+              raise SystemExit('resolved import proof marker not found')
+          insertion_pos = text.find('            buffer.insert_edge(edge);', marker_pos)
+          if insertion_pos < 0:
+              raise SystemExit('buffer insertion marker not found after resolved import proof')
+          block = '''            if fact.edge_type == GraphEdgeType::DependsOn
                 && fact.target_kind == GraphNodeType::Package
                 && fact.source.starts_with("open-kioku-import-resolver/")
                 && matches!(fact.confidence, Confidence::High | Confidence::Exact)
@@ -78,10 +78,8 @@ jobs:
                 edge.set_relationship_proofs(vec![proof])
                     .expect("resolved package dependency proof must serialize to JSON");
             }
-            buffer.insert_edge(edge);'''
-          if anchor not in text:
-              raise SystemExit('graph proof anchor not found')
-          path.write_text(text.replace(anchor, replacement, 1))
+'''
+          path.write_text(text[:insertion_pos] + block + text[insertion_pos:])
           PY
       - name: Validate scorer contract and code quality
         shell: bash
