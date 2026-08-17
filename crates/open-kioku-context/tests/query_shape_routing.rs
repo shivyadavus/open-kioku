@@ -6,8 +6,14 @@ fn query_shape_conformance_covers_structured_conceptual_and_mixed_queries() {
     let cases = [
         ("AuthService", QueryShape::ExactIdentifier),
         ("billing::invoice::finalize", QueryShape::QualifiedSymbol),
-        ("crates/open-kioku-context/src/routing.rs", QueryShape::PathReference),
-        ("Traceback: panic in AuthService.issueToken", QueryShape::ErrorTrace),
+        (
+            "crates/open-kioku-context/src/routing.rs",
+            QueryShape::PathReference,
+        ),
+        (
+            "Traceback: panic in AuthService.issueToken",
+            QueryShape::ErrorTrace,
+        ),
         ("/api/invoices/{id}", QueryShape::ApiResource),
         (
             "how authentication tokens are persisted after login",
