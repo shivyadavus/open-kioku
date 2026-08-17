@@ -3,6 +3,7 @@
   "version": "3.0.0",
   "os": ["linux"],
   "cpu": ["arm64"],
+  "libc": ["glibc"],
   "main": "",
   "author": "Open Kioku",
   "license": "Elastic-2.0",
