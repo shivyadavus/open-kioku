@@ -5,6 +5,7 @@ pub mod evidence;
 pub mod index;
 pub mod inheritance;
 pub mod pipeline;
+pub mod type_candidates;
 
 pub use call_candidates::resolve_call_outcome;
 pub use calls::resolve_call;
@@ -15,6 +16,9 @@ pub use inheritance::InheritanceIndex;
 pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
     ResolutionStrategy,
+};
+pub use type_candidates::{
+    discover_type_candidates, normalize_outer_type_name, TypeCandidate, TypeDiscovery,
 };
 
 #[cfg(test)]

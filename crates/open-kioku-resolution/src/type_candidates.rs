@@ -49,7 +49,11 @@ pub fn normalize_outer_type_name(raw: &str) -> Option<String> {
         value = rest.trim();
     }
     value = value.trim_end_matches('?').trim();
-    if value.is_empty() || value.starts_with('(') || value.starts_with('[') || value.starts_with('{') {
+    if value.is_empty()
+        || value.starts_with('(')
+        || value.starts_with('[')
+        || value.starts_with('{')
+    {
         return None;
     }
 
@@ -90,8 +94,9 @@ pub fn discover_type_candidates(
         return Vec::new();
     };
     let simple_name = type_name
-        .rsplit(["::", "."])
-        .next()
+        .rsplit_once("::")
+        .map(|(_, name)| name)
+        .or_else(|| type_name.rsplit_once('.').map(|(_, name)| name))
         .unwrap_or(type_name.as_str());
 
     let mut candidates = BTreeMap::<String, TypeCandidate>::new();
@@ -224,7 +229,10 @@ mod tests {
         assert_eq!(normalize_outer_type_name("*Repo"), Some("Repo".into()));
         assert_eq!(normalize_outer_type_name("Repo[]"), Some("Repo".into()));
         assert_eq!(normalize_outer_type_name("Repo<Foo>"), Some("Repo".into()));
-        assert_eq!(normalize_outer_type_name("pkg::Repo<Foo>"), Some("pkg::Repo".into()));
+        assert_eq!(
+            normalize_outer_type_name("pkg::Repo<Foo>"),
+            Some("pkg::Repo".into())
+        );
         assert_eq!(normalize_outer_type_name("Repo | MockRepo"), None);
         assert_eq!(normalize_outer_type_name("(Repo, Foo)"), None);
         assert_eq!(normalize_outer_type_name("Repo -> Foo"), None);
@@ -238,13 +246,7 @@ mod tests {
         let symbols = SymbolIndex::build(vec![first, second]);
         let repository = SemanticRepository::new();
 
-        let candidates = discover_type_candidates(
-            &file_id,
-            None,
-            "Repo",
-            &repository,
-            &symbols,
-        );
+        let candidates = discover_type_candidates(&file_id, None, "Repo", &repository, &symbols);
         assert_eq!(
             candidates
                 .iter()
@@ -252,9 +254,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["symbol:a", "symbol:b"]
         );
-        assert!(candidates.iter().all(|candidate| {
-            candidate.discoveries == vec![TypeDiscovery::SameFile]
-        }));
+        assert!(candidates
+            .iter()
+            .all(|candidate| { candidate.discoveries == vec![TypeDiscovery::SameFile] }));
     }
 
     #[test]
@@ -265,13 +267,8 @@ mod tests {
         let symbols = SymbolIndex::build(vec![first, second]);
         let repository = SemanticRepository::new();
 
-        let candidates = discover_type_candidates(
-            &file_id,
-            None,
-            "pkg::Repo",
-            &repository,
-            &symbols,
-        );
+        let candidates =
+            discover_type_candidates(&file_id, None, "pkg::Repo", &repository, &symbols);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].target, SymbolId::new("symbol:a"));
         assert_eq!(

@@ -3,24 +3,12 @@ use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{
     evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy,
 };
+use crate::type_candidates::{discover_type_candidates, TypeDiscovery};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceId, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TypeDiscovery {
-    SameFile,
-    ImportBinding,
-    QualifiedName,
-}
-
-#[derive(Debug, Clone)]
-struct TypeCandidate {
-    target: SymbolId,
-    discoveries: Vec<TypeDiscovery>,
-}
 
 pub fn resolve_call_outcome(call: &CallSite, ctx: &ResolutionContext<'_>) -> ResolutionOutcome {
     let candidates = match call.receiver_kind {
@@ -193,7 +181,13 @@ fn discover_typed_or_static_candidates(
     let Some(type_name) = type_name else {
         return Vec::new();
     };
-    let type_candidates = discover_type_candidates(ctx, type_name);
+    let type_candidates = discover_type_candidates(
+        ctx.file_id,
+        Some(&call.scope_id),
+        type_name,
+        ctx.repository,
+        ctx.symbols,
+    );
     if type_candidates.is_empty() {
         return discover_imported_member_candidates(call, ctx, type_name);
     }
@@ -510,61 +504,6 @@ fn discover_bare_candidates(
     Vec::new()
 }
 
-fn discover_type_candidates(ctx: &ResolutionContext<'_>, type_name: &str) -> Vec<TypeCandidate> {
-    let mut candidates = BTreeMap::<String, TypeCandidate>::new();
-    let mut add = |target: SymbolId, discovery: TypeDiscovery| {
-        let entry = candidates
-            .entry(target.0.clone())
-            .or_insert_with(|| TypeCandidate {
-                target: target.clone(),
-                discoveries: Vec::new(),
-            });
-        entry.discoveries.push(discovery);
-    };
-
-    if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
-        for target in file_symbols {
-            if is_named_type(ctx, target, type_name) {
-                add(target.clone(), TypeDiscovery::SameFile);
-            }
-        }
-    }
-
-    for binding in ctx.repository.imports.lookup(ctx.file_id, None, type_name) {
-        if let Some(target) = &binding.target_symbol {
-            if is_type_symbol(ctx, target) {
-                add(target.clone(), TypeDiscovery::ImportBinding);
-            }
-        }
-        if let Some(target_file) = &binding.target_file {
-            if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
-                for target in file_symbols {
-                    if is_named_type(ctx, target, type_name) {
-                        add(target.clone(), TypeDiscovery::ImportBinding);
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(qualified) = ctx.symbols.by_qualified.get(type_name) {
-        for target in qualified {
-            if is_type_symbol(ctx, target) {
-                add(target.clone(), TypeDiscovery::QualifiedName);
-            }
-        }
-    }
-
-    candidates
-        .into_values()
-        .map(|mut candidate| {
-            candidate.discoveries.sort();
-            candidate.discoveries.dedup();
-            candidate
-        })
-        .collect()
-}
-
 fn members_by_name(
     ctx: &ResolutionContext<'_>,
     parent: &SymbolId,
@@ -594,27 +533,6 @@ fn members_by_name(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
-}
-
-fn is_named_type(ctx: &ResolutionContext<'_>, target: &SymbolId, name: &str) -> bool {
-    ctx.symbols
-        .get(target)
-        .map(|symbol| symbol.name == name && is_type_kind(symbol.kind.clone()))
-        .unwrap_or(false)
-}
-
-fn is_type_symbol(ctx: &ResolutionContext<'_>, target: &SymbolId) -> bool {
-    ctx.symbols
-        .get(target)
-        .map(|symbol| is_type_kind(symbol.kind.clone()))
-        .unwrap_or(false)
-}
-
-fn is_type_kind(kind: SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Class | SymbolKind::Trait | SymbolKind::Interface | SymbolKind::Module
-    )
 }
 
 struct CandidateTemplate<'a> {
