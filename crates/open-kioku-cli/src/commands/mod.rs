@@ -994,6 +994,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::RelationshipBench(args) => {
+            run_relationship_bench_command(args, cli.json)?;
+        }
         Command::ContractBench(args) => {
             let min_cases = args.min_cases;
             let min_verdict_accuracy = args.min_verdict_accuracy;

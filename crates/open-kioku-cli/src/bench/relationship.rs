@@ -119,6 +119,69 @@ fn load_relationship_bench_corpus(path: &Path) -> anyhow::Result<RelationshipBen
     Ok(corpus)
 }
 
+fn run_relationship_bench_command(
+    args: RelationshipBenchArgs,
+    json: bool,
+) -> anyhow::Result<()> {
+    let corpus = load_relationship_bench_corpus(&args.corpus)?;
+    let raw = fs::read_to_string(&args.observations).with_context(|| {
+        format!(
+            "failed to read relationship benchmark observations {}",
+            args.observations.display()
+        )
+    })?;
+    let observations: Vec<RelationshipBenchObservation> = serde_json::from_str(&raw)
+        .with_context(|| {
+            format!(
+                "invalid relationship benchmark observations {}",
+                args.observations.display()
+            )
+        })?;
+    let report = score_relationship_bench(&corpus, &observations)?;
+    let rendered = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = &args.write {
+        fs::write(path, &rendered).with_context(|| {
+            format!(
+                "failed to write relationship benchmark report {}",
+                path.display()
+            )
+        })?;
+    }
+
+    if json {
+        println!("{rendered}");
+    } else {
+        println!(
+            "Relationship conformance: {} cases | precision {:.4} | recall {:.4}",
+            report.overall.cases, report.overall.precision, report.overall.recall
+        );
+        println!(
+            "MustNotEmit/ambiguous FP rate {:.4} | exact ranges {:.4} | proofs {:.4}",
+            report.overall.must_not_emit_false_positive_rate,
+            report.overall.exact_range_compliance,
+            report.overall.proof_compliance
+        );
+        println!("Observation digest: {}", report.observation_digest);
+        if let Some(path) = &args.write {
+            println!("Wrote report to {}", path.display());
+        }
+        if !report.diagnostics.is_empty() {
+            println!("Diagnostics: {}", report.diagnostics.len());
+            for diagnostic in report.diagnostics.iter().take(20) {
+                println!(
+                    "- {} [{}] {}",
+                    diagnostic.case_id, diagnostic.kind, diagnostic.message
+                );
+            }
+            if report.diagnostics.len() > 20 {
+                println!("- ... {} more", report.diagnostics.len() - 20);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_relationship_bench_corpus(corpus: &RelationshipBenchCorpus) -> anyhow::Result<()> {
     if corpus.schema_version != RELATIONSHIP_BENCH_SCHEMA_VERSION {
         anyhow::bail!(
@@ -443,7 +506,7 @@ fn normalize_observed_relationships(relationships: &mut Vec<RelationshipBenchObs
         });
         relationship.source_ranges.dedup();
     }
-    relationships.sort_by(|left, right| observed_relationship_key(left).cmp(&observed_relationship_key(right)));
+    relationships.sort_by_key(observed_relationship_key);
     relationships.dedup();
 }
 
@@ -459,9 +522,18 @@ fn relationship_observation_digest(
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
+type ObservedRelationshipKey = (
+    String,
+    String,
+    String,
+    u8,
+    Vec<String>,
+    Vec<(u32, u32, u32, u32)>,
+);
+
 fn observed_relationship_key(
     relationship: &RelationshipBenchObservedRelationship,
-) -> (String, String, String, u8, Vec<String>, Vec<(u32, u32, u32, u32)>) {
+) -> ObservedRelationshipKey {
     (
         relationship.source_symbol_id.0.clone(),
         relationship.target_symbol_id.0.clone(),
@@ -501,11 +573,11 @@ fn merge_relationship_metrics(target: &mut RelationshipBenchMetrics, source: &Re
 }
 
 fn finalize_relationship_metrics(metrics: &mut RelationshipBenchMetrics) {
-    metrics.precision = ratio(
+    metrics.precision = relationship_ratio(
         metrics.true_positives,
         metrics.true_positives + metrics.false_positives,
     );
-    metrics.recall = ratio(
+    metrics.recall = relationship_ratio(
         metrics.true_positives,
         metrics.true_positives + metrics.false_negatives,
     );
@@ -514,11 +586,11 @@ fn finalize_relationship_metrics(metrics: &mut RelationshipBenchMetrics) {
     } else {
         metrics.negative_cases_with_false_positive as f64 / metrics.negative_cases as f64
     };
-    metrics.exact_range_compliance = ratio(metrics.exact_range_matches, metrics.exact_range_cases);
-    metrics.proof_compliance = ratio(metrics.proof_matches, metrics.proof_cases);
+    metrics.exact_range_compliance = relationship_ratio(metrics.exact_range_matches, metrics.exact_range_cases);
+    metrics.proof_compliance = relationship_ratio(metrics.proof_matches, metrics.proof_cases);
 }
 
-fn ratio(numerator: usize, denominator: usize) -> f64 {
+fn relationship_ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         1.0
     } else {
