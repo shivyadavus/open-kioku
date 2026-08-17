@@ -10,8 +10,6 @@ def replace_exact(path: str, old: str, new: str, label: str, count: int = 1) -> 
     p.write_text(text.replace(old, new, count))
 
 
-# Preserve complete evaluation cardinality on a proven winner so telemetry does not lose weak
-# alternatives merely because the outcome has one structural target.
 replace_exact(
     "crates/open-kioku-resolution/src/pipeline.rs",
     '''    pub proofs: Vec<RelationshipProof>,\n    pub evidence: Vec<ResolutionEvidence>,\n}\n''',
@@ -37,7 +35,6 @@ replace_exact(
     "proven candidate cardinality",
 )
 
-# Add additive, backwards-compatible per-relationship telemetry to the existing quality report.
 replace_exact(
     "crates/open-kioku-ingest/src/lib.rs",
     '''#[derive(Debug, Clone, Default, Serialize, Deserialize)]\npub struct ResolutionQualityReport {\n    pub call_sites: usize,\n''',
@@ -51,24 +48,12 @@ replace_exact(
     "relationship telemetry helpers",
 )
 
-# REFERENCES are produced outside ResolutionOutcome, so account for exact/proofless occurrences at
-# the same ingest boundary instead of leaving that relationship family invisible in telemetry.
-replace_exact(
-    "crates/open-kioku-ingest/src/lib.rs",
-    '''        let mut quality_report = ResolutionQualityReport::default();\n        let mut resolved_relationships = Vec::new();\n\n        let file_lookup: HashMap<FileId, &File> = files.iter().map(|f| (f.id.clone(), f)).collect();\n''',
-    '''        let mut quality_report = ResolutionQualityReport::default();\n        for occurrence in &occurrences {\n            quality_report.record_reference_occurrence(occurrence);\n        }\n        let mut resolved_relationships = Vec::new();\n\n        let file_lookup: HashMap<FileId, &File> = files.iter().map(|f| (f.id.clone(), f)).collect();\n''',
-    "reference telemetry initialization",
-)
-
-# Record every CALLS outcome before legacy comparison mutates aggregate counters.
 replace_exact(
     "crates/open-kioku-ingest/src/lib.rs",
     '''                        let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);\n                        let semantic_target = match &v2_outcome {\n''',
     '''                        let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);\n                        quality_report.record_outcome(&GraphEdgeType::Calls, &v2_outcome);\n                        let semantic_target = match &v2_outcome {\n''',
     "call outcome telemetry",
 )
-
-# Record inheritance and declared-type outcomes before Proven-only graph emission.
 replace_exact(
     "crates/open-kioku-ingest/src/lib.rs",
     '''                let (edge_type, outcome) =\n                    open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);\n                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {\n''',
@@ -82,8 +67,15 @@ replace_exact(
     "type-use outcome telemetry",
 )
 
-# Add focused candidate-cardinality test at the resolution layer. This protects the strong-vs-weak
-# case that motivated the telemetry metadata.
+# Account for REFERENCES only after static occurrences and optional SCIP occurrences have been
+# merged into the canonical occurrence vector.
+replace_exact(
+    "crates/open-kioku-ingest/src/lib.rs",
+    '''            scip_report = Some(report);\n        }\n        let repository = Repository {\n''',
+    '''            scip_report = Some(report);\n        }\n        for occurrence in &occurrences {\n            quality_report.record_reference_occurrence(occurrence);\n        }\n        let repository = Repository {\n''',
+    "finalized reference telemetry",
+)
+
 p = Path("crates/open-kioku-resolution/src/pipeline.rs")
 text = p.read_text()
 text += r'''
@@ -91,7 +83,7 @@ text += r'''
 #[cfg(test)]
 mod ri3_telemetry_tests {
     use super::*;
-    use open_kioku_core::{RelationshipProofKind, RelationshipProof};
+    use open_kioku_core::{RelationshipProof, RelationshipProofKind};
 
     fn candidate(id: &str, authoritative: bool) -> ResolutionCandidate {
         let mut candidate = ResolutionCandidate::new(SymbolId::new(id), Confidence::High);
