@@ -96,6 +96,22 @@ impl ScopeIndex {
     pub fn get(&self, id: &ScopeId) -> Option<&Scope> {
         self.scopes.get(id)
     }
+
+    pub fn nearest_owner_symbol(&self, id: &ScopeId) -> Option<SymbolId> {
+        let mut current = Some(id.clone());
+        let mut visited = std::collections::HashSet::new();
+        while let Some(scope_id) = current {
+            if !visited.insert(scope_id.clone()) {
+                return None;
+            }
+            let scope = self.get(&scope_id)?;
+            if let Some(owner) = &scope.owner_symbol_id {
+                return Some(owner.clone());
+            }
+            current = scope.parent_id.clone();
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -18,7 +18,8 @@ pub use pipeline::{
     ResolutionStrategy,
 };
 pub use type_candidates::{
-    discover_type_candidates, normalize_outer_type_name, TypeCandidate, TypeDiscovery,
+    discover_type_candidates, discovery_candidate_count, normalize_outer_type_name,
+    resolve_declared_type_use, TypeCandidate, TypeDiscovery,
 };
 
 #[cfg(test)]

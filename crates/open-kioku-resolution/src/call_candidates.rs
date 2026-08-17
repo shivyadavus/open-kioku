@@ -3,7 +3,7 @@ use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{
     evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy,
 };
-use crate::type_candidates::{discover_type_candidates, TypeDiscovery};
+use crate::type_candidates::{discover_type_candidates, discovery_candidate_count, TypeDiscovery};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceId, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
@@ -193,6 +193,10 @@ fn discover_typed_or_static_candidates(
     }
 
     let receiver_candidate_count = type_candidates.len();
+    let import_candidate_count =
+        discovery_candidate_count(&type_candidates, TypeDiscovery::ImportBinding);
+    let qualified_candidate_count =
+        discovery_candidate_count(&type_candidates, TypeDiscovery::QualifiedName);
     let mut targets = BTreeMap::<String, (SymbolId, Vec<TypeDiscovery>)>::new();
     for type_candidate in type_candidates {
         for target in members_by_name(ctx, &type_candidate.target, &call.callee_name, false) {
@@ -235,7 +239,7 @@ fn discover_typed_or_static_candidates(
                         &target,
                         RelationshipProofKind::ImportBinding,
                         "receiver_type_import_binding",
-                        receiver_candidate_count,
+                        import_candidate_count,
                     )),
                     TypeDiscovery::QualifiedName => candidate.proofs.push(proof(
                         call,
@@ -243,7 +247,7 @@ fn discover_typed_or_static_candidates(
                         &target,
                         RelationshipProofKind::QualifiedName,
                         "receiver_type_qualified_name",
-                        receiver_candidate_count,
+                        qualified_candidate_count,
                     )),
                     TypeDiscovery::SameFile => {}
                 }

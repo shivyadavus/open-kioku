@@ -234,8 +234,10 @@ pub fn relationship_authority(
         }
         GraphEdgeType::UsesType => {
             exact_target
+                || same_scope
+                || import_binding
+                || qualified_name
                 || (receiver_type && (qualified_name || same_scope))
-                || (import_binding && qualified_name)
         }
         GraphEdgeType::Calls => {
             exact_call_site

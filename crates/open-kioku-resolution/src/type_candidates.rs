@@ -1,7 +1,15 @@
+use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::index::SymbolIndex;
-use open_kioku_core::{FileId, ScopeId, SymbolId, SymbolKind};
+use crate::pipeline::{
+    evaluate_candidates, ResolutionCandidate, ResolutionOutcome, ResolutionStrategy,
+};
+use open_kioku_core::{
+    Binding, Confidence, EvidenceId, EvidenceSourceType, FileId, FileRange, GraphEdgeType,
+    LineRange, RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
+};
 use open_kioku_semantic_model::SemanticRepository;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TypeDiscovery {
@@ -23,7 +31,7 @@ pub fn normalize_outer_type_name(raw: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    if value.contains('|') || value.contains("->") || value.contains("=>") || value.contains(',') {
+    if value.contains('|') || value.contains("->") || value.contains("=>") {
         return None;
     }
 
@@ -77,6 +85,7 @@ pub fn normalize_outer_type_name(raw: &str) -> Option<String> {
         || value.contains(']')
         || value.contains('{')
         || value.contains('}')
+        || value.contains(',')
     {
         return None;
     }
@@ -98,6 +107,7 @@ pub fn discover_type_candidates(
         .map(|(_, name)| name)
         .or_else(|| type_name.rsplit_once('.').map(|(_, name)| name))
         .unwrap_or(type_name.as_str());
+    let qualified_expression = type_name.contains("::") || type_name.contains('.');
 
     let mut candidates = BTreeMap::<String, TypeCandidate>::new();
     let mut add = |target: SymbolId, discovery: TypeDiscovery| {
@@ -110,36 +120,46 @@ pub fn discover_type_candidates(
         entry.discoveries.push(discovery);
     };
 
-    if let Some(file_symbols) = symbols.by_file.get(file_id) {
-        for target in file_symbols {
-            if is_named_type(symbols, target, simple_name) {
-                add(target.clone(), TypeDiscovery::SameFile);
+    if !qualified_expression {
+        if let Some(file_symbols) = symbols.by_file.get(file_id) {
+            for target in file_symbols {
+                if is_named_type(symbols, target, simple_name) {
+                    add(target.clone(), TypeDiscovery::SameFile);
+                }
             }
         }
-    }
 
-    let mut imported = repository.imports.lookup(file_id, scope_id, simple_name);
-    if scope_id.is_some() {
-        imported.extend(repository.imports.lookup(file_id, None, simple_name));
-    }
-    for binding in imported {
-        if let Some(target) = &binding.target_symbol {
-            if is_type_symbol(symbols, target) {
-                add(target.clone(), TypeDiscovery::ImportBinding);
-            }
+        let mut imported = repository.imports.lookup(file_id, scope_id, simple_name);
+        if scope_id.is_some() {
+            imported.extend(repository.imports.lookup(file_id, None, simple_name));
         }
-        if let Some(target_file) = &binding.target_file {
-            if let Some(file_symbols) = symbols.by_file.get(target_file) {
-                for target in file_symbols {
-                    if is_named_type(symbols, target, simple_name) {
-                        add(target.clone(), TypeDiscovery::ImportBinding);
+        for binding in imported {
+            if let Some(target) = &binding.target_symbol {
+                if is_type_symbol(symbols, target) {
+                    add(target.clone(), TypeDiscovery::ImportBinding);
+                }
+            }
+            if let Some(target_file) = &binding.target_file {
+                if let Some(file_symbols) = symbols.by_file.get(target_file) {
+                    for target in file_symbols {
+                        if is_named_type(symbols, target, simple_name) {
+                            add(target.clone(), TypeDiscovery::ImportBinding);
+                        }
                     }
                 }
             }
         }
     }
 
-    for lookup in [type_name.as_str(), simple_name] {
+    let dotted_as_scoped = type_name.replace('.', "::");
+    let mut qualified_lookups = vec![type_name.as_str()];
+    if dotted_as_scoped != type_name {
+        qualified_lookups.push(dotted_as_scoped.as_str());
+    }
+    if !qualified_expression {
+        qualified_lookups.push(simple_name);
+    }
+    for lookup in qualified_lookups {
         if let Some(qualified) = symbols.by_qualified.get(lookup) {
             for target in qualified {
                 if is_type_symbol(symbols, target) {
@@ -157,6 +177,88 @@ pub fn discover_type_candidates(
             candidate
         })
         .collect()
+}
+
+pub fn discovery_candidate_count(candidates: &[TypeCandidate], discovery: TypeDiscovery) -> usize {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.discoveries.contains(&discovery))
+        .count()
+}
+
+pub fn resolve_declared_type_use(
+    binding: &Binding,
+    source_symbol_id: &SymbolId,
+    file_path: &Path,
+    repository: &SemanticRepository,
+    symbols: &SymbolIndex,
+) -> ResolutionOutcome {
+    let Some(declared_type) = binding.declared_type.as_deref() else {
+        return ResolutionOutcome::Unresolved {
+            candidates: Vec::new(),
+            reason: "binding has no explicit declared type".into(),
+        };
+    };
+    let discovered = discover_type_candidates(
+        &binding.file_id,
+        Some(&binding.scope_id),
+        declared_type,
+        repository,
+        symbols,
+    );
+    let same_file_count = discovery_candidate_count(&discovered, TypeDiscovery::SameFile);
+    let import_count = discovery_candidate_count(&discovered, TypeDiscovery::ImportBinding);
+    let qualified_count = discovery_candidate_count(&discovered, TypeDiscovery::QualifiedName);
+    let range = FileRange {
+        path: file_path.to_path_buf(),
+        line_range: Some(LineRange {
+            start: binding.range.start_line,
+            end: binding.range.end_line,
+        }),
+    };
+
+    let candidates = discovered
+        .into_iter()
+        .map(|type_candidate| {
+            let target = type_candidate.target;
+            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact)
+                .with_strategy(ResolutionStrategy::TypedReceiver);
+            for discovery in type_candidate.discoveries {
+                let (kind, strategy, candidate_count) = match discovery {
+                    TypeDiscovery::SameFile => (
+                        RelationshipProofKind::SameScopeDefinition,
+                        "declared_type_same_file",
+                        same_file_count,
+                    ),
+                    TypeDiscovery::ImportBinding => (
+                        RelationshipProofKind::ImportBinding,
+                        "declared_type_import_binding",
+                        import_count,
+                    ),
+                    TypeDiscovery::QualifiedName => (
+                        RelationshipProofKind::QualifiedName,
+                        "declared_type_qualified_name",
+                        qualified_count,
+                    ),
+                };
+                let mut proof = RelationshipProof::new(kind, strategy, candidate_count);
+                proof.source_range = Some(range.clone());
+                proof.source_symbol_id = Some(source_symbol_id.clone());
+                proof.target_symbol_id = Some(target.clone());
+                proof.evidence_ids = vec![EvidenceId::new(binding.id.0.clone())];
+                candidate.proofs.push(proof);
+            }
+            candidate.evidence.push(ResolutionEvidence {
+                kind: ResolutionEvidenceKind::TypedBinding,
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: Some(range.clone()),
+                symbol_id: Some(target),
+                message: format!("explicit declared type `{declared_type}` resolved structurally"),
+            });
+            candidate
+        })
+        .collect();
+    evaluate_candidates(&GraphEdgeType::UsesType, candidates)
 }
 
 fn is_named_type(symbols: &SymbolIndex, target: &SymbolId, name: &str) -> bool {
@@ -230,6 +332,10 @@ mod tests {
         assert_eq!(normalize_outer_type_name("Repo[]"), Some("Repo".into()));
         assert_eq!(normalize_outer_type_name("Repo<Foo>"), Some("Repo".into()));
         assert_eq!(
+            normalize_outer_type_name("Map<Key, Repo>"),
+            Some("Map".into())
+        );
+        assert_eq!(
             normalize_outer_type_name("pkg::Repo<Foo>"),
             Some("pkg::Repo".into())
         );
@@ -257,6 +363,82 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|candidate| { candidate.discoveries == vec![TypeDiscovery::SameFile] }));
+    }
+
+    #[test]
+    fn unique_declared_same_file_type_is_proven() {
+        let file_id = FileId::new("file:main");
+        let owner = SymbolId::new("symbol:owner");
+        let symbols = SymbolIndex::build(vec![symbol(
+            "symbol:Repo",
+            "Repo",
+            "pkg::Repo",
+            "file:main",
+        )]);
+        let repository = SemanticRepository::new();
+        let binding = Binding {
+            id: open_kioku_core::BindingId::new("binding:repo"),
+            file_id,
+            scope_id: ScopeId::new("scope:method"),
+            name: "repo".into(),
+            declared_type: Some("Repo".into()),
+            inferred_type: None,
+            range: open_kioku_core::SourceRange {
+                start_line: 4,
+                start_column: 5,
+                end_line: 4,
+                end_column: 14,
+            },
+        };
+        let outcome = resolve_declared_type_use(
+            &binding,
+            &owner,
+            Path::new("src/main.rs"),
+            &repository,
+            &symbols,
+        );
+        match outcome {
+            ResolutionOutcome::Proven { candidate } => {
+                assert_eq!(candidate.target_symbol_id, SymbolId::new("symbol:Repo"));
+                assert_eq!(
+                    candidate.authority(&GraphEdgeType::UsesType),
+                    open_kioku_core::RelationshipAuthority::Authoritative
+                );
+            }
+            other => panic!("expected proven declared type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_declared_same_file_type_stays_ambiguous() {
+        let file_id = FileId::new("file:main");
+        let symbols = SymbolIndex::build(vec![
+            symbol("symbol:a", "Repo", "a::Repo", "file:main"),
+            symbol("symbol:b", "Repo", "b::Repo", "file:main"),
+        ]);
+        let repository = SemanticRepository::new();
+        let binding = Binding {
+            id: open_kioku_core::BindingId::new("binding:repo"),
+            file_id,
+            scope_id: ScopeId::new("scope:method"),
+            name: "repo".into(),
+            declared_type: Some("Repo".into()),
+            inferred_type: None,
+            range: open_kioku_core::SourceRange {
+                start_line: 4,
+                start_column: 5,
+                end_line: 4,
+                end_column: 14,
+            },
+        };
+        let outcome = resolve_declared_type_use(
+            &binding,
+            &SymbolId::new("symbol:owner"),
+            Path::new("src/main.rs"),
+            &repository,
+            &symbols,
+        );
+        assert!(matches!(outcome, ResolutionOutcome::Ambiguous { .. }));
     }
 
     #[test]

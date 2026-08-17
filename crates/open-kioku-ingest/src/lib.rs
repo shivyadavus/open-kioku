@@ -483,6 +483,38 @@ impl Indexer {
         {
             quality_report.call_sites = call_sites.len();
 
+            for binding in &bindings {
+                if binding.declared_type.is_none() {
+                    continue;
+                }
+                let Some(source_symbol_id) = scope_index.nearest_owner_symbol(&binding.scope_id)
+                else {
+                    continue;
+                };
+                let Some(file) = file_lookup.get(&binding.file_id) else {
+                    continue;
+                };
+                if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } =
+                    open_kioku_resolution::resolve_declared_type_use(
+                        binding,
+                        &source_symbol_id,
+                        &file.path,
+                        &semantic_repo,
+                        &symbol_index,
+                    )
+                {
+                    resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
+                        from: source_symbol_id,
+                        to: candidate.target_symbol_id,
+                        edge_type: GraphEdgeType::UsesType,
+                        confidence: candidate.confidence,
+                        call_site: None,
+                        evidence: candidate.evidence,
+                        proofs: candidate.proofs,
+                    });
+                }
+            }
+
             let symbols_by_qualified: HashMap<&str, &Symbol> = symbols
                 .iter()
                 .map(|s| (s.qualified_name.as_str(), s))
