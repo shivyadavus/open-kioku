@@ -176,6 +176,21 @@ fn fallback_authority(proofs: &[RelationshipProof]) -> RelationshipAuthority {
         .min(RelationshipAuthority::Corroborating)
 }
 
+fn proof_targets_are_coherent(proofs: &[RelationshipProof]) -> bool {
+    let mut expected_target: Option<&SymbolId> = None;
+    for proof in proofs {
+        let Some(target) = proof.target_symbol_id.as_ref() else {
+            continue;
+        };
+        match expected_target {
+            Some(expected) if expected != target => return false,
+            None => expected_target = Some(target),
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Compute effective relationship authority from typed proofs using one fail-closed policy.
 ///
 /// Candidate ordering, confidence, fuzzy/name similarity, and semantic scores are intentionally not
@@ -184,7 +199,7 @@ pub fn relationship_authority(
     edge_type: &GraphEdgeType,
     proofs: &[RelationshipProof],
 ) -> RelationshipAuthority {
-    if proofs.is_empty() {
+    if proofs.is_empty() || !proof_targets_are_coherent(proofs) {
         return RelationshipAuthority::Heuristic;
     }
 
@@ -472,6 +487,19 @@ mod tests {
         assert_eq!(
             relationship_authority(&GraphEdgeType::References, &proofs),
             RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn conflicting_target_ids_fail_closed() {
+        let mut import = proof(RelationshipProofKind::ImportBinding, 1);
+        import.target_symbol_id = Some(SymbolId::new("symbol:a"));
+        let mut qualified = proof(RelationshipProofKind::QualifiedName, 1);
+        qualified.target_symbol_id = Some(SymbolId::new("symbol:b"));
+
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::References, &[import, qualified]),
+            RelationshipAuthority::Heuristic
         );
     }
 
