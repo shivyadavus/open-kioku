@@ -267,7 +267,8 @@ pub fn resolve_super_member(call: &CallSite, ctx: &ResolutionContext<'_>) -> Res
                             source_type: EvidenceSourceType::TreeSitter,
                             file_range: call_file_range(call, ctx),
                             symbol_id: Some(target),
-                            message: "resolved super call via unique nearest inheritance target".into(),
+                            message: "resolved super call via unique nearest inheritance target"
+                                .into(),
                         }],
                     };
                 }
@@ -336,12 +337,19 @@ mod tests {
         let mut index = InheritanceIndex::default();
         index.edges_by_child.insert(
             SymbolId::new("Child"),
-            vec![bound_edge("Child", "ParentB", 1), bound_edge("Child", "ParentA", 0)],
+            vec![
+                bound_edge("Child", "ParentB", 1),
+                bound_edge("Child", "ParentA", 0),
+            ],
         );
 
-        let candidates = index.inherited_member_candidates(&SymbolId::new("Child"), "run", &symbols);
+        let candidates =
+            index.inherited_member_candidates(&SymbolId::new("Child"), "run", &symbols);
         assert_eq!(
-            candidates.iter().map(|id| id.0.as_str()).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
             vec!["ParentA.run", "ParentB.run"]
         );
         assert_eq!(

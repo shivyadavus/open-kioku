@@ -162,26 +162,26 @@ fn discover_super_candidates(
     let Some(containing_type) = caller.parent_symbol_id.as_ref() else {
         return Vec::new();
     };
-    let Some(target) =
-        ctx.inheritance
-            .resolve_inherited_member(containing_type, &call.callee_name, ctx.symbols)
-    else {
-        return Vec::new();
-    };
-
-    // Keep inherited-member discovery heuristic until the inheritance index itself returns all
-    // viable parents/members rather than a first traversal hit. This prevents BFS order becoming
-    // structural truth during the migration.
-    let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::High)
-        .with_strategy(ResolutionStrategy::Inheritance);
-    candidate.evidence.push(resolution_evidence(
+    let targets = ctx.inheritance.inherited_member_candidates(
+        containing_type,
+        &call.callee_name,
+        ctx.symbols,
+    );
+    candidates_for_targets(
         call,
         ctx,
-        target,
-        ResolutionEvidenceKind::InheritanceGraph,
-        "inherited member candidate retained pending proof-complete inheritance discovery",
-    ));
-    vec![candidate]
+        targets,
+        CandidateTemplate {
+            confidence: Confidence::Exact,
+            strategy: ResolutionStrategy::Inheritance,
+            proof_kinds: &[
+                RelationshipProofKind::InheritanceBinding,
+                RelationshipProofKind::ContainingType,
+            ],
+            evidence_kind: ResolutionEvidenceKind::InheritanceGraph,
+            message: "super-call candidate discovered from nearest inheritance binding",
+        },
+    )
 }
 
 fn discover_typed_or_static_candidates(

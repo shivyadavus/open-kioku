@@ -240,8 +240,10 @@ pub fn relationship_authority(
         GraphEdgeType::Calls => {
             exact_call_site
                 && (exact_target
-                    || (receiver_type && (qualified_name || same_scope || containing_type))
-                    || (import_binding && (qualified_name || same_scope)))
+                    || same_scope
+                    || (receiver_type && (qualified_name || containing_type))
+                    || (import_binding && (qualified_name || same_scope))
+                    || (inheritance_binding && (receiver_type || containing_type)))
         }
         GraphEdgeType::Implements => {
             inheritance_binding && (trait_binding || exact_target || qualified_name)
@@ -479,6 +481,62 @@ mod tests {
             ],
         );
         assert!(proved.is_authoritative_relationship());
+    }
+
+    #[test]
+    fn unique_lexical_scope_definition_authorizes_call() {
+        let proved = edge(
+            GraphEdgeType::Calls,
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 1),
+            ],
+        );
+        assert!(proved.is_authoritative_relationship());
+    }
+
+    #[test]
+    fn ambiguous_lexical_scope_definition_does_not_authorize_call() {
+        let ambiguous = edge(
+            GraphEdgeType::Calls,
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::SameScopeDefinition, 2),
+            ],
+        );
+        assert_ne!(
+            ambiguous.relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn unique_inheritance_binding_authorizes_call() {
+        let proved = edge(
+            GraphEdgeType::Calls,
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::InheritanceBinding, 1),
+                proof(RelationshipProofKind::ContainingType, 1),
+            ],
+        );
+        assert!(proved.is_authoritative_relationship());
+    }
+
+    #[test]
+    fn ambiguous_inheritance_binding_does_not_authorize_call() {
+        let ambiguous = edge(
+            GraphEdgeType::Calls,
+            vec![
+                proof(RelationshipProofKind::ExactCallSite, 1),
+                proof(RelationshipProofKind::InheritanceBinding, 2),
+                proof(RelationshipProofKind::ContainingType, 2),
+            ],
+        );
+        assert_ne!(
+            ambiguous.relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
     }
 
     #[test]
