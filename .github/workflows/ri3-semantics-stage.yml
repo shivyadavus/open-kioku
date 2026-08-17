@@ -21,9 +21,23 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Stage durable semantic compatibility changes
-        run: python3 scripts/ri3-semantics-stage.py
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/ri3-semantics-stage.py')
+          text = path.read_text()
+          old = '''            if "IndexManifest {" not in line or "struct IndexManifest" in line:\n                continue\n'''
+          new = '''            prefix = line.split("IndexManifest {", 1)[0]\n            if (\n                "IndexManifest {" not in line\n                or "struct IndexManifest" in line\n                or "->" in prefix\n            ):\n                continue\n'''
+          if old not in text:
+              raise SystemExit('manifest scanner patch point missing')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python3 scripts/ri3-semantics-stage.py
       - name: Format
-        run: cargo fmt --all -- --check || (cargo fmt --all && cargo fmt --all -- --check)
+        run: cargo fmt --all
+      - name: Format check
+        run: cargo fmt --all -- --check
       - name: Core semantics tests
         run: cargo test -p open-kioku-core analysis_semantics
       - name: Storage compatibility tests
