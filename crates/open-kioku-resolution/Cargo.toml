@@ -13,3 +13,6 @@ open-kioku-semantic-model = { path = "../open-kioku-semantic-model" }
 serde = { workspace = true, features = ["derive"] }
 smallvec = "1"
 tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
