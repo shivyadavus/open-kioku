@@ -18,7 +18,18 @@ jobs:
           fetch-depth: 0
 
       - name: Apply explicit authority consumer mode
-        run: python3 scripts/ri3_compat_authority_mode_tmp.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/ri3_compat_authority_mode_tmp.py")
+          text = path.read_text()
+          old = '''    actual = text.count(old)\n    if actual != count:\n        raise SystemExit(f"{label}: expected {count} anchor(s), found {actual}")\n    return text.replace(old, new, count)\n'''
+          new = '''    actual = text.count(old)\n    # The policy and public-API functions intentionally start with the same legacy uncertainty block.\n    # Patch the first here; the later public-API-specific replacement consumes the second.\n    comparable = 1 if label == "architecture policy uncertainty mode" and actual == 2 and count == 1 else actual\n    if comparable != count:\n        raise SystemExit(f"{label}: expected {count} anchor(s), found {actual}")\n    return text.replace(old, new, count)\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f"unexpected replace_exact helper count: {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python3 scripts/ri3_compat_authority_mode_tmp.py
 
       - name: Validate architecture and context compatibility
         run: |
@@ -34,7 +45,8 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-compat-authority-mode.yml scripts/ri3_compat_authority_mode_tmp.py
+          git rm .github/workflows/ri3-compat-authority-mode.yml
+          git rm -f scripts/ri3_compat_authority_mode_tmp.py
           git add crates/open-kioku-architecture/src/lib.rs crates/open-kioku-context/src/lib.rs
           git commit -m "fix(ri3): make authoritative consumer filtering explicit"
           git push origin HEAD:agent/ri3-core-relationship-proofs
