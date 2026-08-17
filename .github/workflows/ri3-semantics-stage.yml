@@ -34,6 +34,16 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
           python3 scripts/ri3-semantics-stage.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-cli/src/bench/relationship_live.rs')
+          text = path.read_text()
+          old = '    corpus: &RelationshipBenchCorpus,\n'
+          new = '    _corpus: &RelationshipBenchCorpus,\n'
+          if old not in text:
+              raise SystemExit('relationship benchmark corpus parameter patch point missing')
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Format
         run: cargo fmt --all
       - name: Format check
