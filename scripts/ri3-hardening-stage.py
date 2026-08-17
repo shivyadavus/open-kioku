@@ -101,8 +101,8 @@ def harden_live_producer() -> None:
     )
     text = replace_once(
         text,
-        """    });\n    Ok(())\n}\n\nfn write_live_relationship_fixture(\n""",
-        """    });\n    if should_inject_exact && case.scenario == \"multiple_exact_sites\" {\n        let second = open_kioku_core::SourceRange {\n            start_line: range.end_line.saturating_add(1),\n            start_column: 1,\n            end_line: range.end_line.saturating_add(1),\n            end_column: 10,\n        };\n        snapshot.occurrences.push(open_kioku_core::SymbolOccurrence {\n            symbol_id: target.id,\n            file_id: source_file.id,\n            range: Some(open_kioku_core::LineRange {\n                start: second.start_line,\n                end: second.end_line,\n            }),\n            source_range: Some(second),\n            is_definition: false,\n            confidence: Confidence::Exact,\n            provenance: EvidenceSourceType::Scip,\n        });\n    }\n    Ok(())\n}\n\nfn write_live_relationship_fixture(\n""",
+        """    });\n    Ok(())\n}\n\nfn write_live_relationship_fixture(case:""",
+        """    });\n    if should_inject_exact && case.scenario == \"multiple_exact_sites\" {\n        let second = open_kioku_core::SourceRange {\n            start_line: range.end_line.saturating_add(1),\n            start_column: 1,\n            end_line: range.end_line.saturating_add(1),\n            end_column: 10,\n        };\n        snapshot.occurrences.push(open_kioku_core::SymbolOccurrence {\n            symbol_id: target.id,\n            file_id: source_file.id,\n            range: Some(open_kioku_core::LineRange {\n                start: second.start_line,\n                end: second.end_line,\n            }),\n            source_range: Some(second),\n            is_definition: false,\n            confidence: Confidence::Exact,\n            provenance: EvidenceSourceType::Scip,\n        });\n    }\n    Ok(())\n}\n\nfn write_live_relationship_fixture(case:""",
         "second exact reference occurrence",
     )
 
