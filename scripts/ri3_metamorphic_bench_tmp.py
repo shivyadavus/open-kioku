@@ -21,6 +21,13 @@ replace_exact(
 
 replace_exact(
     path,
+    '''#[derive(Debug, Clone, Deserialize)]\nstruct RelationshipBenchPolicy {\n''',
+    '''#[derive(Debug, Clone, Deserialize)]\n#[serde(deny_unknown_fields)]\nstruct RelationshipBenchPolicy {\n''',
+    "strict policy schema",
+)
+
+replace_exact(
+    path,
     '''    minimum_outcome_compliance: f64,\n    require_zero_false_negatives: bool,\n    require_positive_and_negative_per_language_relationship: bool,\n    require_frozen_corpus: bool,\n''',
     '''    minimum_outcome_compliance: f64,\n    minimum_metamorphic_groups: usize,\n    minimum_metamorphic_equivalence: f64,\n    require_zero_false_negatives: bool,\n    require_positive_and_negative_per_language_relationship: bool,\n    require_metamorphic_group_per_language_relationship: bool,\n    require_frozen_corpus: bool,\n''',
     "metamorphic policy fields",
@@ -92,7 +99,7 @@ replace_exact(
 replace_exact(
     path,
     '''    diagnostics.sort_by(|left, right| {\n        (&left.case_id, &left.kind, &left.message).cmp(&(&right.case_id, &right.kind, &right.message))\n    });\n\n    Ok(RelationshipBenchScoreReport {\n''',
-    '''    diagnostics.sort_by(|left, right| {\n        (&left.case_id, &left.kind, &left.message).cmp(&(&right.case_id, &right.kind, &right.message))\n    });\n    let metamorphic_groups = metamorphic_verdicts.len();\n    let metamorphic_equivalent_groups = metamorphic_verdicts\n        .values()\n        .filter(|verdicts| {\n            verdicts\n                .first()\n                .map(|first| verdicts.iter().all(|verdict| verdict == first))\n                .unwrap_or(false)\n        })\n        .count();\n    let metamorphic_equivalence = relationship_ratio(\n        metamorphic_equivalent_groups,\n        metamorphic_groups,\n    );\n\n    Ok(RelationshipBenchScoreReport {\n''',
+    '''    diagnostics.sort_by(|left, right| {\n        (&left.case_id, &left.kind, &left.message).cmp(&(&right.case_id, &right.kind, &right.message))\n    });\n    let metamorphic_groups = metamorphic_verdicts.len();\n    let metamorphic_equivalent_groups = metamorphic_verdicts\n        .values()\n        .filter(|verdicts| {\n            verdicts\n                .first()\n                .map(|first| verdicts.iter().all(|verdict| verdict == first))\n                .unwrap_or(false)\n        })\n        .count();\n    let metamorphic_equivalence =\n        relationship_ratio(metamorphic_equivalent_groups, metamorphic_groups);\n\n    Ok(RelationshipBenchScoreReport {\n''',
     "compute metamorphic equivalence",
 )
 
@@ -112,6 +119,31 @@ replace_exact(
 
 replace_exact(
     path,
+    '''    fn case(\n        id: &str,\n        expected_outcome: RelationshipBenchExpectedOutcome,\n    ) -> RelationshipBenchCase {\n''',
+    '''    pub(super) fn case(\n        id: &str,\n        expected_outcome: RelationshipBenchExpectedOutcome,\n    ) -> RelationshipBenchCase {\n''',
+    "test case helper visibility",
+)
+replace_exact(
+    path,
+    '''    fn corpus(cases: Vec<RelationshipBenchCase>) -> RelationshipBenchCorpus {\n''',
+    '''    pub(super) fn corpus(cases: Vec<RelationshipBenchCase>) -> RelationshipBenchCorpus {\n''',
+    "test corpus helper visibility",
+)
+replace_exact(
+    path,
+    '''    fn observed(target: &str, authority: RelationshipAuthority) -> RelationshipBenchObservedRelationship {\n''',
+    '''    pub(super) fn observed(\n        target: &str,\n        authority: RelationshipAuthority,\n    ) -> RelationshipBenchObservedRelationship {\n''',
+    "test observation helper visibility",
+)
+replace_exact(
+    path,
+    '''    fn permissive_test_policy() -> RelationshipBenchPolicy {\n''',
+    '''    pub(super) fn permissive_test_policy() -> RelationshipBenchPolicy {\n''',
+    "test policy helper visibility",
+)
+
+replace_exact(
+    path,
     '''            candidate_count_expected: None,\n            notes: None,\n''',
     '''            candidate_count_expected: None,\n            metamorphic_group: None,\n            notes: None,\n''',
     "test case metamorphic default",
@@ -126,5 +158,5 @@ replace_exact(
 
 p = Path(path)
 text = p.read_text()
-text += '''\n\n#[cfg(test)]\nmod ri3_metamorphic_bench_tests {\n    use super::*;\n\n    #[test]\n    fn corpus_rejects_singleton_metamorphic_group() {\n        let mut c = relationship_bench_tests::case(\n            "singleton",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        c.metamorphic_group = Some("group:singleton".into());\n        let corpus = relationship_bench_tests::corpus(vec![c]);\n        assert!(validate_relationship_bench_corpus(&corpus).is_err());\n    }\n\n    #[test]\n    fn gate_enforces_metamorphic_thresholds_from_policy() {\n        let mut a = relationship_bench_tests::case(\n            "meta-a",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        let mut b = relationship_bench_tests::case(\n            "meta-b",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        a.metamorphic_group = Some("group:stable".into());\n        b.metamorphic_group = Some("group:stable".into());\n        let corpus = relationship_bench_tests::corpus(vec![a, b]);\n        let observations = vec![\n            RelationshipBenchObservation {\n                case_id: "meta-a".into(),\n                outcome: RelationshipBenchObservedOutcome::Unresolved,\n                candidate_count: 0,\n                relationships: Vec::new(),\n            },\n            RelationshipBenchObservation {\n                case_id: "meta-b".into(),\n                outcome: RelationshipBenchObservedOutcome::Proven,\n                candidate_count: 1,\n                relationships: vec![relationship_bench_tests::observed(\n                    "symbol:wrong",\n                    open_kioku_core::RelationshipAuthority::Authoritative,\n                )],\n            },\n        ];\n        let report = score_relationship_bench(&corpus, &observations).unwrap();\n        assert_eq!(report.metamorphic_groups, 1);\n        assert_eq!(report.metamorphic_equivalent_groups, 0);\n        assert_eq!(report.metamorphic_equivalence, 0.0);\n        let mut policy = relationship_bench_tests::permissive_test_policy();\n        policy.minimum_metamorphic_groups = 1;\n        policy.minimum_metamorphic_equivalence = 1.0;\n        let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);\n        assert!(!gate.passed);\n        assert!(gate\n            .failures\n            .iter()\n            .any(|failure| failure.contains("metamorphic equivalence")));\n    }\n}\n'''
+text += '''\n\n#[cfg(test)]\nmod ri3_metamorphic_bench_tests {\n    use super::*;\n\n    #[test]\n    fn policy_rejects_unknown_threshold_fields() {\n        let raw = r#"{\n          "schema_version":"1.0.0",\n          "minimum_cases":0,\n          "minimum_cases_per_language":0,\n          "minimum_cases_per_language_relationship":0,\n          "minimum_negative_fraction":0.0,\n          "minimum_overall_precision":0.0,\n          "minimum_language_relationship_precision":0.0,\n          "maximum_must_not_emit_false_positive_rate":1.0,\n          "minimum_exact_range_compliance":0.0,\n          "minimum_proof_compliance":0.0,\n          "minimum_outcome_compliance":0.0,\n          "minimum_metamorphic_groups":0,\n          "minimum_metamorphic_equivalence":0.0,\n          "require_zero_false_negatives":false,\n          "require_positive_and_negative_per_language_relationship":false,\n          "require_metamorphic_group_per_language_relationship":false,\n          "require_frozen_corpus":false,\n          "future_unwired_threshold":1\n        }"#;\n        assert!(serde_json::from_str::<RelationshipBenchPolicy>(raw).is_err());\n    }\n\n    #[test]\n    fn corpus_rejects_singleton_metamorphic_group() {\n        let mut c = relationship_bench_tests::case(\n            "singleton",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        c.metamorphic_group = Some("group:singleton".into());\n        let corpus = relationship_bench_tests::corpus(vec![c]);\n        assert!(validate_relationship_bench_corpus(&corpus).is_err());\n    }\n\n    #[test]\n    fn gate_enforces_metamorphic_thresholds_from_policy() {\n        let mut a = relationship_bench_tests::case(\n            "meta-a",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        let mut b = relationship_bench_tests::case(\n            "meta-b",\n            RelationshipBenchExpectedOutcome::MustNotEmit,\n        );\n        a.metamorphic_group = Some("group:stable".into());\n        b.metamorphic_group = Some("group:stable".into());\n        let corpus = relationship_bench_tests::corpus(vec![a, b]);\n        let observations = vec![\n            RelationshipBenchObservation {\n                case_id: "meta-a".into(),\n                outcome: RelationshipBenchObservedOutcome::Unresolved,\n                candidate_count: 0,\n                relationships: Vec::new(),\n            },\n            RelationshipBenchObservation {\n                case_id: "meta-b".into(),\n                outcome: RelationshipBenchObservedOutcome::Proven,\n                candidate_count: 1,\n                relationships: vec![relationship_bench_tests::observed(\n                    "symbol:wrong",\n                    open_kioku_core::RelationshipAuthority::Authoritative,\n                )],\n            },\n        ];\n        let report = score_relationship_bench(&corpus, &observations).unwrap();\n        assert_eq!(report.metamorphic_groups, 1);\n        assert_eq!(report.metamorphic_equivalent_groups, 0);\n        assert_eq!(report.metamorphic_equivalence, 0.0);\n        let mut policy = relationship_bench_tests::permissive_test_policy();\n        policy.minimum_metamorphic_groups = 1;\n        policy.minimum_metamorphic_equivalence = 1.0;\n        let gate = evaluate_relationship_bench_gates(&corpus, &report, &policy);\n        assert!(!gate.passed);\n        assert!(gate\n            .failures\n            .iter()\n            .any(|failure| failure.contains("metamorphic equivalence")));\n    }\n}\n'''
 p.write_text(text)
