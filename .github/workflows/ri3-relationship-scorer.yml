@@ -17,6 +17,17 @@ jobs:
           ref: agent/ri3-relationship-conformance-benchmark
           fetch-depth: 0
 
+      - name: Repair scorer namespace
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-cli/src/bench/relationship.rs')
+          text = path.read_text()
+          if 'fn ratio(' not in text:
+              raise SystemExit('relationship scorer ratio helper seam changed')
+          path.write_text(text.replace('ratio(', 'relationship_ratio('))
+          PY
+
       - name: Validate relationship benchmark scorer
         run: |
           cargo fmt --all
