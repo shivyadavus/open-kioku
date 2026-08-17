@@ -12,4 +12,6 @@ categories.workspace = true
 
 [dependencies]
 open-kioku-core = { version = "2.0.0", path = "../open-kioku-core" }
-
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
