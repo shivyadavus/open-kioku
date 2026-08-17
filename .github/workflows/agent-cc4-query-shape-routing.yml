@@ -19,7 +19,28 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Apply asserted CC4 query-shape patch
-        run: python3 .github/scripts/agent_apply_cc4_query_shape.py
+        run: |
+          python3 .github/scripts/agent_apply_cc4_query_shape.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-context/src/routing.rs')
+          lines = path.read_text().splitlines()
+          repaired = []
+          index = 0
+          while index < len(lines):
+              line = lines[index]
+              if '.map(|token| token.trim_matches' in line:
+                  repaired.append(r'''        .map(|token| token.trim_matches(|ch: char| matches!(ch, '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']')))''')
+                  index += 1
+                  continue
+              if line.strip() == ") || (lower.contains('" and index + 1 < len(lines):
+                  repaired.append(r'''    ) || (lower.contains('\n') && contains_any(lower, &["error", "exception", "panic", "traceback"]))''')
+                  index += 2
+                  continue
+              repaired.append(line)
+              index += 1
+          path.write_text('\n'.join(repaired) + '\n')
+          PY
       - name: Validate focused and full workspace contracts
         run: |
           cargo fmt --all -- --check
