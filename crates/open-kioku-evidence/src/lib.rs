@@ -223,6 +223,11 @@ pub fn relationship_authority(
                 || (import_binding && (qualified_name || same_scope))
                 || (qualified_name && same_scope)
         }
+        GraphEdgeType::UsesType => {
+            exact_target
+                || (receiver_type && (qualified_name || same_scope))
+                || (import_binding && qualified_name)
+        }
         GraphEdgeType::Calls => {
             exact_call_site
                 && (exact_target
@@ -658,6 +663,36 @@ mod tests {
         let proofs = vec![proof(RelationshipProofKind::ExactReference, 1)];
         assert_eq!(
             relationship_authority(&GraphEdgeType::References, &proofs),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn exact_reference_proves_uses_type_relationship() {
+        let proofs = vec![proof(RelationshipProofKind::ExactReference, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::UsesType, &proofs),
+            RelationshipAuthority::Authoritative
+        );
+    }
+
+    #[test]
+    fn receiver_type_alone_does_not_prove_uses_type_target() {
+        let proofs = vec![proof(RelationshipProofKind::ReceiverType, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::UsesType, &proofs),
+            RelationshipAuthority::Corroborating
+        );
+    }
+
+    #[test]
+    fn receiver_type_plus_unique_name_proves_uses_type_target() {
+        let proofs = vec![
+            proof(RelationshipProofKind::ReceiverType, 1),
+            proof(RelationshipProofKind::QualifiedName, 1),
+        ];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::UsesType, &proofs),
             RelationshipAuthority::Authoritative
         );
     }
