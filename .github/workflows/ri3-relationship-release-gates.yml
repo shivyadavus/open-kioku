@@ -19,8 +19,9 @@ jobs:
 
       - name: Apply release-gate patch
         run: |
-          python3 -m py_compile scripts/ri3_relationship_gates_tmp.py
+          python3 -m py_compile scripts/ri3_relationship_gates_tmp.py scripts/ri3_relationship_gates_fix_tmp.py
           python3 scripts/ri3_relationship_gates_tmp.py
+          python3 scripts/ri3_relationship_gates_fix_tmp.py
 
       - name: Validate benchmark gates
         run: |
@@ -32,7 +33,10 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm -f .github/workflows/ri3-relationship-release-gates.yml scripts/ri3_relationship_gates_tmp.py
+          git rm -f \
+            .github/workflows/ri3-relationship-release-gates.yml \
+            scripts/ri3_relationship_gates_tmp.py \
+            scripts/ri3_relationship_gates_fix_tmp.py
           git add \
             crates/open-kioku-cli/src/bench/relationship.rs \
             crates/open-kioku-cli/src/types.rs \
