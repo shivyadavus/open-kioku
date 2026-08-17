@@ -49,20 +49,37 @@ text += r'''
 #[cfg(test)]
 mod ri3_reproducibility_metadata_tests {
     use super::*;
+    use open_kioku_core::{RelationshipAuthority, RelationshipProofKind, SourceRange};
 
     #[test]
     fn release_gate_fails_closed_when_reproducibility_metadata_is_missing() {
-        let case = relationship_bench_tests::case(
+        let range = SourceRange {
+            start_line: 10,
+            start_column: 4,
+            end_line: 10,
+            end_column: 17,
+        };
+        let mut case = relationship_bench_tests::case(
             "metadata-fixture",
-            RelationshipBenchExpectedOutcome::MustNotEmit,
+            RelationshipBenchExpectedOutcome::MustEmit,
         );
+        case.expected_source_range = Some(range.clone());
+        case.expected_proof_kinds = BTreeSet::from([RelationshipProofKind::ExactCallSite]);
         let corpus = relationship_bench_tests::corpus(vec![case]);
+
+        let mut relationship = relationship_bench_tests::observed(
+            "symbol:target",
+            RelationshipAuthority::Authoritative,
+        );
+        relationship.source_ranges.push(range);
+        relationship.proof_kinds = BTreeSet::from([RelationshipProofKind::ExactCallSite]);
         let observations = vec![RelationshipBenchObservation {
             case_id: "metadata-fixture".into(),
-            outcome: RelationshipBenchObservedOutcome::Unresolved,
-            candidate_count: 0,
-            relationships: Vec::new(),
+            outcome: RelationshipBenchObservedOutcome::Proven,
+            candidate_count: 1,
+            relationships: vec![relationship],
         }];
+
         let mut report = score_relationship_bench(&corpus, &observations).unwrap();
         let mut policy = relationship_bench_tests::permissive_test_policy();
         policy.require_reproducibility_metadata = true;
