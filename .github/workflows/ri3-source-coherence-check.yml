@@ -1,0 +1,107 @@
+name: RI3 source coherence check
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-authority-final
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-authority-final
+          fetch-depth: 0
+
+      - name: Make proof identities fail closed
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("crates/open-kioku-core/src/relationship.rs")
+          text = path.read_text()
+
+          old = '''fn proof_targets_are_coherent(proofs: &[RelationshipProof]) -> bool {
+              let mut expected_target: Option<&SymbolId> = None;
+              for proof in proofs {
+                  let Some(target) = proof.target_symbol_id.as_ref() else {
+                      continue;
+                  };
+                  match expected_target {
+                      Some(expected) if expected != target => return false,
+                      None => expected_target = Some(target),
+                      _ => {}
+                  }
+              }
+              true
+          }
+          '''.replace("          ", "")
+          new = '''fn proof_identities_are_coherent(proofs: &[RelationshipProof]) -> bool {
+              let mut expected_source: Option<&SymbolId> = None;
+              let mut expected_target: Option<&SymbolId> = None;
+              for proof in proofs {
+                  if let Some(source) = proof.source_symbol_id.as_ref() {
+                      match expected_source {
+                          Some(expected) if expected != source => return false,
+                          None => expected_source = Some(source),
+                          _ => {}
+                      }
+                  }
+                  if let Some(target) = proof.target_symbol_id.as_ref() {
+                      match expected_target {
+                          Some(expected) if expected != target => return false,
+                          None => expected_target = Some(target),
+                          _ => {}
+                      }
+                  }
+              }
+              true
+          }
+          '''.replace("          ", "")
+          if text.count(old) != 1:
+              raise SystemExit(f"coherence function seam count={text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          old_guard = "if proofs.is_empty() || !proof_targets_are_coherent(proofs) {"
+          new_guard = "if proofs.is_empty() || !proof_identities_are_coherent(proofs) {"
+          if text.count(old_guard) != 1:
+              raise SystemExit(f"coherence guard seam count={text.count(old_guard)}")
+          text = text.replace(old_guard, new_guard, 1)
+
+          anchor = '''    #[test]
+              fn legacy_and_malformed_edges_fail_closed() {'''.replace("              ", "")
+          if text.count(anchor) != 1:
+              raise SystemExit(f"test anchor count={text.count(anchor)}")
+          regression = '''    #[test]
+          fn conflicting_source_ids_fail_closed() {
+              let mut call_site = proof(RelationshipProofKind::ExactCallSite, 1);
+              call_site.source_symbol_id = Some(SymbolId::new("caller-a"));
+              call_site.target_symbol_id = Some(SymbolId::new("callee"));
+              let mut exact_target = proof(RelationshipProofKind::ExactReference, 1);
+              exact_target.source_symbol_id = Some(SymbolId::new("caller-b"));
+              exact_target.target_symbol_id = Some(SymbolId::new("callee"));
+              let edge = edge(GraphEdgeType::Calls, vec![call_site, exact_target]);
+              assert_eq!(edge.relationship_authority(), RelationshipAuthority::Heuristic);
+          }
+
+          '''.replace("          ", "") + anchor
+          text = text.replace(anchor, regression, 1)
+          path.write_text(text)
+
+      - name: Validate core trust boundary
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-core -p open-kioku-evidence --all-targets -- -D warnings
+          cargo test -p open-kioku-core -p open-kioku-evidence
+
+      - name: Commit validated product change
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add crates/open-kioku-core/src/relationship.rs
+          git commit -m "fix(ri3): reject conflicting relationship proof sources"
+          git push origin HEAD:agent/ri3-core-authority-final
