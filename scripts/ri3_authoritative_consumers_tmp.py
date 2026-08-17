@@ -99,6 +99,7 @@ replace_exact(
     '''            .push("no import, reference, or call graph edges were available to evaluate".into());\n''',
     '''            .push("no authoritative import, reference, or call graph edges were available to evaluate".into());\n''',
     "architecture uncertainty wording",
+    2,
 )
 architecture_path = Path(architecture)
 architecture_text = architecture_path.read_text()
