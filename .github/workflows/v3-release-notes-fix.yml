@@ -1,0 +1,50 @@
+name: V3 release notes compatibility fix
+
+on:
+  push:
+    branches:
+      - release/v3.0.0
+    paths:
+      - .github/workflows/v3-release-notes-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v3.0.0
+          fetch-depth: 0
+
+      - name: Document Linux glibc compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("CHANGELOG.md")
+          text = path.read_text(encoding="utf-8")
+          note = "- V3 Linux release binaries target GNU/glibc on x86_64 and ARM64 because the local neural runtime does not provide supported MUSL prebuilts; npm Linux platform packages declare `libc: glibc` accordingly.\n"
+          if note not in text:
+              anchor = "- Reindexing is recommended for 3.0. Existing heuristic structural edges from older indexes are not trusted as authoritative unless reconstructed with proof; relationship counts may decrease when ambiguous evidence correctly fails closed.\n"
+              if text.count(anchor) != 1:
+                  raise SystemExit("V3 compatibility anchor mismatch")
+              text = text.replace(anchor, anchor + note, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          scripts/validate-docs.sh
+          scripts/validate-versions.sh
+          git diff --check
+
+      - name: Commit compatibility note
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs: document v3 Linux glibc requirement"
+          git push origin HEAD:release/v3.0.0
