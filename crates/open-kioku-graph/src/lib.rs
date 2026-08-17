@@ -449,12 +449,31 @@ impl InMemoryGraph {
                     path: file.path.clone(),
                     line_range: Some(range.clone()),
                 });
-                proof.evidence_ids.push(evidence_id);
+                proof.evidence_ids.push(evidence_id.clone());
                 proof
                     .details
                     .insert("target_path".into(), json!(fact.target));
                 edge.set_relationship_proofs(vec![proof])
                     .expect("resolved import binding proof must serialize to JSON");
+            }
+            if fact.edge_type == GraphEdgeType::DependsOn
+                && fact.target_kind == GraphNodeType::Package
+                && fact.source.starts_with("open-kioku-import-resolver/")
+                && matches!(fact.confidence, Confidence::High | Confidence::Exact)
+            {
+                let mut proof = RelationshipProof::new(
+                    RelationshipProofKind::ModuleOrPackageBinding,
+                    fact.source.clone(),
+                    1,
+                );
+                proof.source_range = fact.range.as_ref().map(|range| FileRange {
+                    path: file.path.clone(),
+                    line_range: Some(range.clone()),
+                });
+                proof.evidence_ids.push(evidence_id);
+                proof.details.insert("package".into(), json!(fact.target));
+                edge.set_relationship_proofs(vec![proof])
+                    .expect("resolved package dependency proof must serialize to JSON");
             }
             buffer.insert_edge(edge);
         }

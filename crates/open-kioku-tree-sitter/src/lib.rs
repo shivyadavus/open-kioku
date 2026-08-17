@@ -521,15 +521,13 @@ fn symbol_name_node<'tree>(
         Language::Go => match kind {
             "function_declaration" => name.map(|node| (node, SymbolKind::Function)),
             "method_declaration" => name.map(|node| (node, SymbolKind::Method)),
-            "type_spec" => name.map(|node| {
-                let symbol_kind =
-                    if node.parent().map(|parent| parent.kind()) == Some("type_declaration") {
-                        SymbolKind::Class
-                    } else {
-                        SymbolKind::Unknown
-                    };
-                (node, symbol_kind)
-            }),
+            "type_spec" => {
+                let symbol_kind = match node.child_by_field_name("type").map(|node| node.kind()) {
+                    Some("interface_type") => SymbolKind::Interface,
+                    _ => SymbolKind::Class,
+                };
+                name.map(|name_node| (name_node, symbol_kind))
+            }
             _ => None,
         },
         Language::Json | Language::Yaml => None,
@@ -1501,5 +1499,44 @@ mod ri3_rust_module_receiver_tests {
 
         assert_eq!(call.receiver.as_deref(), Some("crate::storage"));
         assert_eq!(call.receiver_kind, ReceiverKind::Module);
+    }
+}
+
+#[cfg(test)]
+mod ri3_go_type_classification_tests {
+    use super::parse_file;
+    use open_kioku_core::{File, FileId, Language, RepositoryId, SymbolKind};
+
+    #[test]
+    fn go_named_types_are_classified_as_type_symbols() {
+        let file = File {
+            id: FileId::new("file_go_types"),
+            repository_id: RepositoryId::new("repo"),
+            path: "main.go".into(),
+            language: Language::Go,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "package bench\ntype TargetType struct{}\ntype TargetInterface interface{ Target() }\nfunc CallerFn(value TargetType) {}\n",
+        )
+        .expect("Go type fixture should parse");
+        let concrete = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "TargetType")
+            .expect("concrete Go type");
+        let interface = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "TargetInterface")
+            .expect("Go interface type");
+        assert_eq!(concrete.kind, SymbolKind::Class);
+        assert_eq!(interface.kind, SymbolKind::Interface);
+        assert!(facts.bindings.iter().any(|binding| binding.name == "value"
+            && binding.declared_type.as_deref() == Some("TargetType")));
     }
 }
