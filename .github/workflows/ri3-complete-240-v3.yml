@@ -73,3 +73,5 @@ jobs:
           git diff --cached --check
           git commit -m "test(ri3): add live frozen relationship conformance gate"
           git push origin HEAD:agent/ri3-frozen-conformance
+
+# Rerun marker: validated compact gate must land from the latest branch head.
