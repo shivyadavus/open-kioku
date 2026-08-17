@@ -1,0 +1,70 @@
+name: RI3 full frozen conformance release gate
+
+on:
+  push:
+    branches:
+      - agent/ri3-frozen-conformance
+    paths:
+      - .github/workflows/ri3-full-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  full-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-frozen-conformance
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Materialize validated RI3 tree
+        run: |
+          set -euo pipefail
+          python3 .tmp-ri3/materialize_v3.py
+          cargo fmt --all
+          cargo build -p open-kioku-cli
+      - name: Run all 336 frozen live cases
+        id: full
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          target/debug/ok --json relationship-bench \
+            --corpus benchmarks/relationship-cases.json \
+            --observations @live \
+            --policy benchmarks/relationship-thresholds.json \
+            --enforce-gates \
+            --write /tmp/relationship-full-report.json \
+            2>&1 | tee /tmp/relationship-full-run.log
+      - name: Summarize release gate
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/relationship-full-report.json ]; then
+            python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/relationship-full-report.json'))
+          print(json.dumps(report.get('overall', {}), indent=2))
+          print(json.dumps(report.get('gate', {}), indent=2))
+          print('diagnostics', len(report.get('diagnostics', [])))
+          for item in report.get('diagnostics', [])[:100]:
+              print(item)
+          PY
+          fi
+      - name: Upload full frozen diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ri3-full-frozen-diagnostics
+          path: |
+            /tmp/relationship-full-report.json
+            /tmp/relationship-full-report.md
+            /tmp/relationship-full-report-capabilities.json
+            /tmp/relationship-full-run.log
+          if-no-files-found: ignore
+      - name: Enforce gate result
+        if: steps.full.outcome != 'success'
+        run: exit 1
