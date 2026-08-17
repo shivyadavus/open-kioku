@@ -1,0 +1,42 @@
+name: agent-cc4-path-scope-routing
+
+on:
+  push:
+    branches:
+      - agent/cc4-path-scope-routing
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted CC4 path-scope patch
+        run: python3 .github/scripts/agent_cc4_path_scope.py
+      - name: Validate workspace and routing contracts
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit product change and remove temporary tooling
+        run: |
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-context/src/routing.rs \
+                  crates/open-kioku-context/src/candidates.rs \
+                  crates/open-kioku-context/src/lib.rs \
+                  crates/open-kioku-cli/src/commands/context.rs \
+                  crates/open-kioku-semantic/src/lib.rs
+          git commit -m "feat(context): propagate explicit path scope to semantic retrieval"
+          git rm .github/scripts/agent_cc4_path_scope.py .github/workflows/agent-cc4-path-scope-routing.yml
+          git commit -m "chore: remove temporary CC4 validation tooling"
+          git push origin HEAD:agent/cc4-path-scope-routing
