@@ -1,0 +1,47 @@
+name: agent-cc4-query-shape-benchmark
+on:
+  push:
+    branches: [agent/cc4-query-shape-benchmark-reporting]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc4-query-shape-benchmark-reporting
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted product patch
+        run: python3 .github/scripts/agent_cc4_query_shape_benchmark.py
+      - name: Validate
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-cli retrieval_bench_tests
+          cargo test --all
+          cargo test -p open-kioku-tests
+          cargo run --release -p open-kioku-cli -- --json retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30 --write-json /tmp/retrieval-report.json --write-markdown /tmp/retrieval-report.md --write-baseline /tmp/retrieval-baseline.json > /tmp/retrieval-stdout.json
+          cmp /tmp/retrieval-baseline.json benchmarks/retrieval-baseline.json
+          grep -q 'Routed ContextPack by query shape' /tmp/retrieval-report.md
+          python3 - <<'PY'
+          import json
+          report=json.load(open('/tmp/retrieval-report.json'))
+          routed=next(x for x in report['stream_ablations'] if x['strategy']=='cc4:routed_contextpack')
+          assert routed['by_query_shape'], routed
+          assert any(x['scope'].startswith('query_shape:') for x in report['advisory_comparisons'])
+          assert all('query_shape' in c for c in routed['cases'])
+          print(sorted(routed['by_query_shape']))
+          PY
+      - name: Commit product changes and remove temporary tooling
+        if: success()
+        run: |
+          git config user.name 'Shiv Yadav'
+          git config user.email '155265880+shivyadavus@users.noreply.github.com'
+          git add crates/open-kioku-cli/src/bench/retrieval.rs benchmarks/retrieval-cases.json
+          git rm .github/scripts/agent_cc4_query_shape_benchmark.py .github/workflows/agent-cc4-query-shape-benchmark.yml
+          git commit -m 'CC4.1: report retrieval quality by frozen query shape'
+          git push origin HEAD:agent/cc4-query-shape-benchmark-reporting
