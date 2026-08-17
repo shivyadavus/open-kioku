@@ -179,16 +179,23 @@ fn fallback_authority(proofs: &[RelationshipProof]) -> RelationshipAuthority {
         .min(RelationshipAuthority::Corroborating)
 }
 
-fn proof_targets_are_coherent(proofs: &[RelationshipProof]) -> bool {
+fn proof_identities_are_coherent(proofs: &[RelationshipProof]) -> bool {
+    let mut expected_source: Option<&SymbolId> = None;
     let mut expected_target: Option<&SymbolId> = None;
     for proof in proofs {
-        let Some(target) = proof.target_symbol_id.as_ref() else {
-            continue;
-        };
-        match expected_target {
-            Some(expected) if expected != target => return false,
-            None => expected_target = Some(target),
-            _ => {}
+        if let Some(source) = proof.source_symbol_id.as_ref() {
+            match expected_source {
+                Some(expected) if expected != source => return false,
+                None => expected_source = Some(source),
+                _ => {}
+            }
+        }
+        if let Some(target) = proof.target_symbol_id.as_ref() {
+            match expected_target {
+                Some(expected) if expected != target => return false,
+                None => expected_target = Some(target),
+                _ => {}
+            }
         }
     }
     true
@@ -202,7 +209,7 @@ pub fn relationship_authority(
     edge_type: &GraphEdgeType,
     proofs: &[RelationshipProof],
 ) -> RelationshipAuthority {
-    if proofs.is_empty() || !proof_targets_are_coherent(proofs) {
+    if proofs.is_empty() || !proof_identities_are_coherent(proofs) {
         return RelationshipAuthority::Heuristic;
     }
 
@@ -433,7 +440,9 @@ mod tests {
     #[test]
     fn exact_reference_authorizes_reference_and_type_use() {
         let proof = proof(RelationshipProofKind::ExactReference, 1);
-        assert!(edge(GraphEdgeType::References, vec![proof.clone()]).is_authoritative_relationship());
+        assert!(
+            edge(GraphEdgeType::References, vec![proof.clone()]).is_authoritative_relationship()
+        );
         assert!(edge(GraphEdgeType::UsesType, vec![proof]).is_authoritative_relationship());
     }
 
@@ -464,7 +473,25 @@ mod tests {
         let mut second = proof(RelationshipProofKind::QualifiedName, 1);
         second.target_symbol_id = Some(SymbolId::new("two"));
         let edge = edge(GraphEdgeType::References, vec![first, second]);
-        assert_eq!(edge.relationship_authority(), RelationshipAuthority::Heuristic);
+        assert_eq!(
+            edge.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
+    }
+
+    #[test]
+    fn conflicting_source_ids_fail_closed() {
+        let mut call_site = proof(RelationshipProofKind::ExactCallSite, 1);
+        call_site.source_symbol_id = Some(SymbolId::new("caller-a"));
+        call_site.target_symbol_id = Some(SymbolId::new("callee"));
+        let mut exact_target = proof(RelationshipProofKind::ExactReference, 1);
+        exact_target.source_symbol_id = Some(SymbolId::new("caller-b"));
+        exact_target.target_symbol_id = Some(SymbolId::new("callee"));
+        let edge = edge(GraphEdgeType::Calls, vec![call_site, exact_target]);
+        assert_eq!(
+            edge.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
     }
 
     #[test]
@@ -473,7 +500,10 @@ mod tests {
             edge_type: GraphEdgeType::References,
             ..Default::default()
         };
-        assert_eq!(legacy.relationship_authority(), RelationshipAuthority::Heuristic);
+        assert_eq!(
+            legacy.relationship_authority(),
+            RelationshipAuthority::Heuristic
+        );
 
         let mut malformed = legacy;
         malformed.properties.insert(
