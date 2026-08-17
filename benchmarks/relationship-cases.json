@@ -59,14 +59,11 @@
         "selector": "caller_fn",
         "identity": "symbol:rust:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "target_fn",
-        "identity": "symbol:rust:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "rust-calls-04-unrelated_receiver",
@@ -80,14 +77,11 @@
         "selector": "caller_fn",
         "identity": "symbol:rust:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "target_fn",
-        "identity": "symbol:rust:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "rust-calls-05-nested_shadowing",
@@ -303,9 +297,24 @@
         "selector": "src/main.rs",
         "identity": "file:rust:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "rust-references-07-test_prod_collision",
@@ -1149,14 +1158,11 @@
         "selector": "callerFn",
         "identity": "symbol:typescript:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:typescript:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "typescript-calls-04-unrelated_receiver",
@@ -1170,14 +1176,11 @@
         "selector": "callerFn",
         "identity": "symbol:typescript:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:typescript:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "typescript-calls-05-nested_shadowing",
@@ -1393,9 +1396,24 @@
         "selector": "src/main.ts",
         "identity": "file:typescript:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "targetFn",
+        "identity": "symbol:typescript:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "typescript-references-07-test_prod_collision",
@@ -2259,14 +2277,11 @@
         "selector": "callerFn",
         "identity": "symbol:javascript:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:javascript:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "javascript-calls-04-unrelated_receiver",
@@ -2280,14 +2295,11 @@
         "selector": "callerFn",
         "identity": "symbol:javascript:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:javascript:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "javascript-calls-05-nested_shadowing",
@@ -2503,9 +2515,24 @@
         "selector": "src/main.js",
         "identity": "file:javascript:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "targetFn",
+        "identity": "symbol:javascript:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "javascript-references-07-test_prod_collision",
@@ -3317,14 +3344,11 @@
         "selector": "caller_fn",
         "identity": "symbol:python:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "target_fn",
-        "identity": "symbol:python:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "python-calls-04-unrelated_receiver",
@@ -3338,14 +3362,11 @@
         "selector": "caller_fn",
         "identity": "symbol:python:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "target_fn",
-        "identity": "symbol:python:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "python-calls-05-nested_shadowing",
@@ -3561,9 +3582,24 @@
         "selector": "src/main.py",
         "identity": "file:python:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:python:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "python-references-07-test_prod_collision",
@@ -4383,14 +4419,11 @@
         "selector": "callerFn",
         "identity": "symbol:java:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:java:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "java-calls-04-unrelated_receiver",
@@ -4404,14 +4437,11 @@
         "selector": "callerFn",
         "identity": "symbol:java:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "targetFn",
-        "identity": "symbol:java:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "java-calls-05-nested_shadowing",
@@ -4627,9 +4657,24 @@
         "selector": "src/Bench.java",
         "identity": "file:java:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "targetFn",
+        "identity": "symbol:java:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "java-references-07-test_prod_collision",
@@ -5469,14 +5514,11 @@
         "selector": "CallerFn",
         "identity": "symbol:go:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "same_simple_name",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "TargetFn",
-        "identity": "symbol:go:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "go-calls-04-unrelated_receiver",
@@ -5490,14 +5532,11 @@
         "selector": "CallerFn",
         "identity": "symbol:go:calls:source"
       },
-      "expected_outcome": "must_emit",
+      "expected_outcome": "must_not_emit",
       "scenario": "unrelated_receiver",
-      "expected_target": {
-        "kind": "symbol",
-        "selector": "TargetFn",
-        "identity": "symbol:go:calls:target"
-      },
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Adversarial precision probe: ambiguous or unrelated same-named call targets must not become authoritative structural CALLS edges.",
+      "expected_proof_kinds": [],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "go-calls-05-nested_shadowing",
@@ -5713,9 +5752,24 @@
         "selector": "main.go",
         "identity": "file:go:references:source"
       },
-      "expected_outcome": "must_not_emit",
+      "expected_outcome": "must_emit",
       "scenario": "multiple_exact_sites",
-      "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
+      "notes": "Two exact SCIP-equivalent occurrences to the same target must aggregate into one authoritative REFERENCES relationship while preserving both source sites.",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "TargetFn",
+        "identity": "symbol:go:references:target"
+      },
+      "expected_source_range": {
+        "start_line": 2,
+        "start_column": 1,
+        "end_line": 2,
+        "end_column": 10
+      },
+      "expected_proof_kinds": [
+        "exact_occurrence"
+      ],
+      "forbidden_proof_kinds": []
     },
     {
       "id": "go-references-07-test_prod_collision",

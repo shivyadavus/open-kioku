@@ -124,6 +124,17 @@ fn produce_live_relationship_case(
         config.semantic.enabled = false;
         let mut snapshot = Indexer::default().index_repo_with_mode(&root, &config, IndexMode::Full)?;
         inject_reference_fixture_occurrence(case, &mut snapshot)?;
+        if case.scenario == "metamorphic_b" {
+            // Exercise order independence after parsing/indexing: graph construction and proof
+            // normalization must not depend on discovery/insertion order of persisted evidence.
+            snapshot.files.reverse();
+            snapshot.symbols.reverse();
+            snapshot.chunks.reverse();
+            snapshot.occurrences.reverse();
+            snapshot.imports.reverse();
+            snapshot.analysis_facts.reverse();
+            snapshot.resolved_relationships.reverse();
+        }
         let graph = InMemoryGraph::from_index_with_resolved_relationships(
             &snapshot.files,
             &snapshot.symbols,
@@ -148,6 +159,33 @@ fn produce_live_relationship_case(
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         normalize_observed_relationships(&mut relationships);
+        if case.scenario == "multiple_exact_sites"
+            && case.expected_outcome == RelationshipBenchExpectedOutcome::MustEmit
+        {
+            let distinct_sites = relationships
+                .iter()
+                .filter(|relationship| {
+                    relationship.authority
+                        == open_kioku_core::RelationshipAuthority::Authoritative
+                })
+                .flat_map(|relationship| relationship.source_ranges.iter())
+                .map(|range| {
+                    (
+                        range.start_line,
+                        range.start_column,
+                        range.end_line,
+                        range.end_column,
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            if distinct_sites.len() < 2 {
+                anyhow::bail!(
+                    "case {} expected at least two exact reference sites, observed {}",
+                    case.id,
+                    distinct_sites.len()
+                );
+            }
+        }
         let authoritative = relationships
             .iter()
             .filter(|relationship| {
@@ -408,13 +446,13 @@ fn inject_reference_fixture_occurrence(
         end_column: 10,
     });
     snapshot.occurrences.push(open_kioku_core::SymbolOccurrence {
-        symbol_id: target.id,
-        file_id: source_file.id,
+        symbol_id: target.id.clone(),
+        file_id: source_file.id.clone(),
         range: Some(open_kioku_core::LineRange {
             start: range.start_line,
             end: range.end_line,
         }),
-        source_range: Some(range),
+        source_range: Some(range.clone()),
         is_definition: false,
         confidence: if should_inject_exact {
             Confidence::Exact
@@ -427,6 +465,26 @@ fn inject_reference_fixture_occurrence(
             EvidenceSourceType::TreeSitter
         },
     });
+    if should_inject_exact && case.scenario == "multiple_exact_sites" {
+        let second = open_kioku_core::SourceRange {
+            start_line: range.end_line.saturating_add(1),
+            start_column: 1,
+            end_line: range.end_line.saturating_add(1),
+            end_column: 10,
+        };
+        snapshot.occurrences.push(open_kioku_core::SymbolOccurrence {
+            symbol_id: target.id,
+            file_id: source_file.id,
+            range: Some(open_kioku_core::LineRange {
+                start: second.start_line,
+                end: second.end_line,
+            }),
+            source_range: Some(second),
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::Scip,
+        });
+    }
     Ok(())
 }
 
@@ -448,11 +506,33 @@ fn write_live_relationship_fixture(case: &RelationshipBenchCase, root: &Path) ->
         fs::write(absolute, content)?;
     }
     if case.scenario == "skipped_path" {
-        let skipped = root.join("vendor/generated/ignored.txt");
+        // Put real relationship-shaped source in a vendor/generated path. If secure ingest ever
+        // leaks skipped source, endpoint identity or structural precision will change.
+        let relative = PathBuf::from("vendor/generated").join(main_path(case.language));
+        let skipped = root.join(relative);
         fs::create_dir_all(skipped.parent().expect("skipped fixture has parent"))?;
-        fs::write(skipped, "generated fixture noise")?;
+        fs::write(skipped, positive_call_source(case.language))?;
+    }
+    if case.scenario == "malformed_partial" {
+        let (path, content) = malformed_live_fixture_file(case.language);
+        let absolute = root.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(absolute, content)?;
     }
     Ok(())
+}
+
+fn malformed_live_fixture_file(language: RelationshipBenchLanguage) -> (PathBuf, &'static str) {
+    match language {
+        RelationshipBenchLanguage::Rust => (PathBuf::from("src/broken.rs"), "pub fn broken( {"),
+        RelationshipBenchLanguage::TypeScript => (PathBuf::from("src/broken.ts"), "export function broken( {"),
+        RelationshipBenchLanguage::JavaScript => (PathBuf::from("src/broken.js"), "export function broken( {"),
+        RelationshipBenchLanguage::Python => (PathBuf::from("src/broken.py"), "def broken(:\n    pass\n"),
+        RelationshipBenchLanguage::Java => (PathBuf::from("src/Broken.java"), "class Broken { void broken( { }"),
+        RelationshipBenchLanguage::Go => (PathBuf::from("broken.go"), "package bench\nfunc Broken( {\n"),
+    }
 }
 
 fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathBuf, String)>> {
