@@ -787,7 +787,30 @@ async fn dispatch(
                 Some(store as &dyn open_kioku_storage::GraphStore),
                 manifest.as_ref(),
             );
-            Ok(json!(schema))
+            let mut schema = serde_json::to_value(schema)?;
+            let capabilities = [
+                open_kioku_core::Language::Rust,
+                open_kioku_core::Language::TypeScript,
+                open_kioku_core::Language::JavaScript,
+                open_kioku_core::Language::Python,
+                open_kioku_core::Language::Java,
+                open_kioku_core::Language::Go,
+            ]
+            .iter()
+            .filter_map(open_kioku_resolution::semantic_capabilities_for)
+            .collect::<Vec<_>>();
+            let object = schema
+                .as_object_mut()
+                .context("evidence schema must serialize as a JSON object")?;
+            object.insert(
+                "relationship_semantic_capability_version".into(),
+                json!(open_kioku_resolution::LANGUAGE_SEMANTIC_CAPABILITY_VERSION),
+            );
+            object.insert(
+                "relationship_semantic_capabilities".into(),
+                json!(capabilities),
+            );
+            Ok(schema)
         }
         "query_evidence_graph" => {
             let query_str = params
@@ -1227,7 +1250,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "map_stacktrace_to_code" => "Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "find_errors_for_symbol" => "Use to look up recently stored runtime errors and stack traces for one specific symbol name. Returns error messages, stack frames, and timestamps when runtime integration is configured. Do NOT use for ad-hoc stack trace text mapping (use map_stacktrace_to_code) or for a broad inventory of recent failures (use find_recent_failures). This is read-only and returns a disabled-status response when runtime error integration is not configured in the repository.",
         "find_recent_failures" => "Use to list recently stored runtime failures, errors, and incidents across the repository before beginning a debugging investigation. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured. Do NOT use when errors for one specific symbol are needed (use find_errors_for_symbol) or for stack trace mapping (use map_stacktrace_to_code). This is read-only and returns a disabled-status response when runtime error integration is not configured.",
-        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.",
+        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, properties, and the versioned Tier-1 relationship-semantic capability matrix. This is read-only and does not query graph data.",
         "query_evidence_graph" => "Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
         _ => "Use when this exact indexed repository capability is needed. Prefer narrower sibling tools when they match the task. This tool reports local Open Kioku index data and does not contact external services.",
     };
@@ -1293,7 +1316,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recently stored runtime errors and stack traces for one specific symbol from the local error store. Returns error messages, stack frames, and timestamps when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact symbol name to look up stored runtime errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recently stored runtime failures, errors, and incidents from the repository's local error store. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve, ordered by most recent. Defaults to 20."}}})),
-        ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
+        ("get_evidence_schema", "Retrieve the versioned schema defining supported graph types, query properties, and the Tier-1 relationship-semantic capability matrix.", json!({"type":"object","properties":{}})),
         ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
 
@@ -3603,6 +3626,31 @@ paths = ["src/**"]
         assert!(result.get("evidence_source_types").is_some());
         assert!(result.get("query_features").is_some());
         assert!(result.get("optional_evidence").is_some());
+        assert_eq!(result["relationship_semantic_capability_version"], 1);
+        let semantic_capabilities = result["relationship_semantic_capabilities"]
+            .as_array()
+            .expect("Tier-1 relationship semantic capabilities");
+        assert_eq!(semantic_capabilities.len(), 6);
+        let javascript = semantic_capabilities
+            .iter()
+            .find(|descriptor| descriptor["language"] == "java_script")
+            .expect("JavaScript semantic capability descriptor");
+        assert_eq!(
+            javascript["capabilities"]["types_annotation"],
+            "unsupported"
+        );
+        let java = semantic_capabilities
+            .iter()
+            .find(|descriptor| descriptor["language"] == "java")
+            .expect("Java semantic capability descriptor");
+        assert_eq!(
+            java["capabilities"]["calls_instance_member"],
+            "supported_authoritative"
+        );
+        assert_eq!(
+            java["capabilities"]["calls_dynamic_dispatch"],
+            "unsupported"
+        );
 
         // Check arrays
         let node_types = result["node_types"].as_array().unwrap();

@@ -79,13 +79,11 @@ fn resolve_rust_qualified_module_outcome(
     ctx: &ResolutionContext<'_>,
     receiver: &str,
 ) -> Option<ResolutionOutcome> {
-    let module = receiver.strip_prefix("crate::")?;
-    if module.is_empty() {
-        return None;
-    }
+    let qualified_names =
+        rust_qualified_module_symbol_names(ctx.file_path, receiver, &call.callee_name)?;
 
     let mut targets = Vec::new();
-    for qualified_name in rust_qualified_module_symbol_names(module, &call.callee_name) {
+    for qualified_name in qualified_names {
         if let Some(ids) = ctx.symbols.by_qualified.get(&qualified_name) {
             targets.extend(ids.iter().cloned());
         }
@@ -133,10 +131,90 @@ fn resolve_rust_qualified_module_outcome(
     Some(evaluate_candidates(&GraphEdgeType::Calls, candidates))
 }
 
-fn rust_qualified_module_symbol_names(module: &str, callee: &str) -> [String; 2] {
-    [
-        format!("src::{module}::{callee}"),
-        format!("src::{module}::mod::{callee}"),
+fn rust_qualified_module_symbol_names(
+    file_path: &std::path::Path,
+    receiver: &str,
+    callee: &str,
+) -> Option<Vec<String>> {
+    let receiver = receiver.trim();
+    let stem = file_path
+        .with_extension("")
+        .to_string_lossy()
+        .replace(['/', '\\'], "::");
+    let logical_module = rust_logical_module_prefix(&stem);
+
+    let mut names = match receiver {
+        "crate" => rust_crate_root_member_names(&stem, callee),
+        "self" => vec![format!("{stem}::{callee}")],
+        "super" => rust_super_member_names(&logical_module, callee),
+        _ if receiver.starts_with("crate::") => {
+            let module = receiver.trim_start_matches("crate::");
+            rust_module_member_names(&format!("src::{module}"), callee)
+        }
+        _ if receiver.starts_with("self::") => {
+            let module = receiver.trim_start_matches("self::");
+            rust_module_member_names(&format!("{logical_module}::{module}"), callee)
+        }
+        _ if receiver.starts_with("super::") => {
+            let module = receiver.trim_start_matches("super::");
+            let parent = rust_parent_module_prefix(&logical_module)?;
+            rust_module_member_names(&format!("{parent}::{module}"), callee)
+        }
+        _ => return None,
+    };
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
+fn rust_logical_module_prefix(stem: &str) -> String {
+    if let Some(prefix) = stem.strip_suffix("::mod") {
+        prefix.to_string()
+    } else if let Some(prefix) = stem.strip_suffix("::lib") {
+        prefix.to_string()
+    } else if let Some(prefix) = stem.strip_suffix("::main") {
+        prefix.to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn rust_parent_module_prefix(module: &str) -> Option<String> {
+    module
+        .rsplit_once("::")
+        .map(|(parent, _)| parent.to_string())
+}
+
+fn rust_crate_root_member_names(stem: &str, callee: &str) -> Vec<String> {
+    if stem.ends_with("::lib") || stem.ends_with("::main") {
+        vec![format!("{stem}::{callee}")]
+    } else {
+        let root = stem.split("::").next().unwrap_or("src");
+        vec![
+            format!("{root}::lib::{callee}"),
+            format!("{root}::main::{callee}"),
+        ]
+    }
+}
+
+fn rust_super_member_names(logical_module: &str, callee: &str) -> Vec<String> {
+    let Some(parent) = rust_parent_module_prefix(logical_module) else {
+        return Vec::new();
+    };
+    if !parent.contains("::") {
+        vec![
+            format!("{parent}::lib::{callee}"),
+            format!("{parent}::main::{callee}"),
+        ]
+    } else {
+        rust_module_member_names(&parent, callee)
+    }
+}
+
+fn rust_module_member_names(module: &str, callee: &str) -> Vec<String> {
+    vec![
+        format!("{module}::{callee}"),
+        format!("{module}::mod::{callee}"),
     ]
 }
 
@@ -517,10 +595,36 @@ mod tests {
     #[test]
     fn rust_module_symbol_names_match_tree_sitter_qualified_names() {
         assert_eq!(
-            rust_qualified_module_symbol_names("storage", "persist"),
-            [
-                "src::storage::persist".to_string(),
+            rust_qualified_module_symbol_names(
+                std::path::Path::new("src/lib.rs"),
+                "crate::storage",
+                "persist"
+            )
+            .unwrap(),
+            vec![
                 "src::storage::mod::persist".to_string(),
+                "src::storage::persist".to_string(),
+            ]
+        );
+        assert_eq!(
+            rust_qualified_module_symbol_names(
+                std::path::Path::new("src/storage/service.rs"),
+                "self",
+                "persist"
+            )
+            .unwrap(),
+            vec!["src::storage::service::persist".to_string()]
+        );
+        assert_eq!(
+            rust_qualified_module_symbol_names(
+                std::path::Path::new("src/storage/service.rs"),
+                "super",
+                "persist"
+            )
+            .unwrap(),
+            vec![
+                "src::storage::mod::persist".to_string(),
+                "src::storage::persist".to_string(),
             ]
         );
     }
