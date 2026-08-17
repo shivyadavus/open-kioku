@@ -151,13 +151,9 @@ impl BindingIndex {
                 .bindings_by_scope_name
                 .get(&(sid.clone(), name.to_string()))
             {
-                if let Some(binding) = list
-                    .iter()
-                    .rev()
-                    .find(|binding| {
-                        (binding.range.start_line, binding.range.start_column) <= call_pos
-                    })
-                {
+                if let Some(binding) = list.iter().rev().find(|binding| {
+                    (binding.range.start_line, binding.range.start_column) <= call_pos
+                }) {
                     return Some(binding);
                 }
             }

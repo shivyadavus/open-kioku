@@ -157,10 +157,7 @@ impl ResolutionOutcome {
                 confidence: candidate.confidence,
                 evidence: candidate.evidence,
             },
-            Self::Ambiguous {
-                candidates,
-                reason,
-            } => ResolutionResult::Ambiguous {
+            Self::Ambiguous { candidates, reason } => ResolutionResult::Ambiguous {
                 candidates: candidates
                     .iter()
                     .map(|candidate| candidate.target_symbol_id.clone())
@@ -168,10 +165,7 @@ impl ResolutionOutcome {
                 reason,
                 evidence: merged_candidate_evidence(&candidates),
             },
-            Self::Unresolved {
-                candidates,
-                reason,
-            } => {
+            Self::Unresolved { candidates, reason } => {
                 let mut evidence = merged_candidate_evidence(&candidates);
                 evidence.push(ResolutionEvidence {
                     kind: ResolutionEvidenceKind::FallbackHeuristic,
