@@ -1,0 +1,55 @@
+name: build-current-main-artifact
+
+on:
+  push:
+    branches:
+      - agent/build-current-main-artifact
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact current main
+        uses: actions/checkout@v4
+        with:
+          ref: acbc5bcb387551501b3bc350247d25c133116d75
+
+      - name: Record source identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "acbc5bcb387551501b3bc350247d25c133116d75"
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" | tee CURRENT_MAIN_BUILD.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build Open Kioku
+        shell: bash
+        run: cargo build --release -p open-kioku-cli
+
+      - name: Smoke binary
+        shell: bash
+        run: ./target/release/ok --version | tee -a CURRENT_MAIN_BUILD.txt
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/ok dist/ok-current-main-linux-x86_64
+          cp CURRENT_MAIN_BUILD.txt dist/
+          chmod +x dist/ok-current-main-linux-x86_64
+          sha256sum dist/ok-current-main-linux-x86_64 > dist/ok-current-main-linux-x86_64.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ok-current-main-linux-x86_64
+          path: dist/*
+          retention-days: 7
