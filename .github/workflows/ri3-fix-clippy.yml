@@ -1,0 +1,37 @@
+name: RI3 clippy cleanup
+
+on:
+  push:
+    branches:
+      - agent/ri3-language-semantics-complete
+    paths:
+      - .github/workflows/ri3-fix-clippy.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply guarded cleanup
+        run: python3 scripts/ri3-fix-clippy.py
+      - name: Validate focused crate
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-tree-sitter --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-tree-sitter rust_scoped_paths_distinguish_modules_from_instance_self
+          cargo test -p open-kioku-tree-sitter rust_crate_qualified_call_is_module_receiver
+      - name: Commit durable cleanup and remove staging files
+        run: |
+          rm .github/workflows/ri3-fix-clippy.yml scripts/ri3-fix-clippy.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-tree-sitter/src/lib.rs .github/workflows/ri3-fix-clippy.yml scripts/ri3-fix-clippy.py
+          git diff --cached --check
+          git diff --cached --quiet && { echo "expected durable cleanup diff"; exit 1; }
+          git commit -m "Fix RI3 scoped-path lint regressions"
+          git push origin HEAD:agent/ri3-language-semantics-complete
