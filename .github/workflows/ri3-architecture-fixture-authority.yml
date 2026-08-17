@@ -1,0 +1,43 @@
+name: RI3 architecture fixture authority
+
+on:
+  push:
+    branches:
+      - agent/ri3-resolution-foundation
+    paths:
+      - scripts/ri3_architecture_fixture_authority_tmp.py
+      - .github/workflows/ri3-architecture-fixture-authority.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-resolution-foundation
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply authoritative architecture fixtures
+        run: python3 scripts/ri3_architecture_fixture_authority_tmp.py
+      - name: Validate architecture contract
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-architecture --all-targets -- -D warnings
+          cargo test -p open-kioku-architecture --lib
+          git diff --check
+      - name: Commit validated fixture fix and self-clean
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add crates/open-kioku-architecture/src/lib.rs
+          git diff --cached --quiet && { echo "expected architecture fixture change missing" >&2; exit 1; }
+          git commit -m "test: align architecture fixtures with RI3 authority"
+          git rm scripts/ri3_architecture_fixture_authority_tmp.py .github/workflows/ri3-architecture-fixture-authority.yml
+          git commit -m "chore: remove RI3 architecture fixture gate"
+          git push origin HEAD:agent/ri3-resolution-foundation
