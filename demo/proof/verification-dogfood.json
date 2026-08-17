@@ -1,0 +1,47 @@
+{
+  "proof_kind": "plan_edit_validate_verify_dogfood",
+  "source_sha": "acbc5bcb387551501b3bc350247d25c133116d75",
+  "binary_sha256": "3b74eeb17ea49a76b06e8bf4fac00834180ab88d2947ef2bd30a2db0824b82f6",
+  "binary_version": "ok 2.4.0",
+  "task": "change token expiration",
+  "changed_files": ["src/lib.rs"],
+  "verdict": "warn",
+  "boundary_violation_count": 0,
+  "missing_test_count": 0,
+  "command_results": [
+    {
+      "command": "cargo test",
+      "status": "pass",
+      "exit_code": 0,
+      "attestation_id": "049ba22c6f55a1f5442e464365dddbfaba67da3632ce6404ad55c1d18bbb5b90",
+      "stdout": "\nrunning 1 test\ntest auth::tests::issues_token_with_user_id ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 1 test\ntest login_returns_valid_token ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+    }
+  ],
+  "validation_attestation_count": 1,
+  "evidence_quality": {
+    "index_mode": "full",
+    "freshness": "fresh",
+    "exact_reference_available": false,
+    "runtime_available": false,
+    "history_available": false,
+    "test_coverage_available": false,
+    "skipped_path_count": 0,
+    "unresolved_import_count": 0,
+    "ambiguous_edge_count": 0,
+    "failed_optional_passes": [],
+    "caveats": [
+      "exact symbol/reference evidence is unavailable",
+      "runtime evidence is unavailable",
+      "history evidence is unavailable",
+      "coverage or JUnit evidence is unavailable"
+    ]
+  },
+  "warning_reasons": [
+    "exact symbol/reference evidence is unavailable",
+    "runtime evidence is unavailable",
+    "history evidence is unavailable",
+    "coverage or JUnit evidence is unavailable",
+    "exact symbol/reference evidence is absent",
+    "runtime corroboration is absent"
+  ]
+}
