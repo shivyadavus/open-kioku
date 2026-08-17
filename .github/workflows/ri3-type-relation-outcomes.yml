@@ -1,0 +1,51 @@
+name: RI3 type relation outcome contracts
+
+on:
+  push:
+    branches:
+      - agent/ri3-resolution-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-resolution-foundation
+          fetch-depth: 0
+
+      - name: Apply final relationship outcome tests
+        run: |
+          python3 -m py_compile scripts/ri3_type_relation_outcome_tests_tmp.py
+          python3 scripts/ri3_type_relation_outcome_tests_tmp.py
+
+      - name: Validate relationship outcomes
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-resolution --all-targets -- -D warnings
+          cargo test -p open-kioku-resolution ri3_relationship_outcome_tests
+
+      - name: Commit validated outcome tests
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -- Cargo.lock
+          rm -rf scripts/__pycache__
+          git rm -f .github/workflows/ri3-type-relation-outcomes.yml scripts/ri3_type_relation_outcome_tests_tmp.py
+          git add crates/open-kioku-resolution/src/type_relations.rs
+          if ! git diff --quiet; then
+            echo "unexpected unstaged tracked changes after validation cleanup:" >&2
+            git status --short >&2
+            exit 1
+          fi
+          if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            echo "unexpected untracked files after validation cleanup:" >&2
+            git ls-files --others --exclude-standard >&2
+            exit 1
+          fi
+          git commit -m "test: lock RI3 type relationship proof outcomes"
+          git pull --rebase origin agent/ri3-resolution-foundation
+          git push origin HEAD:agent/ri3-resolution-foundation
