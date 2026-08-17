@@ -3630,6 +3630,7 @@ mod tests {
 
     fn make_manifest() -> IndexManifest {
         IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),

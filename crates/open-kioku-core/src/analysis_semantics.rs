@@ -182,8 +182,8 @@ pub fn classify_analysis_semantics_with_policy(
             reasons: vec!["legacy index has no analysis-semantics descriptor".into()],
             affected_components: vec!["analysis_semantics".into()],
             affected_languages: Vec::new(),
-            recommended_action: "run `ok index .` to rebuild the index with current analysis semantics"
-                .into(),
+            recommended_action:
+                "run `ok index .` to rebuild the index with current analysis semantics".into(),
         };
     };
 
@@ -293,7 +293,9 @@ pub fn classify_analysis_semantics_with_policy(
         // Descriptor equality with a different valid fingerprint cannot happen with the current
         // canonical encoding, so fail closed if a future encoding ever violates that invariant.
         components.insert("fingerprint".into());
-        reasons.push("analysis-semantics fingerprints differ without a classified component change".into());
+        reasons.push(
+            "analysis-semantics fingerprints differ without a classified component change".into(),
+        );
     }
 
     let refresh_only = components
@@ -430,7 +432,10 @@ mod tests {
             compatibility.status,
             AnalysisSemanticsCompatibilityStatus::RebuildRequired
         );
-        assert_eq!(compatibility.affected_components, vec!["relationship_resolver"]);
+        assert_eq!(
+            compatibility.affected_components,
+            vec!["relationship_resolver"]
+        );
     }
 
     #[test]
@@ -448,7 +453,10 @@ mod tests {
             AnalysisSemanticsCompatibilityStatus::RebuildRequired
         );
         assert_eq!(compatibility.affected_languages, vec!["java"]);
-        assert_eq!(compatibility.affected_components, vec!["language_adapter:java"]);
+        assert_eq!(
+            compatibility.affected_components,
+            vec!["language_adapter:java"]
+        );
     }
 
     #[test]

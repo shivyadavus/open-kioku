@@ -826,6 +826,7 @@ mod tests {
         let store = SqliteStore::open(":memory:").expect("in-memory sqlite store");
         store.initialize().expect("initialize store");
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),
