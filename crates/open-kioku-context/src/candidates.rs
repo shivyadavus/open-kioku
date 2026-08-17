@@ -12,11 +12,19 @@ pub mod builtins;
 
 pub const DEFAULT_RRF_K: f32 = 60.0;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateScope {
+    /// Repository-relative path or directory prefixes that were validated against the
+    /// indexed file inventory before candidate generation. Empty means unscoped.
+    pub path_prefixes: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CandidateRequest {
     pub task: String,
     pub search_terms: Vec<String>,
     pub limit: usize,
+    pub scope: CandidateScope,
 }
 
 impl CandidateRequest {
@@ -25,7 +33,13 @@ impl CandidateRequest {
             task: task.into(),
             search_terms,
             limit: limit.clamp(1, 200),
+            scope: CandidateScope::default(),
         }
+    }
+
+    pub fn with_path_prefixes(mut self, path_prefixes: Vec<String>) -> Self {
+        self.scope.path_prefixes = path_prefixes;
+        self
     }
 }
 
