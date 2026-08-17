@@ -19,8 +19,9 @@ jobs:
 
       - name: Apply exact-reference patch
         run: |
-          python3 -m py_compile scripts/ri3_exact_references_tmp.py
+          python3 -m py_compile scripts/ri3_exact_references_tmp.py scripts/ri3_exact_references_fmt_tmp.py
           python3 scripts/ri3_exact_references_tmp.py
+          python3 scripts/ri3_exact_references_fmt_tmp.py
 
       - name: Validate reference trust boundary
         run: |
@@ -34,7 +35,10 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git checkout -- Cargo.lock
           rm -rf scripts/__pycache__
-          git rm -f .github/workflows/ri3-exact-references.yml scripts/ri3_exact_references_tmp.py
+          git rm -f \
+            .github/workflows/ri3-exact-references.yml \
+            scripts/ri3_exact_references_tmp.py \
+            scripts/ri3_exact_references_fmt_tmp.py
           git add \
             crates/open-kioku-core/src/lib.rs \
             crates/open-kioku-scip/src/lib.rs \
