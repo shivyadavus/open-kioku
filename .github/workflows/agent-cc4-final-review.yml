@@ -1,0 +1,248 @@
+name: agent-cc4-final-review
+
+on:
+  push:
+    branches:
+      - agent/cc4-query-shape-routing
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc4-query-shape-routing
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply self-review hardening and remove unrelated lock drift
+        run: |
+          git fetch origin main
+          git checkout origin/main -- Cargo.lock
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-context/src/routing.rs')
+          text = path.read_text()
+
+          old = '''    if is_qualified_symbol_query(trimmed) {
+              structured.push((
+                  QueryShape::QualifiedSymbol,
+                  "query contains a qualified symbol/member expression".into(),
+              ));
+          } else if is_exact_identifier_query(trimmed) {
+              structured.push((
+                  QueryShape::ExactIdentifier,
+                  "query is a single identifier-shaped token".into(),
+              ));
+          }
+          '''
+          new = '''    if is_qualified_symbol_query(trimmed) {
+              structured.push((
+                  QueryShape::QualifiedSymbol,
+                  "query contains a qualified symbol/member expression".into(),
+              ));
+          } else if is_exact_identifier_query(trimmed) {
+              structured.push((
+                  QueryShape::ExactIdentifier,
+                  "query is a single identifier-shaped token".into(),
+              ));
+          } else if contains_qualified_symbol_reference(trimmed) {
+              structured.push((
+                  QueryShape::QualifiedSymbol,
+                  "natural-language query contains a qualified symbol/member reference".into(),
+              ));
+          } else if contains_named_identifier_reference(trimmed) {
+              structured.push((
+                  QueryShape::ExactIdentifier,
+                  "natural-language query contains an identifier-shaped code reference".into(),
+              ));
+          }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'embedded identifier classifier marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''            let refined = factor.saturating_add(*delta);
+                  *factor = if flat_family {
+                      refined
+                  } else {
+                      refined.min(family_max)
+                  };
+          '''
+          new = '''            let original = *factor;
+                  let refined = original.saturating_add(*delta);
+                  *factor = if flat_family {
+                      refined
+                  } else if original == family_max {
+                      original
+                  } else {
+                      refined.min(family_max.saturating_sub(1).max(original))
+                  };
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'family priority refinement marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          marker = '''fn contains_path_reference(query: &str) -> bool {
+          '''
+          helpers = '''fn contains_qualified_symbol_reference(query: &str) -> bool {
+              query
+                  .split_whitespace()
+                  .map(trim_query_token)
+                  .any(is_qualified_symbol_query)
+          }
+
+          fn contains_named_identifier_reference(query: &str) -> bool {
+              query
+                  .split_whitespace()
+                  .map(trim_query_token)
+                  .any(|token| {
+                      if !is_exact_identifier_query(token) {
+                          return false;
+                      }
+                      let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
+                      let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
+                      let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+                      (has_lower && has_upper) || token.contains('_') || has_digit
+                  })
+          }
+
+          fn trim_query_token(token: &str) -> &str {
+              token.trim_matches(|ch: char| {
+                  matches!(
+                      ch,
+                      '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+                  )
+              })
+          }
+
+          fn contains_path_reference(query: &str) -> bool {
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit(f'query-token helper insertion marker count={text.count(marker)}')
+          text = text.replace(marker, helpers, 1)
+
+          old = '''    query
+                  .split_whitespace()
+                  .map(|token| {
+                      token.trim_matches(|ch: char| {
+                          matches!(
+                              ch,
+                              '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+                          )
+                      })
+                  })
+                  .any(is_source_path_token)
+          }
+          '''
+          new = '''    query
+                  .split_whitespace()
+                  .map(trim_query_token)
+                  .any(is_source_path_token)
+          }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'path token normalization marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''fn is_source_path_token(token: &str) -> bool {
+              let lower = token.to_ascii_lowercase();
+              lower.contains('/')
+          '''
+          new = '''fn is_source_path_token(token: &str) -> bool {
+              let lower = token.to_ascii_lowercase();
+              if lower.starts_with("/api/") {
+                  return false;
+              }
+              lower.contains('/')
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'API-vs-path marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          tests_marker = '''    #[test]
+              fn diagnostics_preserve_query_shape_reasoning_for_json_and_mcp_consumers() {
+          '''
+          tests = '''    #[test]
+              fn embedded_code_identifier_and_api_resource_shapes_are_not_lost_in_prose() {
+                  assert_eq!(
+                      classify_task("explain ContextPackBuilder selection behavior").query_shape,
+                      QueryShape::MixedStructuredNaturalLanguage
+                  );
+                  assert_eq!(
+                      classify_task("/api/v1/orders").query_shape,
+                      QueryShape::ApiResource
+                  );
+                  assert_eq!(
+                      classify_task("look at this behavior carefully").query_shape,
+                      QueryShape::Conceptual
+                  );
+              }
+
+              #[test]
+              fn query_shape_refinement_preserves_specialized_family_top_tier() {
+                  let tests = classify_task("find tests for ContextPackBuilder");
+                  assert_eq!(tests.family, TaskFamily::CodeToTest);
+                  assert!(
+                      tests
+                          .policy
+                          .candidate_cap(RetrievalSourceKind::Validation, 10)
+                          > tests
+                              .policy
+                              .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+                  );
+
+                  let ripple = classify_task("show callers for ContextPackBuilder");
+                  assert_eq!(ripple.family, TaskFamily::EditToRipple);
+                  let lexical = ripple
+                      .policy
+                      .candidate_cap(RetrievalSourceKind::Lexical, 10);
+                  assert!(
+                      ripple
+                          .policy
+                          .candidate_cap(RetrievalSourceKind::ExactSemantic, 10)
+                          > lexical
+                  );
+                  assert!(
+                      ripple
+                          .policy
+                          .candidate_cap(RetrievalSourceKind::Graph, 10)
+                          > lexical
+                  );
+              }
+
+              #[test]
+              fn diagnostics_preserve_query_shape_reasoning_for_json_and_mcp_consumers() {
+          '''
+          if text.count(tests_marker) != 1:
+              raise SystemExit(f'self-review test insertion marker count={text.count(tests_marker)}')
+          text = text.replace(tests_marker, tests, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+      - name: Validate exact reviewed product tree
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-context
+          cargo test -p open-kioku-core
+          cargo test --all
+          cargo test -p open-kioku-tests
+      - name: Commit reviewed product tree and remove temporary workflow
+        run: |
+          rm .github/workflows/agent-cc4-final-review.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No reviewed changes to commit"
+            exit 1
+          fi
+          git commit -m "fix(context): harden query-shape routing boundaries"
+          git push origin HEAD:agent/cc4-query-shape-routing
