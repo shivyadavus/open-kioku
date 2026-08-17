@@ -265,7 +265,7 @@ impl InMemoryGraph {
                 }
             }
 
-            buffer.insert_edge(GraphEdge {
+            let mut edge = GraphEdge {
                 id: edge_id.clone(),
                 from: from_node,
                 to: to_node,
@@ -295,7 +295,10 @@ impl InMemoryGraph {
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            };
+            edge.set_relationship_proofs(rel.proofs.clone())
+                .expect("typed relationship proofs must serialize to JSON");
+            buffer.insert_edge(edge);
         }
         for fact in analysis_facts {
             let Some(file) = files_by_id.get(fact.file_id.0.as_str()) else {
@@ -568,8 +571,9 @@ impl open_kioku_storage::GraphStore for InMemoryGraph {
 mod tests {
     use super::*;
     use open_kioku_core::{
-        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, GraphEdgeType,
-        GraphNodeType, Import, Language, LineRange, RepositoryId, SourceRange, Symbol, SymbolId,
+        AnalysisFact, Confidence, EdgeId, EvidenceSourceType, File, FileId, FileRange,
+        GraphEdgeType, GraphNodeType, Import, Language, LineRange, RelationshipAuthority,
+        RelationshipProof, RelationshipProofKind, RepositoryId, SourceRange, Symbol, SymbolId,
         SymbolKind, SymbolOccurrence,
     };
     use std::path::PathBuf;
@@ -770,11 +774,41 @@ mod tests {
         );
     }
 
+    fn call_relationship_proofs(
+        caller: &SymbolId,
+        callee: &SymbolId,
+        start_line: u32,
+    ) -> Vec<RelationshipProof> {
+        let range = Some(FileRange {
+            path: PathBuf::from("src/service.rs"),
+            line_range: Some(LineRange {
+                start: start_line,
+                end: start_line,
+            }),
+        });
+        let mut call_site =
+            RelationshipProof::new(RelationshipProofKind::ExactCallSite, "test_call_site", 1);
+        call_site.source_range = range.clone();
+        call_site.source_symbol_id = Some(caller.clone());
+        call_site.target_symbol_id = Some(callee.clone());
+
+        let mut target = RelationshipProof::new(
+            RelationshipProofKind::SameScopeDefinition,
+            "test_same_scope",
+            1,
+        );
+        target.source_range = range;
+        target.source_symbol_id = Some(caller.clone());
+        target.target_symbol_id = Some(callee.clone());
+        vec![call_site, target]
+    }
+
     #[test]
     fn resolved_relationships_preserve_same_line_call_columns() {
         let file = make_file("src/service");
         let caller = make_symbol("caller", "src/service", "run");
         let callee = make_symbol("callee", "src/service", "save");
+        let callee_id = callee.id.clone();
         let relationships = vec![
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -788,6 +822,7 @@ mod tests {
                     end_column: 11,
                 }),
                 evidence: Vec::new(),
+                proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
             },
             ResolvedRelationship {
                 from: caller.id.clone(),
@@ -801,6 +836,7 @@ mod tests {
                     end_column: 26,
                 }),
                 evidence: Vec::new(),
+                proofs: call_relationship_proofs(&caller.id, &callee.id, 10),
             },
         ];
 
@@ -827,6 +863,15 @@ mod tests {
         assert_eq!(sites.len(), 2);
         assert_eq!(sites[0]["start_column"], 5);
         assert_eq!(sites[1]["start_column"], 20);
+        let proofs = calls[0].relationship_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(
+            calls[0].relationship_authority(),
+            RelationshipAuthority::Authoritative
+        );
+        assert!(proofs
+            .iter()
+            .all(|proof| proof.target_symbol_id.as_ref() == Some(&callee_id)));
     }
 
     #[test]

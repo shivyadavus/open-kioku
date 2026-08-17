@@ -1,5 +1,6 @@
 use open_kioku_core::{
     identity, EdgeId, Evidence, EvidenceSourceType, GraphEdge, GraphEdgeType, GraphNode, NodeId,
+    RELATIONSHIP_PROOFS_PROPERTY,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -105,6 +106,7 @@ fn file_range_call_site(file_range: &open_kioku_core::FileRange) -> serde_json::
 }
 
 fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
+    let incoming_relationship_proofs = incoming.relationship_proofs();
     let mut call_sites: Vec<serde_json::Value> = existing
         .properties
         .get("call_sites")
@@ -138,9 +140,18 @@ fn merge_edge_metadata(existing: &mut GraphEdge, incoming: GraphEdge) {
     }
 
     for (k, v) in incoming.properties {
-        if k != "call_sites" {
+        if k != "call_sites" && k != RELATIONSHIP_PROOFS_PROPERTY {
             existing.properties.entry(k).or_insert(v);
         }
+    }
+
+    let mut merged_relationship_proofs = existing.relationship_proofs();
+    merged_relationship_proofs.extend(incoming_relationship_proofs);
+    if existing
+        .set_relationship_proofs(merged_relationship_proofs)
+        .is_err()
+    {
+        existing.properties.remove(RELATIONSHIP_PROOFS_PROPERTY);
     }
 
     existing.ambiguity.extend(incoming.ambiguity);
