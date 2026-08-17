@@ -1,0 +1,42 @@
+name: RI3 architecture caveat fix
+
+on:
+  push:
+    branches:
+      - agent/ri3-core-relationship-proofs
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-core-relationship-proofs
+          fetch-depth: 0
+      - name: Correct fail-closed architecture caveat
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("crates/open-kioku-architecture/src/lib.rs")
+          text = path.read_text()
+          old = '"no import, reference, or call graph edges were available to evaluate"'
+          new = '"no authoritative import, reference, or call graph edges were available to evaluate"'
+          if text.count(old) != 2:
+              raise SystemExit(f"expected two caveat anchors, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
+      - name: Validate architecture reporting
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-architecture --all-targets -- -D warnings
+          cargo test -p open-kioku-architecture
+      - name: Commit and self-clean
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-architecture-caveat-fix.yml
+          git add crates/open-kioku-architecture/src/lib.rs
+          git commit -m "fix(ri3): report missing authoritative architecture edges accurately"
+          git push origin HEAD:agent/ri3-core-relationship-proofs
