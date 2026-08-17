@@ -1,0 +1,33 @@
+name: RI3 relationship scorer
+
+on:
+  push:
+    branches:
+      - agent/ri3-relationship-conformance-benchmark
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-relationship-conformance-benchmark
+          fetch-depth: 0
+
+      - name: Validate relationship benchmark scorer
+        run: |
+          cargo fmt --all
+          cargo clippy -p open-kioku-cli --all-targets -- -D warnings
+          cargo test -p open-kioku-cli relationship_bench_tests
+
+      - name: Commit validated scorer
+        run: |
+          git config user.name "open-kioku automation"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/ri3-relationship-scorer.yml
+          git add crates/open-kioku-cli/src/lib.rs crates/open-kioku-cli/src/bench/relationship.rs
+          git commit -m "ri3: validate relationship conformance scorer foundation"
+          git push origin HEAD:agent/ri3-relationship-conformance-benchmark
