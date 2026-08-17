@@ -8,7 +8,7 @@ fn query_shape_conformance_covers_structured_conceptual_and_mixed_queries() {
         ("billing::invoice::finalize", QueryShape::QualifiedSymbol),
         ("crates/open-kioku-context/src/routing.rs", QueryShape::PathReference),
         ("Traceback: panic in AuthService.issueToken", QueryShape::ErrorTrace),
-        ("GET /api/invoices/{id}", QueryShape::ApiResource),
+        ("/api/invoices/{id}", QueryShape::ApiResource),
         (
             "how authentication tokens are persisted after login",
             QueryShape::Conceptual,
@@ -111,7 +111,7 @@ fn query_shape_refinement_never_weakens_task_family_required_evidence() {
 
 #[test]
 fn query_shape_refinement_cannot_enable_sources_forbidden_by_task_family() {
-    let decision = classify_task("document AuthService in README.md");
+    let decision = classify_task("document AuthService method in README.md");
 
     assert_eq!(decision.family, TaskFamily::MixedCodeDocs);
     assert_eq!(
