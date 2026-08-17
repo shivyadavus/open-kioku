@@ -2,7 +2,7 @@ use crate::context::ResolutionContext;
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
-    CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, LineRange,
+    CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language, LineRange,
     RelationshipProof, RelationshipProofKind, ScopeId, SymbolId, SymbolKind,
 };
 use std::collections::BTreeMap;
@@ -60,6 +60,11 @@ pub(crate) fn resolve_module_member_outcome(
     let Some(receiver) = call.receiver.as_deref() else {
         return evaluate_candidates(&GraphEdgeType::Calls, Vec::new());
     };
+    if ctx.language == Language::Rust {
+        if let Some(outcome) = resolve_rust_qualified_module_outcome(call, ctx, receiver) {
+            return outcome;
+        }
+    }
     let imported = imported_receiver_outcome(call, ctx, receiver);
     match imported {
         ResolutionOutcome::Unresolved { ref candidates, .. } if candidates.is_empty() => {
@@ -67,6 +72,72 @@ pub(crate) fn resolve_module_member_outcome(
         }
         other => other,
     }
+}
+
+fn resolve_rust_qualified_module_outcome(
+    call: &CallSite,
+    ctx: &ResolutionContext<'_>,
+    receiver: &str,
+) -> Option<ResolutionOutcome> {
+    let module = receiver.strip_prefix("crate::")?;
+    if module.is_empty() {
+        return None;
+    }
+
+    let mut targets = Vec::new();
+    for qualified_name in rust_qualified_module_symbol_names(module, &call.callee_name) {
+        if let Some(ids) = ctx.symbols.by_qualified.get(&qualified_name) {
+            targets.extend(ids.iter().cloned());
+        }
+    }
+    normalize_symbol_ids(&mut targets);
+    if targets.is_empty() {
+        return None;
+    }
+
+    let candidate_count = targets.len();
+    let ambiguity = ambiguity_strings(&targets);
+    let candidates = targets
+        .into_iter()
+        .map(|target| {
+            let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+            candidate.evidence.push(ResolutionEvidence {
+                kind: ResolutionEvidenceKind::LexicalScope,
+                source_type: EvidenceSourceType::TreeSitter,
+                file_range: call_file_range(call, ctx),
+                symbol_id: Some(target.clone()),
+                message: "candidate from exact Rust crate-qualified module path".into(),
+            });
+            candidate.proofs.push(call_site_proof(call, ctx, &target));
+            candidate.proofs.push(proof(
+                RelationshipProofKind::ModuleOrPackageBinding,
+                "rust_crate_qualified_module",
+                call,
+                ctx,
+                &target,
+                candidate_count,
+                &ambiguity,
+            ));
+            candidate.proofs.push(proof(
+                RelationshipProofKind::QualifiedName,
+                "rust_crate_qualified_member",
+                call,
+                ctx,
+                &target,
+                candidate_count,
+                &ambiguity,
+            ));
+            candidate
+        })
+        .collect();
+    Some(evaluate_candidates(&GraphEdgeType::Calls, candidates))
+}
+
+fn rust_qualified_module_symbol_names(module: &str, callee: &str) -> [String; 2] {
+    [
+        format!("src::{module}::{callee}"),
+        format!("src::{module}::mod::{callee}"),
+    ]
 }
 
 pub(crate) fn resolve_named_type_member_outcome(
@@ -442,6 +513,17 @@ mod tests {
         Binding, BindingId, CallSiteId, FileId, Language, ReceiverKind, Scope, ScopeKind,
         SourceRange, Symbol, Visibility,
     };
+
+    #[test]
+    fn rust_module_symbol_names_match_tree_sitter_qualified_names() {
+        assert_eq!(
+            rust_qualified_module_symbol_names("storage", "persist"),
+            [
+                "src::storage::persist".to_string(),
+                "src::storage::mod::persist".to_string(),
+            ]
+        );
+    }
 
     fn type_symbol(id: &str, name: &str) -> Symbol {
         Symbol {
