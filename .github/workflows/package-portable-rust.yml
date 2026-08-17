@@ -1,0 +1,42 @@
+name: package-portable-rust
+
+on:
+  push:
+    branches:
+      - agent/build-current-main-artifact
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: acbc5bcb387551501b3bc350247d25c133116d75
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Locate and package portable toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOLCHAIN_DIR="$(rustc --print sysroot)"
+          echo "toolchain_dir=$TOOLCHAIN_DIR"
+          "$TOOLCHAIN_DIR/bin/cargo" --version
+          "$TOOLCHAIN_DIR/bin/rustc" --version
+          mkdir -p portable-rust
+          cp -a "$TOOLCHAIN_DIR" portable-rust/toolchain
+          printf 'source_sha=%s\n' "$(git rev-parse HEAD)" > portable-rust/BUILD_INFO.txt
+          printf 'cargo=%s\n' "$("$TOOLCHAIN_DIR/bin/cargo" --version)" >> portable-rust/BUILD_INFO.txt
+          printf 'rustc=%s\n' "$("$TOOLCHAIN_DIR/bin/rustc" --version)" >> portable-rust/BUILD_INFO.txt
+          tar -C portable-rust -czf portable-rust-toolchain.tar.gz toolchain BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-rust-linux-x86_64
+          path: portable-rust-toolchain.tar.gz
+          retention-days: 1
