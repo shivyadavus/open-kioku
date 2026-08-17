@@ -43,7 +43,7 @@ replace_exact(
 replace_exact(
     "crates/open-kioku-graph/src/lib.rs",
     '''        let graph = InMemoryGraph::from_index_with_occurrences(\n            &[file],\n            &[symbol],\n            &[],\n            &[make_occurrence(5), make_occurrence(20)],\n        );\n''',
-    '''        let graph = InMemoryGraph::from_index_with_occurrences(\n            &[file.clone()],\n            &[symbol.clone()],\n            &[],\n            &[make_occurrence(5), make_occurrence(20)],\n        );\n''',
+    '''        let graph = InMemoryGraph::from_index_with_occurrences(\n            std::slice::from_ref(&file),\n            std::slice::from_ref(&symbol),\n            &[],\n            &[make_occurrence(5), make_occurrence(20)],\n        );\n''',
     "exact reference test borrow lifetime",
 )
 replace_exact(
