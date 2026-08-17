@@ -2808,8 +2808,10 @@ mod tests {
     #[test]
     fn candidate_cap_hits_are_visible_in_index_quality() {
         let mut quality = open_kioku_core::IndexQuality::default();
-        let mut report = open_kioku_core::ResolutionQualityReport::default();
-        report.candidate_cap_hits = 2;
+        let report = open_kioku_core::ResolutionQualityReport {
+            candidate_cap_hits: 2,
+            ..Default::default()
+        };
         attach_resolution_quality(&mut quality, Some(report));
 
         assert_eq!(
