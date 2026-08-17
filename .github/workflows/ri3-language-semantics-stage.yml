@@ -21,6 +21,7 @@ jobs:
 
       - name: Validate focused RI3 surface
         run: |
+          cargo fmt --all
           cargo fmt --all -- --check
           cargo test -p open-kioku-languages
           cargo test -p open-kioku-tree-sitter rust_scoped_paths_distinguish_modules_from_instance_self
