@@ -16,6 +16,10 @@ pub struct ResolutionCandidate {
     pub confidence: Confidence,
     pub proofs: Vec<RelationshipProof>,
     pub evidence: Vec<ResolutionEvidence>,
+    /// Complete normalized target count considered by the evaluation that selected this candidate.
+    pub candidates_considered: usize,
+    /// Non-authoritative candidates retained by the evaluation alongside this proven target.
+    pub heuristic_candidates_retained: usize,
 }
 
 impl ResolutionCandidate {
@@ -25,6 +29,8 @@ impl ResolutionCandidate {
             confidence,
             proofs: Vec::new(),
             evidence: Vec::new(),
+            candidates_considered: 1,
+            heuristic_candidates_retained: 0,
         }
     }
 
@@ -101,6 +107,11 @@ pub fn evaluate_candidates(
     candidates: Vec<ResolutionCandidate>,
 ) -> ResolutionOutcome {
     let candidates = normalize_candidates(candidates);
+    let candidates_considered = candidates.len();
+    let heuristic_candidates_retained = candidates
+        .iter()
+        .filter(|candidate| candidate.authority(edge_type) != RelationshipAuthority::Authoritative)
+        .count();
     let authoritative = candidates
         .iter()
         .filter(|candidate| candidate.authority(edge_type) == RelationshipAuthority::Authoritative)
@@ -109,11 +120,13 @@ pub fn evaluate_candidates(
 
     if authoritative.len() == 1 {
         let target = &authoritative[0];
-        let candidate = candidates
+        let mut candidate = candidates
             .iter()
             .find(|candidate| candidate.target_symbol_id.0 == *target)
             .expect("authoritative target came from normalized candidate set")
             .clone();
+        candidate.candidates_considered = candidates_considered;
+        candidate.heuristic_candidates_retained = heuristic_candidates_retained;
         return ResolutionOutcome::Proven { candidate };
     }
 
@@ -375,5 +388,45 @@ mod tests {
         assert_eq!(forward, reversed);
         assert_eq!(forward.len(), 1);
         assert_eq!(forward[0].confidence, Confidence::Exact);
+    }
+}
+
+#[cfg(test)]
+mod ri3_telemetry_tests {
+    use super::*;
+    use open_kioku_core::{RelationshipProof, RelationshipProofKind};
+
+    fn candidate(id: &str, authoritative: bool) -> ResolutionCandidate {
+        let mut candidate = ResolutionCandidate::new(SymbolId::new(id), Confidence::High);
+        if authoritative {
+            candidate.proofs.push(RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "exact_reference",
+                1,
+            ));
+        } else {
+            candidate.proofs.push(RelationshipProof::new(
+                RelationshipProofKind::QualifiedName,
+                "qualified_only",
+                1,
+            ));
+        }
+        candidate
+    }
+
+    #[test]
+    fn proven_outcome_retains_complete_candidate_cardinality() {
+        let outcome = evaluate_candidates(
+            &GraphEdgeType::References,
+            vec![
+                candidate("symbol:weak", false),
+                candidate("symbol:strong", true),
+            ],
+        );
+        let ResolutionOutcome::Proven { candidate } = outcome else {
+            panic!("expected one authoritative winner");
+        };
+        assert_eq!(candidate.candidates_considered, 2);
+        assert_eq!(candidate.heuristic_candidates_retained, 1);
     }
 }

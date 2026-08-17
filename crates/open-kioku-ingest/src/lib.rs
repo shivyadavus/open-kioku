@@ -69,6 +69,20 @@ pub struct ResolutionDiff {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelationshipResolutionQuality {
+    pub candidates_considered: usize,
+    pub proven: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub heuristic_candidates_retained: usize,
+    #[serde(default)]
+    pub proof_kind_counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub resolver_strategy_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResolutionQualityReport {
     pub call_sites: usize,
     pub resolved_exact: usize,
@@ -79,6 +93,117 @@ pub struct ResolutionQualityReport {
     pub legacy_only: usize,
     pub semantic_only: usize,
     pub disagreement: usize,
+    #[serde(default)]
+    pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
+}
+
+impl ResolutionQualityReport {
+    fn record_outcome(
+        &mut self,
+        edge_type: &GraphEdgeType,
+        outcome: &open_kioku_resolution::ResolutionOutcome,
+    ) {
+        let key = relationship_metric_key(edge_type);
+        let metrics = self.by_relationship.entry(key).or_default();
+        match outcome {
+            open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
+                metrics.candidates_considered += candidate.candidates_considered;
+                metrics.proven += 1;
+                metrics.heuristic_candidates_retained += candidate.heuristic_candidates_retained;
+                record_candidate_evidence(metrics, candidate);
+            }
+            open_kioku_resolution::ResolutionOutcome::Ambiguous { candidates, .. } => {
+                metrics.candidates_considered += candidates.len();
+                metrics.ambiguous += 1;
+                metrics.heuristic_candidates_retained += candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.authority(edge_type)
+                            != open_kioku_core::RelationshipAuthority::Authoritative
+                    })
+                    .count();
+                for candidate in candidates {
+                    record_candidate_evidence(metrics, candidate);
+                }
+            }
+            open_kioku_resolution::ResolutionOutcome::Unresolved { candidates, .. } => {
+                metrics.candidates_considered += candidates.len();
+                metrics.unresolved += 1;
+                metrics.heuristic_candidates_retained += candidates.len();
+                for candidate in candidates {
+                    record_candidate_evidence(metrics, candidate);
+                }
+            }
+            open_kioku_resolution::ResolutionOutcome::External { .. } => {
+                metrics.external += 1;
+            }
+        }
+    }
+
+    fn record_reference_occurrence(&mut self, occurrence: &SymbolOccurrence) {
+        if occurrence.is_definition {
+            return;
+        }
+        let metrics = self
+            .by_relationship
+            .entry(relationship_metric_key(&GraphEdgeType::References))
+            .or_default();
+        metrics.candidates_considered += 1;
+        if occurrence.provenance == EvidenceSourceType::Scip
+            && occurrence.confidence == Confidence::Exact
+            && occurrence.source_range.is_some()
+        {
+            metrics.proven += 1;
+            *metrics
+                .proof_kind_counts
+                .entry("exact_occurrence".into())
+                .or_default() += 1;
+            *metrics
+                .resolver_strategy_counts
+                .entry("scip_exact_occurrence".into())
+                .or_default() += 1;
+        } else {
+            metrics.unresolved += 1;
+            metrics.heuristic_candidates_retained += 1;
+        }
+    }
+}
+
+fn relationship_metric_key(edge_type: &GraphEdgeType) -> String {
+    serde_json::to_value(edge_type)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{edge_type:?}"))
+}
+
+fn proof_kind_metric_key(kind: &open_kioku_core::RelationshipProofKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
+
+fn record_candidate_evidence(
+    metrics: &mut RelationshipResolutionQuality,
+    candidate: &open_kioku_resolution::ResolutionCandidate,
+) {
+    let mut proof_kinds = BTreeSet::new();
+    let mut strategies = BTreeSet::new();
+    for proof in &candidate.proofs {
+        proof_kinds.insert(proof_kind_metric_key(&proof.kind));
+        if !proof.resolver_strategy.is_empty() {
+            strategies.insert(proof.resolver_strategy.clone());
+        }
+    }
+    for kind in proof_kinds {
+        *metrics.proof_kind_counts.entry(kind).or_default() += 1;
+    }
+    for strategy in strategies {
+        *metrics
+            .resolver_strategy_counts
+            .entry(strategy)
+            .or_default() += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -545,6 +670,7 @@ impl Indexer {
                         );
 
                         let v2_outcome = open_kioku_resolution::resolve_call_outcome(call, &ctx);
+                        quality_report.record_outcome(&GraphEdgeType::Calls, &v2_outcome);
                         let semantic_target = match &v2_outcome {
                             open_kioku_resolution::ResolutionOutcome::Proven { candidate } => {
                                 match candidate.confidence {
@@ -666,6 +792,7 @@ impl Indexer {
                 );
                 let (edge_type, outcome) =
                     open_kioku_resolution::resolve_inheritance_relationship_outcome(site, &ctx);
+                quality_report.record_outcome(&edge_type, &outcome);
                 if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
                     resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
                         from: site.child_symbol_id.clone(),
@@ -703,6 +830,7 @@ impl Indexer {
                 else {
                     continue;
                 };
+                quality_report.record_outcome(&GraphEdgeType::UsesType, &outcome);
                 if let open_kioku_resolution::ResolutionOutcome::Proven { candidate } = outcome {
                     resolved_relationships.push(open_kioku_resolution::ResolvedRelationship {
                         from: source,
@@ -831,6 +959,9 @@ impl Indexer {
                     .edges_added(imported_occurrence_count),
             );
             scip_report = Some(report);
+        }
+        for occurrence in &occurrences {
+            quality_report.record_reference_occurrence(occurrence);
         }
         let repository = Repository {
             id: repo_id,
