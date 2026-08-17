@@ -37,12 +37,32 @@ jobs:
             --write-baseline /tmp/retrieval-baseline.json \
             > /tmp/retrieval-stdout.json
           cmp benchmarks/retrieval-baseline.json /tmp/retrieval-baseline.json
-          python3 -c "import json; r=json.load(open('/tmp/retrieval-report.json')); x=next(s for s in r['stream_ablations'] if s['strategy']=='cc4:routed_contextpack'); assert x['by_query_shape']; assert x['by_task_family_query_shape']; c=next(s for s in r['strategies'] if s['strategy']=='fusion')['cases']; assert all('query_shape' in q and 'classified_query_shape' in q and 'query_shape_match' in q for q in c)"
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/retrieval-report.json'))
+          routed = next(x for x in report['stream_ablations'] if x['strategy'] == 'cc4:routed_contextpack')
+          shapes = routed['by_query_shape']
+          scopes = routed['by_task_family_query_shape']
+          assert len(shapes) >= 2, f'expected multiple frozen query shapes, got {list(shapes)}'
+          assert 'error_trace' in shapes, f'expected trace coverage, got {list(shapes)}'
+          assert scopes, 'missing task-family/query-shape breakdown'
+          cases = next(x for x in report['strategies'] if x['strategy'] == 'fusion')['cases']
+          assert all('query_shape' in x and 'classified_query_shape' in x and 'query_shape_match' in x for x in cases)
+          assert all(x['query_shape'] for x in cases)
+          print('query-shape report contract passed')
+          PY
       - name: Commit product change and remove temporary tooling
         run: |
           git config user.name "Shiv Yadav"
           git config user.email "155265880+shivyadavus@users.noreply.github.com"
-          git add crates/open-kioku-cli/src/bench/retrieval.rs benchmarks/retrieval-cases.json
-          git rm .github/scripts/agent_cc4_query_shape_benchmark.py .github/scripts/agent_cc4_postprocess.py .github/workflows/agent-cc4-query-shape-benchmark.yml .github/agent-cc4-trigger
+          git add crates/open-kioku-cli/src/bench/retrieval.rs \
+            benchmarks/retrieval-cases.json \
+            benchmarks/retrieval-baseline.json \
+            benchmarks/retrieval-thresholds.json
+          git rm -f --ignore-unmatch \
+            .github/scripts/agent_cc4_query_shape_benchmark.py \
+            .github/scripts/agent_cc4_postprocess.py \
+            .github/workflows/agent-cc4-query-shape-benchmark.yml \
+            .github/agent-cc4-trigger
           git commit -m "bench(context): measure retrieval by query shape"
           git push origin HEAD:agent/cc4-query-shape-benchmark
