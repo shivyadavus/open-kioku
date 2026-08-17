@@ -1398,7 +1398,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn rust_scoped_paths_distinguish_modules_from_instance_self() {
         let file = File {
             id: FileId::new("file_rust_paths"),
@@ -1420,7 +1419,7 @@ mod tests {
                 .calls
                 .iter()
                 .find(|call| call.callee_name == callee)
-                .map(|call| (call.receiver.as_deref(), call.receiver_kind.clone()))
+                .map(|call| (call.receiver.as_deref(), call.receiver_kind))
                 .expect("qualified call")
         };
 
