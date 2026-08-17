@@ -17,29 +17,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Run focused resolution tests
-        id: resolution
+      - name: Run full workspace tests
+        id: workspace
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p open-kioku-resolution -- --nocapture 2>&1 | tee resolution-test.log
-      - name: Run focused tree-sitter tests
-        id: tree_sitter
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test -p open-kioku-tree-sitter -- --nocapture 2>&1 | tee tree-sitter-test.log
-      - name: Upload diagnostic logs
+          cargo test --all -- --nocapture 2>&1 | tee workspace-test.log
+      - name: Upload diagnostic log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ri3-language-semantics-diagnostics
-          path: |
-            resolution-test.log
-            tree-sitter-test.log
+          name: ri3-language-semantics-full-diagnostics
+          path: workspace-test.log
           if-no-files-found: error
       - name: Preserve failure result
-        if: steps.resolution.outcome != 'success' || steps.tree_sitter.outcome != 'success'
+        if: steps.workspace.outcome != 'success'
         run: exit 1
