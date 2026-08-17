@@ -3,18 +3,31 @@ from pathlib import Path
 path = Path("crates/open-kioku-resolution/src/call_candidates.rs")
 text = path.read_text()
 
-old_calls = """candidates_for_targets(
+self_call = """candidates_for_targets(
         call,
         targets,
 """
-new_calls = """candidates_for_targets(
+self_call_with_ctx = """candidates_for_targets(
         call,
         ctx,
         targets,
 """
-if text.count(old_calls) != 2:
-    raise SystemExit(f"unexpected candidates_for_targets call count: {text.count(old_calls)}")
-text = text.replace(old_calls, new_calls)
+if text.count(self_call) != 1:
+    raise SystemExit(f"unexpected self candidates_for_targets seam: {text.count(self_call)}")
+text = text.replace(self_call, self_call_with_ctx, 1)
+
+bare_call = """candidates_for_targets(
+                call,
+                targets,
+"""
+bare_call_with_ctx = """candidates_for_targets(
+                call,
+                ctx,
+                targets,
+"""
+if text.count(bare_call) != 1:
+    raise SystemExit(f"unexpected bare candidates_for_targets seam: {text.count(bare_call)}")
+text = text.replace(bare_call, bare_call_with_ctx, 1)
 
 old_helper = """fn candidates_for_targets(
     call: &CallSite,
