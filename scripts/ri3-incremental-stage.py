@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# This staging helper is temporary; the generated regression is the durable artifact.
 path = Path('crates/open-kioku-watch/src/lib.rs')
 text = path.read_text()
 anchor = '    fn git(root: &Path, args: &[&str]) {'
