@@ -1,11 +1,10 @@
-use open_kioku_core::{
-    Confidence, Evidence, EvidenceId, FileRange, GraphEdge, GraphEdgeType, SymbolId,
-};
+use open_kioku_core::{Confidence, Evidence, FileRange, GraphEdge, GraphEdgeType, SymbolId};
+pub use open_kioku_core::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
 use open_kioku_errors::OkError;
 use open_kioku_storage::GraphStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Structured property key used to persist relationship proofs on existing graph edges.
 ///
@@ -14,134 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// or malformed payloads always fail closed to heuristic authority.
 pub const RELATIONSHIP_PROOFS_PROPERTY: &str = "relationship_proofs";
 
-/// A typed fact that can contribute to proving a structural repository relationship.
-///
-/// This vocabulary intentionally excludes fuzzy-name, semantic-similarity, and candidate-rank
-/// signals. Those signals may remain useful for retrieval, but they are not structural proof.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum RelationshipProofKind {
-    ExactOccurrence,
-    ExactReference,
-    ExactCallSite,
-    ImportBinding,
-    QualifiedName,
-    SameScopeDefinition,
-    ContainingType,
-    ReceiverType,
-    TraitOrInterfaceBinding,
-    InheritanceBinding,
-    ModuleOrPackageBinding,
-    ExternalExactIndex,
-}
-
-/// Whether a relationship may be used as structural truth.
-///
-/// Authority is deliberately separate from confidence and retrieval/ranking score.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum RelationshipAuthority {
-    #[default]
-    Heuristic,
-    Corroborating,
-    Authoritative,
-}
-
-/// Inspectable proof attached to a candidate or emitted graph relationship.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct RelationshipProof {
-    pub kind: RelationshipProofKind,
-    /// The proof-local authority classification. Effective edge authority is always recomputed
-    /// through [`relationship_authority`] and never trusts this field on its own.
-    #[serde(default)]
-    pub authority: RelationshipAuthority,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_range: Option<FileRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_symbol_id: Option<SymbolId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_symbol_id: Option<SymbolId>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub resolver_strategy: String,
-    /// Number of viable targets at the point this proof was produced. Authoritative paths require
-    /// exactly one candidate and no ambiguity notes.
-    #[serde(default)]
-    pub candidate_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ambiguity: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_ids: Vec<EvidenceId>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub details: BTreeMap<String, serde_json::Value>,
-}
-
-impl RelationshipProof {
-    pub fn new(
-        kind: RelationshipProofKind,
-        resolver_strategy: impl Into<String>,
-        candidate_count: usize,
-    ) -> Self {
-        Self {
-            kind,
-            authority: proof_kind_authority(kind),
-            source_range: None,
-            source_symbol_id: None,
-            target_symbol_id: None,
-            resolver_strategy: resolver_strategy.into(),
-            candidate_count,
-            ambiguity: Vec::new(),
-            evidence_ids: Vec::new(),
-            details: BTreeMap::new(),
-        }
-    }
-
-    /// Canonicalize set-like fields so proof JSON is deterministic across discovery order.
-    pub fn normalize(&mut self) {
-        self.ambiguity.sort();
-        self.ambiguity.dedup();
-        self.evidence_ids.sort();
-        self.evidence_ids.dedup();
-        // Do not permit serialized input to self-promote beyond the central proof-kind policy.
-        self.authority = self.authority.min(proof_kind_authority(self.kind));
-    }
-
-    pub fn is_unique(&self) -> bool {
-        self.candidate_count == 1 && self.ambiguity.is_empty()
-    }
-}
-
 /// Maximum authority a single proof kind can contribute before relationship-specific combination
-/// rules are evaluated.
+/// rules are evaluated. The intrinsic ceiling is owned by the core domain type.
 pub fn proof_kind_authority(kind: RelationshipProofKind) -> RelationshipAuthority {
-    match kind {
-        RelationshipProofKind::ExactOccurrence
-        | RelationshipProofKind::ExactReference
-        | RelationshipProofKind::ExactCallSite
-        | RelationshipProofKind::ExternalExactIndex => RelationshipAuthority::Authoritative,
-        RelationshipProofKind::ImportBinding
-        | RelationshipProofKind::QualifiedName
-        | RelationshipProofKind::SameScopeDefinition
-        | RelationshipProofKind::ContainingType
-        | RelationshipProofKind::ReceiverType
-        | RelationshipProofKind::TraitOrInterfaceBinding
-        | RelationshipProofKind::InheritanceBinding
-        | RelationshipProofKind::ModuleOrPackageBinding => RelationshipAuthority::Corroborating,
-    }
+    kind.maximum_authority()
 }
 
 fn normalized_effective_authority(proof: &RelationshipProof) -> RelationshipAuthority {
@@ -574,7 +449,7 @@ impl EvidenceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use open_kioku_core::{EdgeId, GraphNode, LineRange, NodeId};
+    use open_kioku_core::{EdgeId, EvidenceId, GraphNode, LineRange, NodeId};
     use serde_json::json;
     use std::path::PathBuf;
 

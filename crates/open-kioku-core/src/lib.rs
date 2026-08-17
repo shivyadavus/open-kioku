@@ -6,6 +6,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub mod identity;
+pub mod relationship;
+
+pub use relationship::{RelationshipAuthority, RelationshipProof, RelationshipProofKind};
 
 macro_rules! id_type {
     ($name:ident) => {
