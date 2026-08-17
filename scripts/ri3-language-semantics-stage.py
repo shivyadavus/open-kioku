@@ -116,7 +116,7 @@ if addition not in text:
 
 ts = Path("crates/open-kioku-tree-sitter/src/lib.rs")
 text = ts.read_text()
-assert text.count('receiver_kind = classify_receiver_string(&recv);') == 5, "receiver classifier call sites changed unexpectedly"
+assert text.count('receiver_kind = classify_receiver_string(&recv);') == 6, "receiver classifier call sites changed unexpectedly"
 text = text.replace(
     'receiver_kind = classify_receiver_string(&recv);',
     'receiver_kind = classify_receiver_string(&file.language, &recv);',
@@ -194,44 +194,6 @@ text = text.replace(old_classifier, new_classifier)
 
 test_anchor = '''    fn does_not_emit_json_keys_as_symbols() {
 '''
-receiver_test = '''    #[test]
-    fn rust_scoped_paths_distinguish_modules_from_instance_self() {
-        let file = File {
-            id: FileId::new("file_rust_paths"),
-            repository_id: RepositoryId::new("repo"),
-            path: "src/lib.rs".into(),
-            language: Language::Rust,
-            size_bytes: 0,
-            content_hash: "hash".into(),
-            is_generated: false,
-            is_vendor: false,
-        };
-        let facts = parse_file(
-            &file,
-            "fn run() { crate::target(); self::target(); super::target(); Self::target(); self.target(); }",
-        )
-        .expect("Rust qualified-call fixture should parse");
-        let kinds = facts
-            .calls
-            .iter()
-            .filter_map(|call| call.receiver.as_deref().map(|receiver| (receiver, &call.receiver_kind)))
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(kinds.get("crate").copied(), Some(&ReceiverKind::Module));
-        assert_eq!(kinds.get("self").copied(), Some(&ReceiverKind::Module));
-        assert_eq!(kinds.get("super").copied(), Some(&ReceiverKind::Module));
-        assert_eq!(kinds.get("Self").copied(), Some(&ReceiverKind::Self_));
-        assert!(facts.calls.iter().any(|call| {
-            call.receiver.as_deref() == Some("self")
-                && call.receiver_kind == ReceiverKind::Self_
-                && call.callee_name == "target"
-        }));
-    }
-
-    #[test]
-'''
-# The BTreeMap would collapse self::target and self.target because both receiver text is "self".
-# Keep the path assertions separate by source range/call order instead of relying on the map.
 receiver_test = '''    #[test]
     fn rust_scoped_paths_distinguish_modules_from_instance_self() {
         let file = File {
