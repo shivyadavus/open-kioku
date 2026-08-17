@@ -18,7 +18,18 @@ jobs:
           fetch-depth: 0
 
       - name: Apply self/super migration
-        run: python3 scripts/ri3_self_calls_tmp.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/ri3_self_calls_tmp.py')
+          text = path.read_text()
+          old = '    "mod bare_calls;\\npub mod calls;\\nmod typed_calls;\\n",\n    "mod bare_calls;\\npub mod calls;\\nmod self_calls;\\nmod typed_calls;\\n",\n'
+          new = '    "mod typed_calls;\\n",\n    "mod self_calls;\\nmod typed_calls;\\n",\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'unexpected module wiring script seam: {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python3 scripts/ri3_self_calls_tmp.py
 
       - name: Validate resolver
         run: |
@@ -30,7 +41,7 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-self-super-calls.yml scripts/ri3_self_calls_tmp.py
+          git rm -f .github/workflows/ri3-self-super-calls.yml scripts/ri3_self_calls_tmp.py
           git add crates/open-kioku-resolution/src/lib.rs crates/open-kioku-resolution/src/calls.rs crates/open-kioku-resolution/src/self_calls.rs crates/open-kioku-resolution/src/typed_calls.rs
           git commit -m "ri3: proof-gate self and super call resolution"
           git push origin HEAD:agent/ri3-resolution-foundation
