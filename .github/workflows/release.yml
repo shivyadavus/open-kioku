@@ -18,7 +18,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: ok-linux-x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary_name: ok-linux-arm64
           - os: macos-15-intel
@@ -44,19 +44,16 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install cross (Linux only)
+      - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         shell: bash
-        run: cargo install cross --locked
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev zlib1g-dev libgomp1
 
       - name: Build binary
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            cross build --release --target ${{ matrix.target }} -p open-kioku-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
-          fi
+        run: cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
 
       - name: Package binary
         shell: bash
@@ -66,14 +63,7 @@ jobs:
             cp target/${{ matrix.target }}/release/ok.exe dist/${{ matrix.binary_name }}
           else
             cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
-            case "${{ matrix.target }}" in
-              x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin)
-                strip dist/${{ matrix.binary_name }}
-                ;;
-              *)
-                echo "Skipping host strip for cross-compiled target ${{ matrix.target }}"
-                ;;
-            esac
+            strip dist/${{ matrix.binary_name }} || true
           fi
           cd dist
           if [ "${{ runner.os }}" = "macOS" ]; then
