@@ -96,10 +96,24 @@ def update_validators_docs() -> None:
     checklist = load("docs/release-checklist.md").replace("five binary artifacts", "four binary artifacts")
     save("docs/release-checklist.md", checklist)
 
-    remove_once("CHANGELOG.md", "- `ok-macos-x86_64`\n- `ok-macos-x86_64.sha256`\n")
+    changelog = load("CHANGELOG.md")
+    start = changelog.find("## [3.0.0]")
+    if start < 0:
+        raise SystemExit("CHANGELOG.md: 3.0.0 section missing")
+    end = changelog.find("\n---\n", start)
+    if end < 0:
+        raise SystemExit("CHANGELOG.md: 3.0.0 section terminator missing")
+    section = changelog[start:end]
+    intel_artifacts = "- `ok-macos-x86_64`\n- `ok-macos-x86_64.sha256`\n"
+    if section.count(intel_artifacts) != 1:
+        raise SystemExit("CHANGELOG.md: 3.0.0 Intel artifact block missing or duplicated")
+    section = section.replace(intel_artifacts, "", 1)
     anchor = "- V3 Linux release binaries target GNU/glibc on x86_64 and ARM64 because the local neural runtime does not provide supported MUSL prebuilts; npm Linux platform packages declare `libc: glibc` accordingly.\n"
     note = "- V3 macOS binaries require Apple Silicon. The local ONNX Runtime dependency no longer provides Intel macOS (`x86_64-apple-darwin`) prebuilts; Intel Mac users can remain on the 2.4.x release line.\n"
-    replace_once("CHANGELOG.md", anchor, anchor + note)
+    if section.count(anchor) != 1:
+        raise SystemExit("CHANGELOG.md: 3.0.0 Linux compatibility anchor missing")
+    section = section.replace(anchor, anchor + note, 1)
+    save("CHANGELOG.md", changelog[:start] + section + changelog[end:])
 
 
 def remove_intel_matrix(path: str) -> None:
