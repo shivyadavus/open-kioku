@@ -41,6 +41,7 @@ jobs:
               index += 1
           path.write_text('\n'.join(repaired) + '\n')
           PY
+          cargo fmt --all
       - name: Validate focused and full workspace contracts
         run: |
           cargo fmt --all -- --check
