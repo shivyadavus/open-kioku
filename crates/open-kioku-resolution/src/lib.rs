@@ -1,3 +1,4 @@
+pub mod call_candidates;
 pub mod calls;
 pub mod context;
 pub mod evidence;
@@ -5,6 +6,7 @@ pub mod index;
 pub mod inheritance;
 pub mod pipeline;
 
+pub use call_candidates::resolve_call_outcome;
 pub use calls::resolve_call;
 pub use context::{ResolutionContext, ResolutionResult, UnresolvedReason};
 pub use evidence::{ResolutionEvidence, ResolutionEvidenceKind, ResolvedRelationship};
@@ -12,6 +14,7 @@ pub use index::{BindingIndex, ScopeIndex, SymbolIndex};
 pub use inheritance::InheritanceIndex;
 pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+    ResolutionStrategy,
 };
 
 #[cfg(test)]
@@ -23,8 +26,14 @@ mod tests {
         SymbolKind, Visibility,
     };
 
-    #[test]
-    fn resolves_same_name_method_via_typed_receiver() {
+    fn typed_receiver_fixture() -> (
+        SymbolIndex,
+        ScopeIndex,
+        BindingIndex,
+        InheritanceIndex,
+        open_kioku_semantic_model::SemanticRepository,
+        FileId,
+    ) {
         let repo_class = Symbol {
             id: SymbolId::new("symbol:Repo"),
             name: "Repo".into(),
@@ -41,7 +50,6 @@ mod tests {
             signature: None,
             visibility: Visibility::Public,
         };
-
         let repo_save = Symbol {
             id: SymbolId::new("symbol:Repo.save"),
             name: "save".into(),
@@ -58,9 +66,7 @@ mod tests {
             signature: None,
             visibility: Visibility::Public,
         };
-
         let sym_index = SymbolIndex::build(vec![repo_class, repo_save]);
-
         let file_scope = Scope {
             id: ScopeId::new("scope:file"),
             file_id: FileId::new("file:Main.java"),
@@ -75,7 +81,6 @@ mod tests {
             },
         };
         let scope_index = ScopeIndex::build(vec![file_scope]);
-
         let binding = Binding {
             id: BindingId::new("binding:repo"),
             file_id: FileId::new("file:Main.java"),
@@ -109,24 +114,18 @@ mod tests {
                 is_glob: false,
                 evidence: Vec::new(),
             });
-        let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
-        let main_file_id = FileId::new("file:Main.java");
+        (
+            sym_index,
+            scope_index,
+            binding_index,
+            inheritance_index,
+            repository,
+            FileId::new("file:Main.java"),
+        )
+    }
 
-        let file_path = std::path::Path::new("src/Main.java");
-        let ctx = ResolutionContext::new(
-            &main_file_id,
-            file_path,
-            None,
-            Language::Java,
-            &repository,
-            &sym_index,
-            &scope_index,
-            &binding_index,
-            &inheritance_index,
-            semantics,
-        );
-
-        let call = CallSite {
+    fn typed_receiver_call() -> CallSite {
+        CallSite {
             id: CallSiteId::new("call:save"),
             file_id: FileId::new("file:Main.java"),
             scope_id: ScopeId::new("scope:file"),
@@ -140,14 +139,58 @@ mod tests {
                 end_line: 10,
                 end_column: 15,
             },
-        };
+        }
+    }
 
-        let res = resolve_call(&call, &ctx);
-        match res {
+    #[test]
+    fn legacy_resolver_still_resolves_same_name_method_via_typed_receiver() {
+        let (symbols, scopes, bindings, inheritance, repository, file_id) = typed_receiver_fixture();
+        let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
+        let ctx = ResolutionContext::new(
+            &file_id,
+            std::path::Path::new("src/Main.java"),
+            None,
+            Language::Java,
+            &repository,
+            &symbols,
+            &scopes,
+            &bindings,
+            &inheritance,
+            semantics,
+        );
+
+        match resolve_call(&typed_receiver_call(), &ctx) {
             ResolutionResult::Resolved { target, .. } => {
                 assert_eq!(target, SymbolId::new("symbol:Repo.save"));
             }
-            _ => panic!("Expected resolved call edge"),
+            _ => panic!("expected legacy resolved call edge"),
+        }
+    }
+
+    #[test]
+    fn proof_gated_resolver_proves_typed_receiver_without_rank_based_uniqueness() {
+        let (symbols, scopes, bindings, inheritance, repository, file_id) = typed_receiver_fixture();
+        let semantics = open_kioku_languages::semantics_for(&Language::Java).unwrap();
+        let ctx = ResolutionContext::new(
+            &file_id,
+            std::path::Path::new("src/Main.java"),
+            None,
+            Language::Java,
+            &repository,
+            &symbols,
+            &scopes,
+            &bindings,
+            &inheritance,
+            semantics,
+        );
+
+        match resolve_call_outcome(&typed_receiver_call(), &ctx) {
+            ResolutionOutcome::Proven { candidate } => {
+                assert_eq!(candidate.target_symbol_id, SymbolId::new("symbol:Repo.save"));
+                assert_eq!(candidate.authority(&open_kioku_core::GraphEdgeType::Calls), open_kioku_core::RelationshipAuthority::Authoritative);
+                assert!(candidate.strategies.contains(&ResolutionStrategy::TypedReceiver));
+            }
+            other => panic!("expected proven typed-receiver call, got {other:?}"),
         }
     }
 }
