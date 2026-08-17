@@ -90,7 +90,8 @@ jobs:
         run: |
           git config user.name "open-kioku automation"
           git config user.email "actions@users.noreply.github.com"
-          git rm .github/workflows/ri3-finish-contract.yml .github/workflows/ri3-finalize-247.yml scripts/ri3_finish_contract_tmp.py
+          git rm .github/workflows/ri3-finish-contract.yml .github/workflows/ri3-finalize-247.yml
+          git rm -f scripts/ri3_finish_contract_tmp.py
           git add crates/open-kioku-core/src/lib.rs crates/open-kioku-core/src/relationship.rs crates/open-kioku-evidence/src/lib.rs crates/open-kioku-architecture/src/lib.rs crates/open-kioku-context/src/lib.rs crates/open-kioku-mcp/snapshots/mcp/get_evidence_schema.json
           git commit -m "refactor(ri3): enforce core relationship authority contract"
           git push origin HEAD:agent/ri3-core-relationship-proofs
