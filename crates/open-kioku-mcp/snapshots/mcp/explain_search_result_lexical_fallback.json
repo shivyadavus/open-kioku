@@ -70,6 +70,8 @@
     ],
     "returned": 1,
     "semantic_status": {
+      "ann_active": false,
+      "ann_profile": null,
       "backend": "exact-flat",
       "corrupt": false,
       "current_dir": "<current_dir>",

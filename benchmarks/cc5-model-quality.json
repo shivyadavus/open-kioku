@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-16",
+  "fixture": "benchmarks/retrieval-cases.json",
+  "method": "one provider per process; exact document scoring over the shared retrieval fixture",
+  "host": {
+    "profile": "github-actions-ubuntu-x64",
+    "os": "linux",
+    "arch": "x86_64",
+    "logical_cpus": 4,
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "memory_bytes": 16772579328
+  },
+  "providers": [
+    {
+      "label": "local-hash-384",
+      "provider": "local",
+      "model": "local-hash",
+      "dimensions": 384,
+      "evaluated_cases": 25,
+      "recall_at_5": 0.7866666666666667,
+      "recall_at_10": 0.94,
+      "mean_reciprocal_rank": 0.8913333333333334,
+      "query_p95_ms": 0.012343,
+      "model_cache_bytes": 0,
+      "process_peak_rss_bytes": 68591616
+    },
+    {
+      "label": "qwen3-embedding-0.6b-768",
+      "provider": "fastembed",
+      "model": "Qwen/Qwen3-Embedding-0.6B",
+      "dimensions": 768,
+      "evaluated_cases": 25,
+      "recall_at_5": 0.9000000000000001,
+      "recall_at_10": 1.0,
+      "mean_reciprocal_rank": 0.9133333333333334,
+      "index_build_ms": 111173.919543,
+      "query_mean_ms": 729.70257972,
+      "query_p95_ms": 796.017984,
+      "vector_bytes": 119808,
+      "model_cache_bytes": 1203011092,
+      "process_peak_rss_bytes": 3607605248
+    },
+    {
+      "label": "jina-embeddings-v2-base-code-768",
+      "provider": "fastembed",
+      "model": "jinaai/jina-embeddings-v2-base-code",
+      "dimensions": 768,
+      "evaluated_cases": 25,
+      "recall_at_5": 0.9400000000000001,
+      "recall_at_10": 1.0,
+      "mean_reciprocal_rank": 0.91,
+      "index_build_ms": 4199.7,
+      "query_mean_ms": 29.828,
+      "query_p95_ms": 36.32,
+      "vector_bytes": 119808,
+      "model_cache_bytes": 1287927144,
+      "process_peak_rss_bytes": 517763072
+    }
+  ],
+  "recommendation": {
+    "quality_practicality": "jina-embeddings-v2-base-code-768",
+    "reason": "Improves Recall@5 and Recall@10 over local-hash while using substantially less peak memory and lower p95 query latency than Qwen3 0.6B on this fixture and host.",
+    "correctness_baseline": "local-hash-384"
+  },
+  "notes": [
+    "The Qwen3 result uses the corrected Open Kioku-owned local cache path.",
+    "The Qwen3 4B and 8B profiles are available but are not recommended for laptop use without a corresponding measured run.",
+    "Results are fixture- and machine-specific and should be reproduced on target hardware when latency or memory budgets are material."
+  ]
+}

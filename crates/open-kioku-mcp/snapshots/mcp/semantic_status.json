@@ -2,6 +2,8 @@
   "id": "semantic-status",
   "jsonrpc": "2.0",
   "result": {
+    "ann_active": false,
+    "ann_profile": null,
     "backend": "exact-flat",
     "corrupt": false,
     "current_dir": "<current_dir>",

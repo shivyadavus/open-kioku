@@ -750,6 +750,7 @@ mod tests {
             dimensions: 384,
             distance: "cosine".into(),
             batch_size: 64,
+            ann_min_rows: 25_000,
             index_symbols: true,
             index_chunks: true,
             index_docs: true,

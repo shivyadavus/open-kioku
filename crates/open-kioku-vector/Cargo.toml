@@ -2,7 +2,7 @@
 name = "open-kioku-vector"
 version.workspace = true
 edition.workspace = true
-description = "Local vector index contracts and exact-flat backend for Open Kioku."
+description = "Local vector index contracts and exact-flat / HNSW backends for Open Kioku."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -14,3 +14,7 @@ categories.workspace = true
 open-kioku-errors = { version = "2.0.0", path = "../open-kioku-errors" }
 serde.workspace = true
 serde_json.workspace = true
+usearch.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
