@@ -22,24 +22,39 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt,clippy
-      - name: Install RI3 frozen conformance implementation
+      - name: Decode RI3 conformance payloads
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .tmp-ri3/relationship.rs.gz.b64 | gzip -dc > crates/open-kioku-cli/src/bench/relationship.rs
-          base64 -d .tmp-ri3/relationship_live.rs.gz.b64 | gzip -dc > crates/open-kioku-cli/src/bench/relationship_live.rs
-          base64 -d .tmp-ri3/relationship-cases.json.gz.b64 | gzip -dc > benchmarks/relationship-cases.json
-          base64 -d .tmp-ri3/relationship-ci-cases.json.gz.b64 | gzip -dc > benchmarks/relationship-ci-cases.json
-          base64 -d .tmp-ri3/relationship-thresholds.json.gz.b64 | gzip -dc > benchmarks/relationship-thresholds.json
-          python3 - <<'PATCH'
+          python3 - <<'PY'
+          import base64, gzip
           from pathlib import Path
-          path=Path('crates/open-kioku-graph/src/lib.rs')
-          text=path.read_text()
-          anchor='''                edge.set_relationship_proofs(vec![proof])
+          mapping = {
+              '.tmp-ri3/relationship.rs.gz.b64': 'crates/open-kioku-cli/src/bench/relationship.rs',
+              '.tmp-ri3/relationship_live.rs.gz.b64': 'crates/open-kioku-cli/src/bench/relationship_live.rs',
+              '.tmp-ri3/relationship-cases.json.gz.b64': 'benchmarks/relationship-cases.json',
+              '.tmp-ri3/relationship-ci-cases.json.gz.b64': 'benchmarks/relationship-ci-cases.json',
+              '.tmp-ri3/relationship-thresholds.json.gz.b64': 'benchmarks/relationship-thresholds.json',
+          }
+          for source, target in mapping.items():
+              payload = base64.b64decode(Path(source).read_bytes(), validate=True)
+              decoded = gzip.decompress(payload)
+              Path(target).write_bytes(decoded)
+              print(f'decoded {source} -> {target} ({len(decoded)} bytes)')
+          PY
+      - name: Add authoritative explicit-package dependency proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/open-kioku-graph/src/lib.rs')
+          text = path.read_text()
+          anchor = '''                edge.set_relationship_proofs(vec![proof])
                     .expect("resolved import binding proof must serialize to JSON");
             }
             buffer.insert_edge(edge);'''
-          replacement='''                edge.set_relationship_proofs(vec![proof])
+          replacement = '''                edge.set_relationship_proofs(vec![proof])
                     .expect("resolved import binding proof must serialize to JSON");
             }
             if fact.edge_type == GraphEdgeType::DependsOn
@@ -66,8 +81,8 @@ jobs:
             buffer.insert_edge(edge);'''
           if anchor not in text:
               raise SystemExit('graph proof anchor not found')
-          path.write_text(text.replace(anchor,replacement,1))
-          PATCH
+          path.write_text(text.replace(anchor, replacement, 1))
+          PY
       - name: Validate scorer contract and code quality
         shell: bash
         run: |
@@ -86,15 +101,16 @@ jobs:
             --corpus benchmarks/relationship-ci-cases.json \
             --observations @live \
             --write /tmp/relationship-ci-report.json
-          python3 - <<'CHECK'
+          python3 - <<'PY'
           import json
-          report=json.load(open('/tmp/relationship-ci-report.json'))
-          if report.get('diagnostics'):
-              for item in report['diagnostics'][:50]:
+          report = json.load(open('/tmp/relationship-ci-report.json'))
+          diagnostics = report.get('diagnostics', [])
+          if diagnostics:
+              for item in diagnostics[:50]:
                   print(item)
-              raise SystemExit(f"compact conformance produced {len(report['diagnostics'])} diagnostics")
+              raise SystemExit(f'compact conformance produced {len(diagnostics)} diagnostics')
           print('compact conformance clean:', report['overall']['cases'], 'cases')
-          CHECK
+          PY
       - name: Commit validated implementation
         shell: bash
         run: |
