@@ -6,6 +6,26 @@ use open_kioku_core::{
 };
 use std::collections::BTreeMap;
 
+/// How a target entered the resolver candidate set.
+///
+/// Discovery strategy is deliberately separate from structural proof: a candidate can be found by
+/// a useful heuristic strategy without that strategy being sufficient to authorize a graph edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ResolutionStrategy {
+    ExactOccurrence,
+    LexicalScope,
+    ImplicitSelf,
+    TypedReceiver,
+    StaticReceiver,
+    ExactImportBinding,
+    ModuleExport,
+    SameFile,
+    Inheritance,
+    QualifiedName,
+    ExternalExactIndex,
+    Heuristic,
+}
+
 /// One plausible structural target discovered by one or more resolver strategies.
 ///
 /// `confidence` remains retrieval/ranking metadata. Structural truth is decided only from
@@ -14,6 +34,7 @@ use std::collections::BTreeMap;
 pub struct ResolutionCandidate {
     pub target_symbol_id: SymbolId,
     pub confidence: Confidence,
+    pub strategies: Vec<ResolutionStrategy>,
     pub proofs: Vec<RelationshipProof>,
     pub evidence: Vec<ResolutionEvidence>,
 }
@@ -23,9 +44,15 @@ impl ResolutionCandidate {
         Self {
             target_symbol_id,
             confidence,
+            strategies: Vec::new(),
             proofs: Vec::new(),
             evidence: Vec::new(),
         }
+    }
+
+    pub fn with_strategy(mut self, strategy: ResolutionStrategy) -> Self {
+        self.strategies.push(strategy);
+        self
     }
 
     pub fn authority(&self, edge_type: &GraphEdgeType) -> RelationshipAuthority {
@@ -36,11 +63,14 @@ impl ResolutionCandidate {
         if other.confidence.score() > self.confidence.score() {
             self.confidence = other.confidence;
         }
+        self.strategies.append(&mut other.strategies);
         self.proofs.append(&mut other.proofs);
         self.evidence.append(&mut other.evidence);
     }
 
     fn normalize(mut self) -> Self {
+        self.strategies.sort();
+        self.strategies.dedup();
         for proof in &mut self.proofs {
             if proof.target_symbol_id.is_none() {
                 proof.target_symbol_id = Some(self.target_symbol_id.clone());
@@ -278,7 +308,8 @@ mod tests {
         strategy: &str,
     ) -> ResolutionCandidate {
         let target = SymbolId::new(target);
-        let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+        let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact)
+            .with_strategy(ResolutionStrategy::ExactOccurrence);
         candidate.proofs.push(proof(
             RelationshipProofKind::ExactCallSite,
             &target,
@@ -293,7 +324,8 @@ mod tests {
     #[test]
     fn confidence_does_not_turn_a_weak_candidate_into_truth() {
         let target = SymbolId::new("symbol:weak");
-        let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+        let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact)
+            .with_strategy(ResolutionStrategy::QualifiedName);
         candidate
             .proofs
             .push(proof(RelationshipProofKind::QualifiedName, &target, "name"));
@@ -310,7 +342,8 @@ mod tests {
             "exact_reference",
         );
         let weak_target = SymbolId::new("symbol:weak");
-        let mut weak = ResolutionCandidate::new(weak_target.clone(), Confidence::Exact);
+        let mut weak = ResolutionCandidate::new(weak_target.clone(), Confidence::Exact)
+            .with_strategy(ResolutionStrategy::QualifiedName);
         weak.proofs.push(proof(
             RelationshipProofKind::QualifiedName,
             &weak_target,
@@ -357,13 +390,15 @@ mod tests {
     #[test]
     fn normalization_is_independent_of_candidate_generation_order() {
         let target = SymbolId::new("symbol:target");
-        let mut lexical = ResolutionCandidate::new(target.clone(), Confidence::High);
+        let mut lexical = ResolutionCandidate::new(target.clone(), Confidence::High)
+            .with_strategy(ResolutionStrategy::LexicalScope);
         lexical.proofs.push(proof(
             RelationshipProofKind::SameScopeDefinition,
             &target,
             "scope",
         ));
-        let mut exact = ResolutionCandidate::new(target.clone(), Confidence::Exact);
+        let mut exact = ResolutionCandidate::new(target.clone(), Confidence::Exact)
+            .with_strategy(ResolutionStrategy::ExactOccurrence);
         exact.proofs.push(proof(
             RelationshipProofKind::ExactReference,
             &target,
@@ -375,5 +410,12 @@ mod tests {
         assert_eq!(forward, reversed);
         assert_eq!(forward.len(), 1);
         assert_eq!(forward[0].confidence, Confidence::Exact);
+        assert_eq!(
+            forward[0].strategies,
+            vec![
+                ResolutionStrategy::ExactOccurrence,
+                ResolutionStrategy::LexicalScope,
+            ]
+        );
     }
 }
