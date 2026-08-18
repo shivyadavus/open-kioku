@@ -78,10 +78,8 @@ struct Report {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sizes = parse_list("OK_ANN_SCALE_SIZES", DEFAULT_SIZES)?;
     let dimensions = parse_list("OK_ANN_SCALE_DIMS", DEFAULT_DIMS)?;
-    let search_expansions = parse_list(
-        "OK_ANN_SCALE_SEARCH_EXPANSIONS",
-        DEFAULT_SEARCH_EXPANSIONS,
-    )?;
+    let search_expansions =
+        parse_list("OK_ANN_SCALE_SEARCH_EXPANSIONS", DEFAULT_SEARCH_EXPANSIONS)?;
     let query_count = parse_usize("OK_ANN_SCALE_QUERIES", 64)?;
     let connectivity = parse_usize(
         "OK_ANN_SCALE_CONNECTIVITY",
@@ -203,8 +201,8 @@ impl ExactFixture {
             ann.add(record(id, self.dimensions))?;
         }
         let ann_build_ms = elapsed_ms(ann_started);
-        let ann_vectors_per_second = self.vector_count as f64
-            / (ann_build_ms / 1_000.0).max(f64::EPSILON);
+        let ann_vectors_per_second =
+            self.vector_count as f64 / (ann_build_ms / 1_000.0).max(f64::EPSILON);
 
         let temp = tempfile::tempdir()?;
         let ann_path = temp.path().join("ann.usearch");
