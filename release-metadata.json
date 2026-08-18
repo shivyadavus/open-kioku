@@ -6,7 +6,6 @@
   "npm": {
     "wrapper": "open-kioku",
     "platform_packages": [
-      "@open-kioku/darwin-x64",
       "@open-kioku/darwin-arm64",
       "@open-kioku/linux-x64",
       "@open-kioku/linux-arm64",
@@ -35,15 +34,6 @@
     },
     {
       "name": "ok-linux-arm64.sha256",
-      "channels": ["github-release"]
-    },
-    {
-      "name": "ok-macos-x86_64",
-      "sha256": "abde42f14789cbc01d4eaa9dc84d44a885d6b92df84bbe0b21a48921fb60bb96",
-      "channels": ["github-release", "cargo-binstall", "npm"]
-    },
-    {
-      "name": "ok-macos-x86_64.sha256",
       "channels": ["github-release"]
     },
     {
