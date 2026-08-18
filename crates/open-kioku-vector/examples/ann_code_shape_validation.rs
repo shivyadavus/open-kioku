@@ -67,10 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query_count = parse_usize("OK_ANN_CODE_SHAPE_QUERIES", DEFAULT_QUERY_COUNT)?;
     validate_positive_list("OK_ANN_CODE_SHAPE_SIZES", &sizes)?;
     validate_positive_list("OK_ANN_CODE_SHAPE_DIMS", &dimensions)?;
-    validate_positive_list(
-        "OK_ANN_CODE_SHAPE_SEARCH_EXPANSIONS",
-        &search_expansions,
-    )?;
+    validate_positive_list("OK_ANN_CODE_SHAPE_SEARCH_EXPANSIONS", &search_expansions)?;
     if query_count == 0 {
         return Err("OK_ANN_CODE_SHAPE_QUERIES must be greater than zero".into());
     }
@@ -268,8 +265,7 @@ fn code_shaped_unit_vector(id: usize, dimensions: usize) -> Vec<f32> {
         dimensions,
     );
     let revision_vector = deterministic_vector(
-        ((symbol_family as u64 + 1) << 4 | revision as u64)
-            .wrapping_mul(0x94d0_49bb_1331_11eb),
+        ((symbol_family as u64 + 1) << 4 | revision as u64).wrapping_mul(0x94d0_49bb_1331_11eb),
         dimensions,
     );
 
@@ -432,6 +428,9 @@ mod tests {
     }
 
     fn dot(left: &[f32], right: &[f32]) -> f32 {
-        left.iter().zip(right).map(|(left, right)| left * right).sum()
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left * right)
+            .sum()
     }
 }
