@@ -44,8 +44,9 @@ workspace crates. From a clean checkout of the exact release commit, first run:
 EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --dry-run
 ```
 
-After the release commit/tag is final, publish locally using Cargo credentials
-from `cargo login` or `CARGO_REGISTRY_TOKEN`:
+After the `v3.0.0` tag is final and the GitHub release gate has succeeded,
+publish locally using Cargo credentials from `cargo login` or
+`CARGO_REGISTRY_TOKEN`:
 
 ```sh
 EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --publish
