@@ -17,6 +17,11 @@ const OS_MAP = {
 };
 
 function getBinaryPath() {
+    if (os.platform() === 'darwin' && os.arch() === 'x64') {
+        console.error('Open Kioku 3.x on macOS requires Apple Silicon. Intel Mac users can install Open Kioku 2.4.x.');
+        process.exit(1);
+    }
+
     const osType = OS_MAP[os.platform()];
     const archType = ARCH_MAP[os.arch()];
 
