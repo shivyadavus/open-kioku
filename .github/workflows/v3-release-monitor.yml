@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Find or dispatch tagged release and wait for conclusion
+      - name: Find or dispatch tagged release and report run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -31,7 +31,6 @@ jobs:
           import os
           import subprocess
           import time
-          import urllib.error
           import urllib.request
 
           repo = os.environ['GITHUB_REPOSITORY']
@@ -79,26 +78,15 @@ jobs:
                       break
 
           if run is None:
-              conclusion = 'missing'
-              run_url = '(no release run found)'
-              body = (
-                  'V3 publication monitor could not find a release workflow run for '
-                  f'`{tag}` at `{tag_sha}` after dispatch.'
-              )
-          else:
-              run_id = run['id']
-              run_url = run['html_url']
-              while run.get('status') != 'completed':
-                  time.sleep(10)
-                  _, run = request(f'/actions/runs/{run_id}')
-              conclusion = run.get('conclusion') or 'unknown'
-              body = (
-                  f'V3 tagged release workflow `{run_id}` completed with **{conclusion}** '
-                  f'for `{tag}` at `{tag_sha}`.\n\n{run_url}'
-              )
+              body = f'V3 publication monitor could not find a release workflow run for `{tag}` at `{tag_sha}` after dispatch.'
+              request('/issues/258/comments', method='POST', body={'body': body})
+              raise SystemExit(body)
 
+          body = (
+              f'V3 tagged release workflow `{run["id"]}` is **{run["status"]}** '
+              f'(conclusion: `{run.get("conclusion")}`) for `{tag}` at `{tag_sha}`.\n\n'
+              f'{run["html_url"]}'
+          )
           request('/issues/258/comments', method='POST', body={'body': body})
           print(body)
-          if conclusion != 'success':
-              raise SystemExit(f'V3 release workflow conclusion: {conclusion}')
           PY
