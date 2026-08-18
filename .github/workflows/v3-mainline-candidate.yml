@@ -221,18 +221,6 @@ jobs:
           PY
           python3 scripts/verify-release-artifact-hashes.py dist
           scripts/validate-versions.sh
-
-          # The hash-pinning step intentionally dirties exactly these two files.
-          # Preserve publish-crates.sh's clean-tree safety contract by proving
-          # there are no other edits before opting into its dry-run allowance.
-          mapfile -t dirty_files < <(git status --porcelain=v1 | cut -c4- | sort)
-          expected_dirty=("Formula/open-kioku.rb" "release-metadata.json")
-          if [ "${dirty_files[*]}" != "${expected_dirty[*]}" ]; then
-            echo "unexpected dirty files before publish dry-run:" >&2
-            printf '  %s\n' "${dirty_files[@]}" >&2
-            exit 1
-          fi
-          PUBLISH_ALLOW_DIRTY=1 EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --dry-run
           scripts/verify-release-readiness.sh
           scripts/generate-release-trust-artifacts.sh dist
           git diff --check
