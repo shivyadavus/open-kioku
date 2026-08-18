@@ -34,12 +34,7 @@ fn semantic_config() -> SemanticConfig {
     }
 }
 
-fn persist_snapshot(
-    repo: &Path,
-    store: &SqliteStore,
-    commit: &str,
-    fixtures: &[FixtureFile<'_>],
-) {
+fn persist_snapshot(repo: &Path, store: &SqliteStore, commit: &str, fixtures: &[FixtureFile<'_>]) {
     let repository_id = RepositoryId("repo".into());
     let files = fixtures
         .iter()
@@ -105,7 +100,9 @@ fn persist_snapshot(
 fn assert_search_path(manager: &SemanticIndexManager<'_>, query: &str, expected: &str) {
     let results = manager.search(query, 10).unwrap();
     assert!(
-        results.iter().any(|result| result.path == Path::new(expected)),
+        results
+            .iter()
+            .any(|result| result.path == Path::new(expected)),
         "expected semantic search for {query:?} to include {expected:?}, got {results:?}"
     );
 }
@@ -183,7 +180,10 @@ fn ann_generation_stays_clean_across_add_update_rename_delete_and_restart() {
     );
     let renamed = manager.index().unwrap();
     assert_eq!(renamed.status.vector_count, 2);
-    assert_eq!(renamed.reused_embeddings, 2);
+    // Semantic target hashes include path-sensitive metadata, so the renamed target must be
+    // re-embedded while the unchanged billing target is safely reused.
+    assert_eq!(renamed.reused_embeddings, 1);
+    assert_eq!(renamed.embedded_count, 1);
     let renamed_results = manager.search("beta refresh token", 10).unwrap();
     assert!(renamed_results
         .iter()
