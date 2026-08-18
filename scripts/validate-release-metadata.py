@@ -119,7 +119,6 @@ def check_formula(metadata: dict, version: str, errors: list[str]) -> None:
 
     expected_binaries = {
         "ok-macos-arm64",
-        "ok-macos-x86_64",
         "ok-linux-arm64",
         "ok-linux-x86_64",
     }
@@ -140,13 +139,21 @@ def check_binstall(metadata: dict, errors: list[str]) -> None:
     expected = {
         "ok-linux-x86_64",
         "ok-linux-arm64",
-        "ok-macos-x86_64",
         "ok-macos-arm64",
     }
     for name in expected:
         fragment = f"releases/download/v{{ version }}/{name}"
         if fragment not in cli_toml:
             fail(f"cargo-binstall metadata missing artifact URL fragment {fragment}", errors)
+
+    forbidden_targets = (
+        "[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]",
+        "[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]",
+        "[package.metadata.binstall.overrides.x86_64-apple-darwin]",
+    )
+    for target in forbidden_targets:
+        if target in cli_toml:
+            fail(f"cargo-binstall metadata advertises unsupported V3 target {target}", errors)
 
     if "[package.metadata.binstall]" not in cli_toml:
         fail("open-kioku-cli is missing package.metadata.binstall", errors)
