@@ -54,7 +54,6 @@ struct Measurement {
     ann_query: LatencyMetrics,
     ann_reload_ms: f64,
     ann_first_query_after_reload_us: f64,
-    exact_index_bytes: u64,
     ann_index_bytes: u64,
     ann_metadata_bytes: u64,
     ann_memory_bytes: usize,
@@ -138,12 +137,10 @@ struct ExactFixture {
     dimensions: usize,
     vector_count: usize,
     query_count: usize,
-    _exact_oracle: ExactFlatVectorIndex,
     queries: Vec<Vec<f32>>,
     oracle_hits: Vec<Vec<VectorHit>>,
     exact_build_ms: f64,
     exact_query: LatencyMetrics,
-    exact_index_bytes: u64,
 }
 
 impl ExactFixture {
@@ -158,11 +155,6 @@ impl ExactFixture {
             exact.add(record(id, dimensions))?;
         }
         let exact_build_ms = elapsed_ms(exact_started);
-
-        let temp = tempfile::tempdir()?;
-        let exact_path = temp.path().join("exact.json");
-        exact.save(&exact_path)?;
-        let exact_index_bytes = fs::metadata(&exact_path)?.len();
 
         let effective_queries = query_count.min(vector_count);
         let queries = (0..effective_queries)
@@ -180,16 +172,19 @@ impl ExactFixture {
             exact_latencies.push(elapsed_us(started));
         }
 
+        // The exact-flat index is only the correctness oracle. Drop it before
+        // constructing HNSW so ANN memory measurements do not include a second
+        // full copy of the corpus, and avoid serializing a multi-GB JSON oracle.
+        drop(exact);
+
         Ok(Self {
             dimensions,
             vector_count,
             query_count: effective_queries,
-            _exact_oracle: exact,
             queries,
             oracle_hits,
             exact_build_ms,
             exact_query: latency_metrics(&exact_latencies),
-            exact_index_bytes,
         })
     }
 
@@ -268,7 +263,6 @@ impl ExactFixture {
             ann_query: latency_metrics(&ann_latencies),
             ann_reload_ms,
             ann_first_query_after_reload_us,
-            exact_index_bytes: self.exact_index_bytes,
             ann_index_bytes,
             ann_metadata_bytes,
             ann_memory_bytes: loaded.memory_usage_bytes(),
