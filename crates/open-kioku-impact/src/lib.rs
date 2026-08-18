@@ -1046,6 +1046,7 @@ mod tests {
         let store = make_store();
 
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),
@@ -1226,6 +1227,7 @@ mod tests {
             },
         ];
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),
@@ -1301,6 +1303,7 @@ mod tests {
             is_vendor: false,
         };
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),
@@ -1421,6 +1424,7 @@ mod tests {
             message: "JavaScript HTTP route".into(),
         }];
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),
@@ -1509,6 +1513,7 @@ mod tests {
             message: "complexity_risk=high; cyclomatic=12; cognitive=18; loop_count=2; max_loop_depth=2; transitive_loop_depth=2; caveat=risk signal, not proof of complexity".into(),
         }];
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),
@@ -1574,6 +1579,7 @@ mod tests {
             is_vendor: false,
         };
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),

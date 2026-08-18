@@ -39,6 +39,7 @@ fn provenance_lookup(c: &mut Criterion) {
         visibility: open_kioku_core::Visibility::Public,
     };
     let manifest = IndexManifest {
+        analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
         repository: Repository {
             id: RepositoryId::new("repo"),
             name: "bench".into(),

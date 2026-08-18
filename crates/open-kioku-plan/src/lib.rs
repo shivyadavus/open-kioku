@@ -2756,6 +2756,7 @@ mod tests {
             },
         ];
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: repo_id,
                 name: "repo".into(),

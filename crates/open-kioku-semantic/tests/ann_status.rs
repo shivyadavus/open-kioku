@@ -14,6 +14,7 @@ fn auto_backend_persists_hnsw_and_reports_resolved_backend_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
     let manifest = IndexManifest {
+        analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
         repository: Repository {
             id: RepositoryId("repo".into()),
             name: "repo".into(),

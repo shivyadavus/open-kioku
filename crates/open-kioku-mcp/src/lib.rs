@@ -58,20 +58,35 @@ impl<'a> ContextCandidateSource for SemanticContextCandidateSource<'a> {
     }
 
     fn retrieve(&self, request: &CandidateRequest) -> open_kioku_errors::Result<CandidateStream> {
-        let results = self.manager.search(&request.task, request.limit)?;
-        Ok(CandidateStream::success(
+        let report = self.manager.search_with_path_prefixes(
+            &request.task,
+            request.limit,
+            &request.scope.path_prefixes,
+        )?;
+        let rationale = format!(
+            "local semantic-vector similarity; backend={} eligible={}/{} selectivity={} reason={}",
+            report.routing.selected_backend,
+            report.routing.eligible_candidate_count,
+            report.routing.total_vector_count,
+            report.routing.filter_selectivity,
+            report.routing.routing_reason,
+        );
+        let mut stream = CandidateStream::success(
             open_kioku_core::RetrievalSourceKind::SemanticVector,
-            results
+            report
+                .results
                 .into_iter()
                 .map(|result| {
                     StreamCandidate::from_result(
                         result,
                         open_kioku_core::RetrievalAuthority::Heuristic,
-                        "local semantic-vector similarity",
+                        rationale.clone(),
                     )
                 })
                 .collect(),
-        ))
+        );
+        stream.caveats.extend(report.routing.caveats);
+        Ok(stream)
     }
 }
 
@@ -240,6 +255,35 @@ fn store_idle_expired(last_request: Instant) -> bool {
     last_request.elapsed() > STORE_IDLE_TTL
 }
 
+fn analysis_semantics_compatibility_for_store(
+    store: &SqliteStore,
+) -> anyhow::Result<open_kioku_core::AnalysisSemanticsCompatibility> {
+    let manifest = store.manifest()?;
+    Ok(open_kioku_core::classify_analysis_semantics(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &open_kioku_core::AnalysisSemanticsState::current(),
+    ))
+}
+
+fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()> {
+    let compatibility = analysis_semantics_compatibility_for_store(store)?;
+    if compatibility.status.allows_authoritative_relationships() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
+        compatibility.status,
+        compatibility.reasons.join("; "),
+        compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+        compatibility.current_fingerprint,
+        compatibility.affected_components.join(", "),
+        compatibility.affected_languages.join(", "),
+        compatibility.recommended_action
+    )
+}
+
 async fn dispatch(
     repo: &Path,
     store: &SqliteStore,
@@ -283,7 +327,18 @@ async fn dispatch(
             tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(json!({"slept": true}))
         }
-        "repo_status" => Ok(json!(store.manifest()?)),
+        "repo_status" => {
+            let manifest = store.manifest()?;
+            let compatibility = analysis_semantics_compatibility_for_store(store)?;
+            let mut status = serde_json::to_value(&manifest)?;
+            if let Some(object) = status.as_object_mut() {
+                object.insert(
+                    "analysis_semantics_status".into(),
+                    serde_json::to_value(compatibility)?,
+                );
+            }
+            Ok(status)
+        }
         "list_languages" => {
             let files = store.list_files(usize::MAX, 0)?;
             let mut languages = files
@@ -445,6 +500,7 @@ async fn dispatch(
             ))
         }
         "impact_analysis" => {
+            require_authoritative_relationships(store)?;
             let path = required_str(&params, "path")?;
             let mut report = ImpactEngine::new(store)
                 .with_history_store(Some(store))
@@ -535,12 +591,17 @@ async fn dispatch(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
         }
-        "detect_architecture" => Ok(json!(ArchitectureDetector::new(store, None).detect()?)),
+        "detect_architecture" => {
+            require_authoritative_relationships(store)?;
+            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
+        }
         "architecture_boundaries" | "architecture_violations" => {
+            require_authoritative_relationships(store)?;
             architecture_summary_tool(repo, store)
         }
         "architecture_policy_validate" => architecture_policy_validate_tool(repo, &params),
         "architecture_policy_check" => {
+            require_authoritative_relationships(store)?;
             let Some(policy) = load_architecture_policy(repo)? else {
                 return Ok(json!(open_kioku_core::PolicyCheckReport {
                     configured: false,
@@ -555,6 +616,7 @@ async fn dispatch(
             Ok(json!(evaluate_policy(store, &resolver, &policy)?))
         }
         "architecture_policy_explain" => {
+            require_authoritative_relationships(store)?;
             let Some(policy) = load_architecture_policy(repo)? else {
                 return Ok(json!({
                     "configured": false,
@@ -571,12 +633,14 @@ async fn dispatch(
             Ok(json!(SymbolEngine::new(store).definition(query)?))
         }
         "get_references" => {
+            require_authoritative_relationships(store)?;
             let query = required_str(&params, "query")?;
             Ok(json!(
                 SymbolEngine::new(store).references(query, limit(&params))?
             ))
         }
         "get_callers" | "get_callees" => {
+            require_authoritative_relationships(store)?;
             let query = required_str(&params, "query")?;
             let symbol = SymbolEngine::new(store).definition(query)?;
             let node = format!("symbol:{}", symbol.id.0);
@@ -609,8 +673,12 @@ async fn dispatch(
         "hybrid_search" => hybrid_search_tool(repo, store, config, &params),
         "explain_search_result" => hybrid_search_tool(repo, store, config, &params),
         "structural_search" => search_tool(repo, store, &params),
-        "get_implementations" => implementation_lookup_tool(store, &params),
+        "get_implementations" => {
+            require_authoritative_relationships(store)?;
+            implementation_lookup_tool(store, &params)
+        }
         "dependency_path" => {
+            require_authoritative_relationships(store)?;
             let from = required_str(&params, "from")?;
             let to = required_str(&params, "to")?;
             let from = resolve_graph_node(store, from)?;
@@ -623,6 +691,7 @@ async fn dispatch(
             }))
         }
         "module_dependencies" => {
+            require_authoritative_relationships(store)?;
             let node = required_str(&params, "node")?;
             let node = resolve_graph_node(store, node)?;
             let (nodes, edges) = store.neighbors(&node, limit(&params))?;
@@ -639,7 +708,10 @@ async fn dispatch(
             Ok(json!({"file": file, "chunks": chunks}))
         }
         "explain_flow" => explain_flow_tool(store, &params),
-        "summarize_architecture" => architecture_summary_tool(repo, store),
+        "summarize_architecture" => {
+            require_authoritative_relationships(store)?;
+            architecture_summary_tool(repo, store)
+        }
         "explain_test_coverage" => {
             let path = params
                 .get("path")
@@ -772,9 +844,37 @@ async fn dispatch(
                 Some(store as &dyn open_kioku_storage::GraphStore),
                 manifest.as_ref(),
             );
-            Ok(json!(schema))
+            let mut schema = serde_json::to_value(schema)?;
+            let capabilities = [
+                open_kioku_core::Language::Rust,
+                open_kioku_core::Language::TypeScript,
+                open_kioku_core::Language::JavaScript,
+                open_kioku_core::Language::Python,
+                open_kioku_core::Language::Java,
+                open_kioku_core::Language::Go,
+            ]
+            .iter()
+            .filter_map(open_kioku_resolution::semantic_capabilities_for)
+            .collect::<Vec<_>>();
+            let object = schema
+                .as_object_mut()
+                .context("evidence schema must serialize as a JSON object")?;
+            object.insert(
+                "relationship_semantic_capability_version".into(),
+                json!(open_kioku_resolution::LANGUAGE_SEMANTIC_CAPABILITY_VERSION),
+            );
+            object.insert(
+                "relationship_semantic_capabilities".into(),
+                json!(capabilities),
+            );
+            object.insert(
+                "analysis_semantics_status".into(),
+                serde_json::to_value(analysis_semantics_compatibility_for_store(store)?)?,
+            );
+            Ok(schema)
         }
         "query_evidence_graph" => {
+            require_authoritative_relationships(store)?;
             let query_str = params
                 .get("query")
                 .and_then(serde_json::Value::as_str)
@@ -1212,7 +1312,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "map_stacktrace_to_code" => "Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "find_errors_for_symbol" => "Use to look up recently stored runtime errors and stack traces for one specific symbol name. Returns error messages, stack frames, and timestamps when runtime integration is configured. Do NOT use for ad-hoc stack trace text mapping (use map_stacktrace_to_code) or for a broad inventory of recent failures (use find_recent_failures). This is read-only and returns a disabled-status response when runtime error integration is not configured in the repository.",
         "find_recent_failures" => "Use to list recently stored runtime failures, errors, and incidents across the repository before beginning a debugging investigation. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured. Do NOT use when errors for one specific symbol are needed (use find_errors_for_symbol) or for stack trace mapping (use map_stacktrace_to_code). This is read-only and returns a disabled-status response when runtime error integration is not configured.",
-        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, and properties. This is read-only and does not query graph data.",
+        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, properties, and the versioned Tier-1 relationship-semantic capability matrix. This is read-only and does not query graph data.",
         "query_evidence_graph" => "Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
         _ => "Use when this exact indexed repository capability is needed. Prefer narrower sibling tools when they match the task. This tool reports local Open Kioku index data and does not contact external services.",
     };
@@ -1278,7 +1378,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recently stored runtime errors and stack traces for one specific symbol from the local error store. Returns error messages, stack frames, and timestamps when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact symbol name to look up stored runtime errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recently stored runtime failures, errors, and incidents from the repository's local error store. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve, ordered by most recent. Defaults to 20."}}})),
-        ("get_evidence_schema", "Retrieve the versioned schema defining the supported graph node types, edge types, and query properties available in the repository's structural evidence graph.", json!({"type":"object","properties":{}})),
+        ("get_evidence_schema", "Retrieve the versioned schema defining supported graph types, query properties, and the Tier-1 relationship-semantic capability matrix.", json!({"type":"object","properties":{}})),
         ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
 
@@ -3227,7 +3327,7 @@ paths = ["src/**"]
     }
 
     fn fixture_manifest() -> IndexManifest {
-        serde_json::from_value(json!({
+        let mut manifest: IndexManifest = serde_json::from_value(json!({
             "repository": {
                 "id": "repo",
                 "name": "mcp-fixture",
@@ -3244,7 +3344,9 @@ paths = ["src/**"]
             "index_mode": "full",
             "phase_reports": []
         }))
-        .unwrap()
+        .unwrap();
+        manifest.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::current());
+        manifest
     }
 
     fn fixture_history_snapshot() -> HistorySnapshot {
@@ -3345,9 +3447,78 @@ paths = ["src/**"]
     }
 
     #[tokio::test]
+    async fn legacy_analysis_semantics_are_reported_and_relationship_reads_fail_closed() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let mut manifest = fixture_manifest();
+        manifest.analysis_semantics = None;
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let status = dispatch(Path::new("."), &store, &config, "repo_status", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            status["analysis_semantics_status"]["status"],
+            "rebuild_required"
+        );
+        assert!(status["analysis_semantics_status"]["recommended_action"]
+            .as_str()
+            .unwrap()
+            .contains("ok index"));
+
+        let graph = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "query_evidence_graph",
+            json!({"query": "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 1"}),
+        )
+        .await
+        .unwrap_err();
+        let message = graph.to_string();
+        assert!(message.contains("authoritative relationship evidence unavailable"));
+        assert!(message.contains("RebuildRequired"));
+
+        let files = dispatch(Path::new("."), &store, &config, "list_files", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(files["returned"], 0);
+    }
+
+    #[tokio::test]
     async fn query_evidence_graph_returns_metadata_and_continuation() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
+        let manifest = fixture_manifest();
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
         let root = GraphNode {
             id: NodeId::new("file:root"),
             node_type: GraphNodeType::File,
@@ -3588,6 +3759,31 @@ paths = ["src/**"]
         assert!(result.get("evidence_source_types").is_some());
         assert!(result.get("query_features").is_some());
         assert!(result.get("optional_evidence").is_some());
+        assert_eq!(result["relationship_semantic_capability_version"], 1);
+        let semantic_capabilities = result["relationship_semantic_capabilities"]
+            .as_array()
+            .expect("Tier-1 relationship semantic capabilities");
+        assert_eq!(semantic_capabilities.len(), 6);
+        let javascript = semantic_capabilities
+            .iter()
+            .find(|descriptor| descriptor["language"] == "java_script")
+            .expect("JavaScript semantic capability descriptor");
+        assert_eq!(
+            javascript["capabilities"]["types_annotation"],
+            "unsupported"
+        );
+        let java = semantic_capabilities
+            .iter()
+            .find(|descriptor| descriptor["language"] == "java")
+            .expect("Java semantic capability descriptor");
+        assert_eq!(
+            java["capabilities"]["calls_instance_member"],
+            "supported_authoritative"
+        );
+        assert_eq!(
+            java["capabilities"]["calls_dynamic_dispatch"],
+            "unsupported"
+        );
 
         // Check arrays
         let node_types = result["node_types"].as_array().unwrap();

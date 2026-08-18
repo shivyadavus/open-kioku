@@ -2,6 +2,15 @@
   "id": "get-evidence-schema",
   "jsonrpc": "2.0",
   "result": {
+    "analysis_semantics_status": {
+      "affected_components": [],
+      "affected_languages": [],
+      "current_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc",
+      "reasons": [],
+      "recommended_action": "none",
+      "status": "compatible",
+      "stored_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc"
+    },
     "caveats": [
       "schema availability reflects the current persisted index manifest"
     ],
@@ -638,6 +647,111 @@
       "timeout",
       "read_only_syntax_rejection"
     ],
+    "relationship_semantic_capabilities": [
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_corroborating",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_authoritative",
+          "inheritance_extends": "unsupported",
+          "inheritance_implements": "supported_corroborating",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_corroborating",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "rust",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_corroborating",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_corroborating",
+          "inheritance_extends": "supported_corroborating",
+          "inheritance_implements": "supported_corroborating",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_corroborating",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "type_script",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_corroborating",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_corroborating",
+          "inheritance_extends": "supported_corroborating",
+          "inheritance_implements": "unsupported",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "unsupported",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "java_script",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_corroborating",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_corroborating",
+          "inheritance_extends": "supported_corroborating",
+          "inheritance_implements": "unsupported",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_corroborating",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "python",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_authoritative",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_authoritative",
+          "inheritance_extends": "supported_corroborating",
+          "inheritance_implements": "supported_corroborating",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_authoritative",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "java",
+        "version": 1
+      },
+      {
+        "capabilities": {
+          "calls_dynamic_dispatch": "unsupported",
+          "calls_imported_function": "supported_authoritative",
+          "calls_instance_member": "supported_authoritative",
+          "calls_local_function": "supported_authoritative",
+          "calls_static_member": "supported_authoritative",
+          "inheritance_extends": "unsupported",
+          "inheritance_implements": "unsupported",
+          "references_import_binding": "supported_authoritative",
+          "source_ranges_call_site": "supported_authoritative",
+          "types_annotation": "supported_authoritative",
+          "types_constructor": "supported_corroborating"
+        },
+        "language": "go",
+        "version": 1
+      }
+    ],
+    "relationship_semantic_capability_version": 1,
     "version": "1.0.0"
   }
 }

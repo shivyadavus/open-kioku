@@ -10,9 +10,17 @@ pub trait LanguageSemantics: Send + Sync {
 
     fn classify_receiver(&self, receiver: &str) -> ReceiverKind {
         let trimmed = receiver.trim();
-        if self.self_receivers().contains(&trimmed) {
+        if self.self_receivers().iter().any(|self_receiver| {
+            trimmed == *self_receiver
+                || trimmed
+                    .strip_prefix(self_receiver)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        }) {
             ReceiverKind::Self_
-        } else if trimmed == "super" || trimmed == "Super" {
+        } else if matches!(trimmed, "super" | "super()") {
+            // Only direct super dispatch is structurally proven here. Nested member chains such as
+            // `super.repo.save()` require the intermediate member's type; treating them as direct
+            // super calls could manufacture an authoritative target on the parent type.
             ReceiverKind::Super
         } else if trimmed
             .chars()

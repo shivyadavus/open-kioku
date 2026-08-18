@@ -17,20 +17,35 @@ impl<'a> open_kioku_context::candidates::ContextCandidateSource
         &self,
         request: &open_kioku_context::candidates::CandidateRequest,
     ) -> open_kioku_errors::Result<open_kioku_context::candidates::CandidateStream> {
-        let results = self.manager.search(&request.task, request.limit)?;
-        Ok(open_kioku_context::candidates::CandidateStream::success(
+        let report = self.manager.search_with_path_prefixes(
+            &request.task,
+            request.limit,
+            &request.scope.path_prefixes,
+        )?;
+        let rationale = format!(
+            "local semantic-vector similarity; backend={} eligible={}/{} selectivity={} reason={}",
+            report.routing.selected_backend,
+            report.routing.eligible_candidate_count,
+            report.routing.total_vector_count,
+            report.routing.filter_selectivity,
+            report.routing.routing_reason,
+        );
+        let mut stream = open_kioku_context::candidates::CandidateStream::success(
             open_kioku_core::RetrievalSourceKind::SemanticVector,
-            results
+            report
+                .results
                 .into_iter()
                 .map(|result| {
                     open_kioku_context::candidates::StreamCandidate::from_result(
                         result,
                         open_kioku_core::RetrievalAuthority::Heuristic,
-                        "local semantic-vector similarity",
+                        rationale.clone(),
                     )
                 })
                 .collect(),
-        ))
+        );
+        stream.caveats.extend(report.routing.caveats);
+        Ok(stream)
     }
 }
 

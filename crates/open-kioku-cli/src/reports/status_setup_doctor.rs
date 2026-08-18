@@ -28,6 +28,15 @@ fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
     Ok(SqliteStore::open(&index_path)?.manifest()?)
 }
 
+fn analysis_semantics_compatibility_for_manifest(
+    manifest: Option<&IndexManifest>,
+) -> open_kioku_core::AnalysisSemanticsCompatibility {
+    open_kioku_core::classify_analysis_semantics(
+        manifest.and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &open_kioku_core::AnalysisSemanticsState::current(),
+    )
+}
+
 fn render_status_markdown(
     repo: &Path,
     manifest: Option<&IndexManifest>,
@@ -44,6 +53,10 @@ fn render_status_markdown(
     if let Some(manifest) = manifest {
         out.push_str("| Metric | Value |\n| --- | ---: |\n");
         out.push_str(&format!("| Mode | `{}` |\n", manifest.index_mode));
+        let semantics = analysis_semantics_compatibility_for_manifest(Some(manifest));
+        out.push_str(&format!("| Analysis semantics | `{:?}` |\n", semantics.status));
+        out.push_str(&format!("| Stored semantics fingerprint | `{}` |\n", semantics.stored_fingerprint.as_deref().unwrap_or("missing")));
+        out.push_str(&format!("| Current semantics fingerprint | `{}` |\n", semantics.current_fingerprint));
         out.push_str(&format!("| Files | {} |\n", manifest.file_count));
         out.push_str(&format!("| Symbols | {} |\n", manifest.symbol_count));
         out.push_str(&format!("| Chunks | {} |\n", manifest.chunk_count));
@@ -951,6 +964,35 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             message: ".ok/index.sqlite is missing".into(),
         });
         next_steps.push("Run `ok index .` before connecting an MCP client.".into());
+    }
+
+    if let Ok(Some(manifest)) = load_index_manifest(&repo) {
+        let compatibility = analysis_semantics_compatibility_for_manifest(Some(&manifest));
+        let compatible = compatibility.status.allows_authoritative_relationships();
+        checks.push(DoctorCheck {
+            name: "analysis-semantics",
+            status: if compatible { CheckStatus::Pass } else { CheckStatus::Fail },
+            message: if compatible {
+                format!(
+                    "compatible; fingerprint {}",
+                    compatibility.current_fingerprint
+                )
+            } else {
+                format!(
+                    "{:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
+                    compatibility.status,
+                    compatibility.reasons.join("; "),
+                    compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+                    compatibility.current_fingerprint,
+                    compatibility.affected_components.join(", "),
+                    compatibility.affected_languages.join(", "),
+                    compatibility.recommended_action
+                )
+            },
+        });
+        if !compatible {
+            next_steps.push(compatibility.recommended_action.clone());
+        }
     }
 
     if index_path.exists() {

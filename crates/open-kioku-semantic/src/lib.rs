@@ -89,6 +89,29 @@ pub struct SemanticIndexReport {
     pub removed_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemanticSearchRouting {
+    pub selected_backend: String,
+    pub total_vector_count: usize,
+    pub eligible_candidate_count: usize,
+    pub filter_selectivity: String,
+    /// Whether any supported semantic candidate filter was enforced before top-k selection.
+    /// This is broader than `path_scope_enforced`: callers may supply a precomputed vector
+    /// allowlist for language, project, symbol, module, or another repository-validated scope.
+    #[serde(default)]
+    pub filter_scope_enforced: bool,
+    pub path_scope_enforced: bool,
+    pub routing_reason: String,
+    pub ann_profile: Option<String>,
+    pub caveats: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticSearchReport {
+    pub results: Vec<SearchResult>,
+    pub routing: SemanticSearchRouting,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SemanticTarget {
     stable_id: String,
@@ -285,6 +308,42 @@ impl<'a> SemanticIndexManager<'a> {
         limit: usize,
         allowlist: Option<HashSet<VectorId>>,
     ) -> Result<Vec<SearchResult>> {
+        Ok(self
+            .search_with_allowlist_report(query, limit, allowlist)?
+            .results)
+    }
+
+    /// Search a repository-validated semantic candidate set and return routing diagnostics.
+    ///
+    /// The allowlist is intentionally generic: higher layers can derive it from language,
+    /// project/workspace, symbol/module, path, or another scope already represented in repository
+    /// metadata. The semantic layer treats the set as an enforced eligibility boundary and never
+    /// widens it while choosing between exact-flat and ANN.
+    pub fn search_with_allowlist_report(
+        &self,
+        query: &str,
+        limit: usize,
+        allowlist: Option<HashSet<VectorId>>,
+    ) -> Result<SemanticSearchReport> {
+        self.search_routed(query, limit, allowlist, &[])
+    }
+
+    pub fn search_with_path_prefixes(
+        &self,
+        query: &str,
+        limit: usize,
+        path_prefixes: &[String],
+    ) -> Result<SemanticSearchReport> {
+        self.search_routed(query, limit, None, path_prefixes)
+    }
+
+    fn search_routed(
+        &self,
+        query: &str,
+        limit: usize,
+        caller_allowlist: Option<HashSet<VectorId>>,
+        path_prefixes: &[String],
+    ) -> Result<SemanticSearchReport> {
         let status = self.status();
         if !status.ready {
             return Err(OkError::Unsupported(format!(
@@ -294,40 +353,147 @@ impl<'a> SemanticIndexManager<'a> {
         }
         let provider = provider_for_config(&self.config, false, &self.models_dir())?;
         let targets = read_targets(&self.current_dir().join("ids.json"))?;
-        let query_vector = provider.embed_query(query)?;
-        let options = VectorSearchOptions {
-            limit,
-            allowlist,
-            target_kind: None,
+        let total_vector_count = targets.len();
+        let normalized_prefixes = normalize_path_prefixes(path_prefixes)?;
+        let path_scope_enforced = !normalized_prefixes.is_empty();
+        let scoped_ids = if path_scope_enforced {
+            Some(
+                targets
+                    .values()
+                    .filter(|target| target_matches_path_scope(target, &normalized_prefixes))
+                    .map(|target| target.vector_id)
+                    .collect::<HashSet<_>>(),
+            )
+        } else {
+            None
         };
-        let backend = status
+        let allowlist = intersect_allowlists(caller_allowlist, scoped_ids);
+        // Any concrete allowlist is an enforced eligibility boundary, regardless of which
+        // higher-level filter produced it. Backend routing must depend on the effective candidate
+        // population, not on whether the filter happened to be a path prefix.
+        let filter_scope_enforced = allowlist.is_some();
+        let eligible_candidate_count = allowlist
+            .as_ref()
+            .map(|ids| {
+                targets
+                    .values()
+                    .filter(|target| ids.contains(&target.vector_id))
+                    .count()
+            })
+            .unwrap_or(total_vector_count);
+        let filter_selectivity = semantic_filter_selectivity(
+            total_vector_count,
+            eligible_candidate_count,
+            filter_scope_enforced,
+        );
+        let manifest_backend = status
             .manifest
             .as_ref()
             .map(|manifest| manifest.backend.as_str())
             .ok_or_else(|| OkError::Storage("semantic manifest missing for ready index".into()))?;
-        let hits = match backend {
-            "exact-flat" => ExactFlatVectorIndex::load(&self.current_dir().join("index.json"))?
-                .search(&query_vector, options)?,
-            "usearch-hnsw-f32" | "usearch-hnsw-bf16" => {
-                let index =
-                    UsearchHnswVectorIndex::load(&self.current_dir().join("index.usearch"))?;
-                if index.parameters() != PRODUCTION_HNSW_PARAMETERS {
-                    return Err(OkError::Storage(format!(
-                        "semantic HNSW artifact uses {:?}, expected measured profile {} ({:?}); rebuild the semantic index",
-                        index.parameters(),
-                        PRODUCTION_HNSW_PROFILE,
-                        PRODUCTION_HNSW_PARAMETERS
-                    )));
-                }
-                index.search(&query_vector, options)?
-            }
-            other => {
-                return Err(OkError::Storage(format!(
-                    "semantic manifest contains unsupported vector backend `{other}`"
-                )))
-            }
+        let mut selected_backend = manifest_backend.to_string();
+        let mut routing_reason = if path_scope_enforced {
+            format!(
+                "validated path scope leaves {eligible_candidate_count} of {total_vector_count} semantic candidates"
+            )
+        } else if filter_scope_enforced {
+            format!(
+                "validated semantic candidate filter leaves {eligible_candidate_count} of {total_vector_count} candidates"
+            )
+        } else {
+            format!("semantic query uses the persisted {manifest_backend} backend")
         };
-        hydrate_hits(self.store, &targets, hits)
+        let mut caveats = Vec::new();
+
+        let should_use_scoped_exact = filter_scope_enforced
+            && should_route_scoped_exact(&self.config, manifest_backend, eligible_candidate_count);
+        let query_vector = provider.embed_query(query)?;
+        let options = VectorSearchOptions {
+            limit,
+            allowlist: allowlist.clone(),
+            target_kind: None,
+        };
+
+        let hits = if should_use_scoped_exact {
+            match build_scoped_exact_index(
+                &self.current_dir(),
+                &targets,
+                allowlist.as_ref().ok_or_else(|| {
+                  OkError::Storage(
+                      "validated semantic candidate filter lost its allowlist; refusing to widen retrieval"
+                          .into(),
+                  )
+              })?,
+                &self.config,
+            )? {
+                Some(index) => {
+                    selected_backend = "exact-flat".into();
+                    routing_reason = format!(
+                        "auto backend selected exact-flat because the enforced filter has {eligible_candidate_count} eligible candidates below ann_min_rows={} (total vectors {total_vector_count})",
+                        self.config.ann_min_rows
+                    );
+                    index.search(
+                        &query_vector,
+                        VectorSearchOptions {
+                            limit,
+                            allowlist: None,
+                            target_kind: None,
+                        },
+                    )?
+                }
+                None => {
+                    caveats.push(
+                        "filtered exact-flat routing could not reconstruct a complete exact subset from the local embedding cache; retained pre-filtered ANN search without widening scope"
+                            .into(),
+                    );
+                    routing_reason = format!(
+                        "auto backend retained {manifest_backend} because the exact subset cache was incomplete; the enforced candidate filter still applies before ANN top-k"
+                    );
+                    search_persisted_backend(
+                        &self.current_dir(),
+                        manifest_backend,
+                        &query_vector,
+                        options,
+                    )?
+                }
+            }
+        } else {
+            if filter_scope_enforced && backend_is_ann(manifest_backend) {
+                routing_reason = if self.config.backend == "auto" {
+                    format!(
+                        "auto backend retained {manifest_backend} because the enforced filter has {eligible_candidate_count} eligible candidates at or above ann_min_rows={} (total vectors {total_vector_count})",
+                        self.config.ann_min_rows
+                    )
+                } else {
+                    format!(
+                        "explicit backend `{}` retained {manifest_backend}; the enforced candidate filter applies before ANN top-k",
+                        self.config.backend
+                    )
+                };
+            }
+            search_persisted_backend(
+                &self.current_dir(),
+                manifest_backend,
+                &query_vector,
+                options,
+            )?
+        };
+        let results = hydrate_hits(self.store, &targets, hits)?;
+        Ok(SemanticSearchReport {
+            results,
+            routing: SemanticSearchRouting {
+                selected_backend: selected_backend.clone(),
+                total_vector_count,
+                eligible_candidate_count,
+                filter_selectivity,
+                filter_scope_enforced,
+                path_scope_enforced,
+                routing_reason,
+                ann_profile: backend_is_ann(&selected_backend)
+                    .then(|| PRODUCTION_HNSW_PROFILE.to_string()),
+                caveats,
+            },
+        })
     }
 
     fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
@@ -661,6 +827,133 @@ fn index_artifacts_present(current: &Path, backend: &str) -> bool {
             current.join("index.usearch").is_file() && current.join("index.meta.json").is_file()
         }
         Err(_) => false,
+    }
+}
+
+fn normalize_path_prefixes(path_prefixes: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    for prefix in path_prefixes {
+        let value = prefix
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .trim_matches('/')
+            .to_string();
+        if value.is_empty()
+            || value
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            return Err(OkError::Unsupported(format!(
+                "semantic path scope `{prefix}` is not a safe repository-relative prefix"
+            )));
+        }
+        if !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+fn target_matches_path_scope(target: &SemanticTarget, prefixes: &[String]) -> bool {
+    let path = target.path.to_string_lossy().replace('\\', "/");
+    prefixes
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+}
+
+fn intersect_allowlists(
+    left: Option<HashSet<VectorId>>,
+    right: Option<HashSet<VectorId>>,
+) -> Option<HashSet<VectorId>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(ids), None) | (None, Some(ids)) => Some(ids),
+        (Some(left), Some(right)) => Some(left.intersection(&right).copied().collect()),
+    }
+}
+
+fn should_route_scoped_exact(
+    config: &SemanticConfig,
+    persisted_backend: &str,
+    eligible_candidate_count: usize,
+) -> bool {
+    config.backend == "auto"
+        && backend_is_ann(persisted_backend)
+        && eligible_candidate_count < config.ann_min_rows
+}
+
+fn semantic_filter_selectivity(total: usize, eligible: usize, filtered: bool) -> String {
+    if !filtered {
+        return "unfiltered".into();
+    }
+    if total == 0 || eligible.saturating_mul(10) <= total {
+        "highly-selective".into()
+    } else if eligible.saturating_mul(2) <= total {
+        "medium-selectivity".into()
+    } else {
+        "broad".into()
+    }
+}
+
+fn build_scoped_exact_index(
+    current: &Path,
+    targets: &HashMap<String, SemanticTarget>,
+    allowlist: &HashSet<VectorId>,
+    config: &SemanticConfig,
+) -> Result<Option<ExactFlatVectorIndex>> {
+    let Some(cache) = read_json::<EmbeddingCache>(&current.join("embeddings.cache")) else {
+        return Ok(None);
+    };
+    let mut exact = ExactFlatVectorIndex::new(config.dimensions)?;
+    for target in targets
+        .values()
+        .filter(|target| allowlist.contains(&target.vector_id))
+    {
+        let Some(entry) = cache.entries.get(&cache_key(target, config)) else {
+            return Ok(None);
+        };
+        if entry.target_id != target.stable_id
+            || entry.dimensions != config.dimensions
+            || entry.vector.len() != config.dimensions
+        {
+            return Ok(None);
+        }
+        exact.add(VectorRecord {
+            id: target.vector_id,
+            target_id: target.stable_id.clone(),
+            target_kind: target.kind.clone(),
+            vector: entry.vector.clone(),
+        })?;
+    }
+    Ok(Some(exact))
+}
+
+fn search_persisted_backend(
+    current: &Path,
+    backend: &str,
+    query_vector: &[f32],
+    options: VectorSearchOptions,
+) -> Result<Vec<open_kioku_vector::VectorHit>> {
+    match backend {
+        "exact-flat" => {
+            ExactFlatVectorIndex::load(&current.join("index.json"))?.search(query_vector, options)
+        }
+        "usearch-hnsw-f32" | "usearch-hnsw-bf16" => {
+            let index = UsearchHnswVectorIndex::load(&current.join("index.usearch"))?;
+            if index.parameters() != PRODUCTION_HNSW_PARAMETERS {
+                return Err(OkError::Storage(format!(
+                    "semantic HNSW artifact uses {:?}, expected measured profile {} ({:?}); rebuild the semantic index",
+                    index.parameters(),
+                    PRODUCTION_HNSW_PROFILE,
+                    PRODUCTION_HNSW_PARAMETERS
+                )));
+            }
+            index.search(query_vector, options)
+        }
+        other => Err(OkError::Storage(format!(
+            "semantic manifest contains unsupported vector backend `{other}`"
+        ))),
     }
 }
 
@@ -1269,6 +1562,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
         let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: open_kioku_core::Repository {
                 id: RepositoryId("repo".into()),
                 name: "repo".into(),
@@ -1327,6 +1621,208 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "semantic_similarity"));
+    }
+
+    #[test]
+    fn auto_ann_routes_highly_selective_path_scope_to_exact_flat() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
+        let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: open_kioku_core::Repository {
+                id: RepositoryId("repo".into()),
+                name: "repo".into(),
+                root: temp.path().to_path_buf(),
+                branch: Some("main".into()),
+                commit: Some("abc".into()),
+                indexed_at: Some(Utc::now()),
+            },
+            file_count: 3,
+            symbol_count: 3,
+            chunk_count: 3,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: Default::default(),
+        };
+        let files = vec![
+            file("file_auth", "src/auth.rs"),
+            file("file_billing", "src/billing.rs"),
+            file("file_profile", "src/profile.rs"),
+        ];
+        let symbols = vec![
+            symbol("symbol_auth", "issue_token", "file_auth"),
+            symbol("symbol_billing", "issue_invoice", "file_billing"),
+            symbol("symbol_profile", "load_profile", "file_profile"),
+        ];
+        let chunks = vec![
+            chunk(
+                "chunk_auth",
+                "file_auth",
+                "pub fn issue_token() { create session token }",
+                Some("symbol_auth"),
+            ),
+            chunk(
+                "chunk_billing",
+                "file_billing",
+                "pub fn issue_invoice() { billing invoice }",
+                Some("symbol_billing"),
+            ),
+            chunk(
+                "chunk_profile",
+                "file_profile",
+                "pub fn load_profile() { user profile }",
+                Some("symbol_profile"),
+            ),
+        ];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &symbols,
+                chunks: &chunks,
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let mut config = semantic_config();
+        config.backend = "auto".into();
+        config.ann_min_rows = 5;
+        let manager = SemanticIndexManager::new(temp.path(), &store, &config);
+        let indexed = manager.index().unwrap();
+        assert_eq!(indexed.status.backend, "usearch-hnsw-f32");
+
+        let report = manager
+            .search_with_path_prefixes("issue token", 5, &["src/auth.rs".to_string()])
+            .unwrap();
+        assert_eq!(report.routing.selected_backend, "exact-flat");
+        assert!(report.routing.path_scope_enforced);
+        assert_eq!(report.routing.total_vector_count, 6);
+        assert_eq!(report.routing.eligible_candidate_count, 2);
+        assert!(report
+            .results
+            .iter()
+            .all(|result| result.path.as_path() == std::path::Path::new("src/auth.rs")));
+    }
+
+    #[test]
+    fn auto_ann_routes_selective_precomputed_allowlist_to_exact_flat() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
+        let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: open_kioku_core::Repository {
+                id: RepositoryId("repo".into()),
+                name: "repo".into(),
+                root: temp.path().to_path_buf(),
+                branch: Some("main".into()),
+                commit: Some("abc".into()),
+                indexed_at: Some(Utc::now()),
+            },
+            file_count: 3,
+            symbol_count: 3,
+            chunk_count: 3,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: Default::default(),
+        };
+        let files = vec![
+            file("file_auth", "src/auth.rs"),
+            file("file_billing", "src/billing.rs"),
+            file("file_profile", "src/profile.rs"),
+        ];
+        let symbols = vec![
+            symbol("symbol_auth", "issue_token", "file_auth"),
+            symbol("symbol_billing", "issue_invoice", "file_billing"),
+            symbol("symbol_profile", "load_profile", "file_profile"),
+        ];
+        let chunks = vec![
+            chunk(
+                "chunk_auth",
+                "file_auth",
+                "pub fn issue_token() { create session token }",
+                Some("symbol_auth"),
+            ),
+            chunk(
+                "chunk_billing",
+                "file_billing",
+                "pub fn issue_invoice() { billing invoice }",
+                Some("symbol_billing"),
+            ),
+            chunk(
+                "chunk_profile",
+                "file_profile",
+                "pub fn load_profile() { user profile }",
+                Some("symbol_profile"),
+            ),
+        ];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &symbols,
+                chunks: &chunks,
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let mut config = semantic_config();
+        config.backend = "auto".into();
+        config.ann_min_rows = 5;
+        let manager = SemanticIndexManager::new(temp.path(), &store, &config);
+        let indexed = manager.index().unwrap();
+        assert_eq!(indexed.status.backend, "usearch-hnsw-f32");
+
+        let targets = read_targets(&manager.current_dir().join("ids.json")).unwrap();
+        let auth_ids = targets
+            .values()
+            .filter(|target| target.path == std::path::Path::new("src/auth.rs"))
+            .map(|target| target.vector_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(auth_ids.len(), 2);
+
+        let report = manager
+            .search_with_allowlist_report("issue token", 5, Some(auth_ids))
+            .unwrap();
+        assert_eq!(report.routing.selected_backend, "exact-flat");
+        assert!(report.routing.filter_scope_enforced);
+        assert!(!report.routing.path_scope_enforced);
+        assert_eq!(report.routing.total_vector_count, 6);
+        assert_eq!(report.routing.eligible_candidate_count, 2);
+        assert_eq!(report.routing.filter_selectivity, "medium-selectivity");
+        assert!(report
+            .results
+            .iter()
+            .all(|result| result.path.as_path() == std::path::Path::new("src/auth.rs")));
+    }
+
+    #[test]
+    fn explicit_ann_is_not_overridden_by_selective_scope() {
+        let mut config = semantic_config();
+        config.backend = "usearch-hnsw-f32".into();
+        config.ann_min_rows = 10_000;
+        assert!(!should_route_scoped_exact(&config, "usearch-hnsw-f32", 1));
+    }
+
+    #[test]
+    fn unsafe_semantic_path_scope_fails_closed() {
+        let err = normalize_path_prefixes(&["../outside".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("safe repository-relative"));
     }
 
     fn semantic_config() -> SemanticConfig {
