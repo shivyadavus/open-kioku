@@ -1,0 +1,104 @@
+# One-shot V3 release publication verifier. Remove after v3.0.0 is confirmed.
+name: V3 release publication monitor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-release-monitor.yml
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find or dispatch tagged release and wait for conclusion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import time
+          import urllib.error
+          import urllib.request
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          tag = 'v3.0.0'
+          tag_sha = subprocess.check_output(['git', 'rev-list', '-n', '1', tag], text=True).strip()
+          api = f'https://api.github.com/repos/{repo}'
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+              'User-Agent': 'open-kioku-v3-release-monitor',
+          }
+
+          def request(path, *, method='GET', body=None):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(api + path, data=data, method=method, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  raw = response.read()
+                  return response.status, (json.loads(raw) if raw else None)
+
+          def find_release_run():
+              _, payload = request('/actions/workflows/release.yml/runs?per_page=20')
+              matches = [
+                  run for run in payload.get('workflow_runs', [])
+                  if run.get('head_sha') == tag_sha
+                  and run.get('event') in {'workflow_dispatch', 'push'}
+              ]
+              return matches[0] if matches else None
+
+          run = find_release_run()
+          if run is None:
+              status, _ = request(
+                  '/actions/workflows/release.yml/dispatches',
+                  method='POST',
+                  body={'ref': tag},
+              )
+              if status != 204:
+                  raise SystemExit(f'unexpected dispatch status {status}')
+              for _ in range(20):
+                  time.sleep(3)
+                  run = find_release_run()
+                  if run is not None:
+                      break
+
+          if run is None:
+              conclusion = 'missing'
+              run_url = '(no release run found)'
+              body = (
+                  'V3 publication monitor could not find a release workflow run for '
+                  f'`{tag}` at `{tag_sha}` after dispatch.'
+              )
+          else:
+              run_id = run['id']
+              run_url = run['html_url']
+              while run.get('status') != 'completed':
+                  time.sleep(10)
+                  _, run = request(f'/actions/runs/{run_id}')
+              conclusion = run.get('conclusion') or 'unknown'
+              body = (
+                  f'V3 tagged release workflow `{run_id}` completed with **{conclusion}** '
+                  f'for `{tag}` at `{tag_sha}`.\n\n{run_url}'
+              )
+
+          request('/issues/258/comments', method='POST', body={'body': body})
+          print(body)
+          if conclusion != 'success':
+              raise SystemExit(f'V3 release workflow conclusion: {conclusion}')
+          PY
