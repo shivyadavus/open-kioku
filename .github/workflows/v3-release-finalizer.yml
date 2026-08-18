@@ -1,0 +1,86 @@
+name: V3 release finalizer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-release-finalizer.yml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify V3 release contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/validate-versions.sh
+          test "$(awk '/^\[workspace.package\]/{f=1;next} f && /^version = /{gsub(/\"/,"",$3); print $3; exit}' Cargo.toml)" = "3.0.0"
+          python3 - <<'PY'
+          import json
+          data = json.load(open('release-metadata.json'))
+          assert data['version'] == '3.0.0'
+          assert data['tag'] == 'v3.0.0'
+          expected = {
+              'ok-linux-x86_64',
+              'ok-linux-arm64',
+              'ok-macos-arm64',
+              'ok-windows-x86_64.exe',
+          }
+          actual = {a['name'] for a in data['artifacts'] if 'sha256' in a}
+          assert actual == expected, (actual, expected)
+          PY
+
+      - name: Create exact V3 tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags origin
+          if git rev-parse -q --verify refs/tags/v3.0.0 >/dev/null; then
+            existing="$(git rev-list -n 1 v3.0.0)"
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "v3.0.0 already exists at $existing; refusing to move it from $GITHUB_SHA" >&2
+              exit 1
+            fi
+            echo "v3.0.0 already points at the exact release commit"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a v3.0.0 "$GITHUB_SHA" -m "Open Kioku 3.0.0"
+            git push origin refs/tags/v3.0.0
+          fi
+
+      - name: Dispatch release workflow at immutable tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          url = 'https://api.github.com/repos/shivyadavus/open-kioku/actions/workflows/release.yml/dispatches'
+          body = json.dumps({'ref': 'v3.0.0'}).encode()
+          req = urllib.request.Request(
+              url,
+              data=body,
+              method='POST',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'open-kioku-v3-release-finalizer',
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as response:
+              if response.status != 204:
+                  raise SystemExit(f'unexpected dispatch status: {response.status}')
+          PY
