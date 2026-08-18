@@ -1,0 +1,192 @@
+use chrono::Utc;
+use open_kioku_config::SemanticConfig;
+use open_kioku_core::{
+    CodeChunk, File, FileId, IndexManifest, Language, LineRange, Repository, RepositoryId,
+};
+use open_kioku_semantic::SemanticIndexManager;
+use open_kioku_storage::{IndexData, MetadataStore};
+use open_kioku_storage_sqlite::SqliteStore;
+use std::path::{Path, PathBuf};
+
+fn semantic_config(backend: &str, dimensions: usize) -> SemanticConfig {
+    SemanticConfig {
+        enabled: true,
+        backend: backend.into(),
+        provider: "local".into(),
+        model: "local-hash".into(),
+        dimensions,
+        distance: "cosine".into(),
+        batch_size: 16,
+        ann_min_rows: 1,
+        index_symbols: false,
+        index_chunks: true,
+        index_docs: false,
+        index_memory: false,
+        external_provider_allowed: false,
+    }
+}
+
+fn persist_snapshot(
+    repo: &Path,
+    store: &SqliteStore,
+    branch: &str,
+    commit: &str,
+    text: &str,
+    content_hash: &str,
+) {
+    let repository_id = RepositoryId("repo".into());
+    let file = File {
+        id: FileId("file_auth".into()),
+        repository_id: repository_id.clone(),
+        path: PathBuf::from("src/auth.rs"),
+        language: Language::Rust,
+        size_bytes: text.len() as u64,
+        content_hash: content_hash.into(),
+        is_generated: false,
+        is_vendor: false,
+    };
+    let chunk = CodeChunk {
+        id: "chunk:file_auth".into(),
+        file_id: file.id.clone(),
+        range: LineRange::single(1),
+        language: Language::Rust,
+        text: text.into(),
+        symbol_id: None,
+    };
+    let manifest = IndexManifest {
+        analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+        repository: Repository {
+            id: repository_id,
+            name: "repo".into(),
+            root: repo.to_path_buf(),
+            branch: Some(branch.into()),
+            commit: Some(commit.into()),
+            indexed_at: Some(Utc::now()),
+        },
+        file_count: 1,
+        symbol_count: 0,
+        chunk_count: 1,
+        indexed_at: Utc::now(),
+        schema_version: 1,
+        index_mode: Default::default(),
+        phase_reports: Vec::new(),
+        quality: Default::default(),
+    };
+
+    store
+        .replace_index(IndexData {
+            manifest: &manifest,
+            files: &[file],
+            symbols: &[],
+            chunks: &[chunk],
+            tests: &[],
+            imports: &[],
+            occurrences: &[],
+            analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
+        })
+        .unwrap();
+}
+
+#[test]
+fn branch_switch_invalidates_ann_until_authoritative_generation_is_rebuilt() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config("auto", 64);
+
+    persist_snapshot(
+        repo,
+        &store,
+        "main",
+        "main-commit",
+        "pub fn main_branch_token() { main_branch_token(); }",
+        "main-v1",
+    );
+    let manager = SemanticIndexManager::new(repo, &store, &config);
+    let initial = manager.index().unwrap();
+    assert!(initial.status.ready);
+    assert!(initial.status.ann_active);
+
+    persist_snapshot(
+        repo,
+        &store,
+        "feature/security",
+        "feature-commit",
+        "pub fn feature_branch_token() { feature_branch_token(); }",
+        "feature-v1",
+    );
+
+    let stale = manager.status();
+    assert!(!stale.ready);
+    assert!(stale.stale);
+    assert!(!stale.ann_active);
+    assert!(stale
+        .notes
+        .iter()
+        .any(|note| note.contains("authoritative index generation")));
+    assert!(manager
+        .search("main branch token", 10)
+        .unwrap_err()
+        .to_string()
+        .contains("semantic index is stale"));
+
+    let rebuilt = manager.index().unwrap();
+    assert!(rebuilt.status.ready);
+    assert!(rebuilt.status.ann_active);
+    let results = manager.search("feature branch token", 10).unwrap();
+    assert!(results
+        .iter()
+        .any(|result| result.path == Path::new("src/auth.rs")));
+}
+
+#[test]
+fn semantic_profile_change_cannot_reuse_incompatible_ann_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+
+    persist_snapshot(
+        repo,
+        &store,
+        "main",
+        "main-commit",
+        "pub fn profile_token() { profile_token(); }",
+        "profile-v1",
+    );
+
+    let ann_config = semantic_config("auto", 64);
+    let ann_manager = SemanticIndexManager::new(repo, &store, &ann_config);
+    let initial = ann_manager.index().unwrap();
+    assert!(initial.status.ready);
+    assert!(initial.status.ann_active);
+
+    let exact_config = semantic_config("exact-flat", 64);
+    let exact_manager = SemanticIndexManager::new(repo, &store, &exact_config);
+    let incompatible = exact_manager.status();
+    assert!(!incompatible.ready);
+    assert!(incompatible.stale);
+    assert!(!incompatible.ann_active);
+    assert_eq!(incompatible.state, "stale");
+    assert!(incompatible
+        .notes
+        .iter()
+        .any(|note| note.contains("semantic config")));
+    assert!(exact_manager
+        .search("profile token", 10)
+        .unwrap_err()
+        .to_string()
+        .contains("semantic index is stale"));
+
+    let rebuilt = exact_manager.rebuild().unwrap();
+    assert!(rebuilt.status.ready);
+    assert!(!rebuilt.status.ann_active);
+    assert_eq!(rebuilt.status.backend, "exact-flat");
+    assert!(exact_manager
+        .search("profile token", 10)
+        .unwrap()
+        .iter()
+        .any(|result| result.path == Path::new("src/auth.rs")));
+}
