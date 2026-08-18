@@ -61,7 +61,9 @@ fn assert_semantic_path(repo: &Path, query: &str, expected: &str) {
     assert!(status.ann_active, "semantic status was {status:?}");
     let results = manager.search(query, 20).unwrap();
     assert!(
-        results.iter().any(|result| result.path == Path::new(expected)),
+        results
+            .iter()
+            .any(|result| result.path == Path::new(expected)),
         "expected {expected:?} for {query:?}, got {results:?}"
     );
 }
@@ -141,11 +143,9 @@ fn semantic_refresh_failure_does_not_rollback_authoritative_watch_index() {
     assert!(status.changed_files >= 1);
 
     let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
-    assert!(store
-        .all_chunks()
-        .unwrap()
-        .iter()
-        .any(|chunk| chunk.text.contains("authoritative_survives_semantic_failure")));
+    assert!(store.all_chunks().unwrap().iter().any(|chunk| chunk
+        .text
+        .contains("authoritative_survives_semantic_failure")));
     let manager = SemanticIndexManager::new(repo, &store, &config.semantic);
     assert!(!manager.status().ready);
 }
