@@ -401,6 +401,7 @@ impl Indexer {
                 skipped_paths: &[],
             });
             let manifest = IndexManifest {
+                analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
                 repository,
                 file_count: 0,
                 symbol_count: 0,
@@ -1070,6 +1071,7 @@ impl Indexer {
         };
         attach_resolution_quality(&mut quality, resolution_quality.clone());
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository,
             file_count: files.len(),
             symbol_count: symbols.len(),

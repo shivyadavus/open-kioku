@@ -781,6 +781,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn imports(&self) -> Result<Vec<Import>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -833,6 +834,7 @@ impl MetadataStore for SqliteStore {
         target: &str,
         limit: usize,
     ) -> Result<Vec<AnalysisFact>> {
+        require_authoritative_relationship_semantics(self)?;
         let target = target.trim();
         if target.is_empty() {
             return Ok(Vec::new());
@@ -868,6 +870,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -884,6 +887,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn occurrences_for_file(&self, file_id: &FileId) -> Result<Vec<SymbolOccurrence>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2480,6 +2484,30 @@ fn clamp_limit(limit: usize) -> usize {
     }
 }
 
+fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<()> {
+    let manifest = MetadataStore::manifest(store)?;
+    let compatibility = open_kioku_core::classify_analysis_semantics(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &open_kioku_core::AnalysisSemanticsState::current(),
+    );
+    if compatibility.status.allows_authoritative_relationships() {
+        return Ok(());
+    }
+    Err(OkError::Index(format!(
+        "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; {}",
+        compatibility.status,
+        compatibility.reasons.join("; "),
+        compatibility
+            .stored_fingerprint
+            .as_deref()
+            .unwrap_or("missing"),
+        compatibility.current_fingerprint,
+        compatibility.recommended_action
+    )))
+}
+
 impl GraphStore for SqliteStore {
     fn replace_graph(&self, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
         let mut conn = self
@@ -2563,6 +2591,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2590,6 +2619,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
+        require_authoritative_relationship_semantics(self)?;
         use std::collections::{HashSet, VecDeque};
 
         let conn = self
@@ -2670,6 +2700,7 @@ impl GraphStore for SqliteStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<GraphEdge>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2743,6 +2774,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn graph_edges_between(&self, from: &str, to: &str, limit: usize) -> Result<Vec<GraphEdge>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -3582,6 +3614,14 @@ mod tests {
         SqliteStore::open(":memory:").expect("in-memory store")
     }
 
+    fn make_current_store() -> SqliteStore {
+        let store = make_store();
+        store
+            .put_manifest(&make_manifest())
+            .expect("current analysis-semantics manifest");
+        store
+    }
+
     fn make_file(id: &str, path: &str) -> File {
         File {
             id: FileId::new(id),
@@ -3630,6 +3670,7 @@ mod tests {
 
     fn make_manifest() -> IndexManifest {
         IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),
@@ -4906,6 +4947,42 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].id.0, "e1");
         assert!(nodes.iter().any(|n| n.id == node_a.id));
+
+        let mut stale_manifest = manifest.clone();
+        let mut semantics = stale_manifest.analysis_semantics.clone().unwrap();
+        semantics.descriptor.relationship_resolver_version = "old-resolver".into();
+        stale_manifest.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::new(
+            semantics.descriptor,
+        ));
+        store.put_manifest(&stale_manifest).unwrap();
+
+        for error in [
+            store.neighbors("file:src/lib.rs", 10).unwrap_err(),
+            store
+                .shortest_path("file:src/lib.rs", "symbol:s1", 4)
+                .unwrap_err(),
+            store
+                .edges_by_type(GraphEdgeType::Defines, 10, 0)
+                .unwrap_err(),
+            store
+                .graph_edges_between("file:src/lib.rs", "symbol:s1", 10)
+                .unwrap_err(),
+            store.imports().unwrap_err(),
+            store
+                .implementation_facts_for_target("worker", 10)
+                .unwrap_err(),
+            store
+                .references_for_symbol(&SymbolId::new("s1"), 10)
+                .unwrap_err(),
+            store.occurrences_for_file(&FileId::new("f1")).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("authoritative relationship evidence unavailable"));
+            assert!(message.contains("RebuildRequired"));
+        }
+
+        assert!(store.node_by_id("file:src/lib.rs").unwrap().is_some());
+        assert_eq!(store.graph_counts().unwrap().edges, 1);
     }
 
     #[test]
@@ -5161,13 +5238,30 @@ mod tests {
         assert_eq!(migrated_nodes.len(), 1);
         assert_eq!(migrated_nodes[0].id.0, "legacy_file");
 
-        let migrated_edges = store.edges_by_type(GraphEdgeType::Defines, 10, 0).unwrap();
-        assert_eq!(migrated_edges.len(), 1);
-        assert_eq!(migrated_edges[0].id.0, "legacy_edge");
-        let migrated_between = store
+        let edge_read_error = store
+            .edges_by_type(GraphEdgeType::Defines, 10, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(edge_read_error.contains("legacy index has no analysis-semantics descriptor"));
+        let between_read_error = store
             .graph_edges_between("legacy_file", "legacy_symbol", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(between_read_error.contains("legacy index has no analysis-semantics descriptor"));
+
+        let (migrated_edge_type, migrated_from, migrated_to): (String, String, String) = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT edge_type, from_id, to_id FROM graph_edges WHERE id = 'legacy_edge'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .unwrap();
-        assert_eq!(migrated_between.len(), 1);
+        assert_eq!(migrated_edge_type, "Defines");
+        assert_eq!(migrated_from, "legacy_file");
+        assert_eq!(migrated_to, "legacy_symbol");
 
         let migrated_counts = store.graph_schema_counts().unwrap();
         assert_eq!(migrated_counts.node_types.get("File"), Some(&1));
@@ -5254,7 +5348,7 @@ mod tests {
 
     #[test]
     fn test_edges_by_type_uses_indexed_column() {
-        let store = make_store();
+        let store = make_current_store();
         let node1 = GraphNode {
             id: NodeId::new("n1"),
             ..Default::default()
@@ -5299,7 +5393,7 @@ mod tests {
 
     #[test]
     fn test_graph_edges_between_respects_limit() {
-        let store = make_store();
+        let store = make_current_store();
         let node1 = GraphNode {
             id: NodeId::new("n1"),
             ..Default::default()

@@ -277,6 +277,8 @@ struct SnapshotMetadata {
     schema_version: String,
     sqlite_user_version: i64,
     open_kioku_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    analysis_semantics: Option<open_kioku_core::AnalysisSemanticsState>,
     index_mode: String,
     repo_commit: String,
     indexed_at: String,

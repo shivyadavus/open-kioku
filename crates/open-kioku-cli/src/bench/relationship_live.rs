@@ -62,7 +62,7 @@ fn validate_live_relationship_scenario_coverage(
 }
 
 fn live_relationship_run_metadata(
-    corpus: &RelationshipBenchCorpus,
+    _corpus: &RelationshipBenchCorpus,
 ) -> anyhow::Result<RelationshipBenchRunMetadata> {
     let git_commit = ProcessCommand::new("git")
         .args(["rev-parse", "HEAD"])
@@ -73,11 +73,7 @@ fn live_relationship_run_metadata(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| std::env::var("GITHUB_SHA").ok());
-    let fingerprint_input = format!(
-        "relationship-bench={};corpus={};proof-policy=ri3-v1;language-capability-contract=v1;resolution-mode=shadow",
-        RELATIONSHIP_BENCH_SCHEMA_VERSION, corpus.corpus_version
-    );
-    let semantics_fingerprint = format!("{:x}", Sha256::digest(fingerprint_input.as_bytes()));
+    let semantics_fingerprint = open_kioku_core::AnalysisSemanticsState::current().fingerprint;
     let adapter_versions = ["rust", "typescript", "javascript", "python", "java", "go"]
         .into_iter()
         .map(|language| {

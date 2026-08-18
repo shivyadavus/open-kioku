@@ -5,8 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod analysis_semantics;
 pub mod identity;
 pub mod relationship;
+
+pub use analysis_semantics::*;
 
 pub use relationship::{
     normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
@@ -1752,6 +1755,8 @@ pub struct IndexManifest {
     pub chunk_count: usize,
     pub indexed_at: DateTime<Utc>,
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_semantics: Option<AnalysisSemanticsState>,
     #[serde(default)]
     pub index_mode: IndexMode,
     #[serde(default)]
