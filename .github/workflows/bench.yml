@@ -33,6 +33,42 @@ jobs:
       run: |
         set -o pipefail
         cargo bench --workspace | tee artifacts/benchmarks/criterion.txt
+
+    - name: Smoke ANN scale matrix
+      shell: bash
+      run: |
+        set -euo pipefail
+        OK_ANN_SCALE_SIZES=2000 \
+        OK_ANN_SCALE_DIMS=384 \
+        OK_ANN_SCALE_SEARCH_EXPANSIONS=64,1024 \
+        OK_ANN_SCALE_QUERIES=8 \
+          cargo run -p open-kioku-vector --example ann_scale_matrix --release \
+          > artifacts/benchmarks/ann-scale-smoke.json
+        python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        report = json.loads(Path('artifacts/benchmarks/ann-scale-smoke.json').read_text())
+        if report['schema_version'] != 1:
+            raise SystemExit('unexpected ANN scale benchmark schema')
+        if report['oracle'] != 'exact-flat':
+            raise SystemExit('ANN scale benchmark must retain exact-flat as oracle')
+        rows = report['measurements']
+        if len(rows) != 2:
+            raise SystemExit(f'expected 2 bounded ANN scale rows, got {len(rows)}')
+        if {row['parameters']['expansion_search'] for row in rows} != {64, 1024}:
+            raise SystemExit('ANN scale smoke did not exercise both search expansions')
+        for row in rows:
+            if row['vector_count'] != 2000 or row['dimensions'] != 384:
+                raise SystemExit('ANN scale smoke reported an unexpected fixture shape')
+            for metric in ('recall_at_1', 'recall_at_5', 'recall_at_10', 'recall_at_20', 'mrr'):
+                value = row['quality'][metric]
+                if not 0.0 <= value <= 1.0:
+                    raise SystemExit(f'ANN scale {metric} out of range: {value}')
+            if row['ann_index_bytes'] <= 0 or row['ann_metadata_bytes'] <= 0:
+                raise SystemExit('ANN scale persistence metrics must be positive')
+        print('bounded ANN scale matrix smoke passed')
+        PY
       
     - name: Run CLI Bench
       shell: bash
