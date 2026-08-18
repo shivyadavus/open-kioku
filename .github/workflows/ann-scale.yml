@@ -166,3 +166,39 @@ jobs:
           path: artifacts/ann-scale
           if-no-files-found: error
           retention-days: 30
+
+  aggregate:
+    needs: measure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download scale measurements
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ann-scale-*
+          path: artifacts/ann-scale-input
+          merge-multiple: true
+
+      - name: Aggregate complete measured frontier
+        shell: bash
+        env:
+          SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ann-scale-aggregate
+          python3 scripts/aggregate_ann_scale_evidence.py \
+            artifacts/ann-scale-input \
+            --sizes 50000,100000,300000,1000000 \
+            --dimensions 384,768 \
+            --expansions "$SEARCH_EXPANSIONS" \
+            --json-output artifacts/ann-scale-aggregate/ann-scale-aggregate.json \
+            --markdown-output artifacts/ann-scale-aggregate/ann-scale-aggregate.md
+
+      - name: Upload aggregate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ann-scale-aggregate
+          path: artifacts/ann-scale-aggregate
+          if-no-files-found: error
+          retention-days: 30
