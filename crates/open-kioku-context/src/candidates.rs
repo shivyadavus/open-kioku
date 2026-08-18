@@ -271,9 +271,7 @@ impl FusionConfig {
     /// This keeps ContextPack JSON backward-compatible while making the applied fusion profile
     /// observable in every selected candidate's existing contribution rationale.
     pub fn profile_identity(&self) -> &'static str {
-        if self.rrf_k == DEFAULT_RRF_K
-            && self.source_weights == Self::unweighted().source_weights
-        {
+        if self.rrf_k == DEFAULT_RRF_K && self.source_weights == Self::unweighted().source_weights {
             "rrf_unweighted"
         } else if self.rrf_k == DEFAULT_RRF_K
             && self.source_weights == Self::evidence_prior_weighted().source_weights
@@ -459,10 +457,7 @@ pub fn fuse_candidate_streams(
                     .as_ref()
                     .map(|symbol| symbol.id.clone()),
                 evidence_refs: dedup_strings(candidate.evidence_refs.clone()),
-                rationale: format!(
-                    "fusion_profile={profile_identity}; {}",
-                    candidate.rationale
-                ),
+                rationale: format!("fusion_profile={profile_identity}; {}", candidate.rationale),
             };
             let entry = by_unit.entry(key).or_insert_with(|| FusedEntry {
                 representative: candidate.result.clone(),
@@ -833,7 +828,10 @@ mod tests {
 
     #[test]
     fn fusion_profile_identity_is_stable_and_exposed_in_candidate_provenance() {
-        assert_eq!(FusionConfig::unweighted().profile_identity(), "rrf_unweighted");
+        assert_eq!(
+            FusionConfig::unweighted().profile_identity(),
+            "rrf_unweighted"
+        );
         assert_eq!(
             FusionConfig::evidence_prior_weighted().profile_identity(),
             "rrf_evidence_prior"
