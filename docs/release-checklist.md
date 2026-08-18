@@ -35,6 +35,24 @@ install audit evidence expected on every release.
 - Confirm the GitHub release tag is exactly `v3.0.0`.
 - Confirm `CHANGELOG.md` has a `3.0.0` section and a matching `[3.0.0]` release link.
 
+## Crates.io Publication
+
+Keep crates.io credentials local. GitHub Actions does not publish the Rust
+workspace crates. From a clean checkout of the exact release commit, first run:
+
+```sh
+EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --dry-run
+```
+
+After the release commit/tag is final, publish locally using Cargo credentials
+from `cargo login` or `CARGO_REGISTRY_TOKEN`:
+
+```sh
+EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --publish
+```
+
+Do not commit or upload the crates.io token.
+
 ## Install Channels
 
 Each channel must report the same `ok --version` value.
@@ -65,8 +83,6 @@ GitHub release notes, the release workflow, in-repo Homebrew formula URLs, cargo
 - `ok-linux-x86_64.sha256`
 - `ok-linux-arm64`
 - `ok-linux-arm64.sha256`
-- `ok-macos-x86_64`
-- `ok-macos-x86_64.sha256`
 - `ok-macos-arm64`
 - `ok-macos-arm64.sha256`
 - `ok-windows-x86_64.exe`
@@ -80,7 +96,7 @@ GitHub release notes, the release workflow, in-repo Homebrew formula URLs, cargo
 `scripts/generate-release-trust-artifacts.sh dist` generates the aggregate
 release trust artifacts after the platform binaries have been downloaded into
 `dist/`. GitHub Actions also publishes build provenance attestations for the
-five binary artifacts.
+four binary artifacts.
 
 ## Post-Publish Smoke
 
