@@ -147,7 +147,13 @@ fn semantic_refresh_failure_does_not_rollback_authoritative_watch_index() {
         .text
         .contains("authoritative_survives_semantic_failure")));
     let manager = SemanticIndexManager::new(repo, &store, &config.semantic);
-    assert!(!manager.status().ready);
+    let semantic_status = manager.status();
+    assert!(!semantic_status.ready, "semantic status was {semantic_status:?}");
+    assert!(semantic_status.stale, "semantic status was {semantic_status:?}");
+    assert_eq!(semantic_status.state, "stale");
+    assert!(semantic_status.notes.iter().any(|note| note.contains(
+        "semantic index is stale for the current authoritative index generation"
+    )));
 }
 
 fn git(repo: &Path, args: &[&str]) {
