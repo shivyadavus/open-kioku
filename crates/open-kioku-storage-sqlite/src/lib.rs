@@ -3614,6 +3614,14 @@ mod tests {
         SqliteStore::open(":memory:").expect("in-memory store")
     }
 
+    fn make_current_store() -> SqliteStore {
+        let store = make_store();
+        store
+            .put_manifest(&make_manifest())
+            .expect("current analysis-semantics manifest");
+        store
+    }
+
     fn make_file(id: &str, path: &str) -> File {
         File {
             id: FileId::new(id),
@@ -5230,13 +5238,30 @@ mod tests {
         assert_eq!(migrated_nodes.len(), 1);
         assert_eq!(migrated_nodes[0].id.0, "legacy_file");
 
-        let migrated_edges = store.edges_by_type(GraphEdgeType::Defines, 10, 0).unwrap();
-        assert_eq!(migrated_edges.len(), 1);
-        assert_eq!(migrated_edges[0].id.0, "legacy_edge");
-        let migrated_between = store
+        let edge_read_error = store
+            .edges_by_type(GraphEdgeType::Defines, 10, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(edge_read_error.contains("legacy index has no analysis-semantics descriptor"));
+        let between_read_error = store
             .graph_edges_between("legacy_file", "legacy_symbol", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(between_read_error.contains("legacy index has no analysis-semantics descriptor"));
+
+        let (migrated_edge_type, migrated_from, migrated_to): (String, String, String) = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT edge_type, from_id, to_id FROM graph_edges WHERE id = 'legacy_edge'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .unwrap();
-        assert_eq!(migrated_between.len(), 1);
+        assert_eq!(migrated_edge_type, "Defines");
+        assert_eq!(migrated_from, "legacy_file");
+        assert_eq!(migrated_to, "legacy_symbol");
 
         let migrated_counts = store.graph_schema_counts().unwrap();
         assert_eq!(migrated_counts.node_types.get("File"), Some(&1));
@@ -5323,7 +5348,7 @@ mod tests {
 
     #[test]
     fn test_edges_by_type_uses_indexed_column() {
-        let store = make_store();
+        let store = make_current_store();
         let node1 = GraphNode {
             id: NodeId::new("n1"),
             ..Default::default()
@@ -5368,7 +5393,7 @@ mod tests {
 
     #[test]
     fn test_graph_edges_between_respects_limit() {
-        let store = make_store();
+        let store = make_current_store();
         let node1 = GraphNode {
             id: NodeId::new("n1"),
             ..Default::default()
