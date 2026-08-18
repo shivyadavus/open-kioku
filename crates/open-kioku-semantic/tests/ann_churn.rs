@@ -229,3 +229,74 @@ fn ann_generation_stays_clean_across_add_update_rename_delete_and_restart() {
         .iter()
         .any(|result| result.path == Path::new("src/security/auth.rs")));
 }
+
+#[test]
+fn ann_rapid_rewrites_fail_closed_and_never_accumulate_stale_vectors() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config();
+    let manager = SemanticIndexManager::new(repo, &store, &config);
+
+    persist_snapshot(
+        repo,
+        &store,
+        "rewrite-0",
+        &[FixtureFile {
+            id: "file_hot",
+            path: "src/hot.rs",
+            text: "pub fn rewrite_token_0() { rewrite_token_0(); }",
+            content_hash: "hot-v0",
+        }],
+    );
+    let initial = manager.index().unwrap();
+    assert!(initial.status.ready);
+    assert!(initial.status.ann_active);
+    assert_eq!(initial.status.vector_count, 1);
+
+    for revision in 1..=12 {
+        let commit = format!("rewrite-{revision}");
+        let text = format!(
+            "pub fn rewrite_token_{revision}() {{ rewrite_token_{revision}(); }}"
+        );
+        let content_hash = format!("hot-v{revision}");
+        persist_snapshot(
+            repo,
+            &store,
+            &commit,
+            &[FixtureFile {
+                id: "file_hot",
+                path: "src/hot.rs",
+                text: &text,
+                content_hash: &content_hash,
+            }],
+        );
+
+        let stale = manager.status();
+        assert!(stale.stale, "revision {revision} must invalidate the old ANN generation");
+        assert!(!stale.ready);
+        assert!(!stale.ann_active);
+        assert!(manager.search("rewrite token", 10).is_err());
+
+        let rebuilt = manager.index().unwrap();
+        assert!(rebuilt.status.ready);
+        assert!(rebuilt.status.ann_active);
+        assert_eq!(rebuilt.status.vector_count, 1);
+        assert_eq!(rebuilt.indexed_count, 1);
+        assert_eq!(rebuilt.reused_embeddings, 0);
+        assert_eq!(rebuilt.embedded_count, 1);
+        assert_eq!(rebuilt.removed_count, 1);
+        assert_search_path(&manager, &format!("rewrite token {revision}"), "src/hot.rs");
+    }
+
+    drop(manager);
+    drop(store);
+
+    let restarted_store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let restarted = SemanticIndexManager::new(repo, &restarted_store, &config);
+    let status = restarted.status();
+    assert!(status.ready);
+    assert!(status.ann_active);
+    assert_eq!(status.vector_count, 1);
+    assert_search_path(&restarted, "rewrite token 12", "src/hot.rs");
+}
