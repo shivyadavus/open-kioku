@@ -1,0 +1,48 @@
+name: RI3 semantics exact-read guard
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  validate:
+    if: github.head_ref == 'agent/ri3-analysis-semantics-fingerprint'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply exact relationship read guards
+        run: python3 scripts/ri3-semantics-exact-read-guard.py
+      - name: Validate focused semantics safety
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-storage-sqlite replace_graph_and_neighbors
+          cargo test -p open-kioku-symbols
+          cargo test -p open-kioku-impact
+          cargo test -p open-kioku-tests
+          cargo test -p open-kioku-patch
+          cargo test -p open-kioku-plan
+          cargo test -p open-kioku-mcp
+          cargo clippy -p open-kioku-storage-sqlite -p open-kioku-symbols -p open-kioku-impact -p open-kioku-tests -p open-kioku-patch -p open-kioku-plan -p open-kioku-mcp --all-targets --all-features -- -D warnings
+      - name: Commit safety hardening and remove staging tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -f .github/workflows/ri3-semantics-exact-read-guard.yml scripts/ri3-semantics-exact-read-guard.py
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(ri3): reject incompatible exact relationship reads"
+          git push origin HEAD:agent/ri3-analysis-semantics-fingerprint
