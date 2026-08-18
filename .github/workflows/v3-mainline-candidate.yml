@@ -25,6 +25,65 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
+      - name: Synchronize current main into release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main release/v3.0.0-mainline
+
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "release candidate already contains current main"
+          else
+            set +e
+            git merge --no-ff --no-commit origin/main
+            merge_status=$?
+            set -e
+
+            if [ "$merge_status" -ne 0 ]; then
+              mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+              allowed_conflicts=(
+                "Cargo.lock"
+                "crates/open-kioku-mcp/Cargo.toml"
+                "crates/open-kioku-tree-sitter/Cargo.toml"
+                "crates/open-kioku-watch/Cargo.toml"
+              )
+
+              if [ "${#conflicts[@]}" -eq 0 ]; then
+                echo "merge failed without inspectable conflicts" >&2
+                git merge --abort || true
+                exit 1
+              fi
+
+              for conflict in "${conflicts[@]}"; do
+                allowed=false
+                for expected in "${allowed_conflicts[@]}"; do
+                  if [ "$conflict" = "$expected" ]; then
+                    allowed=true
+                    break
+                  fi
+                done
+                if [ "$allowed" != true ]; then
+                  echo "unexpected mainline merge conflict: $conflict" >&2
+                  git merge --abort || true
+                  exit 1
+                fi
+                git checkout --theirs -- "$conflict"
+                git add "$conflict"
+              done
+            fi
+
+            # The release branch owns the V3 version contract. Resolve Cargo
+            # conflicts from main first, then deterministically re-apply the V3
+            # workspace dependency versions and regenerate the lockfile.
+            scripts/sync-version.sh
+            cargo generate-lockfile
+            git add -A
+            git diff --cached --check
+            git commit -m "Merge current main into v3 release candidate"
+            git push origin HEAD:release/v3.0.0-mainline
+          fi
       - name: Validate candidate source
         shell: bash
         run: |
@@ -36,6 +95,7 @@ jobs:
           scripts/validate-versions.sh
           scripts/check-no-ignored-tests.py
           git diff --check
+          test -z "$(git status --porcelain)"
       - name: Pin source
         id: candidate
         shell: bash
