@@ -124,7 +124,10 @@ fn restart_keeps_last_good_generation_when_staging_build_is_partial() {
     let status = restarted.status();
     assert!(status.ready);
     assert!(status.ann_active);
-    assert_eq!(fs::read(current.join("manifest.json")).unwrap(), current_manifest);
+    assert_eq!(
+        fs::read(current.join("manifest.json")).unwrap(),
+        current_manifest
+    );
 
     let results = restarted.search("last known good token", 10).unwrap();
     assert!(results
