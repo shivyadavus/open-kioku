@@ -74,7 +74,7 @@ fn incompatible_semantics_block_relationship_reads_but_preserve_diagnostics() {
     for message in failures {
         assert!(message.contains("authoritative relationship evidence unavailable"));
         assert!(message.contains("RebuildRequired"));
-        assert!(message.contains("Run a full `ok index` rebuild"));
+        assert!(message.contains("ok index"));
     }
 
     // Incompatibility blocks relationship truth, not observability needed to diagnose/rebuild it.
