@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 1;
 const CHUNKER_VERSION: &str = "open-kioku-chunks-v1";
 const EXACT_INDEX_VERSION: &str = "exact-flat-json-v1";
 const HNSW_INDEX_VERSION: &str = PRODUCTION_HNSW_PROFILE;
@@ -39,8 +39,6 @@ pub struct SemanticManifest {
     pub chunker_version: String,
     pub index_version: String,
     pub source_commit: Option<String>,
-    #[serde(default)]
-    pub source_index_fingerprint: Option<String>,
     pub created_at: String,
     pub vector_count: usize,
     pub target_counts: BTreeMap<String, usize>,
@@ -165,10 +163,13 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     pub fn status(&self) -> SemanticStatus {
+        let mut notes = Vec::new();
+        if let Some(note) = self.recover_interrupted_promotion() {
+            notes.push(note);
+        }
         let current = self.current_dir();
         let manifest_path = current.join("manifest.json");
         let stats_path = current.join("stats.json");
-        let mut notes = Vec::new();
         if !self.config.enabled {
             notes.push("semantic search is disabled in ok.toml; `ok semantic index` is explicit local opt-in".into());
         }
@@ -217,19 +218,11 @@ impl<'a> SemanticIndexManager<'a> {
             .as_ref()
             .map(|manifest| !index_artifacts_present(&current, &manifest.backend))
             .unwrap_or(true);
-        let source_stale = manifest
-            .as_ref()
-            .is_some_and(|manifest| !self.source_generation_compatible(manifest));
         let stale = manifest
             .as_ref()
             .map(|manifest| !self.compatible(manifest))
             .unwrap_or(false);
-        if source_stale {
-            notes.push(
-                "semantic index is stale for the current authoritative index generation; rebuild semantic index"
-                    .into(),
-            );
-        } else if stale {
+        if stale {
             notes.push("semantic index manifest is stale for the current semantic config".into());
         }
         if corrupt {
@@ -507,6 +500,7 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
+        let _ = self.recover_interrupted_promotion();
         let provider = provider_for_config(&self.config, allow_model_download, &self.models_dir())?;
         let descriptor = provider.descriptor();
         if descriptor.dimensions != self.config.dimensions {
@@ -674,7 +668,6 @@ impl<'a> SemanticIndexManager<'a> {
                 .ok()
                 .flatten()
                 .and_then(|manifest| manifest.repository.commit),
-            source_index_fingerprint: Some(source_index_fingerprint(self.store)?),
             created_at: Utc::now().to_rfc3339(),
             vector_count: exact_index
                 .as_ref()
@@ -706,7 +699,7 @@ impl<'a> SemanticIndexManager<'a> {
         write_json(&build_dir.join("stats.json"), &stats)?;
 
         let current = self.current_dir();
-        let previous = self.vectors_dir().join("previous");
+        let previous = self.previous_dir();
         let _ = fs::remove_dir_all(&previous);
         if current.exists() {
             fs::rename(&current, &previous)?;
@@ -730,7 +723,6 @@ impl<'a> SemanticIndexManager<'a> {
 
     fn compatible(&self, manifest: &SemanticManifest) -> bool {
         manifest.schema_version == SCHEMA_VERSION
-            && self.source_generation_compatible(manifest)
             && resolve_semantic_backend(&self.config, manifest.vector_count)
                 .is_ok_and(|backend| manifest.backend == resolved_backend_name(backend))
             && manifest.embedding_provider == self.config.provider
@@ -747,14 +739,36 @@ impl<'a> SemanticIndexManager<'a> {
                 .is_ok_and(|backend| manifest.index_version == index_version_for_backend(backend))
     }
 
-    fn source_generation_compatible(&self, manifest: &SemanticManifest) -> bool {
-        source_index_fingerprint(self.store).is_ok_and(|fingerprint| {
-            manifest.source_index_fingerprint.as_deref() == Some(fingerprint.as_str())
-        })
+    fn recover_interrupted_promotion(&self) -> Option<String> {
+        let current = self.current_dir();
+        let previous = self.previous_dir();
+        if current.exists() || !previous.exists() {
+            return None;
+        }
+        if !semantic_generation_complete(&previous) {
+            return Some(
+                "previous semantic generation is incomplete; refusing automatic recovery".into(),
+            );
+        }
+        match fs::rename(&previous, &current) {
+            Ok(()) => {
+                Some("recovered previous semantic generation after interrupted promotion".into())
+            }
+            Err(_) if current.exists() => Some(
+                "semantic generation was recovered concurrently after interrupted promotion".into(),
+            ),
+            Err(err) => Some(format!(
+                "failed to recover previous semantic generation after interrupted promotion: {err}"
+            )),
+        }
     }
 
     fn vectors_dir(&self) -> PathBuf {
         self.repo.join(".ok/vectors")
+    }
+
+    fn previous_dir(&self) -> PathBuf {
+        self.vectors_dir().join("previous")
     }
 
     fn current_dir(&self) -> PathBuf {
@@ -843,6 +857,28 @@ fn index_artifacts_present(current: &Path, backend: &str) -> bool {
         Ok(ResolvedSemanticBackend::ExactFlat) => current.join("index.json").is_file(),
         Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
             current.join("index.usearch").is_file() && current.join("index.meta.json").is_file()
+        }
+        Err(_) => false,
+    }
+}
+
+fn semantic_generation_complete(generation: &Path) -> bool {
+    let Some(manifest) = read_json::<SemanticManifest>(&generation.join("manifest.json")) else {
+        return false;
+    };
+    if read_targets(&generation.join("ids.json")).is_err()
+        || read_json::<EmbeddingCache>(&generation.join("embeddings.cache")).is_none()
+        || read_json::<SemanticStats>(&generation.join("stats.json")).is_none()
+    {
+        return false;
+    }
+    match resolved_backend_from_name(&manifest.backend) {
+        Ok(ResolvedSemanticBackend::ExactFlat) => {
+            ExactFlatVectorIndex::load(&generation.join("index.json")).is_ok()
+        }
+        Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
+            UsearchHnswVectorIndex::load(&generation.join("index.usearch"))
+                .is_ok_and(|index| index.parameters() == PRODUCTION_HNSW_PARAMETERS)
         }
         Err(_) => false,
     }
@@ -1405,20 +1441,6 @@ fn excluded_path(file: &File) -> bool {
         || path.ends_with(".lock")
         || path.contains(".env")
         || path.contains("secret")
-}
-
-fn source_index_fingerprint(store: &dyn MetadataStore) -> Result<String> {
-    let manifest = store.manifest()?.ok_or_else(|| {
-        OkError::Storage(
-            "authoritative index manifest is missing; run `ok index .` before semantic indexing"
-                .into(),
-        )
-    })?;
-    let raw = serde_json::to_vec(&manifest)?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"open-kioku-semantic-source-index-v1\0");
-    hasher.update(raw);
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn cache_key(target: &SemanticTarget, config: &SemanticConfig) -> String {
