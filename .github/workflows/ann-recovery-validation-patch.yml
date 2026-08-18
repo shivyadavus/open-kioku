@@ -1,0 +1,63 @@
+name: ANN recovery validation patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'agent/cc5-ann-promotion-recovery' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Strengthen recovery validation and remove helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('crates/open-kioku-semantic/src/lib.rs')
+          text = source.read_text()
+          old = '''fn semantic_generation_complete(generation: &Path) -> bool {\n    let Some(manifest) = read_json::<SemanticManifest>(&generation.join("manifest.json")) else {\n        return false;\n    };\n    generation.join("ids.json").is_file()\n        && generation.join("embeddings.cache").is_file()\n        && generation.join("stats.json").is_file()\n        && index_artifacts_present(generation, &manifest.backend)\n}\n'''
+          new = '''fn semantic_generation_complete(generation: &Path) -> bool {\n    let Some(manifest) = read_json::<SemanticManifest>(&generation.join("manifest.json")) else {\n        return false;\n    };\n    if read_targets(&generation.join("ids.json")).is_err()\n        || read_json::<EmbeddingCache>(&generation.join("embeddings.cache")).is_none()\n        || read_json::<SemanticStats>(&generation.join("stats.json")).is_none()\n    {\n        return false;\n    }\n    match resolved_backend_from_name(&manifest.backend) {\n        Ok(ResolvedSemanticBackend::ExactFlat) => {\n            ExactFlatVectorIndex::load(&generation.join("index.json")).is_ok()\n        }\n        Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {\n            UsearchHnswVectorIndex::load(&generation.join("index.usearch")).is_ok_and(|index| {\n                index.parameters() == PRODUCTION_HNSW_PARAMETERS\n            })\n        }\n        Err(_) => false,\n    }\n}\n'''
+          if text.count(old) != 1:
+              raise SystemExit('semantic_generation_complete patch anchor changed')
+          source.write_text(text.replace(old, new, 1))
+
+          test = Path('crates/open-kioku-semantic/tests/ann_recovery.rs')
+          text = test.read_text()
+          replacements = [
+              ('fn restart_refuses_incomplete_previous_generation() {', 'fn restart_refuses_corrupt_previous_generation() {'),
+              ('    fs::remove_file(previous.join("ids.json")).unwrap();', '    fs::write(previous.join("ids.json"), b"{not valid json").unwrap();'),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f'ann_recovery patch anchor changed: {old!r}')
+              text = text.replace(old, new, 1)
+          test.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo test -p open-kioku-semantic --test ann_recovery
+          unexpected="$(git diff --name-only | grep -Ev '^(crates/open-kioku-semantic/src/lib.rs|crates/open-kioku-semantic/tests/ann_recovery.rs)$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected source changes:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+          rm .github/workflows/ann-recovery-validation-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-semantic/src/lib.rs crates/open-kioku-semantic/tests/ann_recovery.rs .github/workflows/ann-recovery-validation-patch.yml
+          git commit -m "test(semantic): reject corrupt recovery generations"
+          git push origin HEAD:${{ github.head_ref }}
