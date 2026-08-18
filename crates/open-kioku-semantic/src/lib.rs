@@ -163,10 +163,13 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     pub fn status(&self) -> SemanticStatus {
+        let mut notes = Vec::new();
+        if let Some(note) = self.recover_interrupted_promotion() {
+            notes.push(note);
+        }
         let current = self.current_dir();
         let manifest_path = current.join("manifest.json");
         let stats_path = current.join("stats.json");
-        let mut notes = Vec::new();
         if !self.config.enabled {
             notes.push("semantic search is disabled in ok.toml; `ok semantic index` is explicit local opt-in".into());
         }
@@ -497,6 +500,7 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     fn build_and_promote(&self, allow_model_download: bool) -> Result<SemanticIndexReport> {
+        let _ = self.recover_interrupted_promotion();
         let provider = provider_for_config(&self.config, allow_model_download, &self.models_dir())?;
         let descriptor = provider.descriptor();
         if descriptor.dimensions != self.config.dimensions {
@@ -695,7 +699,7 @@ impl<'a> SemanticIndexManager<'a> {
         write_json(&build_dir.join("stats.json"), &stats)?;
 
         let current = self.current_dir();
-        let previous = self.vectors_dir().join("previous");
+        let previous = self.previous_dir();
         let _ = fs::remove_dir_all(&previous);
         if current.exists() {
             fs::rename(&current, &previous)?;
@@ -735,8 +739,36 @@ impl<'a> SemanticIndexManager<'a> {
                 .is_ok_and(|backend| manifest.index_version == index_version_for_backend(backend))
     }
 
+    fn recover_interrupted_promotion(&self) -> Option<String> {
+        let current = self.current_dir();
+        let previous = self.previous_dir();
+        if current.exists() || !previous.exists() {
+            return None;
+        }
+        if !semantic_generation_complete(&previous) {
+            return Some(
+                "previous semantic generation is incomplete; refusing automatic recovery".into(),
+            );
+        }
+        match fs::rename(&previous, &current) {
+            Ok(()) => {
+                Some("recovered previous semantic generation after interrupted promotion".into())
+            }
+            Err(_) if current.exists() => Some(
+                "semantic generation was recovered concurrently after interrupted promotion".into(),
+            ),
+            Err(err) => Some(format!(
+                "failed to recover previous semantic generation after interrupted promotion: {err}"
+            )),
+        }
+    }
+
     fn vectors_dir(&self) -> PathBuf {
         self.repo.join(".ok/vectors")
+    }
+
+    fn previous_dir(&self) -> PathBuf {
+        self.vectors_dir().join("previous")
     }
 
     fn current_dir(&self) -> PathBuf {
@@ -825,6 +857,28 @@ fn index_artifacts_present(current: &Path, backend: &str) -> bool {
         Ok(ResolvedSemanticBackend::ExactFlat) => current.join("index.json").is_file(),
         Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
             current.join("index.usearch").is_file() && current.join("index.meta.json").is_file()
+        }
+        Err(_) => false,
+    }
+}
+
+fn semantic_generation_complete(generation: &Path) -> bool {
+    let Some(manifest) = read_json::<SemanticManifest>(&generation.join("manifest.json")) else {
+        return false;
+    };
+    if read_targets(&generation.join("ids.json")).is_err()
+        || read_json::<EmbeddingCache>(&generation.join("embeddings.cache")).is_none()
+        || read_json::<SemanticStats>(&generation.join("stats.json")).is_none()
+    {
+        return false;
+    }
+    match resolved_backend_from_name(&manifest.backend) {
+        Ok(ResolvedSemanticBackend::ExactFlat) => {
+            ExactFlatVectorIndex::load(&generation.join("index.json")).is_ok()
+        }
+        Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
+            UsearchHnswVectorIndex::load(&generation.join("index.usearch"))
+                .is_ok_and(|index| index.parameters() == PRODUCTION_HNSW_PARAMETERS)
         }
         Err(_) => false,
     }
