@@ -52,8 +52,8 @@ struct Measurement {
     ann_vectors_per_second: f64,
     exact_query: LatencyMetrics,
     ann_query: LatencyMetrics,
-    ann_cold_load_ms: f64,
-    ann_warm_first_query_us: f64,
+    ann_reload_ms: f64,
+    ann_first_query_after_reload_us: f64,
     exact_index_bytes: u64,
     ann_index_bytes: u64,
     ann_metadata_bytes: u64,
@@ -138,7 +138,7 @@ struct ExactFixture {
     dimensions: usize,
     vector_count: usize,
     query_count: usize,
-    exact: ExactFlatVectorIndex,
+    _exact_oracle: ExactFlatVectorIndex,
     queries: Vec<Vec<f32>>,
     oracle_hits: Vec<Vec<VectorHit>>,
     exact_build_ms: f64,
@@ -184,7 +184,7 @@ impl ExactFixture {
             dimensions,
             vector_count,
             query_count: effective_queries,
-            exact,
+            _exact_oracle: exact,
             queries,
             oracle_hits,
             exact_build_ms,
@@ -219,9 +219,9 @@ impl ExactFixture {
 
         let load_started = Instant::now();
         let loaded = UsearchHnswVectorIndex::load(&ann_path)?;
-        let ann_cold_load_ms = elapsed_ms(load_started);
+        let ann_reload_ms = elapsed_ms(load_started);
 
-        let ann_warm_first_query_us = if let Some(query) = self.queries.first() {
+        let ann_first_query_after_reload_us = if let Some(query) = self.queries.first() {
             let started = Instant::now();
             let _ = loaded.search(query, search_options())?;
             elapsed_us(started)
@@ -249,7 +249,6 @@ impl ExactFixture {
         }
 
         let denominator = self.query_count.max(1) as f64;
-        let _keep_exact_alive = &self.exact;
         Ok(Measurement {
             dimensions: self.dimensions,
             vector_count: self.vector_count,
@@ -267,8 +266,8 @@ impl ExactFixture {
             ann_vectors_per_second,
             exact_query: self.exact_query.clone(),
             ann_query: latency_metrics(&ann_latencies),
-            ann_cold_load_ms,
-            ann_warm_first_query_us,
+            ann_reload_ms,
+            ann_first_query_after_reload_us,
             exact_index_bytes: self.exact_index_bytes,
             ann_index_bytes,
             ann_metadata_bytes,
