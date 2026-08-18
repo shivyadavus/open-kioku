@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,131 @@ def development_metrics(strategy: dict[str, Any], label: str) -> dict[str, float
     return values
 
 
+def development_cases(strategy: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    cases = strategy.get("cases")
+    if not isinstance(cases, list):
+        raise SystemExit(f"{label}.cases must be a list")
+    development = [case for case in cases if case.get("split") == "development"]
+    if not development:
+        raise SystemExit(f"{label} has no development cases")
+    for index, case in enumerate(development):
+        if not isinstance(case, dict):
+            raise SystemExit(f"{label}.development case {index} must be an object")
+        if not isinstance(case.get("id"), str) or not case["id"]:
+            raise SystemExit(f"{label}.development case {index} is missing a case id")
+    return development
+
+
+def case_recall_at_10(case: dict[str, Any], label: str) -> float:
+    recall = case.get("recall_at")
+    if not isinstance(recall, dict):
+        raise SystemExit(f"{label}.recall_at must be an object")
+    value = recall.get("10", recall.get(10))
+    return finite_number(value, f"{label}.recall_at_10")
+
+
+def summarize_cases(cases: list[dict[str, Any]], label: str) -> dict[str, float]:
+    positives = [case for case in cases if not case.get("no_gold_expected", False)]
+    no_gold = [case for case in cases if case.get("no_gold_expected", False)]
+
+    def mean_positive(metric: str) -> float:
+        if not positives:
+            return 0.0
+        if metric == "recall_at_10":
+            values = [
+                case_recall_at_10(case, f"{label}.{case['id']}") for case in positives
+            ]
+        else:
+            source = {
+                "mean_reciprocal_rank": "reciprocal_rank",
+                "file_f1_at_10": "file_f1_at_10",
+            }[metric]
+            values = [
+                finite_number(case.get(source), f"{label}.{case['id']}.{source}")
+                for case in positives
+            ]
+        return sum(values) / len(values)
+
+    false_positive_rate = 0.0
+    if no_gold:
+        false_positive_rate = sum(bool(case.get("returned_any", False)) for case in no_gold) / len(
+            no_gold
+        )
+
+    return {
+        "recall_at_10": mean_positive("recall_at_10"),
+        "mean_reciprocal_rank": mean_positive("mean_reciprocal_rank"),
+        "file_f1_at_10": mean_positive("file_f1_at_10"),
+        "no_gold_false_positive_rate": false_positive_rate,
+    }
+
+
+def development_subgroups(
+    strategy: dict[str, Any], label: str
+) -> dict[str, dict[str, float]]:
+    cases = development_cases(strategy, label)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for case in cases:
+        task_family = case.get("task_family")
+        if not isinstance(task_family, str) or not task_family:
+            raise SystemExit(f"{label}.{case['id']} is missing task_family")
+        grouped[f"task_family:{task_family}"].append(case)
+
+        shape = case.get("expected_query_shape")
+        if shape is not None:
+            if not isinstance(shape, str) or not shape:
+                raise SystemExit(f"{label}.{case['id']} has invalid expected_query_shape")
+            grouped[f"query_shape:{shape}"].append(case)
+            grouped[f"task_family_query_shape:{task_family}:{shape}"].append(case)
+
+    return {
+        group: summarize_cases(group_cases, f"{label}.{group}")
+        for group, group_cases in sorted(grouped.items())
+    }
+
+
+def subgroup_regression_report(
+    baseline_strategy: dict[str, Any],
+    candidate_strategy: dict[str, Any],
+    baseline_label: str,
+    candidate_label: str,
+    epsilon: float,
+) -> tuple[dict[str, dict[str, float]], list[str]]:
+    baseline_cases = development_cases(baseline_strategy, baseline_label)
+    candidate_cases = development_cases(candidate_strategy, candidate_label)
+    baseline_ids = {case["id"] for case in baseline_cases}
+    candidate_ids = {case["id"] for case in candidate_cases}
+    if baseline_ids != candidate_ids:
+        missing = sorted(baseline_ids - candidate_ids)
+        extra = sorted(candidate_ids - baseline_ids)
+        raise SystemExit(
+            "baseline/candidate development case identities differ "
+            f"(missing={missing}, extra={extra})"
+        )
+
+    baseline_groups = development_subgroups(baseline_strategy, baseline_label)
+    candidate_groups = development_subgroups(candidate_strategy, candidate_label)
+    if baseline_groups.keys() != candidate_groups.keys():
+        raise SystemExit("baseline/candidate development subgroup identities differ")
+
+    deltas: dict[str, dict[str, float]] = {}
+    regressions: list[str] = []
+    for group in baseline_groups:
+        group_deltas: dict[str, float] = {}
+        for metric in PRIMARY_HIGHER_IS_BETTER:
+            delta = candidate_groups[group][metric] - baseline_groups[group][metric]
+            group_deltas[metric] = delta
+            if delta < -epsilon:
+                regressions.append(f"{group}:{metric}")
+        for metric in PRIMARY_LOWER_IS_BETTER:
+            delta = baseline_groups[group][metric] - candidate_groups[group][metric]
+            group_deltas[metric] = delta
+            if delta < -epsilon:
+                regressions.append(f"{group}:{metric}")
+        deltas[group] = group_deltas
+    return deltas, regressions
+
+
 def main() -> None:
     args = parse_args()
     if args.min_quality_gain < 0 or args.min_fp_gain < 0:
@@ -124,6 +250,14 @@ def main() -> None:
         if delta >= args.min_fp_gain:
             meaningful_gains.append(metric)
 
+    subgroup_deltas, subgroup_regressions = subgroup_regression_report(
+        baseline_strategy,
+        candidate_strategy,
+        args.baseline,
+        args.candidate,
+        epsilon,
+    )
+
     baseline_p95 = baseline["p95_ms"]
     candidate_p95 = candidate["p95_ms"]
     if baseline_p95 <= 0:
@@ -131,10 +265,20 @@ def main() -> None:
     p95_ratio = candidate_p95 / baseline_p95
     latency_acceptable = p95_ratio <= args.max_p95_regression_ratio + epsilon
 
-    promote = not regressions and bool(meaningful_gains) and latency_acceptable
+    promote = (
+        not regressions
+        and not subgroup_regressions
+        and bool(meaningful_gains)
+        and latency_acceptable
+    )
     reasons: list[str] = []
     if regressions:
         reasons.append("candidate regresses calibration quality: " + ", ".join(regressions))
+    if subgroup_regressions:
+        reasons.append(
+            "candidate regresses development subgroup quality: "
+            + ", ".join(subgroup_regressions)
+        )
     if not meaningful_gains:
         reasons.append("candidate has no meaningful development-split quality gain")
     if not latency_acceptable:
@@ -149,7 +293,7 @@ def main() -> None:
         )
 
     decision = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "corpus_id": report.get("corpus_id"),
         "cases_file": report.get("cases_file"),
         "calibration_split": "development",
@@ -166,6 +310,8 @@ def main() -> None:
         "candidate_improvements": deltas,
         "meaningful_gains": meaningful_gains,
         "regressions": regressions,
+        "development_subgroup_improvements": subgroup_deltas,
+        "development_subgroup_regressions": subgroup_regressions,
         "p95_latency_ratio": p95_ratio,
         "promote_candidate_to_holdout_evaluation": promote,
         "production_default_changed": False,
