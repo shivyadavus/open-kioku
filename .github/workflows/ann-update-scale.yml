@@ -1,0 +1,128 @@
+name: ANN Generation Update Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_count:
+        description: Queries per scale/dimension measurement
+        required: true
+        default: "64"
+        type: string
+      mutation_basis_points:
+        description: Fraction of vectors changed before fresh-generation rebuild (100 = 1%)
+        required: true
+        default: "100"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate benchmark inputs
+        shell: bash
+        env:
+          QUERY_COUNT: ${{ inputs.query_count }}
+          MUTATION_BPS: ${{ inputs.mutation_basis_points }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+
+          query_count = os.environ["QUERY_COUNT"]
+          mutation_bps = os.environ["MUTATION_BPS"]
+          if not query_count.isdigit() or int(query_count) <= 0:
+              raise SystemExit("query_count must be a positive integer")
+          if not mutation_bps.isdigit() or not 1 <= int(mutation_bps) <= 10000:
+              raise SystemExit("mutation_basis_points must be in 1..=10000")
+          PY
+
+  measure:
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        vector_count: [50000, 100000, 300000, 1000000]
+        dimensions: [384, 768]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build generation-update benchmark
+        run: cargo build -p open-kioku-vector --example ann_generation_update --release
+
+      - name: Measure fresh-generation update cost
+        shell: bash
+        env:
+          OK_ANN_UPDATE_SIZES: ${{ matrix.vector_count }}
+          OK_ANN_UPDATE_DIMS: ${{ matrix.dimensions }}
+          OK_ANN_UPDATE_QUERIES: ${{ inputs.query_count }}
+          OK_ANN_UPDATE_MUTATION_BPS: ${{ inputs.mutation_basis_points }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ann-update
+          output="artifacts/ann-update/ann-update-${OK_ANN_UPDATE_SIZES}-${OK_ANN_UPDATE_DIMS}.json"
+          ./target/release/examples/ann_generation_update > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import math
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          if report.get("schema_version") != 1:
+              raise SystemExit("unexpected ANN update benchmark schema")
+          if report.get("benchmark") != "cc5-ann-fresh-generation-update":
+              raise SystemExit("unexpected ANN update benchmark identity")
+          if report.get("oracle") != "exact-flat":
+              raise SystemExit("exact-flat must remain the correctness oracle")
+          if report.get("lifecycle_policy") != "fresh generation from authoritative live vectors; no in-place tombstone compaction":
+              raise SystemExit("unexpected ANN lifecycle policy")
+          rows = report.get("measurements", [])
+          if len(rows) != 1:
+              raise SystemExit("matrix job must emit exactly one measurement")
+          row = rows[0]
+          if row["vector_count"] != int(report["requested_sizes"][0]):
+              raise SystemExit("measurement vector count does not match request")
+          if row["dimensions"] != int(report["requested_dimensions"][0]):
+              raise SystemExit("measurement dimensions do not match request")
+          if row["mutation_count"] <= 0 or not 0.0 < row["mutation_ratio"] <= 1.0:
+              raise SystemExit("benchmark must apply a non-empty mutation set")
+          for field in (
+              "baseline_build_ms",
+              "fresh_generation_build_ms",
+              "fresh_generation_vectors_per_second",
+              "rebuild_to_baseline_ratio",
+          ):
+              value = row[field]
+              if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                  raise SystemExit(f"invalid {field}: {value}")
+          for metric in ("recall_at_1", "recall_at_5", "recall_at_10", "recall_at_20", "mrr"):
+              value = row["quality"][metric]
+              if not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                  raise SystemExit(f"invalid {metric}: {value}")
+          print("validated ANN fresh-generation update measurement")
+          PY
+
+      - name: Upload update measurement
+        uses: actions/upload-artifact@v4
+        with:
+          name: ann-update-${{ matrix.vector_count }}-${{ matrix.dimensions }}d
+          path: artifacts/ann-update
+          if-no-files-found: error
+          retention-days: 30
