@@ -72,6 +72,52 @@ jobs:
                 raise SystemExit('ANN scale persistence metrics must be positive')
         print('bounded ANN scale matrix smoke passed')
         PY
+
+    - name: Smoke ANN churn lifecycle
+      shell: bash
+      run: |
+        set -euo pipefail
+        OK_ANN_CHURN_INITIAL_VECTORS=2000 \
+        OK_ANN_CHURN_DIMS=384 \
+        OK_ANN_CHURN_CYCLES=3 \
+        OK_ANN_CHURN_MUTATIONS_PER_CYCLE=100 \
+        OK_ANN_CHURN_QUERIES=8 \
+          cargo run -p open-kioku-vector --example ann_churn_matrix --release \
+          > artifacts/benchmarks/ann-churn-smoke.json
+        python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        report = json.loads(Path('artifacts/benchmarks/ann-churn-smoke.json').read_text())
+        if report['schema_version'] != 1:
+            raise SystemExit('unexpected ANN churn benchmark schema')
+        if report['oracle'] != 'exact-flat':
+            raise SystemExit('ANN churn benchmark must retain exact-flat as oracle')
+        if report['lifecycle_model'] != 'fresh-generation-from-live-set':
+            raise SystemExit('ANN churn smoke exercised an unexpected lifecycle model')
+        if report['overall']['total_mutations'] != 300:
+            raise SystemExit(
+                f"expected 300 applied mutations, got {report['overall']['total_mutations']}"
+            )
+        if not report['policy']['passed']:
+            raise SystemExit(
+                f"ANN churn lifecycle policy failed: {report['policy']['reasons']}"
+            )
+        if report['overall']['max_stored_to_live_ratio_deviation'] != 0.0:
+            raise SystemExit('ANN churn stored/live population deviated from the authoritative live set')
+        for cycle in report['measurements']:
+            if cycle['stored_vectors'] != cycle['live_vectors']:
+                raise SystemExit('ANN churn persisted population differs from live population')
+            if cycle['stale_or_deleted_hits'] != 0:
+                raise SystemExit('ANN churn returned deleted vector identities')
+            if cycle['stale_identity_hits'] != 0:
+                raise SystemExit('ANN churn returned stale renamed identities')
+            if cycle['duplicate_hit_ids'] != 0:
+                raise SystemExit('ANN churn returned duplicate vector IDs')
+            if cycle['inspected_ann_hits'] <= 0:
+                raise SystemExit('ANN churn smoke did not inspect ANN results')
+        print('bounded ANN churn lifecycle smoke passed')
+        PY
       
     - name: Run CLI Bench
       shell: bash
