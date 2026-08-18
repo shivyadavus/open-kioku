@@ -156,11 +156,7 @@ fn disabled_weight_is_fail_visible_and_cannot_contribute() {
         ),
         CandidateStream::success(
             RetrievalSourceKind::ExactSemantic,
-            vec![candidate(
-                "src/exact.rs",
-                1.0,
-                RetrievalAuthority::Exact,
-            )],
+            vec![candidate("src/exact.rs", 1.0, RetrievalAuthority::Exact)],
         ),
     ];
     let fused = fuse_candidate_streams(
