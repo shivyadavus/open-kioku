@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       query_count:
-        description: Queries per scale/dimension measurement
+        description: Queries per scale/dimension measurement (1-256)
         required: true
         default: "64"
         type: string
       search_expansions:
-        description: Comma-separated HNSW expansion_search values
+        description: Comma-separated HNSW expansion_search values (up to 8 values, each 1-4096)
         required: true
         default: "64,128,256,512,1024"
         type: string
@@ -35,13 +35,17 @@ jobs:
           import os
 
           query_count = os.environ["QUERY_COUNT"]
-          if not query_count.isdigit() or int(query_count) <= 0:
-              raise SystemExit("query_count must be a positive integer")
+          if not query_count.isdigit() or not 1 <= int(query_count) <= 256:
+              raise SystemExit("query_count must be an integer from 1 through 256")
 
           raw = os.environ["SEARCH_EXPANSIONS"]
           parts = [part.strip() for part in raw.split(",") if part.strip()]
-          if not parts or any(not part.isdigit() or int(part) <= 0 for part in parts):
-              raise SystemExit("search_expansions must be a non-empty CSV of positive integers")
+          if not parts or any(not part.isdigit() or not 1 <= int(part) <= 4096 for part in parts):
+              raise SystemExit(
+                  "search_expansions must be a non-empty CSV of integers from 1 through 4096"
+              )
+          if len(parts) > 8:
+              raise SystemExit("search_expansions may contain at most 8 values")
           if len(parts) != len(set(parts)):
               raise SystemExit("search_expansions values must be unique")
           PY
