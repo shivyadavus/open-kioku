@@ -1,21 +1,23 @@
 name: RI3 semantics graph-read guard
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/ri3-analysis-semantics-fingerprint
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   validate:
-    if: github.actor != 'github-actions[bot]'
+    if: github.head_ref == 'agent/ri3-analysis-semantics-fingerprint'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
