@@ -5,8 +5,9 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
 use open_kioku_storage::{
-    changed_document_paths, classify_file_changes, partial_index_supported, GraphStore,
-    HistoryStore, IndexChangeKind, IndexData, MetadataStore, PartialIndexUpdate,
+    analysis_semantics_compatibility, changed_document_paths, classify_file_changes,
+    partial_index_supported, GraphStore, HistoryStore, IndexChangeKind, IndexData, MetadataStore,
+    PartialIndexUpdate,
 };
 use open_kioku_storage_sqlite::SqliteStore;
 use std::collections::BTreeSet;
@@ -109,6 +110,23 @@ pub fn reindex_repo_after_changes<'a>(
     let previous_manifest = store.manifest()?;
     let previous_files = store.list_files(usize::MAX, 0)?;
     let previous_documents = store.document_sections()?;
+    if previous_manifest.is_some() {
+        let compatibility =
+            analysis_semantics_compatibility(previous_manifest.as_ref(), &snapshot.manifest);
+        if !compatibility.status.allows_partial_index_update() {
+            return Err(OkError::Index(format!(
+                "analysis semantics {}: {}; stored={}, current={}; {}",
+                format!("{:?}", compatibility.status).to_ascii_lowercase(),
+                compatibility.reasons.join("; "),
+                compatibility
+                    .stored_fingerprint
+                    .as_deref()
+                    .unwrap_or("missing"),
+                compatibility.current_fingerprint,
+                compatibility.recommended_action
+            )));
+        }
+    }
     let changed_paths = changed_paths
         .into_iter()
         .filter_map(|path| path.strip_prefix(root).ok().or(Some(path)))
@@ -397,6 +415,51 @@ mod tests {
     }
 
     #[test]
+    fn incremental_reindex_refuses_incompatible_semantics_and_preserves_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/lib.rs"), "pub fn stable() {}\n").unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "watch@example.com"]);
+        git(repo, &["config", "user.name", "Watch Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "initial source"]);
+
+        reindex_repo(repo).unwrap();
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let mut legacy = store.manifest().unwrap().unwrap();
+        let mut state = legacy.analysis_semantics.clone().unwrap();
+        state.descriptor.relationship_resolver_version = "old-resolver".into();
+        legacy.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::new(
+            state.descriptor,
+        ));
+        let legacy_fingerprint = legacy
+            .analysis_semantics
+            .as_ref()
+            .unwrap()
+            .fingerprint
+            .clone();
+        store.put_manifest(&legacy).unwrap();
+
+        fs::write(repo.join("src/lib.rs"), "pub fn stable() { let _ = 1; }\n").unwrap();
+        let err = reindex_repo_after_changes(
+            repo,
+            [repo.join("src/lib.rs")].iter().map(PathBuf::as_path),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("analysis semantics"));
+
+        let persisted = store.manifest().unwrap().unwrap();
+        assert_eq!(
+            persisted.analysis_semantics.as_ref().unwrap().fingerprint,
+            legacy_fingerprint
+        );
+    }
+
+    #[test]
     fn reindex_repo_writes_sqlite_and_search_indexes() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
@@ -482,6 +545,87 @@ mod tests {
             .unwrap()
             .iter()
             .any(|chunk| chunk.text.contains("other_token")));
+    }
+
+    #[test]
+    fn incremental_relationship_graph_matches_clean_final_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn target() {}\npub fn caller() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(repo.join("src/other.rs"), "pub fn unrelated() {}\n").unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "watch@example.com"]);
+        git(repo, &["config", "user.name", "Watch Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "initial source"]);
+
+        reindex_repo(repo).unwrap();
+        fs::write(
+            repo.join("src/other.rs"),
+            "pub fn unrelated() { let _stable = 1; }\n",
+        )
+        .unwrap();
+        let changed = repo.join("src/other.rs");
+        let status = reindex_repo_after_changes(repo, [changed.as_path()]).unwrap();
+        assert!(status.partial);
+
+        let semantic_projection = |mut edges: Vec<open_kioku_core::GraphEdge>| {
+            edges.sort_by(|left, right| {
+                left.from
+                    .0
+                    .cmp(&right.from.0)
+                    .then_with(|| left.to.0.cmp(&right.to.0))
+                    .then_with(|| {
+                        format!("{:?}", left.edge_type).cmp(&format!("{:?}", right.edge_type))
+                    })
+            });
+            edges
+                .into_iter()
+                .map(|edge| {
+                    (
+                        edge.from.0,
+                        edge.to.0,
+                        format!("{:?}", edge.edge_type),
+                        edge.evidence.source,
+                        format!("{:?}", edge.evidence.source_type),
+                        format!("{:?}", edge.evidence.file_range),
+                        edge.evidence.symbol_id.map(|id| id.0),
+                        format!("{:?}", edge.evidence.confidence),
+                        edge.evidence.message,
+                        edge.properties,
+                        edge.schema_version,
+                        edge.source_pass,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let incremental_store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let incremental = incremental_store
+            .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
+            .unwrap();
+        assert!(!incremental.is_empty(), "fixture should emit a CALLS edge");
+        let incremental_projection = semantic_projection(incremental);
+
+        fs::remove_dir_all(repo.join(".ok")).unwrap();
+        reindex_repo(repo).unwrap();
+        let clean_store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let clean = clean_store
+            .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
+            .unwrap();
+        let clean_projection = semantic_projection(clean);
+
+        assert_eq!(
+            incremental_projection, clean_projection,
+            "incremental and clean CALLS truth/proof projection diverged"
+        );
     }
 
     fn git(root: &Path, args: &[&str]) {

@@ -526,6 +526,60 @@ mod tests {
     }
 
     #[test]
+    fn filtered_hnsw_matches_exact_oracle_across_selectivity_and_top_k() {
+        let records = [
+            record(1, "a", "chunk", &[1.0, 0.0, 0.0]),
+            record(2, "b", "chunk", &[0.98, 0.2, 0.0]),
+            record(3, "c", "symbol", &[0.8, 0.6, 0.0]),
+            record(4, "d", "chunk", &[0.6, 0.8, 0.0]),
+            record(5, "e", "symbol", &[0.2, 0.98, 0.0]),
+            record(6, "f", "chunk", &[0.0, 1.0, 0.0]),
+            record(7, "g", "chunk", &[0.0, 0.8, 0.6]),
+            record(8, "h", "symbol", &[0.0, 0.2, 0.98]),
+            record(9, "i", "chunk", &[0.0, 0.0, 1.0]),
+            record(10, "j", "chunk", &[0.5, 0.5, 0.707]),
+        ];
+        let mut exact = ExactFlatVectorIndex::new(3).unwrap();
+        let mut hnsw = UsearchHnswVectorIndex::new(3, AnnScalarKind::F32, records.len()).unwrap();
+        for value in records {
+            exact.add(value.clone()).unwrap();
+            hnsw.add(value).unwrap();
+        }
+
+        let scopes = [
+            HashSet::from([VectorId(1)]),
+            HashSet::from([VectorId(1), VectorId(2), VectorId(3)]),
+            HashSet::from([
+                VectorId(1),
+                VectorId(2),
+                VectorId(3),
+                VectorId(4),
+                VectorId(5),
+                VectorId(6),
+                VectorId(7),
+                VectorId(8),
+            ]),
+        ];
+        for allowlist in scopes {
+            for limit in [1usize, 3, 5] {
+                let options = VectorSearchOptions {
+                    limit,
+                    allowlist: Some(allowlist.clone()),
+                    target_kind: None,
+                };
+                let exact_hits = exact.search(&[1.0, 0.0, 0.0], options.clone()).unwrap();
+                let hnsw_hits = hnsw.search(&[1.0, 0.0, 0.0], options).unwrap();
+                assert_eq!(
+                    exact_hits.iter().map(|hit| &hit.target_id).collect::<Vec<_>>(),
+                    hnsw_hits.iter().map(|hit| &hit.target_id).collect::<Vec<_>>(),
+                    "filtered ANN must preserve exact-oracle top-k for allowlist size {} and k={limit}",
+                    allowlist.len()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hnsw_preserves_filters_parameters_and_persistence_without_duplicate_vectors() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("index.usearch");

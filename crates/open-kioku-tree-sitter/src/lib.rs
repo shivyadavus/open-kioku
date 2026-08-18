@@ -521,15 +521,13 @@ fn symbol_name_node<'tree>(
         Language::Go => match kind {
             "function_declaration" => name.map(|node| (node, SymbolKind::Function)),
             "method_declaration" => name.map(|node| (node, SymbolKind::Method)),
-            "type_spec" => name.map(|node| {
-                let symbol_kind =
-                    if node.parent().map(|parent| parent.kind()) == Some("type_declaration") {
-                        SymbolKind::Class
-                    } else {
-                        SymbolKind::Unknown
-                    };
-                (node, symbol_kind)
-            }),
+            "type_spec" => {
+                let symbol_kind = match node.child_by_field_name("type").map(|node| node.kind()) {
+                    Some("interface_type") => SymbolKind::Interface,
+                    _ => SymbolKind::Class,
+                };
+                name.map(|name_node| (name_node, symbol_kind))
+            }
             _ => None,
         },
         Language::Json | Language::Yaml => None,
@@ -583,7 +581,7 @@ fn extract_call(
                         .unwrap_or("")
                         .to_string();
                     if !recv.is_empty() {
-                        receiver_kind = classify_receiver_string(&recv);
+                        receiver_kind = classify_receiver_string(&file.language, &recv);
                         receiver_text = Some(recv);
                     }
                 }
@@ -604,7 +602,7 @@ fn extract_call(
                     if let Some(object) = function_node.child_by_field_name("object") {
                         let recv = object.utf8_text(source_bytes).unwrap_or("").to_string();
                         if !recv.is_empty() {
-                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_kind = classify_receiver_string(&file.language, &recv);
                             receiver_text = Some(recv);
                         }
                     }
@@ -625,7 +623,7 @@ fn extract_call(
                     if let Some(object) = function_node.child_by_field_name("object") {
                         let recv = object.utf8_text(source_bytes).unwrap_or("").to_string();
                         if !recv.is_empty() {
-                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_kind = classify_receiver_string(&file.language, &recv);
                             receiver_text = Some(recv);
                         }
                     }
@@ -646,7 +644,7 @@ fn extract_call(
                     if let Some(operand) = function_node.child_by_field_name("operand") {
                         let recv = operand.utf8_text(source_bytes).unwrap_or("").to_string();
                         if !recv.is_empty() {
-                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_kind = classify_receiver_string(&file.language, &recv);
                             receiver_text = Some(recv);
                         }
                     }
@@ -667,7 +665,7 @@ fn extract_call(
                     if let Some(value) = function_node.child_by_field_name("value") {
                         let recv = value.utf8_text(source_bytes).unwrap_or("").to_string();
                         if !recv.is_empty() {
-                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_kind = classify_receiver_string(&file.language, &recv);
                             receiver_text = Some(recv);
                         }
                     }
@@ -678,7 +676,7 @@ fn extract_call(
                     if let Some(path_node) = function_node.child_by_field_name("path") {
                         let recv = path_node.utf8_text(source_bytes).unwrap_or("").to_string();
                         if !recv.is_empty() {
-                            receiver_kind = classify_receiver_string(&recv);
+                            receiver_kind = classify_rust_path_receiver(&recv);
                             receiver_text = Some(recv);
                         }
                     }
@@ -717,34 +715,22 @@ fn extract_call(
     }
 }
 
-fn classify_receiver_string(recv: &str) -> ReceiverKind {
+fn classify_receiver_string(language: &Language, recv: &str) -> ReceiverKind {
+    open_kioku_languages::semantics_for(language)
+        .map(|semantics| semantics.classify_receiver(recv))
+        .unwrap_or(ReceiverKind::Value)
+}
+
+fn classify_rust_path_receiver(recv: &str) -> ReceiverKind {
     let recv = recv.trim();
-    if recv == "this"
-        || recv == "self"
-        || recv == "Self"
-        || recv.starts_with("this.")
-        || recv.starts_with("self.")
-        || recv.starts_with("Self::")
+    if matches!(recv, "crate" | "self" | "super")
+        || recv.starts_with("crate::")
+        || recv.starts_with("self::")
+        || recv.starts_with("super::")
     {
-        ReceiverKind::Self_
-    } else if recv == "super"
-        || recv == "Super"
-        || recv.starts_with("super.")
-        || recv.starts_with("Super::")
-    {
-        ReceiverKind::Super
-    } else if recv
-        .chars()
-        .next()
-        .map(|c| c.is_uppercase())
-        .unwrap_or(false)
-        && !recv.contains('.')
-    {
-        ReceiverKind::Type
-    } else if recv.starts_with("crate::") {
         ReceiverKind::Module
     } else {
-        ReceiverKind::Value
+        classify_receiver_string(&Language::Rust, recv)
     }
 }
 
@@ -1412,6 +1398,51 @@ mod tests {
     }
 
     #[test]
+    fn rust_scoped_paths_distinguish_modules_from_instance_self() {
+        let file = File {
+            id: FileId::new("file_rust_paths"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/lib.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "fn run() { crate::crate_target(); self::self_target(); super::super_target(); Self::type_target(); self.instance_target(); }",
+        )
+        .expect("Rust qualified-call fixture should parse");
+        let kind_for = |callee: &str| {
+            facts
+                .calls
+                .iter()
+                .find(|call| call.callee_name == callee)
+                .map(|call| (call.receiver.as_deref(), call.receiver_kind))
+                .expect("qualified call")
+        };
+
+        assert_eq!(
+            kind_for("crate_target"),
+            (Some("crate"), ReceiverKind::Module)
+        );
+        assert_eq!(
+            kind_for("self_target"),
+            (Some("self"), ReceiverKind::Module)
+        );
+        assert_eq!(
+            kind_for("super_target"),
+            (Some("super"), ReceiverKind::Module)
+        );
+        assert_eq!(kind_for("type_target"), (Some("Self"), ReceiverKind::Self_));
+        assert_eq!(
+            kind_for("instance_target"),
+            (Some("self"), ReceiverKind::Self_)
+        );
+    }
+
+    #[test]
     fn does_not_emit_json_keys_as_symbols() {
         let file = File {
             id: FileId::new("file"),
@@ -1501,5 +1532,44 @@ mod ri3_rust_module_receiver_tests {
 
         assert_eq!(call.receiver.as_deref(), Some("crate::storage"));
         assert_eq!(call.receiver_kind, ReceiverKind::Module);
+    }
+}
+
+#[cfg(test)]
+mod ri3_go_type_classification_tests {
+    use super::parse_file;
+    use open_kioku_core::{File, FileId, Language, RepositoryId, SymbolKind};
+
+    #[test]
+    fn go_named_types_are_classified_as_type_symbols() {
+        let file = File {
+            id: FileId::new("file_go_types"),
+            repository_id: RepositoryId::new("repo"),
+            path: "main.go".into(),
+            language: Language::Go,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let facts = parse_file(
+            &file,
+            "package bench\ntype TargetType struct{}\ntype TargetInterface interface{ Target() }\nfunc CallerFn(value TargetType) {}\n",
+        )
+        .expect("Go type fixture should parse");
+        let concrete = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "TargetType")
+            .expect("concrete Go type");
+        let interface = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "TargetInterface")
+            .expect("Go interface type");
+        assert_eq!(concrete.kind, SymbolKind::Class);
+        assert_eq!(interface.kind, SymbolKind::Interface);
+        assert!(facts.bindings.iter().any(|binding| binding.name == "value"
+            && binding.declared_type.as_deref() == Some("TargetType")));
     }
 }

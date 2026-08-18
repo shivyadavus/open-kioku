@@ -21,6 +21,7 @@ pub use language_capabilities::{
 };
 pub use pipeline::{
     evaluate_candidates, normalize_candidates, ResolutionCandidate, ResolutionOutcome,
+    MAX_RESOLUTION_CANDIDATES,
 };
 pub use type_relations::{
     resolve_declared_type_use_outcome, resolve_inheritance_relationship_outcome,

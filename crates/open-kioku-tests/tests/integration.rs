@@ -141,7 +141,8 @@ fn test_mcp_tools_list_snapshot() {
     let json_lines: Vec<&str> = stdout_str.lines().filter(|l| l.starts_with("{")).collect();
     let last_json = json_lines.last().expect("should output JSON");
 
-    // Validate snapshot
+    // Validate the complete public tool-list contract, including descriptions as well as schemas.
+    // Intentional MCP description changes therefore require an explicit golden snapshot update.
     let snapshot_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots");
     std::fs::create_dir_all(&snapshot_dir).unwrap();
     let snapshot_file = snapshot_dir.join("tools_list.json");

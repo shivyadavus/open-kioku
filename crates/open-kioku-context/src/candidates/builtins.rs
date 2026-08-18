@@ -19,6 +19,34 @@ pub struct BuiltinCandidateContext<'a> {
 }
 
 impl<'a> BuiltinCandidateContext<'a> {
+    fn authoritative_relationships_available(&self) -> Result<(), String> {
+        let manifest = self
+            .store
+            .manifest()
+            .map_err(|err| format!("index manifest unavailable: {err}"))?;
+        let compatibility = open_kioku_core::classify_analysis_semantics(
+            manifest
+                .as_ref()
+                .and_then(|manifest| manifest.analysis_semantics.as_ref()),
+            &open_kioku_core::AnalysisSemanticsState::current(),
+        );
+        if compatibility.status.allows_authoritative_relationships() {
+            Ok(())
+        } else {
+            Err(format!(
+                "analysis semantics {:?}: {}; stored={}, current={}; {}",
+                compatibility.status,
+                compatibility.reasons.join("; "),
+                compatibility
+                    .stored_fingerprint
+                    .as_deref()
+                    .unwrap_or("missing"),
+                compatibility.current_fingerprint,
+                compatibility.recommended_action
+            ))
+        }
+    }
+
     pub fn collect(&self, request: &CandidateRequest) -> Vec<CandidateStream> {
         self.collect_excluding(request, &BTreeSet::new())
     }
@@ -234,6 +262,12 @@ impl<'a> BuiltinCandidateContext<'a> {
     }
 
     fn exact_symbol_stream(&self, request: &CandidateRequest) -> CandidateStream {
+        if let Err(reason) = self.authoritative_relationships_available() {
+            return CandidateStream::unavailable(
+                RetrievalSourceKind::ExactSemantic,
+                format!("exact semantic retrieval unavailable: {reason}"),
+            );
+        }
         let keys = symbol_anchor_keys(&request.task, &request.search_terms);
         if keys.is_empty() {
             return CandidateStream::success(RetrievalSourceKind::ExactSemantic, Vec::new());
@@ -321,6 +355,12 @@ impl<'a> BuiltinCandidateContext<'a> {
         request: &CandidateRequest,
         anchor_symbols: &[Symbol],
     ) -> CandidateStream {
+        if let Err(reason) = self.authoritative_relationships_available() {
+            return CandidateStream::unavailable(
+                RetrievalSourceKind::Graph,
+                format!("graph retrieval unavailable: {reason}"),
+            );
+        }
         if anchor_symbols.is_empty() {
             return CandidateStream::success(RetrievalSourceKind::Graph, Vec::new());
         }

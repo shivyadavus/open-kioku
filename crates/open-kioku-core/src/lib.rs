@@ -5,8 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod analysis_semantics;
 pub mod identity;
 pub mod relationship;
+
+pub use analysis_semantics::*;
 
 pub use relationship::{
     normalize_relationship_proofs, relationship_authority, RelationshipAuthority,
@@ -1752,6 +1755,8 @@ pub struct IndexManifest {
     pub chunk_count: usize,
     pub indexed_at: DateTime<Utc>,
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_semantics: Option<AnalysisSemanticsState>,
     #[serde(default)]
     pub index_mode: IndexMode,
     #[serde(default)]
@@ -1860,6 +1865,18 @@ pub struct RelationshipResolutionQuality {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LanguageResolutionQuality {
+    pub occurrences: usize,
+    pub candidates_considered: usize,
+    pub proven: usize,
+    pub ambiguous: usize,
+    pub unresolved: usize,
+    pub external: usize,
+    pub candidate_cap_hits: usize,
+    pub enrichment_time_us: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResolutionQualityReport {
     pub call_sites: usize,
     pub resolved_exact: usize,
@@ -1870,6 +1887,10 @@ pub struct ResolutionQualityReport {
     pub legacy_only: usize,
     pub semantic_only: usize,
     pub disagreement: usize,
+    #[serde(default)]
+    pub candidate_cap_hits: usize,
+    #[serde(default)]
+    pub by_language: BTreeMap<String, LanguageResolutionQuality>,
     #[serde(default)]
     pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
 }
