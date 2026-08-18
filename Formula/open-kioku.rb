@@ -5,13 +5,9 @@ class OpenKioku < Formula
   license "Elastic-2.0"
 
   on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v3.0.0/ok-macos-arm64"
-      sha256 "85922cbad9f623ff8f6f85fba4c0670e6ab9fb0b6d3b46e612d96232a2e8c82d"
-    else
-      url "https://github.com/shivyadavus/open-kioku/releases/download/v3.0.0/ok-macos-x86_64"
-      sha256 "abde42f14789cbc01d4eaa9dc84d44a885d6b92df84bbe0b21a48921fb60bb96"
-    end
+    depends_on arch: :arm64
+    url "https://github.com/shivyadavus/open-kioku/releases/download/v3.0.0/ok-macos-arm64"
+    sha256 "85922cbad9f623ff8f6f85fba4c0670e6ab9fb0b6d3b46e612d96232a2e8c82d"
   end
 
   on_linux do
