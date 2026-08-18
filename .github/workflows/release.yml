@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -115,7 +116,8 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          awk "/^## \\[$VERSION\\]/ {flag=1; print; next} /^## \\[/ {if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          awk "/^## \\[$VERSION\\]/ {flag=1; print; next} /^## \\[/ {if(flag) exit} flag" CHANGELOG.md \
+            | grep -v 'ok-macos-x86_64' > release_notes.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
