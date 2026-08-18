@@ -105,8 +105,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: release/v3.0.0-mainline
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
           fetch-depth: 0
+      - name: Verify candidate source is still branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin release/v3.0.0-mainline
+          branch_tip="$(git rev-parse origin/release/v3.0.0-mainline)"
+          candidate_sha="${{ needs.prepare.outputs.candidate_sha }}"
+          if [ "$branch_tip" != "$candidate_sha" ]; then
+            echo "release candidate moved during build: expected $candidate_sha, found $branch_tip" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
