@@ -21,4 +21,5 @@ open-kioku-storage-sqlite = { version = "3.0.0", path = "../open-kioku-storage-s
 open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
 
 [dev-dependencies]
+open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
 tempfile.workspace = true
