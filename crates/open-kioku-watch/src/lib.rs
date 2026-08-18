@@ -4,6 +4,7 @@ use open_kioku_errors::{OkError, Result};
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
+use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::{
     analysis_semantics_compatibility, changed_document_paths, classify_file_changes,
     partial_index_supported, GraphStore, HistoryStore, IndexChangeKind, IndexData, MetadataStore,
@@ -295,6 +296,7 @@ pub fn reindex_repo_after_changes<'a>(
             &snapshot.symbols,
         )?;
     }
+    maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -326,6 +328,7 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         &snapshot.files,
         &snapshot.symbols,
     )?;
+    maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
         files: snapshot.manifest.file_count,
@@ -336,6 +339,32 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         changed_files: snapshot.manifest.file_count,
         deleted_files: 0,
     })
+}
+
+fn maintain_semantic_index(root: &Path, store: &SqliteStore, config: &OkConfig) {
+    if !config.semantic.enabled {
+        return;
+    }
+    let manager = SemanticIndexManager::new(root, store, &config.semantic);
+    match manager.index() {
+        Ok(report) => eprintln!(
+            "watch semantic refresh: state={}, backend={}, ann={}, vectors={}, embedded={}, reused={}, removed={}",
+            report.status.state,
+            report.status.backend,
+            report.status.ann_active,
+            report.status.vector_count,
+            report.embedded_count,
+            report.reused_embeddings,
+            report.removed_count
+        ),
+        Err(err) => {
+            let status = manager.status();
+            eprintln!(
+                "watch semantic maintenance failed: {err} (state={}, ready={}, vectors={})",
+                status.state, status.ready, status.vector_count
+            );
+        }
+    }
 }
 
 fn persist_full_snapshot(
