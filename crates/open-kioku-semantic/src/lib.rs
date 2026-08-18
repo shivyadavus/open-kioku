@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const CHUNKER_VERSION: &str = "open-kioku-chunks-v1";
 const EXACT_INDEX_VERSION: &str = "exact-flat-json-v1";
 const HNSW_INDEX_VERSION: &str = PRODUCTION_HNSW_PROFILE;
@@ -39,6 +39,8 @@ pub struct SemanticManifest {
     pub chunker_version: String,
     pub index_version: String,
     pub source_commit: Option<String>,
+    #[serde(default)]
+    pub source_index_fingerprint: Option<String>,
     pub created_at: String,
     pub vector_count: usize,
     pub target_counts: BTreeMap<String, usize>,
@@ -218,11 +220,19 @@ impl<'a> SemanticIndexManager<'a> {
             .as_ref()
             .map(|manifest| !index_artifacts_present(&current, &manifest.backend))
             .unwrap_or(true);
+        let source_stale = manifest
+            .as_ref()
+            .is_some_and(|manifest| !self.source_generation_compatible(manifest));
         let stale = manifest
             .as_ref()
             .map(|manifest| !self.compatible(manifest))
             .unwrap_or(false);
-        if stale {
+        if source_stale {
+            notes.push(
+                "semantic index is stale for the current authoritative index generation; rebuild semantic index"
+                    .into(),
+            );
+        } else if stale {
             notes.push("semantic index manifest is stale for the current semantic config".into());
         }
         if corrupt {
@@ -668,6 +678,7 @@ impl<'a> SemanticIndexManager<'a> {
                 .ok()
                 .flatten()
                 .and_then(|manifest| manifest.repository.commit),
+            source_index_fingerprint: Some(source_index_fingerprint(self.store)?),
             created_at: Utc::now().to_rfc3339(),
             vector_count: exact_index
                 .as_ref()
@@ -723,6 +734,7 @@ impl<'a> SemanticIndexManager<'a> {
 
     fn compatible(&self, manifest: &SemanticManifest) -> bool {
         manifest.schema_version == SCHEMA_VERSION
+            && self.source_generation_compatible(manifest)
             && resolve_semantic_backend(&self.config, manifest.vector_count)
                 .is_ok_and(|backend| manifest.backend == resolved_backend_name(backend))
             && manifest.embedding_provider == self.config.provider
@@ -737,6 +749,12 @@ impl<'a> SemanticIndexManager<'a> {
             && manifest.chunker_version == CHUNKER_VERSION
             && resolved_backend_from_name(&manifest.backend)
                 .is_ok_and(|backend| manifest.index_version == index_version_for_backend(backend))
+    }
+
+    fn source_generation_compatible(&self, manifest: &SemanticManifest) -> bool {
+        source_index_fingerprint(self.store).is_ok_and(|fingerprint| {
+            manifest.source_index_fingerprint.as_deref() == Some(fingerprint.as_str())
+        })
     }
 
     fn recover_interrupted_promotion(&self) -> Option<String> {
@@ -1441,6 +1459,20 @@ fn excluded_path(file: &File) -> bool {
         || path.ends_with(".lock")
         || path.contains(".env")
         || path.contains("secret")
+}
+
+fn source_index_fingerprint(store: &dyn MetadataStore) -> Result<String> {
+    let manifest = store.manifest()?.ok_or_else(|| {
+        OkError::Storage(
+            "authoritative index manifest is missing; run `ok index .` before semantic indexing"
+                .into(),
+        )
+    })?;
+    let raw = serde_json::to_vec(&manifest)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"open-kioku-semantic-source-index-v1\0");
+    hasher.update(raw);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn cache_key(target: &SemanticTarget, config: &SemanticConfig) -> String {
