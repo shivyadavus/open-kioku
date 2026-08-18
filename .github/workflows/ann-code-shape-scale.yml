@@ -1,0 +1,220 @@
+name: ANN Code-Shaped Scale Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_count:
+        description: Queries per scale/dimension measurement
+        required: true
+        default: "64"
+        type: string
+      search_expansions:
+        description: Comma-separated HNSW expansion_search values
+        required: true
+        default: "64,128,256,512,1024"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate benchmark inputs
+        shell: bash
+        env:
+          QUERY_COUNT: ${{ inputs.query_count }}
+          SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+
+          query_count = os.environ["QUERY_COUNT"]
+          if not query_count.isdigit() or int(query_count) <= 0:
+              raise SystemExit("query_count must be a positive integer")
+
+          raw = os.environ["SEARCH_EXPANSIONS"]
+          parts = [part.strip() for part in raw.split(",") if part.strip()]
+          if not parts or any(not part.isdigit() or int(part) <= 0 for part in parts):
+              raise SystemExit("search_expansions must be a non-empty CSV of positive integers")
+          if len(parts) != len(set(parts)):
+              raise SystemExit("search_expansions values must be unique")
+          PY
+
+  measure:
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        vector_count: [50000, 100000, 300000, 1000000]
+        dimensions: [384, 768]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build code-shaped ANN benchmark
+        run: cargo build -p open-kioku-vector --example ann_code_shape_validation --release
+
+      - name: Measure code-shaped ANN quality and latency
+        shell: bash
+        env:
+          OK_ANN_CODE_SHAPE_SIZES: ${{ matrix.vector_count }}
+          OK_ANN_CODE_SHAPE_DIMS: ${{ matrix.dimensions }}
+          OK_ANN_CODE_SHAPE_QUERIES: ${{ inputs.query_count }}
+          OK_ANN_CODE_SHAPE_SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ann-code-shape
+          output="artifacts/ann-code-shape/ann-code-shape-${OK_ANN_CODE_SHAPE_SIZES}-${OK_ANN_CODE_SHAPE_DIMS}.json"
+          ./target/release/examples/ann_code_shape_validation > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import math
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          if report.get("schema_version") != 1:
+              raise SystemExit("unexpected code-shaped ANN schema")
+          if report.get("benchmark") != "cc5-ann-code-shape-validation":
+              raise SystemExit("unexpected code-shaped ANN benchmark identity")
+          if report.get("oracle") != "exact-flat":
+              raise SystemExit("exact-flat must remain the correctness oracle")
+          if report.get("distribution") != "deterministic-code-shaped-v1":
+              raise SystemExit("unexpected code-shaped distribution")
+          expected = len(report["requested_search_expansions"])
+          rows = report.get("measurements", [])
+          if len(rows) != expected:
+              raise SystemExit(f"expected {expected} measurements, got {len(rows)}")
+          observed = set()
+          for row in rows:
+              if row["vector_count"] != int(report["requested_sizes"][0]):
+                  raise SystemExit("measurement vector count does not match request")
+              if row["dimensions"] != int(report["requested_dimensions"][0]):
+                  raise SystemExit("measurement dimensions do not match request")
+              expansion = int(row["parameters"]["expansion_search"])
+              if expansion in observed:
+                  raise SystemExit(f"duplicate expansion_search measurement: {expansion}")
+              observed.add(expansion)
+              for metric in ("recall_at_1", "recall_at_5", "recall_at_10", "recall_at_20", "mrr"):
+                  value = row["quality"][metric]
+                  if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                      raise SystemExit(f"invalid {metric}: {value}")
+              for family in ("exact_query", "ann_query"):
+                  for metric in ("mean_us", "p50_us", "p95_us", "p99_us"):
+                      value = row[family][metric]
+                      if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                          raise SystemExit(f"invalid {family}.{metric}: {value}")
+          if observed != set(report["requested_search_expansions"]):
+              raise SystemExit("measurement expansion_search set does not match request")
+          print("validated code-shaped ANN measurement")
+          PY
+
+      - name: Upload code-shaped measurement
+        uses: actions/upload-artifact@v4
+        with:
+          name: ann-code-shape-${{ matrix.vector_count }}-${{ matrix.dimensions }}d
+          path: artifacts/ann-code-shape
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    needs: measure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ann-code-shape-*
+          path: artifacts/ann-code-shape-input
+          merge-multiple: true
+
+      - name: Validate complete code-shaped scale matrix
+        shell: bash
+        env:
+          SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ann-code-shape-aggregate
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          sizes = [50000, 100000, 300000, 1000000]
+          dims = [384, 768]
+          expansions = [int(value.strip()) for value in os.environ["SEARCH_EXPANSIONS"].split(",") if value.strip()]
+          reports = sorted(Path("artifacts/ann-code-shape-input").glob("*.json"))
+          expected_pairs = {(size, dim) for size in sizes for dim in dims}
+          observed_pairs = set()
+          groups = []
+
+          for path in reports:
+              report = json.loads(path.read_text())
+              if report.get("benchmark") != "cc5-ann-code-shape-validation" or report.get("oracle") != "exact-flat":
+                  raise SystemExit(f"{path}: incompatible benchmark evidence")
+              if report.get("distribution") != "deterministic-code-shaped-v1":
+                  raise SystemExit(f"{path}: mixed distribution evidence")
+              pair = (int(report["requested_sizes"][0]), int(report["requested_dimensions"][0]))
+              if pair in observed_pairs:
+                  raise SystemExit(f"duplicate matrix point: {pair}")
+              observed_pairs.add(pair)
+              rows = report.get("measurements", [])
+              row_expansions = [int(row["parameters"]["expansion_search"]) for row in rows]
+              if row_expansions != expansions:
+                  raise SystemExit(f"{path}: expansion sweep does not match requested order")
+              best_recall = max(rows, key=lambda row: (row["quality"]["recall_at_10"], -row["ann_query"]["p95_us"]))
+              fastest = min(rows, key=lambda row: row["ann_query"]["p95_us"])
+              groups.append({
+                  "vector_count": pair[0],
+                  "dimensions": pair[1],
+                  "best_recall_at_10": best_recall["quality"]["recall_at_10"],
+                  "best_recall_expansion_search": best_recall["parameters"]["expansion_search"],
+                  "fastest_ann_p95_us": fastest["ann_query"]["p95_us"],
+                  "fastest_expansion_search": fastest["parameters"]["expansion_search"],
+              })
+
+          if observed_pairs != expected_pairs:
+              missing = sorted(expected_pairs - observed_pairs)
+              unexpected = sorted(observed_pairs - expected_pairs)
+              raise SystemExit(f"incomplete code-shaped matrix; missing={missing}, unexpected={unexpected}")
+
+          aggregate = {
+              "schema_version": 1,
+              "benchmark": "cc5-ann-code-shape-scale-aggregate",
+              "source_benchmark": "cc5-ann-code-shape-validation",
+              "oracle": "exact-flat",
+              "distribution": "deterministic-code-shaped-v1",
+              "selection_policy": "measurement-only; no production ANN profile or threshold selected automatically",
+              "requested_sizes": sizes,
+              "requested_dimensions": dims,
+              "requested_search_expansions": expansions,
+              "groups": sorted(groups, key=lambda group: (group["dimensions"], group["vector_count"])),
+          }
+          Path("artifacts/ann-code-shape-aggregate/ann-code-shape-aggregate.json").write_text(
+              json.dumps(aggregate, indent=2, sort_keys=True) + "\n"
+          )
+          print("validated complete code-shaped ANN scale matrix")
+          PY
+
+      - name: Upload aggregate code-shaped evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ann-code-shape-aggregate
+          path: artifacts/ann-code-shape-aggregate
+          if-no-files-found: error
+          retention-days: 30
