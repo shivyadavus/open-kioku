@@ -310,7 +310,7 @@ fn parse_usize(name: &str, default: usize) -> Result<usize, Box<dyn std::error::
 }
 
 fn validate_nonzero(name: &str, values: &[usize]) -> Result<(), Box<dyn std::error::Error>> {
-    if values.iter().any(|value| *value == 0) {
+    if values.contains(&0) {
         return Err(format!("{name} values must be greater than zero").into());
     }
     Ok(())
