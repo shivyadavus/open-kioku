@@ -31,7 +31,7 @@ jobs:
           cargo test -p open-kioku-storage-sqlite replace_graph_and_neighbors
           cargo test -p open-kioku-symbols
           cargo test -p open-kioku-impact
-          cargo test -p open-kioku-tests
+          cargo test -p open-kioku-tests --lib
           cargo test -p open-kioku-patch
           cargo test -p open-kioku-plan
           cargo test -p open-kioku-mcp
