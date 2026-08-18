@@ -2,6 +2,15 @@
   "id": "get-evidence-schema",
   "jsonrpc": "2.0",
   "result": {
+    "analysis_semantics_status": {
+      "affected_components": [],
+      "affected_languages": [],
+      "current_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc",
+      "reasons": [],
+      "recommended_action": "none",
+      "status": "compatible",
+      "stored_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc"
+    },
     "caveats": [
       "schema availability reflects the current persisted index manifest"
     ],

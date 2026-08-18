@@ -73,6 +73,7 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
         schema_version: SNAPSHOT_SCHEMA_VERSION.to_string(),
         sqlite_user_version,
         open_kioku_version: env!("CARGO_PKG_VERSION").to_string(),
+        analysis_semantics: manifest.analysis_semantics.clone(),
         index_mode: manifest.index_mode.to_string(),
         repo_commit: manifest
             .repository
@@ -131,10 +132,34 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
             temp_user_version
         );
     }
-    let temp_manifest = read_manifest_from_sqlite(&temp_db)?;
-    if temp_manifest.is_none() {
+    let temp_manifest = match read_manifest_from_sqlite(&temp_db)? {
+        Some(manifest) => manifest,
+        None => {
+            let _ = fs::remove_file(&temp_db);
+            anyhow::bail!("snapshot database has no index manifest");
+        }
+    };
+    if metadata.analysis_semantics != temp_manifest.analysis_semantics {
         let _ = fs::remove_file(&temp_db);
-        anyhow::bail!("snapshot database has no index manifest");
+        anyhow::bail!(
+            "snapshot analysis-semantics metadata does not match the embedded index manifest"
+        );
+    }
+    let current_semantics = open_kioku_core::AnalysisSemanticsState::current();
+    let compatibility = open_kioku_core::classify_analysis_semantics(
+        temp_manifest.analysis_semantics.as_ref(),
+        &current_semantics,
+    );
+    if !compatibility.status.allows_authoritative_relationships() {
+        let _ = fs::remove_file(&temp_db);
+        anyhow::bail!(
+            "snapshot analysis semantics are {:?}: {}; stored={}, current={}; {}",
+            compatibility.status,
+            compatibility.reasons.join("; "),
+            compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+            compatibility.current_fingerprint,
+            compatibility.recommended_action
+        );
     }
 
     let index_path = index_sqlite_path(&repo);
@@ -216,6 +241,29 @@ fn snapshot_doctor(repo: &Path) -> SnapshotDoctorReport {
                             Ok(_) => {}
                             Err(err) => errors.push(err.to_string()),
                         }
+                    }
+                    match read_manifest_from_sqlite(&temp_db) {
+                        Ok(Some(manifest)) => {
+                            if let Some(metadata) = &metadata {
+                                if metadata.analysis_semantics != manifest.analysis_semantics {
+                                    errors.push("snapshot analysis-semantics metadata does not match the embedded index manifest".into());
+                                }
+                            }
+                            let compatibility = open_kioku_core::classify_analysis_semantics(
+                                manifest.analysis_semantics.as_ref(),
+                                &open_kioku_core::AnalysisSemanticsState::current(),
+                            );
+                            if !compatibility.status.allows_authoritative_relationships() {
+                                errors.push(format!(
+                                    "snapshot analysis semantics are {:?}: {}; {}",
+                                    compatibility.status,
+                                    compatibility.reasons.join("; "),
+                                    compatibility.recommended_action
+                                ));
+                            }
+                        }
+                        Ok(None) => errors.push("snapshot database has no index manifest".into()),
+                        Err(err) => errors.push(err.to_string()),
                     }
                 }
                 Err(err) => errors.push(err.to_string()),

@@ -2,6 +2,43 @@
   "id": "repo-status",
   "jsonrpc": "2.0",
   "result": {
+    "analysis_semantics": {
+      "descriptor": {
+        "exact_index_ingestion_version": "exact-occurrence-v1",
+        "graph_emission_version": "ri3-graph-emission-v1",
+        "language_adapter_versions": {
+          "go": "ri3-language-semantics-v1",
+          "java": "ri3-language-semantics-v1",
+          "javascript": "ri3-language-semantics-v1",
+          "python": "ri3-language-semantics-v1",
+          "rust": "ri3-language-semantics-v1",
+          "typescript": "ri3-language-semantics-v1"
+        },
+        "parser_semantics": {
+          "go": "tier1-parser-semantics-v1",
+          "java": "tier1-parser-semantics-v1",
+          "javascript": "tier1-parser-semantics-v1",
+          "python": "tier1-parser-semantics-v1",
+          "rust": "tier1-parser-semantics-v1",
+          "typescript": "tier1-parser-semantics-v1"
+        },
+        "project_resolver_version": "project-resolver-v1",
+        "proof_policy_version": "ri3-proof-policy-v1",
+        "relationship_resolver_version": "ri3-relationship-resolver-v1",
+        "stable_identity_version": "stable-identity-v1",
+        "version": 1
+      },
+      "fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc"
+    },
+    "analysis_semantics_status": {
+      "affected_components": [],
+      "affected_languages": [],
+      "current_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc",
+      "reasons": [],
+      "recommended_action": "none",
+      "status": "compatible",
+      "stored_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc"
+    },
     "chunk_count": 1,
     "file_count": 2,
     "index_mode": "full",

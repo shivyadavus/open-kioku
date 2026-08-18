@@ -1562,6 +1562,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
         let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: open_kioku_core::Repository {
                 id: RepositoryId("repo".into()),
                 name: "repo".into(),
@@ -1627,6 +1628,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
         let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: open_kioku_core::Repository {
                 id: RepositoryId("repo".into()),
                 name: "repo".into(),
@@ -1715,6 +1717,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path().join(".ok/index.sqlite")).unwrap();
         let manifest = open_kioku_core::IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: open_kioku_core::Repository {
                 id: RepositoryId("repo".into()),
                 name: "repo".into(),

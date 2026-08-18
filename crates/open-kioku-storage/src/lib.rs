@@ -171,6 +171,7 @@ pub enum IndexChangeKind {
     Renamed,
     ModeSkipped,
     ParserVersionStale,
+    AnalysisSemanticsStale,
     SchemaVersionStale,
 }
 
@@ -233,6 +234,20 @@ pub fn classify_file_changes_with_parser_version(
             })
             .collect();
     }
+    if previous_manifest.is_some_and(|manifest| {
+        analysis_semantics_compatibility(Some(manifest), next_manifest).status
+            != open_kioku_core::AnalysisSemanticsCompatibilityStatus::Compatible
+    }) {
+        return next_files
+            .iter()
+            .map(|file| IndexChange {
+                old_path: Some(file.path.clone()),
+                new_path: Some(file.path.clone()),
+                file_id: Some(file.id.clone()),
+                kind: IndexChangeKind::AnalysisSemanticsStale,
+            })
+            .collect();
+    }
     if previous_manifest.is_some_and(|manifest| manifest.index_mode != next_manifest.index_mode) {
         return next_files
             .iter()
@@ -290,9 +305,27 @@ pub fn classify_file_changes_with_parser_version(
     changes
 }
 
+pub fn analysis_semantics_compatibility(
+    previous: Option<&IndexManifest>,
+    next: &IndexManifest,
+) -> open_kioku_core::AnalysisSemanticsCompatibility {
+    let current = next
+        .analysis_semantics
+        .clone()
+        .unwrap_or_else(open_kioku_core::AnalysisSemanticsState::current);
+    open_kioku_core::classify_analysis_semantics(
+        previous.and_then(|manifest| manifest.analysis_semantics.as_ref()),
+        &current,
+    )
+}
+
 pub fn partial_index_supported(previous: Option<&IndexManifest>, next: &IndexManifest) -> bool {
     previous.is_some_and(|previous| {
-        previous.schema_version == next.schema_version && previous.index_mode == next.index_mode
+        previous.schema_version == next.schema_version
+            && previous.index_mode == next.index_mode
+            && analysis_semantics_compatibility(Some(previous), next)
+                .status
+                .allows_partial_index_update()
     })
 }
 
@@ -343,7 +376,8 @@ pub fn changed_document_paths(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_file_changes, classify_file_changes_with_parser_version, IndexChangeKind,
+        analysis_semantics_compatibility, classify_file_changes,
+        classify_file_changes_with_parser_version, partial_index_supported, IndexChangeKind,
     };
     use chrono::Utc;
     use open_kioku_core::{
@@ -411,8 +445,59 @@ mod tests {
         assert_eq!(parser_changes[0].kind, IndexChangeKind::ParserVersionStale);
     }
 
+    #[test]
+    fn analysis_semantics_change_disables_partial_updates_without_schema_change() {
+        let next = manifest(1);
+        let mut previous = manifest(1);
+        let mut state = previous.analysis_semantics.clone().unwrap();
+        state.descriptor.proof_policy_version = "old-proof-policy".into();
+        previous.analysis_semantics = Some(open_kioku_core::AnalysisSemanticsState::new(
+            state.descriptor,
+        ));
+
+        let compatibility = analysis_semantics_compatibility(Some(&previous), &next);
+        assert_eq!(
+            compatibility.status,
+            open_kioku_core::AnalysisSemanticsCompatibilityStatus::RebuildRequired
+        );
+        assert!(!partial_index_supported(Some(&previous), &next));
+
+        let files = vec![file("f1", "src/lib.rs", "a")];
+        let changes = classify_file_changes(Some(&previous), &next, &files, &files);
+        assert_eq!(changes[0].kind, IndexChangeKind::AnalysisSemanticsStale);
+    }
+
+    #[test]
+    fn schema_version_is_independent_from_analysis_semantics() {
+        let first = manifest(1);
+        let second = manifest(2);
+        assert_eq!(
+            first.analysis_semantics.as_ref().unwrap().fingerprint,
+            second.analysis_semantics.as_ref().unwrap().fingerprint
+        );
+        assert_eq!(
+            analysis_semantics_compatibility(Some(&first), &second).status,
+            open_kioku_core::AnalysisSemanticsCompatibilityStatus::Compatible
+        );
+        assert!(!partial_index_supported(Some(&first), &second));
+    }
+
+    #[test]
+    fn legacy_manifest_requires_rebuild() {
+        let next = manifest(1);
+        let mut legacy = manifest(1);
+        legacy.analysis_semantics = None;
+        let compatibility = analysis_semantics_compatibility(Some(&legacy), &next);
+        assert_eq!(
+            compatibility.status,
+            open_kioku_core::AnalysisSemanticsCompatibilityStatus::RebuildRequired
+        );
+        assert!(!partial_index_supported(Some(&legacy), &next));
+    }
+
     fn manifest(schema_version: u32) -> IndexManifest {
         IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),

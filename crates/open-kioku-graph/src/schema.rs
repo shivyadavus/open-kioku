@@ -367,6 +367,7 @@ mod tests {
     fn test_schema_uses_manifest_for_optional_evidence_availability() {
         let indexed_at = Utc::now();
         let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
             repository: Repository {
                 id: RepositoryId::new("repo"),
                 name: "repo".into(),
