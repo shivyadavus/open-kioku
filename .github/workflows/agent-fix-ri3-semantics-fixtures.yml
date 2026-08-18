@@ -1,0 +1,114 @@
+name: agent-fix-ri3-semantics-fixtures
+
+on:
+  push:
+    branches:
+      - agent/ri3-analysis-semantics-fingerprint
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ri3-analysis-semantics-fingerprint
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply asserted fixture repair
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-storage-sqlite/src/lib.rs')
+          text = path.read_text()
+
+          marker = '''    fn make_store() -> SqliteStore {
+              SqliteStore::open(":memory:").expect("in-memory store")
+          }
+          '''
+          helper = '''    fn make_store() -> SqliteStore {
+              SqliteStore::open(":memory:").expect("in-memory store")
+          }
+
+          fn make_current_store() -> SqliteStore {
+              let store = make_store();
+              store
+                  .put_manifest(&make_manifest())
+                  .expect("current analysis-semantics manifest");
+              store
+          }
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit(f'make_store marker count={text.count(marker)}')
+          text = text.replace(marker, helper, 1)
+
+          for test_name in [
+              'test_edges_by_type_uses_indexed_column',
+              'test_graph_edges_between_respects_limit',
+          ]:
+              old = f'''    fn {test_name}() {{\n        let store = make_store();\n'''
+              new = f'''    fn {test_name}() {{\n        let store = make_current_store();\n'''
+              if text.count(old) != 1:
+                  raise SystemExit(f'{test_name} store marker count={text.count(old)}')
+              text = text.replace(old, new, 1)
+
+          old = '''        let migrated_edges = store.edges_by_type(GraphEdgeType::Defines, 10, 0).unwrap();
+              assert_eq!(migrated_edges.len(), 1);
+              assert_eq!(migrated_edges[0].id.0, "legacy_edge");
+              let migrated_between = store
+                  .graph_edges_between("legacy_file", "legacy_symbol", 10)
+                  .unwrap();
+              assert_eq!(migrated_between.len(), 1);
+          '''
+          new = '''        let edge_read_error = store
+              .edges_by_type(GraphEdgeType::Defines, 10, 0)
+              .unwrap_err()
+              .to_string();
+          assert!(edge_read_error.contains("legacy index has no analysis-semantics descriptor"));
+          let between_read_error = store
+              .graph_edges_between("legacy_file", "legacy_symbol", 10)
+              .unwrap_err()
+              .to_string();
+          assert!(between_read_error.contains("legacy index has no analysis-semantics descriptor"));
+
+          let (migrated_edge_type, migrated_from, migrated_to): (String, String, String) = store
+              .connection
+              .lock()
+              .unwrap()
+              .query_row(
+                  "SELECT edge_type, from_id, to_id FROM graph_edges WHERE id = 'legacy_edge'",
+                  [],
+                  |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+              )
+              .unwrap();
+          assert_eq!(migrated_edge_type, "Defines");
+          assert_eq!(migrated_from, "legacy_file");
+          assert_eq!(migrated_to, "legacy_symbol");
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'legacy relationship read marker count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Validate focused regression
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p open-kioku-storage-sqlite --all-targets --all-features -- -D warnings
+          cargo test -p open-kioku-storage-sqlite --lib
+      - name: Commit clean product fix
+        shell: bash
+        run: |
+          rm .github/workflows/agent-fix-ri3-semantics-fixtures.yml
+          git config user.name "Shiv Yadav"
+          git config user.email "155265880+shivyadavus@users.noreply.github.com"
+          git add crates/open-kioku-storage-sqlite/src/lib.rs .github/workflows/agent-fix-ri3-semantics-fixtures.yml
+          git diff --cached --check
+          git commit -m "test(ri3): align graph fixtures with semantics authority"
+          git push origin HEAD:agent/ri3-analysis-semantics-fingerprint
