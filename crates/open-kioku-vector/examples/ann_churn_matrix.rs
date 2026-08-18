@@ -1,6 +1,6 @@
 use open_kioku_vector::{
-    AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorHit, VectorId,
-    VectorRecord, VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
+    AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorHit, VectorId, VectorRecord,
+    VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -158,10 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let query_count = parse_usize("OK_ANN_CHURN_QUERIES", DEFAULT_QUERIES)?;
     let thresholds = PolicyThresholds {
-        min_recall_at_10: parse_f64(
-            "OK_ANN_CHURN_MIN_RECALL_AT_10",
-            DEFAULT_MIN_RECALL_AT_10,
-        )?,
+        min_recall_at_10: parse_f64("OK_ANN_CHURN_MIN_RECALL_AT_10", DEFAULT_MIN_RECALL_AT_10)?,
         min_mrr: parse_f64("OK_ANN_CHURN_MIN_MRR", DEFAULT_MIN_MRR)?,
         min_ann_build_vectors_per_second: parse_f64(
             "OK_ANN_CHURN_MIN_BUILD_VECTORS_PER_SECOND",
@@ -445,8 +442,7 @@ fn sample_entries<'a>(
     }
     (0..count)
         .filter_map(|index| {
-            let selected =
-                (cycle.wrapping_mul(131) + index.wrapping_mul(1_003)) % live.len();
+            let selected = (cycle.wrapping_mul(131) + index.wrapping_mul(1_003)) % live.len();
             live.values().nth(selected)
         })
         .collect()
@@ -467,10 +463,8 @@ fn query_vector(entry: &LiveVector, dimensions: usize) -> Vec<f32> {
 
 fn content_vector(id: usize, generation: usize, dimensions: usize) -> Vec<f32> {
     let cluster = (id % 256) as u64 + 1;
-    let mut centroid = deterministic_vector(
-        cluster.wrapping_mul(0xa24b_aed4_963e_e407),
-        dimensions,
-    );
+    let mut centroid =
+        deterministic_vector(cluster.wrapping_mul(0xa24b_aed4_963e_e407), dimensions);
     let seed = (id as u64 + 1)
         .wrapping_mul(0xd134_2543_de82_ef95)
         .wrapping_add((generation as u64).wrapping_mul(0x94d0_49bb_1331_11eb));
@@ -560,7 +554,10 @@ fn overall_metrics(measurements: &[CycleMeasurement]) -> OverallMetrics {
         .map(|measurement| measurement.ann_build_ms)
         .collect::<Vec<_>>();
     OverallMetrics {
-        total_mutations: measurements.iter().map(|measurement| measurement.operations).sum(),
+        total_mutations: measurements
+            .iter()
+            .map(|measurement| measurement.operations)
+            .sum(),
         min_recall_at_10: measurements
             .iter()
             .map(|measurement| measurement.quality.recall_at_10)
@@ -583,8 +580,7 @@ fn overall_metrics(measurements: &[CycleMeasurement]) -> OverallMetrics {
                 let observed = measurement
                     .stale_or_deleted_hits
                     .saturating_add(measurement.stale_identity_hits);
-                observed as f64
-                    / (measurement.live_vectors.max(1) * MAX_K).max(1) as f64
+                observed as f64 / (measurement.live_vectors.max(1) * MAX_K).max(1) as f64
             })
             .fold(0.0, f64::max),
         max_stored_to_live_ratio: measurements
@@ -628,8 +624,7 @@ fn policy_decision(overall: &OverallMetrics, thresholds: &PolicyThresholds) -> P
     if overall.min_ann_build_vectors_per_second < thresholds.min_ann_build_vectors_per_second {
         reasons.push(format!(
             "ANN rebuild throughput {:.1} vectors/s fell below {:.1}",
-            overall.min_ann_build_vectors_per_second,
-            thresholds.min_ann_build_vectors_per_second
+            overall.min_ann_build_vectors_per_second, thresholds.min_ann_build_vectors_per_second
         ));
     }
     if overall.max_ann_to_exact_p95_ratio > thresholds.max_ann_to_exact_p95_ratio {
