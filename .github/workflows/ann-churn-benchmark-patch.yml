@@ -1,0 +1,71 @@
+name: ANN churn benchmark patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'agent/cc5-ann-churn-benchmark' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Format, exercise churn matrix, and wire bounded smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/bench.yml')
+          text = path.read_text()
+          anchor = '''      \n    - name: Run CLI Bench\n'''
+          insertion = '''\n    - name: Smoke ANN churn lifecycle\n      shell: bash\n      run: |\n        set -euo pipefail\n        OK_ANN_CHURN_INITIAL_VECTORS=2000 \\\n        OK_ANN_CHURN_DIMS=384 \\\n        OK_ANN_CHURN_CYCLES=3 \\\n        OK_ANN_CHURN_MUTATIONS_PER_CYCLE=100 \\\n        OK_ANN_CHURN_QUERIES=8 \\\n          cargo run -p open-kioku-vector --example ann_churn_matrix --release \\\n          > artifacts/benchmarks/ann-churn-smoke.json\n        python3 - <<'PY_INNER'\n        import json\n        from pathlib import Path\n\n        report = json.loads(Path('artifacts/benchmarks/ann-churn-smoke.json').read_text())\n        if report.get('schema_version') != 1 or report.get('oracle') != 'exact-flat':\n            raise SystemExit('unexpected ANN churn report contract')\n        if report.get('lifecycle_model') != 'fresh-generation-from-live-set':\n            raise SystemExit('ANN churn must exercise the fresh-generation lifecycle')\n        if report['overall']['total_mutations'] != 300:\n            raise SystemExit('bounded ANN churn smoke did not execute 300 mutations')\n        if not report['policy']['passed']:\n            raise SystemExit(f"ANN churn policy failed: {report['policy']['reasons']}")\n        for cycle in report['measurements']:\n            if cycle['stored_vectors'] != cycle['live_vectors']:\n                raise SystemExit('published ANN population diverged from the live vector set')\n            if cycle['stale_or_deleted_hits'] or cycle['stale_identity_hits']:\n                raise SystemExit('ANN churn surfaced stale/deleted vector identity')\n            if cycle['duplicate_hit_ids']:\n                raise SystemExit('ANN churn surfaced duplicate vector identities')\n            if cycle['quality']['recall_at_10'] < 0.99 or cycle['quality']['mrr'] < 0.99:\n                raise SystemExit('ANN churn quality fell below the calibrated bounded gate')\n        print('bounded ANN churn lifecycle smoke passed')\n        PY_INNER\n\n    - name: Run CLI Bench\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit(f'expected one bench insertion anchor, found {text.count(anchor)}')
+          path.write_text(text.replace(anchor, insertion, 1))
+          PY
+
+          cargo fmt --all
+          OK_ANN_CHURN_INITIAL_VECTORS=2000 \
+          OK_ANN_CHURN_DIMS=384 \
+          OK_ANN_CHURN_CYCLES=3 \
+          OK_ANN_CHURN_MUTATIONS_PER_CYCLE=100 \
+          OK_ANN_CHURN_QUERIES=8 \
+            cargo run -p open-kioku-vector --example ann_churn_matrix --release \
+            > /tmp/ann-churn.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/ann-churn.json'))
+          assert report['overall']['total_mutations'] == 300
+          assert report['policy']['passed'], report['policy']['reasons']
+          for cycle in report['measurements']:
+              assert cycle['stored_vectors'] == cycle['live_vectors']
+              assert cycle['stale_or_deleted_hits'] == 0
+              assert cycle['stale_identity_hits'] == 0
+              assert cycle['duplicate_hit_ids'] == 0
+          print(json.dumps(report['overall'], sort_keys=True))
+          PY
+
+          unexpected="$(git diff --name-only | grep -Ev '^(crates/open-kioku-vector/examples/ann_churn_matrix.rs|.github/workflows/bench.yml)$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected changes:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+          rm .github/workflows/ann-churn-benchmark-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-vector/examples/ann_churn_matrix.rs .github/workflows/bench.yml .github/workflows/ann-churn-benchmark-patch.yml
+          git commit -m "bench(vector): gate fresh-generation ANN churn policy"
+          git push origin HEAD:${{ github.head_ref }}
