@@ -52,9 +52,6 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary_name: ok-linux-arm64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            binary_name: ok-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: ok-macos-arm64
@@ -143,7 +140,7 @@ jobs:
           metadata_path.write_text(json.dumps(metadata, indent=2)+'\n')
           formula=Path('Formula/open-kioku.rb')
           text=formula.read_text()
-          for name in ['ok-macos-arm64','ok-macos-x86_64','ok-linux-arm64','ok-linux-x86_64']:
+          for name in ['ok-macos-arm64','ok-linux-arm64','ok-linux-x86_64']:
               pattern=re.compile(rf'(url "[^"]*/{re.escape(name)}"\n\s+sha256 ")[0-9a-f]{{64}}(")')
               text,count=pattern.subn(rf'\g<1>{hashes[name]}\2', text, count=1)
               if count != 1:
