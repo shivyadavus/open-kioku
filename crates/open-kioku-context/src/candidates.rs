@@ -265,6 +265,22 @@ impl FusionConfig {
             ]),
         }
     }
+
+    /// Stable identity surfaced through per-candidate retrieval provenance. Built-in profiles get
+    /// explicit names; repository ranking overrides remain distinguishable as a custom profile.
+    /// This keeps ContextPack JSON backward-compatible while making the applied fusion profile
+    /// observable in every selected candidate's existing contribution rationale.
+    pub fn profile_identity(&self) -> &'static str {
+        if self.rrf_k == DEFAULT_RRF_K && self.source_weights == Self::unweighted().source_weights {
+            "rrf_unweighted"
+        } else if self.rrf_k == DEFAULT_RRF_K
+            && self.source_weights == Self::evidence_prior_weighted().source_weights
+        {
+            "rrf_evidence_prior"
+        } else {
+            "rrf_custom"
+        }
+    }
 }
 
 impl FusionConfig {
@@ -399,6 +415,7 @@ pub fn fuse_candidate_streams(
 ) -> FusedCandidates {
     let limit = limit.clamp(1, 200);
     let rrf_k = config.rrf_k.max(1.0);
+    let profile_identity = config.profile_identity();
     let mut by_unit = BTreeMap::<String, FusedEntry>::new();
     let mut caveats = Vec::new();
     let mut attempted = BTreeSet::new();
@@ -440,7 +457,7 @@ pub fn fuse_candidate_streams(
                     .as_ref()
                     .map(|symbol| symbol.id.clone()),
                 evidence_refs: dedup_strings(candidate.evidence_refs.clone()),
-                rationale: candidate.rationale.clone(),
+                rationale: format!("fusion_profile={profile_identity}; {}", candidate.rationale),
             };
             let entry = by_unit.entry(key).or_insert_with(|| FusedEntry {
                 representative: candidate.result.clone(),
@@ -807,6 +824,41 @@ mod tests {
             .all(|weight| (*weight - 1.0).abs() < f32::EPSILON));
         let weighted = FusionConfig::evidence_prior_weighted();
         assert_ne!(config.source_weights, weighted.source_weights);
+    }
+
+    #[test]
+    fn fusion_profile_identity_is_stable_and_exposed_in_candidate_provenance() {
+        assert_eq!(
+            FusionConfig::unweighted().profile_identity(),
+            "rrf_unweighted"
+        );
+        assert_eq!(
+            FusionConfig::evidence_prior_weighted().profile_identity(),
+            "rrf_evidence_prior"
+        );
+
+        let mut custom = FusionConfig::unweighted();
+        custom
+            .source_weights
+            .insert(RetrievalSourceKind::SemanticVector, 0.5);
+        assert_eq!(custom.profile_identity(), "rrf_custom");
+
+        let streams = vec![CandidateStream::success(
+            RetrievalSourceKind::Lexical,
+            vec![candidate(
+                "src/a.rs",
+                1.0,
+                RetrievalAuthority::Heuristic,
+                Some("a"),
+            )],
+        )];
+        let fused = fuse_candidate_streams(&streams, 10, &FusionConfig::unweighted());
+        assert!(fused.diagnostics.traces[0].contributions[0]
+            .rationale
+            .starts_with("fusion_profile=rrf_unweighted; "));
+        assert!(fused.results[0].score_breakdown[0]
+            .rationale
+            .contains("fusion_profile=rrf_unweighted"));
     }
 
     #[test]
