@@ -866,10 +866,22 @@ fn semantic_generation_complete(generation: &Path) -> bool {
     let Some(manifest) = read_json::<SemanticManifest>(&generation.join("manifest.json")) else {
         return false;
     };
-    generation.join("ids.json").is_file()
-        && generation.join("embeddings.cache").is_file()
-        && generation.join("stats.json").is_file()
-        && index_artifacts_present(generation, &manifest.backend)
+    if read_targets(&generation.join("ids.json")).is_err()
+        || read_json::<EmbeddingCache>(&generation.join("embeddings.cache")).is_none()
+        || read_json::<SemanticStats>(&generation.join("stats.json")).is_none()
+    {
+        return false;
+    }
+    match resolved_backend_from_name(&manifest.backend) {
+        Ok(ResolvedSemanticBackend::ExactFlat) => {
+            ExactFlatVectorIndex::load(&generation.join("index.json")).is_ok()
+        }
+        Ok(ResolvedSemanticBackend::HnswF32 | ResolvedSemanticBackend::HnswBf16) => {
+            UsearchHnswVectorIndex::load(&generation.join("index.usearch"))
+                .is_ok_and(|index| index.parameters() == PRODUCTION_HNSW_PARAMETERS)
+        }
+        Err(_) => false,
+    }
 }
 
 fn normalize_path_prefixes(path_prefixes: &[String]) -> Result<Vec<String>> {

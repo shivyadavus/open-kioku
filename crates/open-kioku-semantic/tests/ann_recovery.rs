@@ -123,7 +123,7 @@ fn restart_recovers_complete_previous_generation_after_interrupted_promotion() {
 }
 
 #[test]
-fn restart_refuses_incomplete_previous_generation() {
+fn restart_refuses_corrupt_previous_generation() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
@@ -136,7 +136,7 @@ fn restart_refuses_incomplete_previous_generation() {
     let current = vectors.join("current");
     let previous = vectors.join("previous");
     fs::rename(&current, &previous).unwrap();
-    fs::remove_file(previous.join("ids.json")).unwrap();
+    fs::write(previous.join("ids.json"), b"{not valid json").unwrap();
     drop(manager);
 
     let restarted = SemanticIndexManager::new(repo, &store, &config);
