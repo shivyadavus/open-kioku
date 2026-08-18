@@ -116,6 +116,14 @@ fn restart_recovers_complete_previous_generation_after_interrupted_promotion() {
         .iter()
         .any(|note| note.contains("recovered previous semantic generation")));
 
+    let stable_status = restarted.status();
+    assert!(stable_status.ready);
+    assert!(stable_status.ann_active);
+    assert!(!stable_status
+        .notes
+        .iter()
+        .any(|note| note.contains("recovered previous semantic generation")));
+
     let results = restarted.search("interrupted promotion token", 10).unwrap();
     assert!(results
         .iter()
@@ -149,4 +157,8 @@ fn restart_refuses_corrupt_previous_generation() {
         .notes
         .iter()
         .any(|note| note.contains("refusing automatic recovery")));
+    assert!(!status
+        .notes
+        .iter()
+        .any(|note| note.contains("recovered previous semantic generation")));
 }
