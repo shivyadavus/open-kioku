@@ -1,0 +1,168 @@
+name: ANN Scale Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_count:
+        description: Queries per scale/dimension measurement
+        required: true
+        default: "64"
+        type: string
+      search_expansions:
+        description: Comma-separated HNSW expansion_search sweep
+        required: true
+        default: "64,128,256,512,1024"
+        type: string
+      host_profile:
+        description: Optional host/profile label recorded in the report
+        required: false
+        default: "github-hosted-ubuntu"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate benchmark inputs
+        shell: bash
+        env:
+          QUERY_COUNT: ${{ inputs.query_count }}
+          SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+
+          query_count = os.environ["QUERY_COUNT"]
+          expansions = os.environ["SEARCH_EXPANSIONS"]
+          if not query_count.isdigit() or int(query_count) <= 0:
+              raise SystemExit("query_count must be a positive integer")
+          parsed = [value.strip() for value in expansions.split(",") if value.strip()]
+          if not parsed or any(not value.isdigit() or int(value) <= 0 for value in parsed):
+              raise SystemExit("search_expansions must be a non-empty comma-separated list of positive integers")
+          if len(set(parsed)) != len(parsed):
+              raise SystemExit("search_expansions must not contain duplicates")
+          print("ANN scale benchmark inputs are valid")
+          PY
+
+  measure:
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        vector_count: [50000, 100000, 300000, 1000000]
+        dimensions: [384, 768]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build ANN scale benchmark
+        run: cargo build -p open-kioku-vector --example ann_scale_matrix --release
+
+      - name: Run ANN scale measurement
+        shell: bash
+        env:
+          OK_ANN_SCALE_SIZES: ${{ matrix.vector_count }}
+          OK_ANN_SCALE_DIMS: ${{ matrix.dimensions }}
+          OK_ANN_SCALE_QUERIES: ${{ inputs.query_count }}
+          OK_ANN_SCALE_SEARCH_EXPANSIONS: ${{ inputs.search_expansions }}
+          OK_CC5_HOST_PROFILE: ${{ inputs.host_profile }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ann-scale
+          output="artifacts/ann-scale/ann-scale-${OK_ANN_SCALE_SIZES}-${OK_ANN_SCALE_DIMS}.json"
+          ./target/release/examples/ann_scale_matrix > "$output"
+          python3 - "$output" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          report = json.loads(path.read_text())
+          if report.get("schema_version") != 1:
+              raise SystemExit("unexpected ANN scale benchmark schema")
+          if report.get("oracle") != "exact-flat":
+              raise SystemExit("exact-flat must remain the ANN correctness oracle")
+          rows = report.get("measurements", [])
+          if not rows:
+              raise SystemExit("ANN scale benchmark produced no measurements")
+          requested_expansions = set(report["requested_search_expansions"])
+          observed_expansions = {row["parameters"]["expansion_search"] for row in rows}
+          if observed_expansions != requested_expansions:
+              raise SystemExit("ANN scale benchmark did not execute the requested search-expansion sweep")
+          for row in rows:
+              if row["vector_count"] != int(report["requested_sizes"][0]):
+                  raise SystemExit("measurement vector count does not match requested scale")
+              if row["dimensions"] != int(report["requested_dimensions"][0]):
+                  raise SystemExit("measurement dimensions do not match requested dimensions")
+              for metric in ("recall_at_1", "recall_at_5", "recall_at_10", "recall_at_20", "mrr"):
+                  value = row["quality"][metric]
+                  if not 0.0 <= value <= 1.0:
+                      raise SystemExit(f"{metric} out of range: {value}")
+          print(f"validated {len(rows)} ANN scale measurements")
+          PY
+
+      - name: Write measurement summary
+        shell: bash
+        env:
+          VECTOR_COUNT: ${{ matrix.vector_count }}
+          DIMENSIONS: ${{ matrix.dimensions }}
+        run: |
+          set -euo pipefail
+          input="artifacts/ann-scale/ann-scale-${VECTOR_COUNT}-${DIMENSIONS}.json"
+          output="artifacts/ann-scale/ann-scale-${VECTOR_COUNT}-${DIMENSIONS}.md"
+          python3 - "$input" "$output" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          rows = sorted(report["measurements"], key=lambda row: row["parameters"]["expansion_search"])
+          lines = [
+              f"# ANN scale measurement: {report['requested_sizes'][0]:,} vectors × {report['requested_dimensions'][0]}d",
+              "",
+              f"Host profile: `{report['host'].get('profile_label') or 'unspecified'}`",
+              f"Distribution: `{report['distribution']}`",
+              f"Oracle: `{report['oracle']}`",
+              "",
+              "| expansion_search | Recall@1 | Recall@5 | Recall@10 | Recall@20 | MRR | ANN p50 µs | ANN p95 µs | ANN p99 µs | build ms | index bytes | memory bytes |",
+              "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+          for row in rows:
+              q = row["quality"]
+              latency = row["ann_query"]
+              lines.append(
+                  "| {exp} | {r1:.4f} | {r5:.4f} | {r10:.4f} | {r20:.4f} | {mrr:.4f} | {p50:.1f} | {p95:.1f} | {p99:.1f} | {build:.1f} | {index} | {memory} |".format(
+                      exp=row["parameters"]["expansion_search"],
+                      r1=q["recall_at_1"], r5=q["recall_at_5"], r10=q["recall_at_10"], r20=q["recall_at_20"],
+                      mrr=q["mrr"], p50=latency["p50_us"], p95=latency["p95_us"], p99=latency["p99_us"],
+                      build=row["ann_build_ms"], index=row["ann_index_bytes"], memory=row["ann_memory_bytes"],
+                  )
+              )
+          Path(sys.argv[2]).write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload scale measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ann-scale-${{ matrix.vector_count }}-${{ matrix.dimensions }}d
+          path: artifacts/ann-scale
+          if-no-files-found: error
+          retention-days: 30
