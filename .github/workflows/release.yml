@@ -21,9 +21,6 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary_name: ok-linux-arm64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            binary_name: ok-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: ok-macos-arm64
@@ -110,7 +107,6 @@ jobs:
           subject-path: |
             dist/ok-linux-x86_64
             dist/ok-linux-arm64
-            dist/ok-macos-x86_64
             dist/ok-macos-arm64
             dist/ok-windows-x86_64.exe
 
@@ -150,12 +146,10 @@ jobs:
       - name: Inject binaries into NPM packages
         shell: bash
         run: |
-          cp dist/ok-macos-x86_64 packages/npm-darwin-x64/ok
           cp dist/ok-macos-arm64 packages/npm-darwin-arm64/ok
           cp dist/ok-linux-x86_64 packages/npm-linux-x64/ok
           cp dist/ok-linux-arm64 packages/npm-linux-arm64/ok
           cp dist/ok-windows-x86_64.exe packages/npm-win32-x64/ok.exe
-          chmod +x packages/npm-darwin-x64/ok
           chmod +x packages/npm-darwin-arm64/ok
           chmod +x packages/npm-linux-x64/ok
           chmod +x packages/npm-linux-arm64/ok
@@ -176,7 +170,7 @@ jobs:
             (cd "${package_dir}" && npm publish --access public)
           }
 
-          for package in npm-darwin-x64 npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
+          for package in npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
             publish_package "packages/${package}"
           done
         env:
