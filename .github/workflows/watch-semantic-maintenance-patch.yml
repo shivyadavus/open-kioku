@@ -1,0 +1,73 @@
+name: Watch semantic maintenance patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'agent/cc5-watch-semantic-maintenance' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Apply watch maintenance patch and focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-watch/src/lib.rs')
+          text = path.read_text()
+          replacements = [
+              (
+                  '''use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};\n''',
+                  '''use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};\nuse open_kioku_semantic::SemanticIndexManager;\n''',
+              ),
+              (
+                  '''    if !partial || changed_file_count > 0 || deleted_file_count > 0 {\n        rebuild_disk_index(\n            default_index_dir(root),\n            &snapshot.chunks,\n            &snapshot.files,\n            &snapshot.symbols,\n        )?;\n    }\n\n    Ok(WatchIndexStatus {\n''',
+                  '''    if !partial || changed_file_count > 0 || deleted_file_count > 0 {\n        rebuild_disk_index(\n            default_index_dir(root),\n            &snapshot.chunks,\n            &snapshot.files,\n            &snapshot.symbols,\n        )?;\n    }\n    maintain_semantic_index(root, &store, &config);\n\n    Ok(WatchIndexStatus {\n''',
+              ),
+              (
+                  '''    rebuild_disk_index(\n        default_index_dir(root),\n        &snapshot.chunks,\n        &snapshot.files,\n        &snapshot.symbols,\n    )?;\n\n    Ok(WatchIndexStatus {\n''',
+                  '''    rebuild_disk_index(\n        default_index_dir(root),\n        &snapshot.chunks,\n        &snapshot.files,\n        &snapshot.symbols,\n    )?;\n    maintain_semantic_index(root, &store, &config);\n\n    Ok(WatchIndexStatus {\n''',
+              ),
+              (
+                  '''fn persist_full_snapshot(\n    store: &SqliteStore,\n''',
+                  '''fn maintain_semantic_index(root: &Path, store: &SqliteStore, config: &OkConfig) {\n    if !config.semantic.enabled {\n        return;\n    }\n    let manager = SemanticIndexManager::new(root, store, &config.semantic);\n    match manager.index() {\n        Ok(report) => eprintln!(\n            "watch semantic refresh: state={}, backend={}, ann={}, vectors={}, embedded={}, reused={}, removed={}",\n            report.status.state,\n            report.status.backend,\n            report.status.ann_active,\n            report.status.vector_count,\n            report.embedded_count,\n            report.reused_embeddings,\n            report.removed_count\n        ),\n        Err(err) => {\n            let status = manager.status();\n            eprintln!(\n                "watch semantic maintenance failed: {err} (state={}, ready={}, vectors={})",\n                status.state, status.ready, status.vector_count\n            );\n        }\n    }\n}\n\nfn persist_full_snapshot(\n    store: &SqliteStore,\n''',
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one patch anchor, found {count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo test -p open-kioku-watch --test semantic_maintenance
+          cargo test -p open-kioku-watch
+
+          unexpected="$(git diff --name-only | grep -Ev '^(crates/open-kioku-watch/src/lib.rs|crates/open-kioku-watch/Cargo.toml|crates/open-kioku-watch/tests/semantic_maintenance.rs|Cargo.lock)$' || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected source changes:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+          rm .github/workflows/watch-semantic-maintenance-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/open-kioku-watch/src/lib.rs crates/open-kioku-watch/Cargo.toml crates/open-kioku-watch/tests/semantic_maintenance.rs Cargo.lock .github/workflows/watch-semantic-maintenance-patch.yml
+          git commit -m "feat(watch): refresh semantic generation after reindex"
+          git push origin HEAD:${{ github.head_ref }}
