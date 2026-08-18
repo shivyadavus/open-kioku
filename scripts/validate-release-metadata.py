@@ -86,6 +86,31 @@ def check_npm_packages(metadata: dict, version: str, errors: list[str]) -> None:
         fail(f"missing npm platform package manifests: {', '.join(sorted(missing))}", errors)
 
 
+def check_internal_cargo_dependencies(version: str, errors: list[str]) -> None:
+    sections = ("dependencies", "dev-dependencies", "build-dependencies")
+
+    def check_table(path: Path, table: dict) -> None:
+        for section in sections:
+            for name, spec in table.get(section, {}).items():
+                if not name.startswith("open-kioku-") or not isinstance(spec, dict):
+                    continue
+                if not spec.get("path"):
+                    continue
+                found = spec.get("version")
+                if found != version:
+                    fail(
+                        f"{path.relative_to(ROOT)} internal dependency {name} has version {found!r}; expected {version}",
+                        errors,
+                    )
+
+    for path in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+        data = tomllib.loads(load_text(path))
+        check_table(path, data)
+        for target in data.get("target", {}).values():
+            if isinstance(target, dict):
+                check_table(path, target)
+
+
 def check_formula(metadata: dict, version: str, errors: list[str]) -> None:
     formula_path = ROOT / metadata["homebrew"]["formula"]
     text = load_text(formula_path)
@@ -94,7 +119,6 @@ def check_formula(metadata: dict, version: str, errors: list[str]) -> None:
 
     expected_binaries = {
         "ok-macos-arm64",
-        "ok-macos-x86_64",
         "ok-linux-arm64",
         "ok-linux-x86_64",
     }
@@ -115,13 +139,21 @@ def check_binstall(metadata: dict, errors: list[str]) -> None:
     expected = {
         "ok-linux-x86_64",
         "ok-linux-arm64",
-        "ok-macos-x86_64",
         "ok-macos-arm64",
     }
     for name in expected:
         fragment = f"releases/download/v{{ version }}/{name}"
         if fragment not in cli_toml:
             fail(f"cargo-binstall metadata missing artifact URL fragment {fragment}", errors)
+
+    forbidden_targets = (
+        "[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]",
+        "[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]",
+        "[package.metadata.binstall.overrides.x86_64-apple-darwin]",
+    )
+    for target in forbidden_targets:
+        if target in cli_toml:
+            fail(f"cargo-binstall metadata advertises unsupported V3 target {target}", errors)
 
     if "[package.metadata.binstall]" not in cli_toml:
         fail("open-kioku-cli is missing package.metadata.binstall", errors)
@@ -138,6 +170,7 @@ def check_release_workflow(metadata: dict, errors: list[str]) -> None:
     required_steps = [
         "scripts/validate-versions.sh",
         "scripts/generate-release-trust-artifacts.sh",
+        "scripts/verify-release-artifact-hashes.py",
         "SHA256SUMS",
         "SBOM.cargo-metadata.json",
         "PROVENANCE.json",
@@ -236,6 +269,7 @@ def main() -> int:
         fail(f"release-metadata.json version {metadata.get('version')!r} does not match Cargo.toml {version}", errors)
 
     check_git_tag(version, metadata.get("tag"), errors)
+    check_internal_cargo_dependencies(version, errors)
     check_json_version(ROOT / ".cursor-plugin/plugin.json", version, errors)
     check_json_version(ROOT / ".cursor-plugin/marketplace.json", version, errors)
     check_json_version(ROOT / "claude_plugin.json", version, errors)

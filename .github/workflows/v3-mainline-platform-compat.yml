@@ -1,0 +1,65 @@
+# One-shot V3 supported-platform alignment. Workflow YAML changes land via connector.
+name: V3 mainline platform compatibility
+
+on:
+  push:
+    branches:
+      - release/v3.0.0-mainline
+    paths:
+      - .github/workflows/v3-mainline-platform-compat.yml
+
+permissions:
+  contents: write
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v3.0.0-mainline
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply supported-platform contract
+        run: |
+          set -euo pipefail
+          python3 scripts/v3-mainline-platform-compat.py
+          python3 scripts/v3-mainline-platform-plumbing.py
+          git rm packages/npm-darwin-x64/package.json packages/npm-darwin-x64/README.md
+      - name: Validate supported-platform release surface
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 >/dev/null
+          cargo fmt --all -- --check
+          scripts/validate-docs.sh
+          scripts/validate-versions.sh
+          scripts/verify-npm-package.sh
+          git diff --check
+          if git grep -nE 'ok-macos-x86_64|@open-kioku/darwin-x64|x86_64-apple-darwin' -- release-metadata.json Formula crates/open-kioku-cli packages/npm docs/release-checklist.md scripts/validate-release-metadata.py; then
+            echo 'unsupported V3 Intel macOS reference remains outside workflow plumbing' >&2
+            exit 1
+          fi
+      - name: Commit validated non-workflow alignment
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            release-metadata.json \
+            packages/npm/package.json \
+            packages/npm/bin/ok.js \
+            packages/npm/README.md \
+            crates/open-kioku-cli/Cargo.toml \
+            Formula/open-kioku.rb \
+            scripts/validate-release-metadata.py \
+            docs/release-checklist.md \
+            CHANGELOG.md
+          git add -u packages/npm-darwin-x64
+          git commit -m "release: align v3 with supported runtime platforms"
+          git push origin HEAD:release/v3.0.0-mainline

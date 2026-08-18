@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,14 +17,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             binary_name: ok-linux-x86_64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             binary_name: ok-linux-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            binary_name: ok-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: ok-macos-arm64
@@ -44,19 +42,16 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install cross (Linux only)
+      - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         shell: bash
-        run: cargo install cross --locked
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev zlib1g-dev libgomp1
 
       - name: Build binary
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            cross build --release --target ${{ matrix.target }} -p open-kioku-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
-          fi
+        run: cargo build --release --target ${{ matrix.target }} -p open-kioku-cli
 
       - name: Package binary
         shell: bash
@@ -66,14 +61,7 @@ jobs:
             cp target/${{ matrix.target }}/release/ok.exe dist/${{ matrix.binary_name }}
           else
             cp target/${{ matrix.target }}/release/ok dist/${{ matrix.binary_name }}
-            case "${{ matrix.target }}" in
-              x86_64-unknown-linux-musl|x86_64-apple-darwin|aarch64-apple-darwin)
-                strip dist/${{ matrix.binary_name }}
-                ;;
-              *)
-                echo "Skipping host strip for cross-compiled target ${{ matrix.target }}"
-                ;;
-            esac
+            strip dist/${{ matrix.binary_name }} || true
           fi
           cd dist
           if [ "${{ runner.os }}" = "macOS" ]; then
@@ -102,6 +90,10 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Verify release artifact hashes
+        shell: bash
+        run: python3 scripts/verify-release-artifact-hashes.py dist
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -116,7 +108,6 @@ jobs:
           subject-path: |
             dist/ok-linux-x86_64
             dist/ok-linux-arm64
-            dist/ok-macos-x86_64
             dist/ok-macos-arm64
             dist/ok-windows-x86_64.exe
 
@@ -125,7 +116,8 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          awk "/^## \\[$VERSION\\]/ {flag=1; print; next} /^## \\[/ {if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          awk "/^## \\[$VERSION\\]/ {flag=1; print; next} /^## \\[/ {if(flag) exit} flag" CHANGELOG.md \
+            | grep -v 'ok-macos-x86_64' > release_notes.md
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -156,12 +148,10 @@ jobs:
       - name: Inject binaries into NPM packages
         shell: bash
         run: |
-          cp dist/ok-macos-x86_64 packages/npm-darwin-x64/ok
           cp dist/ok-macos-arm64 packages/npm-darwin-arm64/ok
           cp dist/ok-linux-x86_64 packages/npm-linux-x64/ok
           cp dist/ok-linux-arm64 packages/npm-linux-arm64/ok
           cp dist/ok-windows-x86_64.exe packages/npm-win32-x64/ok.exe
-          chmod +x packages/npm-darwin-x64/ok
           chmod +x packages/npm-darwin-arm64/ok
           chmod +x packages/npm-linux-x64/ok
           chmod +x packages/npm-linux-arm64/ok
@@ -182,7 +172,7 @@ jobs:
             (cd "${package_dir}" && npm publish --access public)
           }
 
-          for package in npm-darwin-x64 npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
+          for package in npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
             publish_package "packages/${package}"
           done
         env:

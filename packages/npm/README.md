@@ -83,7 +83,8 @@ The `open-kioku` npm package is a small JavaScript wrapper. It installs one plat
 
 Supported packages:
 
-- `@open-kioku/darwin-x64`
+> Open Kioku 3.x on macOS requires Apple Silicon. Intel macOS remains supported by the 2.4.x release line.
+
 - `@open-kioku/darwin-arm64`
 - `@open-kioku/linux-x64`
 - `@open-kioku/linux-arm64`
