@@ -1,4 +1,5 @@
 # One-shot V3 release publication verifier. Remove after v3.0.0 is confirmed.
+# This no-op comment makes the observation trigger visible in a normal PR merge.
 name: V3 release publication monitor
 
 on:
