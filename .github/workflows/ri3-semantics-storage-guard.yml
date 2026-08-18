@@ -26,7 +26,7 @@ jobs:
         run: |
           cargo fmt --all
           cargo fmt --all -- --check
-          cargo test -p open-kioku-storage-sqlite replace_graph_and_neighbors -- --exact
+          cargo test -p open-kioku-storage-sqlite replace_graph_and_neighbors
           cargo test -p open-kioku-context
           cargo test -p open-kioku-plan
           cargo test -p open-kioku-mcp
