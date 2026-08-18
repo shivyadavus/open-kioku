@@ -158,6 +158,9 @@ jobs:
                 )
         print('retrieval benchmark deterministic baseline and holdout thresholds passed')
         PY
+        python3 scripts/evaluate-fusion-calibration.py \
+          artifacts/benchmarks/retrieval-report.json \
+          --output artifacts/benchmarks/fusion-calibration-decision.json
         ./target/release/ok --json relationship-bench \
           --corpus benchmarks/relationship-cases.json \
           --observations @live \
