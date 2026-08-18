@@ -39,15 +39,11 @@ fn incompatible_semantics_block_relationship_reads_but_preserve_diagnostics() {
     assert!(store.neighbors("missing", 10).is_ok());
     assert!(store.shortest_path("missing", "also-missing", 4).is_ok());
     assert!(store.imports().is_ok());
-    assert!(store
-        .implementation_facts_for_target("missing", 10)
-        .is_ok());
+    assert!(store.implementation_facts_for_target("missing", 10).is_ok());
     assert!(store
         .references_for_symbol(&SymbolId::new("missing"), 10)
         .is_ok());
-    assert!(store
-        .occurrences_for_file(&FileId::new("missing"))
-        .is_ok());
+    assert!(store.occurrences_for_file(&FileId::new("missing")).is_ok());
 
     let mut incompatible = current;
     let mut semantics = incompatible.analysis_semantics.take().unwrap();
