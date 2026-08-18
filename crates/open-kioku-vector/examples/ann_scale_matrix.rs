@@ -368,8 +368,12 @@ fn query_vector(target: usize, dimensions: usize) -> Vec<f32> {
 
 fn clustered_unit_vector(id: usize, dimensions: usize) -> Vec<f32> {
     let cluster = (id % 256) as u64 + 1;
-    let mut centroid = deterministic_vector(cluster.wrapping_mul(0xa24b_aed4_963e_e407), dimensions);
-    let member = deterministic_vector((id as u64 + 1).wrapping_mul(0xd134_2543_de82_ef95), dimensions);
+    let mut centroid =
+        deterministic_vector(cluster.wrapping_mul(0xa24b_aed4_963e_e407), dimensions);
+    let member = deterministic_vector(
+        (id as u64 + 1).wrapping_mul(0xd134_2543_de82_ef95),
+        dimensions,
+    );
     for (centroid_value, member_value) in centroid.iter_mut().zip(member) {
         *centroid_value = *centroid_value * 0.94 + member_value * 0.06;
     }
@@ -405,7 +409,7 @@ fn normalize(vector: &mut [f32]) {
 }
 
 fn metadata_path(path: &Path) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("{}.meta.json", path.display()))
+    path.with_extension("meta.json")
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
