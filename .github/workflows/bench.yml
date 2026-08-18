@@ -28,6 +28,9 @@ jobs:
     - name: Prepare benchmark artifact directory
       run: mkdir -p artifacts/benchmarks
 
+    - name: Test fusion calibration gate
+      run: python3 -m unittest scripts.tests.test_evaluate_fusion_calibration
+
     - name: Run Criterion Benchmarks
       shell: bash
       run: |
