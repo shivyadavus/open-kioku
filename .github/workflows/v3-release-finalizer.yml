@@ -1,3 +1,4 @@
+# One-shot V3 publication trigger. Remove after the release is confirmed.
 name: V3 release finalizer
 
 on:
