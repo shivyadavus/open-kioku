@@ -442,11 +442,11 @@ fn measure_cycle(
     })
 }
 
-fn sample_entries<'a>(
-    live: &'a BTreeMap<usize, LiveVector>,
+fn sample_entries(
+    live: &BTreeMap<usize, LiveVector>,
     query_count: usize,
     cycle: usize,
-) -> Vec<&'a LiveVector> {
+) -> Vec<&LiveVector> {
     let count = query_count.min(live.len());
     if count == 0 {
         return Vec::new();
