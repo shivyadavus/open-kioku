@@ -8,7 +8,6 @@
     "open-kioku": "./bin/ok.js"
   },
   "optionalDependencies": {
-    "@open-kioku/darwin-x64": "3.0.0",
     "@open-kioku/darwin-arm64": "3.0.0",
     "@open-kioku/linux-x64": "3.0.0",
     "@open-kioku/linux-arm64": "3.0.0",
