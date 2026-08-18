@@ -781,6 +781,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn imports(&self) -> Result<Vec<Import>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -833,6 +834,7 @@ impl MetadataStore for SqliteStore {
         target: &str,
         limit: usize,
     ) -> Result<Vec<AnalysisFact>> {
+        require_authoritative_relationship_semantics(self)?;
         let target = target.trim();
         if target.is_empty() {
             return Ok(Vec::new());
@@ -868,6 +870,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn references_for_symbol(&self, id: &SymbolId, limit: usize) -> Result<Vec<SymbolOccurrence>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -884,6 +887,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn occurrences_for_file(&self, file_id: &FileId) -> Result<Vec<SymbolOccurrence>> {
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2480,7 +2484,7 @@ fn clamp_limit(limit: usize) -> usize {
     }
 }
 
-fn require_authoritative_graph_semantics(store: &SqliteStore) -> Result<()> {
+fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<()> {
     let manifest = MetadataStore::manifest(store)?;
     let compatibility = open_kioku_core::classify_analysis_semantics(
         manifest
@@ -2587,7 +2591,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn neighbors(&self, node: &str, limit: usize) -> Result<(Vec<GraphNode>, Vec<GraphEdge>)> {
-        require_authoritative_graph_semantics(self)?;
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2615,7 +2619,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn shortest_path(&self, from: &str, to: &str, max_depth: usize) -> Result<Vec<GraphEdge>> {
-        require_authoritative_graph_semantics(self)?;
+        require_authoritative_relationship_semantics(self)?;
         use std::collections::{HashSet, VecDeque};
 
         let conn = self
@@ -2696,7 +2700,7 @@ impl GraphStore for SqliteStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<GraphEdge>> {
-        require_authoritative_graph_semantics(self)?;
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -2770,7 +2774,7 @@ impl GraphStore for SqliteStore {
     }
 
     fn graph_edges_between(&self, from: &str, to: &str, limit: usize) -> Result<Vec<GraphEdge>> {
-        require_authoritative_graph_semantics(self)?;
+        require_authoritative_relationship_semantics(self)?;
         let conn = self
             .connection
             .lock()
@@ -4955,6 +4959,14 @@ mod tests {
             store
                 .graph_edges_between("file:src/lib.rs", "symbol:s1", 10)
                 .unwrap_err(),
+            store.imports().unwrap_err(),
+            store
+                .implementation_facts_for_target("worker", 10)
+                .unwrap_err(),
+            store
+                .references_for_symbol(&SymbolId::new("s1"), 10)
+                .unwrap_err(),
+            store.occurrences_for_file(&FileId::new("f1")).unwrap_err(),
         ] {
             let message = error.to_string();
             assert!(message.contains("authoritative relationship evidence unavailable"));
