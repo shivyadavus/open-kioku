@@ -53,6 +53,12 @@ struct MutationCounts {
     deleted: usize,
 }
 
+impl MutationCounts {
+    fn total(&self) -> usize {
+        self.added + self.updated + self.renamed + self.deleted
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct QualityMetrics {
     recall_at_1: f64,
@@ -80,6 +86,7 @@ struct CycleMeasurement {
     stale_or_deleted_hits: usize,
     stale_identity_hits: usize,
     duplicate_hit_ids: usize,
+    inspected_ann_hits: usize,
     quality: QualityMetrics,
     mutation_apply_ms: f64,
     exact_build_ms: f64,
@@ -123,6 +130,7 @@ struct OverallMetrics {
     max_ann_to_exact_p95_ratio: f64,
     max_stale_or_deleted_ratio: f64,
     max_stored_to_live_ratio: f64,
+    max_stored_to_live_ratio_deviation: f64,
     ann_build_p50_ms: f64,
     ann_build_p95_ms: f64,
     ann_build_p99_ms: f64,
@@ -217,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?);
     }
 
-    let overall = overall_metrics(&measurements);
+    let overall = overall_metrics(&measurements, &thresholds);
     let policy = policy_decision(&overall, &thresholds);
     let passed = policy.passed;
     let report = Report {
@@ -367,6 +375,7 @@ fn measure_cycle(
     let mut stale_or_deleted_hits = 0;
     let mut stale_identity_hits = 0;
     let mut duplicate_hit_ids = 0;
+    let mut inspected_ann_hits = 0;
 
     for entry in query_entries {
         let query = query_vector(entry, dimensions);
@@ -377,6 +386,7 @@ fn measure_cycle(
         let ann_started = Instant::now();
         let hits = loaded.search(&query, search_options())?;
         ann_latencies.push(elapsed_us(ann_started));
+        inspected_ann_hits += hits.len();
 
         recall_at_1 += recall_at_k(&oracle, &hits, 1);
         recall_at_5 += recall_at_k(&oracle, &hits, 5);
@@ -411,6 +421,7 @@ fn measure_cycle(
         stale_or_deleted_hits,
         stale_identity_hits,
         duplicate_hit_ids,
+        inspected_ann_hits,
         quality: QualityMetrics {
             recall_at_1: recall_at_1 / denominator,
             recall_at_5: recall_at_5 / denominator,
@@ -548,7 +559,10 @@ fn latency_metrics(values: &[f64]) -> LatencyMetrics {
     }
 }
 
-fn overall_metrics(measurements: &[CycleMeasurement]) -> OverallMetrics {
+fn overall_metrics(
+    measurements: &[CycleMeasurement],
+    thresholds: &PolicyThresholds,
+) -> OverallMetrics {
     let build_ms = measurements
         .iter()
         .map(|measurement| measurement.ann_build_ms)
@@ -556,7 +570,7 @@ fn overall_metrics(measurements: &[CycleMeasurement]) -> OverallMetrics {
     OverallMetrics {
         total_mutations: measurements
             .iter()
-            .map(|measurement| measurement.operations)
+            .map(|measurement| measurement.mutations.total())
             .sum(),
         min_recall_at_10: measurements
             .iter()
@@ -580,12 +594,18 @@ fn overall_metrics(measurements: &[CycleMeasurement]) -> OverallMetrics {
                 let observed = measurement
                     .stale_or_deleted_hits
                     .saturating_add(measurement.stale_identity_hits);
-                observed as f64 / (measurement.live_vectors.max(1) * MAX_K).max(1) as f64
+                observed as f64 / measurement.inspected_ann_hits.max(1) as f64
             })
             .fold(0.0, f64::max),
         max_stored_to_live_ratio: measurements
             .iter()
             .map(|measurement| measurement.stored_to_live_ratio)
+            .fold(0.0, f64::max),
+        max_stored_to_live_ratio_deviation: measurements
+            .iter()
+            .map(|measurement| {
+                (measurement.stored_to_live_ratio - thresholds.required_stored_to_live_ratio).abs()
+            })
             .fold(0.0, f64::max),
         ann_build_p50_ms: percentile(&build_ms, 0.50),
         ann_build_p95_ms: percentile(&build_ms, 0.95),
@@ -639,10 +659,10 @@ fn policy_decision(overall: &OverallMetrics, thresholds: &PolicyThresholds) -> P
             overall.max_stale_or_deleted_ratio, thresholds.max_stale_or_deleted_ratio
         ));
     }
-    if (overall.max_stored_to_live_ratio - thresholds.required_stored_to_live_ratio).abs() > 1e-9 {
+    if overall.max_stored_to_live_ratio_deviation > 1e-9 {
         reasons.push(format!(
-            "stored/live ratio {:.6} did not equal required {:.6}",
-            overall.max_stored_to_live_ratio, thresholds.required_stored_to_live_ratio
+            "stored/live ratio deviated by {:.6} from required {:.6}",
+            overall.max_stored_to_live_ratio_deviation, thresholds.required_stored_to_live_ratio
         ));
     }
     if reasons.is_empty() {
