@@ -1,9 +1,7 @@
 use open_kioku_context::candidates::{
     fuse_candidate_streams, CandidateStream, FusionConfig, StreamCandidate, DEFAULT_RRF_K,
 };
-use open_kioku_core::{
-    LineRange, RetrievalAuthority, RetrievalSourceKind, SearchResult,
-};
+use open_kioku_core::{LineRange, RetrievalAuthority, RetrievalSourceKind, SearchResult};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -22,11 +20,7 @@ fn result(path: &str, score: f32) -> SearchResult {
     }
 }
 
-fn candidate(
-    path: &str,
-    score: f32,
-    authority: RetrievalAuthority,
-) -> StreamCandidate {
+fn candidate(path: &str, score: f32, authority: RetrievalAuthority) -> StreamCandidate {
     StreamCandidate::from_result(result(path, score), authority, "adversarial fixture")
 }
 
@@ -45,7 +39,7 @@ fn extreme_heuristic_weight_cannot_displace_authoritative_evidence() {
             vec![candidate(
                 "src/authoritative.rs",
                 0.01,
-                RetrievalAuthority::Authoritative,
+                RetrievalAuthority::Exact,
             )],
         ),
         CandidateStream::success(
@@ -67,8 +61,14 @@ fn extreme_heuristic_weight_cannot_displace_authoritative_evidence() {
     );
 
     assert_eq!(fused.results[0].path, PathBuf::from("src/authoritative.rs"));
-    assert_eq!(fused.diagnostics.traces[0].authority, RetrievalAuthority::Authoritative);
-    assert_eq!(fused.diagnostics.traces[1].authority, RetrievalAuthority::Heuristic);
+    assert_eq!(
+        fused.diagnostics.traces[0].authority,
+        RetrievalAuthority::Exact
+    );
+    assert_eq!(
+        fused.diagnostics.traces[1].authority,
+        RetrievalAuthority::Heuristic
+    );
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn fusion_never_upgrades_authority_from_numeric_score_or_stream_count() {
     assert!(!fused.diagnostics.traces[0]
         .contributions
         .iter()
-        .any(|contribution| contribution.authority == RetrievalAuthority::Authoritative));
+        .any(|contribution| contribution.authority == RetrievalAuthority::Exact));
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn disabled_weight_is_fail_visible_and_cannot_contribute() {
             vec![candidate(
                 "src/exact.rs",
                 1.0,
-                RetrievalAuthority::Authoritative,
+                RetrievalAuthority::Exact,
             )],
         ),
     ];
