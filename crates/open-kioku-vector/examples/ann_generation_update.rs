@@ -1,6 +1,6 @@
 use open_kioku_vector::{
-    AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorHit, VectorId,
-    VectorRecord, VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
+    AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorHit, VectorId, VectorRecord,
+    VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -77,7 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend: "usearch-hnsw-f32",
         oracle: "exact-flat",
         distribution: "deterministic-clustered-synthetic-v1",
-        lifecycle_policy: "fresh generation from authoritative live vectors; no in-place tombstone compaction",
+        lifecycle_policy:
+            "fresh generation from authoritative live vectors; no in-place tombstone compaction",
         requested_sizes: sizes,
         requested_dimensions: dimensions,
         mutation_basis_points: mutation_bps,
@@ -207,7 +208,8 @@ fn query_vector(target: usize, dimensions: usize, mutated: bool) -> Vec<f32> {
 
 fn clustered_unit_vector(id: usize, dimensions: usize, mutated: bool) -> Vec<f32> {
     let cluster = (id % 256) as u64 + 1;
-    let mut centroid = deterministic_vector(cluster.wrapping_mul(0xa24b_aed4_963e_e407), dimensions);
+    let mut centroid =
+        deterministic_vector(cluster.wrapping_mul(0xa24b_aed4_963e_e407), dimensions);
     let member_seed = (id as u64 + 1).wrapping_mul(if mutated {
         0x94d0_49bb_1331_11eb
     } else {
