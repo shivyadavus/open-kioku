@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/cc7-zero-budget-omission-telemetry
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: agent/cc7-zero-budget-omission-telemetry
           fetch-depth: 0
       - name: Apply focused production and regression patch
         shell: python
