@@ -244,3 +244,5 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatc
           git add crates/open-kioku-ingest/src/lib.rs
           git commit -m 'fix: honor scoped repository ignore semantics'
           git push origin HEAD:agent/fix-gitignore-discovery
+
+# Re-save to trigger after workflow creation.
