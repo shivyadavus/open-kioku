@@ -1,0 +1,271 @@
+name: V3 canonical publication
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-canonical-publish.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: v3-canonical-publication
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v3.0.0
+  RELEASE_TAG_SHA: 81c742f6ef34c99513e5d4d857004f903d973cef
+  CANDIDATE_SOURCE_SHA: 7974d3036635f3bc903a8049338f0d0208e80cd4
+  CANDIDATE_WORKFLOW_HEAD_SHA: 133d3c026702cbec4aba58ef2555c2f1d6783161
+  CANDIDATE_RUN_ID: '32095891880'
+
+jobs:
+  publish-github:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout immutable V3 tag
+        uses: actions/checkout@v4
+        with:
+          ref: v3.0.0
+          fetch-depth: 0
+
+      - name: Verify immutable tag and candidate-to-tag product identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_TAG_SHA"
+          git cat-file -e "$CANDIDATE_SOURCE_SHA^{commit}" || git fetch --no-tags origin "$CANDIDATE_SOURCE_SHA"
+
+          cat > /tmp/expected-release-only-diff <<'EOF'
+          .github/workflows/bench.yml
+          .github/workflows/ci.yml
+          .github/workflows/release.yml
+          .github/workflows/v3-mainline-candidate.yml
+          .github/workflows/v3-release-finalizer.yml
+          Formula/open-kioku.rb
+          docs/release-checklist.md
+          release-metadata.json
+          EOF
+          sort -o /tmp/expected-release-only-diff /tmp/expected-release-only-diff
+          git diff --name-only "$CANDIDATE_SOURCE_SHA" "$RELEASE_TAG_SHA" | sort > /tmp/actual-release-only-diff
+          diff -u /tmp/expected-release-only-diff /tmp/actual-release-only-diff
+
+          # Product source, dependency lock, package manifests, and plugin manifests
+          # must be byte-identical to the canonical candidate build source.
+          git diff --quiet "$CANDIDATE_SOURCE_SHA" "$RELEASE_TAG_SHA" -- \
+            Cargo.toml Cargo.lock crates packages \
+            .cursor-plugin .claude-plugin .codex-plugin claude_plugin.json
+
+      - name: Validate tagged release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
+      - name: Download canonical candidate artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: shivyadavus/open-kioku
+          run-id: 32095891880
+          pattern: v3-ok-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify canonical artifacts against immutable tag metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-artifact-hashes.py dist
+          test -f dist/ok-linux-x86_64
+          test -f dist/ok-linux-arm64
+          test -f dist/ok-macos-arm64
+          test -f dist/ok-windows-x86_64.exe
+          chmod +x dist/ok-linux-x86_64
+          test "$(dist/ok-linux-x86_64 --version)" = "ok 3.0.0"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Generate checksums, SBOM, and truthful candidate provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            GITHUB_SHA="$CANDIDATE_SOURCE_SHA" \
+            GITHUB_WORKFLOW="V3 mainline candidate" \
+            GITHUB_RUN_ID="$CANDIDATE_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="1" \
+            scripts/generate-release-trust-artifacts.sh dist
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          provenance_path = Path('dist/PROVENANCE.json')
+          provenance = json.loads(provenance_path.read_text(encoding='utf-8'))
+          provenance['release_tag_sha'] = os.environ['RELEASE_TAG_SHA']
+          provenance['candidate_workflow_head_sha'] = os.environ['CANDIDATE_WORKFLOW_HEAD_SHA']
+          provenance['artifact_origin'] = {
+              'kind': 'github-actions-canonical-candidate',
+              'candidate_source_sha': os.environ['CANDIDATE_SOURCE_SHA'],
+              'candidate_workflow_head_sha': os.environ['CANDIDATE_WORKFLOW_HEAD_SHA'],
+              'candidate_run_id': os.environ['CANDIDATE_RUN_ID'],
+              'release_tag': os.environ['RELEASE_TAG'],
+              'release_tag_sha': os.environ['RELEASE_TAG_SHA'],
+              'candidate_to_tag_diff': 'release-orchestration-only',
+          }
+          provenance_path.write_text(
+              json.dumps(provenance, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+
+          predicate = {
+              'schema_version': 'open-kioku.canonical-candidate.v1',
+              'candidate_source_sha': os.environ['CANDIDATE_SOURCE_SHA'],
+              'candidate_workflow_head_sha': os.environ['CANDIDATE_WORKFLOW_HEAD_SHA'],
+              'candidate_run_id': os.environ['CANDIDATE_RUN_ID'],
+              'release_tag': os.environ['RELEASE_TAG'],
+              'release_tag_sha': os.environ['RELEASE_TAG_SHA'],
+              'verification': {
+                  'candidate_to_tag_release_only_allowlist': True,
+                  'tag_metadata_sha256_match': True,
+                  'artifact_sidecar_sha256_match': True,
+                  'linux_version_smoke': 'ok 3.0.0',
+              },
+          }
+          Path('dist/CANONICAL_CANDIDATE.json').write_text(
+              json.dumps(predicate, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Sign canonical-candidate verification attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/ok-linux-x86_64
+            dist/ok-linux-arm64
+            dist/ok-macos-arm64
+            dist/ok-windows-x86_64.exe
+          predicate-type: https://openkioku.com/attestations/canonical-candidate/v1
+          predicate-path: dist/CANONICAL_CANDIDATE.json
+
+      - name: Extract V3 release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '/^## \[3\.0\.0\]/ {flag=1; print; next} /^## \[/ {if(flag) exit} flag' CHANGELOG.md \
+            | grep -v 'ok-macos-x86_64' > release_notes.md
+          test -s release_notes.md
+
+      - name: Publish GitHub release from canonical artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.0.0
+          name: Open Kioku 3.0.0
+          body_path: release_notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+          make_latest: true
+
+  publish-npm:
+    needs: publish-github
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout immutable V3 tag
+        uses: actions/checkout@v4
+        with:
+          ref: v3.0.0
+
+      - name: Validate tagged release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download canonical candidate artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: shivyadavus/open-kioku
+          run-id: 32095891880
+          pattern: v3-ok-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify artifacts before npm packaging
+        shell: bash
+        run: python3 scripts/verify-release-artifact-hashes.py dist
+
+      - name: Inject canonical binaries into npm platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp dist/ok-macos-arm64 packages/npm-darwin-arm64/ok
+          cp dist/ok-linux-x86_64 packages/npm-linux-x64/ok
+          cp dist/ok-linux-arm64 packages/npm-linux-arm64/ok
+          cp dist/ok-windows-x86_64.exe packages/npm-win32-x64/ok.exe
+          chmod +x packages/npm-darwin-arm64/ok
+          chmod +x packages/npm-linux-x64/ok
+          chmod +x packages/npm-linux-arm64/ok
+
+      - name: Publish optional dependency packages idempotently
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_package() {
+            local package_dir="$1"
+            local name version
+            name="$(node -p "require('./${package_dir}/package.json').name")"
+            version="$(node -p "require('./${package_dir}/package.json').version")"
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "${name}@${version} is already published; skipping"
+              return 0
+            fi
+            (cd "${package_dir}" && npm publish --access public)
+          }
+
+          for package in npm-darwin-arm64 npm-linux-x64 npm-linux-arm64 npm-win32-x64; do
+            publish_package "packages/${package}"
+          done
+
+      - name: Publish main npm wrapper idempotently
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./packages/npm/package.json').name")"
+          version="$(node -p "require('./packages/npm/package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already published; skipping"
+          else
+            (cd packages/npm && npm publish --access public)
+          fi
+
+      - name: Verify npm publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package_json in \
+            packages/npm/package.json \
+            packages/npm-darwin-arm64/package.json \
+            packages/npm-linux-x64/package.json \
+            packages/npm-linux-arm64/package.json \
+            packages/npm-win32-x64/package.json; do
+            name="$(node -p "require('./${package_json}').name")"
+            test "$(npm view "${name}@3.0.0" version)" = "3.0.0"
+          done

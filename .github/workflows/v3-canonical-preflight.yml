@@ -1,0 +1,104 @@
+name: V3 canonical publication preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-canonical-publish.yml
+      - .github/workflows/v3-canonical-preflight.yml
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RELEASE_TAG_SHA: 81c742f6ef34c99513e5d4d857004f903d973cef
+  CANDIDATE_SOURCE_SHA: 7974d3036635f3bc903a8049338f0d0208e80cd4
+  CANDIDATE_RUN_ID: '32095891880'
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout immutable V3 tag
+        uses: actions/checkout@v4
+        with:
+          ref: v3.0.0
+          fetch-depth: 0
+
+      - name: Verify immutable tag and candidate-to-tag product identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_TAG_SHA"
+          git cat-file -e "$CANDIDATE_SOURCE_SHA^{commit}" || git fetch --no-tags origin "$CANDIDATE_SOURCE_SHA"
+          cat > /tmp/expected <<'EOF'
+          .github/workflows/bench.yml
+          .github/workflows/ci.yml
+          .github/workflows/release.yml
+          .github/workflows/v3-mainline-candidate.yml
+          .github/workflows/v3-release-finalizer.yml
+          Formula/open-kioku.rb
+          docs/release-checklist.md
+          release-metadata.json
+          EOF
+          sort -o /tmp/expected /tmp/expected
+          git diff --name-only "$CANDIDATE_SOURCE_SHA" "$RELEASE_TAG_SHA" | sort > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          git diff --quiet "$CANDIDATE_SOURCE_SHA" "$RELEASE_TAG_SHA" -- \
+            Cargo.toml Cargo.lock crates packages \
+            .cursor-plugin .claude-plugin .codex-plugin claude_plugin.json
+
+      - name: Validate tagged release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
+      - name: Download canonical candidate artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: shivyadavus/open-kioku
+          run-id: 32095891880
+          pattern: v3-ok-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify pinned hashes, sidecars, and Linux executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-release-artifact-hashes.py dist
+          test -f dist/ok-linux-x86_64
+          test -f dist/ok-linux-arm64
+          test -f dist/ok-macos-arm64
+          test -f dist/ok-windows-x86_64.exe
+          chmod +x dist/ok-linux-x86_64
+          test "$(dist/ok-linux-x86_64 --version)" = "ok 3.0.0"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Verify trust-artifact generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            GITHUB_SHA="$CANDIDATE_SOURCE_SHA" \
+            GITHUB_WORKFLOW="V3 mainline candidate" \
+            GITHUB_RUN_ID="$CANDIDATE_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="1" \
+            scripts/generate-release-trust-artifacts.sh dist
+          test -s dist/SHA256SUMS
+          test -s dist/SBOM.cargo-metadata.json
+          test -s dist/PROVENANCE.json
+          test -s dist/THIRD_PARTY_NOTICES.md
+
+      - name: Verify release-note extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '/^## \[3\.0\.0\]/ {flag=1; print; next} /^## \[/ {if(flag) exit} flag' CHANGELOG.md \
+            | grep -v 'ok-macos-x86_64' > release_notes.md
+          test -s release_notes.md
+          ! grep -q 'ok-macos-x86_64' release_notes.md
