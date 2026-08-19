@@ -224,11 +224,13 @@ fn refresh_context_pack_retrieval_telemetry(
     diagnostics.selection.ambiguity_unresolved_count = diagnostics
         .caveats
         .iter()
-        .filter(|caveat| {
+        .chain(diagnostics.selection.caveats.iter())
+        .filter_map(|caveat| {
             let caveat = caveat.to_ascii_lowercase();
-            caveat.contains("ambiguous") || caveat.contains("unresolved")
+            (caveat.contains("ambiguous") || caveat.contains("unresolved")).then_some(caveat)
         })
-        .count();
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     diagnostics.selection.retrieval_confidence = Some(confidence.overall_enum);
     if diagnostics.selection.abstention_reason.is_none() {
         diagnostics.selection.abstention_reason = if selected.is_empty() {
@@ -250,7 +252,10 @@ fn refresh_context_pack_retrieval_telemetry(
 }
 
 fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
-    if diagnostics.sources_attempted.is_empty() && diagnostics.caveats.is_empty() {
+    if diagnostics.sources_attempted.is_empty()
+        && diagnostics.caveats.is_empty()
+        && diagnostics.selection.caveats.is_empty()
+    {
         return;
     }
     out.push_str("## Retrieval\n\n");
@@ -329,6 +334,12 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             out.push_str(&format!("  - {caveat}\n"));
         }
     }
+    if !diagnostics.selection.caveats.is_empty() {
+        out.push_str("- Selection caveats:\n");
+        for caveat in &diagnostics.selection.caveats {
+            out.push_str(&format!("  - {caveat}\n"));
+        }
+    }
     out.push('\n');
 }
 
@@ -398,6 +409,9 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
     }
     for caveat in &diagnostics.caveats {
         out.push_str(&format!("RETRIEVAL_CAVEAT: {caveat}\n"));
+    }
+    for caveat in &diagnostics.selection.caveats {
+        out.push_str(&format!("RETRIEVAL_SELECTION_CAVEAT: {caveat}\n"));
     }
 }
 
@@ -2828,6 +2842,7 @@ mod tests {
                 budget: ContextBudget::from_file_limit(10),
                 available_context_tokens: 1_000,
                 estimated_tokens_selected: 100,
+                caveats: vec!["ambiguous exact symbol anchor".into()],
                 ..Default::default()
             },
             ..Default::default()
@@ -3000,6 +3015,7 @@ mod tests {
         );
         assert_eq!(diagnostics.selection.exact_evidence_count, 0);
         assert_eq!(diagnostics.selection.unattributed_selected_file_count, 0);
+        assert_eq!(diagnostics.selection.ambiguity_unresolved_count, 0);
         assert_eq!(diagnostics.selection.source_stream_mix.len(), 1);
         assert_eq!(
             diagnostics.selection.source_stream_mix[0].source,
@@ -3021,7 +3037,7 @@ mod tests {
             confidence: 0.5,
             score_breakdown: Vec::new(),
         };
-        let diagnostics = RetrievalDiagnostics {
+        let mut diagnostics = RetrievalDiagnostics {
             traces: vec![
                 RetrievalTrace {
                     path: result.path.clone(),
@@ -3040,11 +3056,45 @@ mod tests {
             ],
             ..Default::default()
         };
+        diagnostics.selection.budget.max_tokens = 1_000;
+        diagnostics.selection.available_context_tokens = 900;
+
         assert!(retrieval_trace_for_result(&diagnostics, &result).is_none());
         assert_eq!(
             retrieval_authority_for_result(&diagnostics, &result),
             RetrievalAuthority::Heuristic
         );
+
+        refresh_context_pack_retrieval_telemetry(
+            &mut diagnostics,
+            std::slice::from_ref(&result),
+            &ConfidenceBreakdown::default(),
+        );
+
+        assert_eq!(diagnostics.selection.unattributed_selected_file_count, 1);
+        assert_eq!(diagnostics.selection.ambiguity_unresolved_count, 1);
+        assert_eq!(diagnostics.selection.exact_evidence_count, 0);
+        assert!(diagnostics.selection.source_stream_mix.is_empty());
+        assert!(diagnostics
+            .selection
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("ambiguous or unavailable")));
+
+        let json = serde_json::to_string(&diagnostics).unwrap();
+        assert!(json.contains("\"ambiguity_unresolved_count\":1"));
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("ambiguity/unresolved signals: `1`"));
+        assert!(markdown.contains("Selection caveats:"));
+        assert!(markdown.contains("ambiguous or unavailable"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("RETRIEVAL_AMBIGUITY_UNRESOLVED_COUNT: 1"));
+        assert!(prompt.contains("RETRIEVAL_SELECTION_CAVEAT:"));
+        assert!(prompt.contains("ambiguous or unavailable"));
     }
 
     #[test]
