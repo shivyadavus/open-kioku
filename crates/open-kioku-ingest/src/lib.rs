@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+mod git_ignore;
 pub mod imports;
 pub mod project_model;
 pub mod relationships;
@@ -1120,7 +1121,12 @@ impl Indexer {
         let excludes = compile_globs(&config.index.exclude)?;
         let denied = compile_globs(&config.paths.deny)?;
         let document_plain_text = compile_globs(&config.documents.plain_text)?;
-        let git_ignores = build_ignore_matcher(root, ".gitignore")?;
+        let git_ignored_paths = git_ignore::ignored_paths(root)?;
+        let git_ignores = if git_ignored_paths.is_none() {
+            Some(build_ignore_matcher(root, ".gitignore")?)
+        } else {
+            None
+        };
         let ok_ignores = build_ignore_matcher(root, ".okignore")?;
         let mut builder = WalkBuilder::new(root);
         builder.hidden(false);
@@ -1208,10 +1214,13 @@ impl Indexer {
                 );
                 continue;
             }
-            if git_ignores
-                .matched_path_or_any_parents(path, false)
-                .is_ignore()
-            {
+            let git_ignored = git_ignored_paths
+                .as_ref()
+                .is_some_and(|paths| paths.contains(&rel))
+                || git_ignores
+                    .as_ref()
+                    .is_some_and(|matcher| matcher.is_ignored(path, false));
+            if git_ignored {
                 push_skip(
                     root,
                     path,
@@ -1222,10 +1231,7 @@ impl Indexer {
                 );
                 continue;
             }
-            if ok_ignores
-                .matched_path_or_any_parents(path, false)
-                .is_ignore()
-            {
+            if ok_ignores.is_ignored(path, false) {
                 push_skip(
                     root,
                     path,
@@ -2510,18 +2516,31 @@ fn fast_mode_skip_path(path: &Path) -> bool {
     })
 }
 
-fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<Gitignore> {
-    let mut builder = GitignoreBuilder::new(root);
-    let direct = root.join(file_name);
-    if direct.exists() {
-        builder.add(&direct);
-    }
-    if file_name == ".gitignore" {
-        let git_exclude = root.join(".git/info/exclude");
-        if git_exclude.exists() {
-            builder.add(git_exclude);
+#[derive(Debug)]
+struct ScopedIgnoreMatcher {
+    layers: Vec<(PathBuf, Gitignore)>,
+}
+
+impl ScopedIgnoreMatcher {
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        let mut ignored = false;
+        for (scope, matcher) in &self.layers {
+            if !path.starts_with(scope) {
+                continue;
+            }
+            let matched = matcher.matched_path_or_any_parents(path, is_dir);
+            if matched.is_ignore() {
+                ignored = true;
+            } else if matched.is_whitelist() {
+                ignored = false;
+            }
         }
+        ignored
     }
+}
+
+fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatcher> {
+    let mut ignore_files = Vec::new();
     for entry in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
@@ -2536,16 +2555,38 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<Gitignore> {
             Ok(entry) => entry,
             Err(_) => continue,
         };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        if entry.file_name() == file_name {
-            builder.add(entry.path());
+        if entry.file_type().is_some_and(|kind| kind.is_file())
+            && entry.file_name() == file_name
+        {
+            ignore_files.push(entry.path().to_path_buf());
         }
     }
-    builder
-        .build()
-        .map_err(|err| OkError::Config(err.to_string()))
+
+    ignore_files.sort_by(|left, right| {
+        let left_depth = left
+            .parent()
+            .map(|path| path.components().count())
+            .unwrap_or(0);
+        let right_depth = right
+            .parent()
+            .map(|path| path.components().count())
+            .unwrap_or(0);
+        left_depth.cmp(&right_depth).then_with(|| left.cmp(right))
+    });
+
+    let mut layers = Vec::with_capacity(ignore_files.len());
+    for ignore_file in ignore_files {
+        let scope = ignore_file.parent().unwrap_or(root).to_path_buf();
+        let mut builder = GitignoreBuilder::new(&scope);
+        if let Some(err) = builder.add(&ignore_file) {
+            return Err(OkError::Config(err.to_string()));
+        }
+        let matcher = builder
+            .build()
+            .map_err(|err| OkError::Config(err.to_string()))?;
+        layers.push((scope, matcher));
+    }
+    Ok(ScopedIgnoreMatcher { layers })
 }
 
 fn is_heavy_discovery_dir(path: &Path) -> bool {
@@ -2690,7 +2731,6 @@ fn collect_architecture_facts(
     use open_kioku_core::{Confidence, EvidenceSourceType, GraphEdgeType, GraphNodeType};
     let mut facts = Vec::new();
 
-    // Process files
     for file in files {
         let path = file.path.display().to_string();
         let matches = resolver.resolve_file(&path);
@@ -2727,7 +2767,6 @@ fn collect_architecture_facts(
         }
     }
 
-    // Process symbols
     let mut files_by_id = std::collections::HashMap::new();
     for file in files {
         files_by_id.insert(file.id.clone(), file.path.display().to_string());
