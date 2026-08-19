@@ -1,24 +1,24 @@
+use ignore::WalkBuilder;
 use open_kioku_errors::{OkError, Result};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Returns the candidate paths that Git itself considers ignored below `root`.
+/// Returns the paths that Git itself considers ignored below `root`.
 ///
 /// `Some(paths)` means `root` is inside a Git work tree and Git was used as
 /// the source of truth. `None` means there is no Git work tree, so callers may
 /// fall back to filesystem-style ignore handling.
 ///
-/// A single `git check-ignore --stdin -z` process handles the entire candidate
-/// set. This preserves Git's nested `.gitignore`, negation, `.git/info/exclude`,
-/// and global-exclude semantics without spawning a process per file. We
-/// intentionally do not pass `--no-index`, so tracked files are never reported
-/// as ignored merely because an exclude pattern also matches them.
-pub(crate) fn ignored_paths(
-    root: &Path,
-    candidates: &[PathBuf],
-) -> Result<Option<HashSet<PathBuf>>> {
+/// Discovery first collects the same lightweight filesystem candidates used by
+/// indexing (without descending into known heavy build/cache directories), then
+/// sends them through one `git check-ignore --stdin -z` process. This preserves
+/// Git's nested `.gitignore`, negation, `.git/info/exclude`, and global-exclude
+/// semantics without spawning a process per file. We intentionally do not pass
+/// `--no-index`, so tracked files are never reported as ignored merely because
+/// an exclude pattern also matches them.
+pub(crate) fn ignored_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>> {
     if !has_git_marker(root) {
         return Ok(None);
     }
@@ -32,6 +32,8 @@ pub(crate) fn ignored_paths(
     if !probe.status.success() || String::from_utf8_lossy(&probe.stdout).trim() != "true" {
         return Ok(None);
     }
+
+    let candidates = filesystem_candidates(root);
     if candidates.is_empty() {
         return Ok(Some(HashSet::new()));
     }
@@ -51,7 +53,7 @@ pub(crate) fn ignored_paths(
         let stdin = child.stdin.as_mut().ok_or_else(|| {
             OkError::Repository("git ignore discovery could not open stdin".into())
         })?;
-        for candidate in candidates {
+        for candidate in &candidates {
             let value = candidate.to_string_lossy().into_owned();
             by_git_path.insert(value.clone(), candidate.clone());
             stdin
@@ -87,15 +89,51 @@ pub(crate) fn ignored_paths(
     Ok(Some(ignored))
 }
 
+fn filesystem_candidates(root: &Path) -> Vec<PathBuf> {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .parents(false)
+        .ignore(false)
+        .follow_links(false)
+        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .build()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_some_and(|kind| kind.is_file() || kind.is_symlink())
+        })
+        .map(|entry| {
+            entry
+                .path()
+                .strip_prefix(root)
+                .unwrap_or(entry.path())
+                .to_path_buf()
+        })
+        .collect()
+}
+
 fn has_git_marker(root: &Path) -> bool {
     root.ancestors().any(|ancestor| ancestor.join(".git").exists())
+}
+
+fn is_heavy_discovery_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git" | ".ok" | "target" | "node_modules" | "dist" | "build" | ".venv"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::ignored_paths;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     #[test]
@@ -114,13 +152,7 @@ mod tests {
         write(dir.path(), "notes/scratch.txt", "scratch\n");
         write(dir.path(), "notes/README.md", "kept\n");
 
-        let candidates = paths(&[
-            "src/Foo.java",
-            "src/Bar.java",
-            "notes/scratch.txt",
-            "notes/README.md",
-        ]);
-        let ignored = ignored_paths(dir.path(), &candidates).unwrap().unwrap();
+        let ignored = ignored_paths(dir.path()).unwrap().unwrap();
         assert!(ignored.contains(Path::new("notes/scratch.txt")));
         assert!(!ignored.contains(Path::new("src/Foo.java")));
         assert!(!ignored.contains(Path::new("src/Bar.java")));
@@ -128,8 +160,7 @@ mod tests {
 
         write(dir.path(), ".gitignore", "*.java\n");
         write(dir.path(), "src/New.java", "class New {}\n");
-        let candidates = paths(&["src/Foo.java", "src/Bar.java", "src/New.java"]);
-        let ignored = ignored_paths(dir.path(), &candidates).unwrap().unwrap();
+        let ignored = ignored_paths(dir.path()).unwrap().unwrap();
         assert!(ignored.contains(Path::new("src/New.java")));
         assert!(!ignored.contains(Path::new("src/Foo.java")));
         assert!(!ignored.contains(Path::new("src/Bar.java")));
@@ -138,13 +169,7 @@ mod tests {
     #[test]
     fn plain_directory_does_not_require_git() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(ignored_paths(dir.path(), &[PathBuf::from("src/Foo.java")])
-            .unwrap()
-            .is_none());
-    }
-
-    fn paths(values: &[&str]) -> Vec<PathBuf> {
-        values.iter().map(PathBuf::from).collect()
+        assert!(ignored_paths(dir.path()).unwrap().is_none());
     }
 
     fn initialized_repo() -> tempfile::TempDir {
