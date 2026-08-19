@@ -163,3 +163,39 @@ fn lifecycle_status_distinguishes_semantic_profile_incompatibility() {
         .iter()
         .any(|note| note.contains("authoritative index generation")));
 }
+
+#[test]
+fn lifecycle_status_fails_closed_when_ann_artifact_disappears() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config();
+
+    persist_snapshot(
+        repo,
+        &store,
+        "generation-a",
+        "pub fn corrupt_status_token() {}",
+        "corrupt-hash",
+    );
+    let manager = SemanticIndexManager::new(repo, &store, &config);
+    let indexed = manager.index().unwrap().status;
+    assert!(indexed.ready);
+    assert!(indexed.ann_active);
+
+    std::fs::remove_file(indexed.current_dir.join("index.usearch")).unwrap();
+
+    let corrupt = manager.status();
+    assert_eq!(corrupt.state, "corrupt");
+    assert!(corrupt.corrupt);
+    assert!(!corrupt.ready);
+    assert!(!corrupt.ann_active);
+    assert_eq!(corrupt.vector_count, indexed.vector_count);
+    assert!(corrupt
+        .notes
+        .iter()
+        .any(|note| note.contains("semantic index is corrupt or incomplete")));
+
+    let error = manager.search("corrupt_status_token", 5).unwrap_err();
+    assert!(error.to_string().contains("semantic index is corrupt"));
+}
