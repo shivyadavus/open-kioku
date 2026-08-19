@@ -131,7 +131,13 @@ fn ann_large_rebase_burst_matches_exact_flat_and_drops_stale_identities() {
     let exact = SemanticIndexManager::new(exact_repo, &exact_store, &exact_config);
 
     let initial = (0..8)
-        .map(|id| fixture(id, format!("src/module_{id}.rs"), format!("baseline_token_{id}")))
+        .map(|id| {
+            fixture(
+                id,
+                format!("src/module_{id}.rs"),
+                format!("baseline_token_{id}"),
+            )
+        })
         .collect::<Vec<_>>();
     persist_snapshot(ann_repo, &ann_store, "before-rebase", &initial);
     persist_snapshot(exact_repo, &exact_store, "before-rebase", &initial);
@@ -193,7 +199,10 @@ fn ann_large_rebase_burst_matches_exact_flat_and_drops_stale_identities() {
 
     let all_paths = result_paths(&ann, "repository code", rebased.len());
     assert_eq!(all_paths.len(), rebased.len());
-    assert_eq!(all_paths.iter().cloned().collect::<BTreeSet<_>>(), authoritative_paths);
+    assert_eq!(
+        all_paths.iter().cloned().collect::<BTreeSet<_>>(),
+        authoritative_paths
+    );
     assert!(!all_paths.contains(&PathBuf::from("src/module_6.rs")));
     assert!(!all_paths.contains(&PathBuf::from("src/module_7.rs")));
 
