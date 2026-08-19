@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       query_count:
-        description: Queries per scale/dimension measurement
+        description: Queries per scale/dimension measurement (1-256)
         required: true
         default: "64"
         type: string
       search_expansions:
-        description: Comma-separated HNSW expansion_search sweep
+        description: Comma-separated HNSW expansion_search values (up to 8 values, each 1-4096)
         required: true
         default: "64,128,256,512,1024"
         type: string
@@ -40,14 +40,21 @@ jobs:
           import os
 
           query_count = os.environ["QUERY_COUNT"]
-          expansions = os.environ["SEARCH_EXPANSIONS"]
-          if not query_count.isdigit() or int(query_count) <= 0:
-              raise SystemExit("query_count must be a positive integer")
-          parsed = [value.strip() for value in expansions.split(",") if value.strip()]
-          if not parsed or any(not value.isdigit() or int(value) <= 0 for value in parsed):
-              raise SystemExit("search_expansions must be a non-empty comma-separated list of positive integers")
-          if len(set(parsed)) != len(parsed):
-              raise SystemExit("search_expansions must not contain duplicates")
+          if not query_count.isdigit() or not 1 <= int(query_count) <= 256:
+              raise SystemExit("query_count must be an integer from 1 through 256")
+
+          raw = os.environ["SEARCH_EXPANSIONS"]
+          parsed = [value.strip() for value in raw.split(",") if value.strip()]
+          if not parsed or any(
+              not value.isdigit() or not 1 <= int(value) <= 4096 for value in parsed
+          ):
+              raise SystemExit(
+                  "search_expansions must be a non-empty CSV of integers from 1 through 4096"
+              )
+          if len(parsed) > 8:
+              raise SystemExit("search_expansions may contain at most 8 values")
+          if len(parsed) != len(set(parsed)):
+              raise SystemExit("search_expansions values must be unique")
           print("ANN scale benchmark inputs are valid")
           PY
 
