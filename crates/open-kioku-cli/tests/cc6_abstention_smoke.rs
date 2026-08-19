@@ -2,8 +2,9 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use std::fs;
 
-#[test]
-fn context_json_reports_explicit_abstention_for_no_match_query() {
+const NO_MATCH_QUERY: &str = "zzqv_no_matching_repository_evidence_7f31b9";
+
+fn initialized_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("temporary repository");
     let repo = temp.path();
     fs::create_dir_all(repo.join("src")).expect("create source directory");
@@ -30,15 +31,18 @@ fn context_json_reports_explicit_abstention_for_no_match_query() {
         .assert()
         .success();
 
+    temp
+}
+
+#[test]
+fn context_json_reports_explicit_abstention_for_no_match_query() {
+    let temp = initialized_fixture();
+    let repo = temp.path();
+
     let output = cargo_bin_cmd!("ok")
         .arg("--repo")
         .arg(repo)
-        .args([
-            "context",
-            "zzqv_no_matching_repository_evidence_7f31b9",
-            "--format",
-            "json",
-        ])
+        .args(["context", NO_MATCH_QUERY, "--format", "json"])
         .output()
         .expect("run context command");
     assert!(
@@ -70,4 +74,37 @@ fn context_json_reports_explicit_abstention_for_no_match_query() {
             .is_some(),
         "abstention telemetry must retain retrieval confidence"
     );
+}
+
+#[test]
+fn rendered_context_formats_keep_no_match_abstention_visible() {
+    let temp = initialized_fixture();
+    let repo = temp.path();
+
+    for (format, expected_marker) in [
+        ("markdown", "Abstention reason:"),
+        ("prompt-text", "RETRIEVAL_ABSTENTION_REASON:"),
+    ] {
+        let output = cargo_bin_cmd!("ok")
+            .arg("--repo")
+            .arg(repo)
+            .args(["context", NO_MATCH_QUERY, "--format", format])
+            .output()
+            .expect("run rendered context command");
+        assert!(
+            output.status.success(),
+            "context --format {format} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let rendered = String::from_utf8(output.stdout).expect("utf-8 context output");
+        assert!(
+            rendered.contains(expected_marker),
+            "{format} output must explain why retrieval abstained: {rendered}"
+        );
+        assert!(
+            !rendered.contains("alpha_token"),
+            "{format} no-match output must not leak unrelated primary context: {rendered}"
+        );
+    }
 }
