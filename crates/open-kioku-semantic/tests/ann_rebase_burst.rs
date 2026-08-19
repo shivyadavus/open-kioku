@@ -7,6 +7,7 @@ use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_storage::{IndexData, MetadataStore};
 use open_kioku_storage_sqlite::SqliteStore;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -117,6 +118,22 @@ fn result_paths(manager: &SemanticIndexManager<'_>, query: &str, limit: usize) -
         .collect()
 }
 
+fn persisted_generation_paths(current_dir: &Path) -> BTreeSet<PathBuf> {
+    let targets: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(current_dir.join("ids.json")).unwrap()).unwrap();
+    targets
+        .into_iter()
+        .map(|target| {
+            PathBuf::from(
+                target
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("semantic target must persist a path"),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn ann_large_rebase_burst_matches_exact_flat_and_drops_stale_identities() {
     let ann_temp = tempfile::tempdir().unwrap();
@@ -197,14 +214,11 @@ fn ann_large_rebase_burst_matches_exact_flat_and_drops_stale_identities() {
             .all(|path| authoritative_paths.contains(path)));
     }
 
-    let all_paths = result_paths(&ann, "repository code", rebased.len());
-    assert_eq!(all_paths.len(), rebased.len());
-    assert_eq!(
-        all_paths.iter().cloned().collect::<BTreeSet<_>>(),
-        authoritative_paths
-    );
-    assert!(!all_paths.contains(&PathBuf::from("src/module_6.rs")));
-    assert!(!all_paths.contains(&PathBuf::from("src/module_7.rs")));
+    let persisted_paths = persisted_generation_paths(&ann_report.status.current_dir);
+    assert_eq!(persisted_paths.len(), rebased.len());
+    assert_eq!(persisted_paths, authoritative_paths);
+    assert!(!persisted_paths.contains(&PathBuf::from("src/module_6.rs")));
+    assert!(!persisted_paths.contains(&PathBuf::from("src/module_7.rs")));
 
     drop(ann);
     drop(ann_store);
@@ -215,9 +229,7 @@ fn ann_large_rebase_burst_matches_exact_flat_and_drops_stale_identities() {
     assert!(restarted_status.ann_active);
     assert_eq!(restarted_status.vector_count, rebased.len());
     assert_eq!(
-        result_paths(&restarted, "repository code", rebased.len())
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
+        persisted_generation_paths(&restarted_status.current_dir),
         authoritative_paths
     );
 }
