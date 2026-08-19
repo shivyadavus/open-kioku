@@ -61,6 +61,26 @@ fn context_json_reports_explicit_abstention_for_no_match_query() {
         "no-match query must not invent primary context"
     );
 
+    for pointer in [
+        "/supporting_files",
+        "/dependency_edges",
+        "/runtime_signals",
+        "/test_candidates",
+        "/validation_plan/tests",
+        "/recommended_change_boundary/allowed_files",
+        "/recommended_change_boundary/caution_files",
+        "/recommended_change_boundary/forbidden_files",
+    ] {
+        let values = pack
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{pointer} array"));
+        assert!(
+            values.is_empty(),
+            "abstained no-match context must not synthesize downstream evidence at {pointer}: {values:?}"
+        );
+    }
+
     let reason = pack
         .pointer("/retrieval_diagnostics/selection/abstention_reason")
         .and_then(Value::as_str)
