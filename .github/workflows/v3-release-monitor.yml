@@ -1,4 +1,4 @@
-# Temporary V3 reproducibility probe. Do not merge.
+# Temporary V3 live-status probe. Do not merge.
 name: V3 release publication monitor
 
 on:
@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  actions: read
 
 jobs:
   verify:
@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Dispatch a fresh immutable-tag release run and report conclusion
+      - name: Report latest exact-tag release run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -29,63 +29,35 @@ jobs:
           import json
           import os
           import subprocess
-          import time
           import urllib.request
 
           repo = os.environ['GITHUB_REPOSITORY']
           token = os.environ['GH_TOKEN']
-          tag = 'v3.0.0'
-          tag_sha = subprocess.check_output(['git', 'rev-list', '-n', '1', tag], text=True).strip()
+          tag_sha = subprocess.check_output(['git', 'rev-list', '-n', '1', 'v3.0.0'], text=True).strip()
           api = f'https://api.github.com/repos/{repo}'
-          headers = {
-              'Accept': 'application/vnd.github+json',
-              'Authorization': f'Bearer {token}',
-              'X-GitHub-Api-Version': '2022-11-28',
-              'Content-Type': 'application/json',
-              'User-Agent': 'open-kioku-v3-reproducibility-probe',
-          }
-
-          def request(path, *, method='GET', body=None):
-              data = None if body is None else json.dumps(body).encode()
-              req = urllib.request.Request(api + path, data=data, method=method, headers=headers)
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  raw = response.read()
-                  return response.status, (json.loads(raw) if raw else None)
-
-          def runs():
-              _, payload = request('/actions/workflows/release.yml/runs?event=workflow_dispatch&per_page=30')
-              return [
-                  run for run in payload.get('workflow_runs', [])
-                  if run.get('head_sha') == tag_sha and run.get('event') == 'workflow_dispatch'
-              ]
-
-          before = {run['id'] for run in runs()}
-          status, _ = request(
-              '/actions/workflows/release.yml/dispatches',
-              method='POST',
-              body={'ref': tag},
+          req = urllib.request.Request(
+              api + '/actions/workflows/release.yml/runs?event=workflow_dispatch&per_page=30',
+              headers={
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': f'Bearer {token}',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'User-Agent': 'open-kioku-v3-live-status-probe',
+              },
           )
-          if status != 204:
-              raise SystemExit(f'unexpected dispatch status {status}')
-
-          run = None
-          for _ in range(40):
-              time.sleep(3)
-              fresh = [candidate for candidate in runs() if candidate['id'] not in before]
-              if fresh:
-                  run = max(fresh, key=lambda item: item['id'])
-                  break
-          if run is None:
-              raise SystemExit('dispatch returned 204 but no new V3 release run appeared')
-
-          run_id = run['id']
-          print(f'fresh V3 release run {run_id}: {run["html_url"]}', flush=True)
-          while run.get('status') != 'completed':
-              time.sleep(10)
-              _, run = request(f'/actions/runs/{run_id}')
-
-          conclusion = run.get('conclusion') or 'unknown'
-          print(f'fresh V3 release run {run_id} completed with {conclusion}', flush=True)
-          if conclusion not in {'success', 'failure'}:
-              raise SystemExit(f'unexpected V3 release conclusion: {conclusion}')
+          with urllib.request.urlopen(req, timeout=30) as response:
+              payload = json.load(response)
+          matches = [
+              run for run in payload.get('workflow_runs', [])
+              if run.get('head_sha') == tag_sha and run.get('event') == 'workflow_dispatch'
+          ]
+          if not matches:
+              raise SystemExit(f'no workflow_dispatch release run found for {tag_sha}')
+          run = max(matches, key=lambda item: item['id'])
+          print(json.dumps({
+              'id': run['id'],
+              'status': run.get('status'),
+              'conclusion': run.get('conclusion'),
+              'head_sha': run.get('head_sha'),
+              'url': run.get('html_url'),
+          }, sort_keys=True))
           PY
