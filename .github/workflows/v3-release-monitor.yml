@@ -7,6 +7,10 @@ on:
     branches: [main]
     paths:
       - .github/workflows/v3-release-monitor.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-release-monitor.yml
 
 permissions:
   contents: read
@@ -84,6 +88,7 @@ jobs:
               raise SystemExit(body)
 
           run_id = run['id']
+          print(f'V3 release run {run_id}: status={run.get("status")} conclusion={run.get("conclusion")} url={run["html_url"]}', flush=True)
           while run.get('status') != 'completed':
               time.sleep(10)
               _, run = request(f'/actions/runs/{run_id}')
