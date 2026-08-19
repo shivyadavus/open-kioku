@@ -842,11 +842,24 @@ fn select_context_units(
     diagnostics.selection.available_context_tokens = available;
 
     if budget.max_primary_files == 0 || available == 0 {
-        diagnostics.selection.omitted_due_to_budget.extend(
-            ranked
-                .iter()
-                .map(|result| format!("{}: no context budget available", result.path.display())),
-        );
+        for result in &ranked {
+            let message = format!("{}: no context budget available", result.path.display());
+            diagnostics
+                .selection
+                .omitted_due_to_budget
+                .push(message.clone());
+            let authority = retrieval_authority_for_result(diagnostics, result);
+            let sources = retrieval_sources_for_result(diagnostics, result);
+            if is_high_value_context(authority, &sources) {
+                record_high_value_omission(
+                    diagnostics,
+                    result,
+                    &format!(
+                        "high-value evidence omitted because no context capacity is available: {message}"
+                    ),
+                );
+            }
+        }
         return Vec::new();
     }
 
@@ -3233,6 +3246,195 @@ mod tests {
             context_quality_tier(Path::new("src/generated/service.rs"), &without_path_quality,),
             2
         );
+    }
+
+    #[test]
+    fn zero_available_tokens_record_exact_high_value_omission_and_render_it() {
+        let exact = SearchResult {
+            path: "src/exact.rs".into(),
+            line_range: Some(LineRange { start: 7, end: 11 }),
+            snippet: "fn exact_target() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "exact fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![RetrievalTrace {
+                path: exact.path.clone(),
+                unit_key: Some(RetrievalUnitKey::from_result(&exact)),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![exact], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert_eq!(diagnostics.selection.omitted_high_value.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value[0].contains("src/exact.rs:7-11"));
+
+        let json = serde_json::to_string(&diagnostics).unwrap();
+        assert!(json.contains("omitted_high_value"));
+        assert!(json.contains("src/exact.rs:7-11"));
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("High-value omissions:"));
+        assert!(markdown.contains("src/exact.rs:7-11"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("CONTEXT_HIGH_VALUE_OMISSION: src/exact.rs:7-11"));
+    }
+
+    #[test]
+    fn zero_primary_file_capacity_records_graph_high_value_omission() {
+        let graph = SearchResult {
+            path: "src/graph.rs".into(),
+            line_range: None,
+            snippet: "fn graph_target() {}".into(),
+            symbol: None,
+            score: 0.8,
+            match_reason: "graph fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.8,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![RetrievalTrace {
+                path: graph.path.clone(),
+                unit_key: Some(RetrievalUnitKey::from_result(&graph)),
+                fused_score: graph.score,
+                authority: RetrievalAuthority::Corroborating,
+                contributions: vec![open_kioku_core::RetrievalContribution {
+                    source: RetrievalSourceKind::Graph,
+                    rank: 1,
+                    raw_score: Some(0.8),
+                    rrf_contribution: 0.1,
+                    authority: RetrievalAuthority::Corroborating,
+                    symbol_id: None,
+                    evidence_refs: vec!["graph:edge".into()],
+                    rationale: "graph fixture".into(),
+                }],
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 1_000,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 0,
+        };
+
+        let selected = select_context_units(vec![graph], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert_eq!(diagnostics.selection.omitted_high_value.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value[0].contains("src/graph.rs"));
+    }
+
+    #[test]
+    fn zero_capacity_heuristic_candidate_is_not_marked_high_value() {
+        let heuristic = SearchResult {
+            path: "src/heuristic.rs".into(),
+            line_range: None,
+            snippet: "fn maybe_target() {}".into(),
+            symbol: None,
+            score: 0.5,
+            match_reason: "heuristic fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![heuristic], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value.is_empty());
+    }
+
+    #[test]
+    fn zero_capacity_ambiguous_legacy_path_traces_do_not_borrow_high_value_authority() {
+        let result = SearchResult {
+            path: "src/shared.rs".into(),
+            line_range: Some(LineRange { start: 3, end: 9 }),
+            snippet: "fn shared() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "ambiguous legacy fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 1.0,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                },
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 0.5,
+                    authority: RetrievalAuthority::Corroborating,
+                    contributions: vec![open_kioku_core::RetrievalContribution {
+                        source: RetrievalSourceKind::Graph,
+                        rank: 1,
+                        raw_score: Some(0.5),
+                        rrf_contribution: 0.05,
+                        authority: RetrievalAuthority::Corroborating,
+                        symbol_id: None,
+                        evidence_refs: Vec::new(),
+                        rationale: "ambiguous graph fixture".into(),
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![result], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value.is_empty());
     }
 
     #[test]
