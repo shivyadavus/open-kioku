@@ -1,1 +1,0 @@
-PR #304 exact-head validation trigger. This marker is removed immediately; it must not enter the final diff.
