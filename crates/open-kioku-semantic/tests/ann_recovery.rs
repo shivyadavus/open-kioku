@@ -162,3 +162,40 @@ fn restart_refuses_corrupt_previous_generation() {
         .iter()
         .any(|note| note.contains("recovered previous semantic generation")));
 }
+
+#[test]
+fn restart_refuses_previous_generation_with_corrupt_ann_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    persist_snapshot(repo, &store);
+    let config = semantic_config();
+
+    let manager = SemanticIndexManager::new(repo, &store, &config);
+    let report = manager.index().unwrap();
+    assert!(report.status.ready);
+    assert!(report.status.ann_active);
+
+    let vectors = repo.join(".ok/vectors");
+    let current = vectors.join("current");
+    let previous = vectors.join("previous");
+    fs::rename(&current, &previous).unwrap();
+    fs::write(previous.join("index.meta.json"), b"{not valid json").unwrap();
+    drop(manager);
+
+    let restarted = SemanticIndexManager::new(repo, &store, &config);
+    let status = restarted.status();
+    assert!(!status.ready);
+    assert_eq!(status.state, "missing");
+    assert!(!status.ann_active);
+    assert!(!current.exists());
+    assert!(previous.exists());
+    assert!(status
+        .notes
+        .iter()
+        .any(|note| note.contains("previous semantic generation is incomplete")));
+    assert!(!status
+        .notes
+        .iter()
+        .any(|note| note.contains("recovered previous semantic generation")));
+}
