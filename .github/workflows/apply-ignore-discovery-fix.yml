@@ -1,0 +1,246 @@
+name: Apply ignore discovery fix
+
+on:
+  push:
+    branches:
+      - agent/fix-gitignore-discovery
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-gitignore-discovery
+
+      - name: Patch scanner safely
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-ingest/src/lib.rs')
+          text = path.read_text()
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'pub mod imports;\n',
+              'mod git_ignore;\npub mod imports;\n',
+              'module declaration',
+          )
+
+          replace_once(
+              '''        let git_ignores = build_ignore_matcher(root, ".gitignore")?;
+        let ok_ignores = build_ignore_matcher(root, ".okignore")?;
+''',
+              '''        let git_ignored_paths = git_ignore::ignored_paths(root)?;
+        let git_ignores = if git_ignored_paths.is_none() {
+            Some(build_ignore_matcher(root, ".gitignore")?)
+        } else {
+            None
+        };
+        let ok_ignores = build_ignore_matcher(root, ".okignore")?;
+''',
+              'ignore setup',
+          )
+
+          replace_once(
+              '''            if git_ignores
+                .matched_path_or_any_parents(path, false)
+                .is_ignore()
+            {
+''',
+              '''            let git_ignored = git_ignored_paths
+                .as_ref()
+                .is_some_and(|paths| paths.contains(&rel))
+                || git_ignores
+                    .as_ref()
+                    .is_some_and(|matcher| matcher.is_ignored(path, false));
+            if git_ignored {
+''',
+              'git ignore check',
+          )
+
+          replace_once(
+              '''            if ok_ignores
+                .matched_path_or_any_parents(path, false)
+                .is_ignore()
+            {
+''',
+              '''            if ok_ignores.is_ignored(path, false) {
+''',
+              'okignore check',
+          )
+
+          replace_once(
+              '''        if fast_skipped > 0 {
+            warnings.push(format!(
+                "fast mode skipped {fast_skipped} code/example/testdata/sample path(s) from code analysis"
+            ));
+        }
+        progress.emit(
+''',
+              '''        if fast_skipped > 0 {
+            warnings.push(format!(
+                "fast mode skipped {fast_skipped} code/example/testdata/sample path(s) from code analysis"
+            ));
+        }
+        if files.is_empty() && scanned_files > 0 {
+            let source_like_files = WalkBuilder::new(root)
+                .hidden(false)
+                .git_ignore(false)
+                .git_exclude(false)
+                .parents(false)
+                .ignore(false)
+                .follow_links(false)
+                .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+                .build()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .filter(|entry| {
+                    let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+                    is_supported_code(&detect_language(rel))
+                })
+                .count();
+            if source_like_files > 0 {
+                let git_ignored = skipped_paths
+                    .iter()
+                    .filter(|path| path.source == SkipSource::GitIgnore)
+                    .count();
+                warnings.push(format!(
+                    "discovery indexed no code files from {source_like_files} source-like path(s) after scanning {scanned_files} file(s); Git ignored {git_ignored} path(s); inspect skip counts and repository ignore rules"
+                ));
+            }
+        }
+        progress.emit(
+''',
+              'zero-index warning',
+          )
+
+          old_matcher = '''fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root);
+    let direct = root.join(file_name);
+    if direct.exists() {
+        builder.add(&direct);
+    }
+    if file_name == ".gitignore" {
+        let git_exclude = root.join(".git/info/exclude");
+        if git_exclude.exists() {
+            builder.add(git_exclude);
+        }
+    }
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .parents(false)
+        .ignore(false)
+        .follow_links(false)
+        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .build()
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if entry.file_name() == file_name {
+            builder.add(entry.path());
+        }
+    }
+    builder
+        .build()
+        .map_err(|err| OkError::Config(err.to_string()))
+}
+'''
+
+          new_matcher = '''#[derive(Debug)]
+struct ScopedIgnoreMatcher {
+    layers: Vec<(PathBuf, Gitignore)>,
+}
+
+impl ScopedIgnoreMatcher {
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        let mut ignored = false;
+        for (scope, matcher) in &self.layers {
+            if !path.starts_with(scope) {
+                continue;
+            }
+            let matched = matcher.matched_path_or_any_parents(path, is_dir);
+            if matched.is_ignore() {
+                ignored = true;
+            } else if matched.is_whitelist() {
+                ignored = false;
+            }
+        }
+        ignored
+    }
+}
+
+fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatcher> {
+    let mut ignore_files = Vec::new();
+    for entry in WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_exclude(false)
+        .parents(false)
+        .ignore(false)
+        .follow_links(false)
+        .filter_entry(|entry| !is_heavy_discovery_dir(entry.path()))
+        .build()
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_some_and(|kind| kind.is_file())
+            && entry.file_name() == file_name
+        {
+            ignore_files.push(entry.path().to_path_buf());
+        }
+    }
+
+    ignore_files.sort_by(|left, right| {
+        let left_depth = left.parent().map(|path| path.components().count()).unwrap_or(0);
+        let right_depth = right.parent().map(|path| path.components().count()).unwrap_or(0);
+        left_depth.cmp(&right_depth).then_with(|| left.cmp(right))
+    });
+
+    let mut layers = Vec::with_capacity(ignore_files.len());
+    for ignore_file in ignore_files {
+        let scope = ignore_file.parent().unwrap_or(root).to_path_buf();
+        let mut builder = GitignoreBuilder::new(&scope);
+        if let Some(err) = builder.add(&ignore_file) {
+            return Err(OkError::Config(err.to_string()));
+        }
+        let matcher = builder
+            .build()
+            .map_err(|err| OkError::Config(err.to_string()))?;
+        layers.push((scope, matcher));
+    }
+    Ok(ScopedIgnoreMatcher { layers })
+}
+'''
+          replace_once(old_matcher, new_matcher, 'scoped matcher')
+
+          path.write_text(text)
+          PY
+
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/open-kioku-ingest/src/lib.rs
+          git commit -m 'fix: honor scoped repository ignore semantics'
+          git push origin HEAD:agent/fix-gitignore-discovery
