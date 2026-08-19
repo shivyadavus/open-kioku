@@ -1,0 +1,64 @@
+name: V3 Windows reproducibility probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/v3-windows-brepro-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [a, b]
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C link-arg=/Brepro
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v3.0.0
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-pc-windows-msvc
+      - name: Build exact V3 payload with reproducible linker mode
+        shell: bash
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p open-kioku-cli
+      - name: Package and hash
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/ok.exe dist/ok-windows-x86_64.exe
+          sha256sum dist/ok-windows-x86_64.exe > dist/ok-windows-x86_64.exe.sha256
+          cat dist/ok-windows-x86_64.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-brepro-${{ matrix.replica }}
+          path: dist/*
+          if-no-files-found: error
+
+  compare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-brepro-*
+          path: dist
+      - name: Require byte-identical independent Windows builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t bins < <(find dist -type f -name 'ok-windows-x86_64.exe' | sort)
+          test "${#bins[@]}" -eq 2
+          left="$(sha256sum "${bins[0]}" | awk '{print $1}')"
+          right="$(sha256sum "${bins[1]}" | awk '{print $1}')"
+          printf 'replica-a/b hashes: %s %s\n' "$left" "$right"
+          test "$left" = "$right"
