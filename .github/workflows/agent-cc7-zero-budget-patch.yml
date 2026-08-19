@@ -1,0 +1,273 @@
+name: Agent CC7 zero-budget patch
+
+on:
+  push:
+    branches:
+      - agent/cc7-zero-budget-omission-telemetry
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply focused production and regression patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-context/src/lib.rs')
+          text = path.read_text()
+
+          old = '''    if budget.max_primary_files == 0 || available == 0 {
+        diagnostics.selection.omitted_due_to_budget.extend(
+            ranked
+                .iter()
+                .map(|result| format!("{}: no context budget available", result.path.display())),
+        );
+        return Vec::new();
+    }
+'''
+          new = '''    if budget.max_primary_files == 0 || available == 0 {
+        for result in &ranked {
+            let message = format!("{}: no context budget available", result.path.display());
+            diagnostics
+                .selection
+                .omitted_due_to_budget
+                .push(message.clone());
+            let authority = retrieval_authority_for_result(diagnostics, result);
+            let sources = retrieval_sources_for_result(diagnostics, result);
+            if is_high_value_context(authority, &sources) {
+                record_high_value_omission(
+                    diagnostics,
+                    result,
+                    &format!(
+                        "high-value evidence omitted because no context capacity is available: {message}"
+                    ),
+                );
+            }
+        }
+        return Vec::new();
+    }
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one zero-capacity selection block, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          anchor = '''    #[test]
+    fn token_budget_prevents_one_large_heuristic_unit_from_monopolizing_context() {
+'''
+          tests = r'''    #[test]
+    fn zero_available_tokens_record_exact_high_value_omission_and_render_it() {
+        let exact = SearchResult {
+            path: "src/exact.rs".into(),
+            line_range: Some(LineRange { start: 7, end: 11 }),
+            snippet: "fn exact_target() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "exact fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["symbol:exact".into()],
+            confidence: 1.0,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![RetrievalTrace {
+                path: exact.path.clone(),
+                unit_key: Some(RetrievalUnitKey::from_result(&exact)),
+                fused_score: exact.score,
+                authority: RetrievalAuthority::Exact,
+                contributions: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![exact], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert_eq!(diagnostics.selection.omitted_high_value.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value[0].contains("src/exact.rs:7-11"));
+
+        let json = serde_json::to_string(&diagnostics).unwrap();
+        assert!(json.contains("omitted_high_value"));
+        assert!(json.contains("src/exact.rs:7-11"));
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("High-value omissions:"));
+        assert!(markdown.contains("src/exact.rs:7-11"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("CONTEXT_HIGH_VALUE_OMISSION: src/exact.rs:7-11"));
+    }
+
+    #[test]
+    fn zero_primary_file_capacity_records_graph_high_value_omission() {
+        let graph = SearchResult {
+            path: "src/graph.rs".into(),
+            line_range: None,
+            snippet: "fn graph_target() {}".into(),
+            symbol: None,
+            score: 0.8,
+            match_reason: "graph fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.8,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![RetrievalTrace {
+                path: graph.path.clone(),
+                unit_key: Some(RetrievalUnitKey::from_result(&graph)),
+                fused_score: graph.score,
+                authority: RetrievalAuthority::Corroborating,
+                contributions: vec![open_kioku_core::RetrievalContribution {
+                    source: RetrievalSourceKind::Graph,
+                    rank: 1,
+                    raw_score: Some(0.8),
+                    rrf_contribution: 0.1,
+                    authority: RetrievalAuthority::Corroborating,
+                    symbol_id: None,
+                    evidence_refs: vec!["graph:edge".into()],
+                    rationale: "graph fixture".into(),
+                }],
+            }],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 1_000,
+            reserve_for_instructions: 100,
+            reserve_for_validation: 100,
+            max_per_file: 2,
+            max_primary_files: 0,
+        };
+
+        let selected = select_context_units(vec![graph], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert_eq!(diagnostics.selection.omitted_high_value.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value[0].contains("src/graph.rs"));
+    }
+
+    #[test]
+    fn zero_capacity_heuristic_candidate_is_not_marked_high_value() {
+        let heuristic = SearchResult {
+            path: "src/heuristic.rs".into(),
+            line_range: None,
+            snippet: "fn maybe_target() {}".into(),
+            symbol: None,
+            score: 0.5,
+            match_reason: "heuristic fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![heuristic], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value.is_empty());
+    }
+
+    #[test]
+    fn zero_capacity_ambiguous_legacy_path_traces_do_not_borrow_high_value_authority() {
+        let result = SearchResult {
+            path: "src/shared.rs".into(),
+            line_range: Some(LineRange { start: 3, end: 9 }),
+            snippet: "fn shared() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "ambiguous legacy fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut diagnostics = RetrievalDiagnostics {
+            traces: vec![
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 1.0,
+                    authority: RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                },
+                RetrievalTrace {
+                    path: result.path.clone(),
+                    unit_key: None,
+                    fused_score: 0.5,
+                    authority: RetrievalAuthority::Corroborating,
+                    contributions: vec![open_kioku_core::RetrievalContribution {
+                        source: RetrievalSourceKind::Graph,
+                        rank: 1,
+                        raw_score: Some(0.5),
+                        rrf_contribution: 0.05,
+                        authority: RetrievalAuthority::Corroborating,
+                        symbol_id: None,
+                        evidence_refs: Vec::new(),
+                        rationale: "ambiguous graph fixture".into(),
+                    }],
+                },
+            ],
+            ..Default::default()
+        };
+        let budget = ContextBudget {
+            max_tokens: 100,
+            reserve_for_instructions: 50,
+            reserve_for_validation: 50,
+            max_per_file: 2,
+            max_primary_files: 4,
+        };
+
+        let selected = select_context_units(vec![result], &budget, &mut diagnostics);
+
+        assert!(selected.is_empty());
+        assert_eq!(diagnostics.selection.omitted_due_to_budget.len(), 1);
+        assert!(diagnostics.selection.omitted_high_value.is_empty());
+    }
+
+'''
+          if text.count(anchor) != 1:
+              raise SystemExit(f'expected exactly one token-budget test anchor, found {text.count(anchor)}')
+          text = text.replace(anchor, tests + anchor, 1)
+          path.write_text(text)
+      - name: Format and focused tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-context zero_available_tokens_record_exact_high_value_omission_and_render_it
+          cargo test -p open-kioku-context zero_primary_file_capacity_records_graph_high_value_omission
+          cargo test -p open-kioku-context zero_capacity_heuristic_candidate_is_not_marked_high_value
+          cargo test -p open-kioku-context zero_capacity_ambiguous_legacy_path_traces_do_not_borrow_high_value_authority
+      - name: Finalize branch without temporary workflow
+        run: |
+          rm .github/workflows/agent-cc7-zero-budget-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- crates/open-kioku-context/src/lib.rs .github/workflows/agent-cc7-zero-budget-patch.yml
+          git commit -m "fix(cc7): report high-value omissions at zero context capacity"
+          git push origin HEAD:agent/cc7-zero-budget-omission-telemetry
