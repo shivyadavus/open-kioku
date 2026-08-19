@@ -256,9 +256,7 @@ fn ann_rapid_rewrites_fail_closed_and_never_accumulate_stale_vectors() {
 
     for revision in 1..=12 {
         let commit = format!("rewrite-{revision}");
-        let text = format!(
-            "pub fn rewrite_token_{revision}() {{ rewrite_token_{revision}(); }}"
-        );
+        let text = format!("pub fn rewrite_token_{revision}() {{ rewrite_token_{revision}(); }}");
         let content_hash = format!("hot-v{revision}");
         persist_snapshot(
             repo,
@@ -273,7 +271,10 @@ fn ann_rapid_rewrites_fail_closed_and_never_accumulate_stale_vectors() {
         );
 
         let stale = manager.status();
-        assert!(stale.stale, "revision {revision} must invalidate the old ANN generation");
+        assert!(
+            stale.stale,
+            "revision {revision} must invalidate the old ANN generation"
+        );
         assert!(!stale.ready);
         assert!(!stale.ann_active);
         assert!(manager.search("rewrite token", 10).is_err());
