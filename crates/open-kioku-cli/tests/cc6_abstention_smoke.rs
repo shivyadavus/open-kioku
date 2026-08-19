@@ -52,7 +52,10 @@ fn context_json_reports_explicit_abstention_for_no_match_query() {
         .pointer("/primary_files")
         .and_then(Value::as_array)
         .expect("primary_files array");
-    assert!(primary.is_empty(), "no-match query must not invent primary context");
+    assert!(
+        primary.is_empty(),
+        "no-match query must not invent primary context"
+    );
 
     let reason = pack
         .pointer("/retrieval_diagnostics/selection/abstention_reason")
