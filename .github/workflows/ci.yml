@@ -26,6 +26,9 @@ jobs:
           new = "        // Materialize the caller-visible primary selection once. Downstream authority must be\n        // derived only from evidence that survived the primary limit; hidden retrieval candidates\n        // cannot widen symbols, dependency seeds, or the allowed edit boundary.\n        let mut primary_files = bounded_primary_results(primary, limit);\n        let primary_symbols = primary_files\n            .iter()\n            .filter_map(|result| result.symbol.clone())\n            .take(10)\n            .collect::<Vec<_>>();\n        let impact = if expand_impact {\n            if let Some(first) = primary_files.first() {\n"
           if old not in text: raise SystemExit("primary symbol anchor missing")
           text = text.replace(old, new, 1)
+          old = "        } else if primary.is_empty() {\n"
+          if old not in text: raise SystemExit("impact emptiness anchor missing")
+          text = text.replace(old, "        } else if primary_files.is_empty() {\n", 1)
           old = "        for result in primary.iter().take(5) {\n"
           if old not in text: raise SystemExit("dependency anchor missing")
           text = text.replace(old, "        for result in primary_files.iter().take(5) {\n", 1)
