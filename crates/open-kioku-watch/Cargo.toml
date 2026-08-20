@@ -12,16 +12,16 @@ categories.workspace = true
 
 [dependencies]
 notify.workspace = true
-open-kioku-config = { version = "3.0.0", path = "../open-kioku-config" }
-open-kioku-graph = { version = "3.0.0", path = "../open-kioku-graph" }
-open-kioku-ingest = { version = "3.0.0", path = "../open-kioku-ingest" }
-open-kioku-search-tantivy = { version = "3.0.0", path = "../open-kioku-search-tantivy" }
-open-kioku-semantic = { version = "3.0.0", path = "../open-kioku-semantic" }
-open-kioku-storage = { version = "3.0.0", path = "../open-kioku-storage" }
-open-kioku-storage-sqlite = { version = "3.0.0", path = "../open-kioku-storage-sqlite" }
-open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
+open-kioku-config = { version = "3.0.2", path = "../open-kioku-config" }
+open-kioku-graph = { version = "3.0.2", path = "../open-kioku-graph" }
+open-kioku-ingest = { version = "3.0.2", path = "../open-kioku-ingest" }
+open-kioku-search-tantivy = { version = "3.0.2", path = "../open-kioku-search-tantivy" }
+open-kioku-semantic = { version = "3.0.2", path = "../open-kioku-semantic" }
+open-kioku-storage = { version = "3.0.2", path = "../open-kioku-storage" }
+open-kioku-storage-sqlite = { version = "3.0.2", path = "../open-kioku-storage-sqlite" }
+open-kioku-errors = { version = "3.0.2", path = "../open-kioku-errors" }
 
 [dev-dependencies]
-open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
+open-kioku-core = { version = "3.0.2", path = "../open-kioku-core" }
 tempfile.workspace = true
 toml.workspace = true

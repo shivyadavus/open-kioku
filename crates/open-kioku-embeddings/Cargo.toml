@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
+open-kioku-errors = { version = "3.0.2", path = "../open-kioku-errors" }
 candle-core.workspace = true
 fastembed.workspace = true
 
