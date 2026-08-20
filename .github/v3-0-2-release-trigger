@@ -2,3 +2,4 @@ Trigger immutable v3.0.2 cumulative hotfix publication from the current mainline
 Re-dispatch after the publication workflow landed on main.
 Re-dispatch publication after verifying the workflow is present on the default branch.
 Dispatch through the stable hotfix PR dispatcher now present on main.
+Execute through the generic release orchestrator merged on main.
