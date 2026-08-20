@@ -10,6 +10,7 @@ if [[ ! -x "$OK_BIN" ]]; then
 fi
 
 "$ROOT/scripts/verify-npm-package.sh"
+bash "$ROOT/scripts/test-wait-for-npm-version.sh"
 "$ROOT/scripts/publish-crates.sh" --preflight
 
 rm -rf "$SMOKE_REPO"
