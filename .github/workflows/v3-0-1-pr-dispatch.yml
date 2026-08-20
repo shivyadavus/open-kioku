@@ -1,0 +1,87 @@
+name: V3.0.1 hotfix PR dispatcher
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/v3-0-1-release-trigger
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: v3-0-1-pr-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch V3.0.1 hotfix publication and wait
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GH_TOKEN']
+          workflow = 'v3-0-1-hotfix-publish.yml'
+          api = f'https://api.github.com/repos/{repo}'
+          headers = {
+              'Accept': 'application/vnd.github+json',
+              'Authorization': f'Bearer {token}',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+              'User-Agent': 'open-kioku-v301-pr-dispatch',
+          }
+
+          def request(path, *, method='GET', body=None):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(api + path, data=data, method=method, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  raw = response.read()
+                  return response.status, json.loads(raw) if raw else None
+
+          def runs():
+              _, payload = request(f'/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=30')
+              return payload.get('workflow_runs', [])
+
+          before = {run['id'] for run in runs()}
+          status, _ = request(
+              f'/actions/workflows/{workflow}/dispatches',
+              method='POST',
+              body={'ref': 'main'},
+          )
+          if status != 204:
+              raise SystemExit(f'unexpected dispatch status: {status}')
+
+          run = None
+          for _ in range(60):
+              time.sleep(3)
+              fresh = [item for item in runs() if item['id'] not in before]
+              if fresh:
+                  run = max(fresh, key=lambda item: item['id'])
+                  break
+          if run is None:
+              raise SystemExit('hotfix dispatch succeeded but no workflow run appeared')
+
+          print(f"V3.0.1 hotfix run: {run['html_url']}")
+          run_id = run['id']
+          while run.get('status') != 'completed':
+              time.sleep(15)
+              _, run = request(f'/actions/runs/{run_id}')
+
+          conclusion = run.get('conclusion') or 'unknown'
+          print(f'V3.0.1 hotfix conclusion: {conclusion}')
+          if conclusion != 'success':
+              raise SystemExit(f"V3.0.1 hotfix failed: {run['html_url']}")
+          PY
