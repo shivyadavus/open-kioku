@@ -1,7 +1,8 @@
 use open_kioku_core::{
     ChangeBoundary, CompressedContextPack, ConfidenceBreakdown, ContextHandle, ContextPack,
     Evidence, EvidenceQuality, LineRange, MemorySearchResult, NegativeEvidence, PlanReport,
-    RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget, ToolCallRecommendation,
+    RetrievalDiagnostics, RuntimeSignal, ScoreComponent, SearchResult, Symbol, TestTarget,
+    ToolCallRecommendation,
 };
 use std::path::PathBuf;
 
@@ -13,6 +14,7 @@ pub fn render_context_pack_toon(pack: &ContextPack) -> String {
     push_kv(&mut out, 0, "intent", &pack.intent);
     push_kv(&mut out, 0, "confidence_summary", &pack.confidence_summary);
     push_confidence_breakdown(&mut out, &pack.confidence_breakdown);
+    push_retrieval_diagnostics(&mut out, &pack.retrieval_diagnostics);
     push_search_results(&mut out, "primary_context", &pack.primary_files);
     push_search_results(&mut out, "supporting_impact", &pack.supporting_files);
     push_runtime_signals(&mut out, &pack.runtime_signals);
@@ -24,6 +26,126 @@ pub fn render_context_pack_toon(pack: &ContextPack) -> String {
     );
     push_evidence(&mut out, &pack.evidence);
     out
+}
+
+fn has_retrieval_trust_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
+    let selection = &diagnostics.selection;
+    !selection.source_stream_mix.is_empty()
+        || selection.exact_evidence_count > 0
+        || selection.ambiguity_unresolved_count > 0
+        || selection.unattributed_selected_file_count > 0
+        || selection.retrieval_confidence.is_some()
+        || selection.abstention_reason.is_some()
+        || !selection.omitted_high_value.is_empty()
+}
+
+fn push_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+    let has_trust_telemetry = has_retrieval_trust_telemetry(diagnostics);
+    if diagnostics.sources_attempted.is_empty()
+        && diagnostics.sources_succeeded.is_empty()
+        && diagnostics.routing.reasons.is_empty()
+        && diagnostics.caveats.is_empty()
+        && diagnostics.selection.caveats.is_empty()
+        && !has_trust_telemetry
+    {
+        return;
+    }
+
+    out.push_str("retrieval:\n");
+    push_kv(
+        out,
+        1,
+        "task_family",
+        format!("{:?}", diagnostics.routing.task_family),
+    );
+    push_kv(
+        out,
+        1,
+        "routing_confidence",
+        format!("{:.3}", diagnostics.routing.confidence),
+    );
+    push_string_list(out, 1, "routing_reasons", &diagnostics.routing.reasons);
+
+    let attempted_sources = diagnostics
+        .sources_attempted
+        .iter()
+        .map(|source| format!("{source:?}"))
+        .collect::<Vec<_>>();
+    let succeeded_sources = diagnostics
+        .sources_succeeded
+        .iter()
+        .map(|source| format!("{source:?}"))
+        .collect::<Vec<_>>();
+    push_string_list(out, 1, "attempted_sources", &attempted_sources);
+    push_string_list(out, 1, "succeeded_sources", &succeeded_sources);
+
+    if diagnostics.selection.budget.max_tokens > 0 {
+        push_kv(
+            out,
+            1,
+            "budget_tokens",
+            diagnostics.selection.budget.max_tokens,
+        );
+        push_kv(
+            out,
+            1,
+            "available_context_tokens",
+            diagnostics.selection.available_context_tokens,
+        );
+        push_kv(
+            out,
+            1,
+            "selected_tokens_estimate",
+            diagnostics.selection.estimated_tokens_selected,
+        );
+    }
+
+    if has_trust_telemetry {
+        out.push_str(&format!(
+            "  source_stream_mix[{}]{{source,selected_file_count}}:\n",
+            diagnostics.selection.source_stream_mix.len()
+        ));
+        for entry in &diagnostics.selection.source_stream_mix {
+            out.push_str("    ");
+            out.push_str(&cell(&format!("{:?}", entry.source)));
+            out.push_str(" | ");
+            out.push_str(&entry.selected_file_count.to_string());
+            out.push('\n');
+        }
+        push_kv(
+            out,
+            1,
+            "exact_evidence_count",
+            diagnostics.selection.exact_evidence_count,
+        );
+        push_kv(
+            out,
+            1,
+            "ambiguity_unresolved_count",
+            diagnostics.selection.ambiguity_unresolved_count,
+        );
+        push_kv(
+            out,
+            1,
+            "unattributed_selected_file_count",
+            diagnostics.selection.unattributed_selected_file_count,
+        );
+        if let Some(confidence) = diagnostics.selection.retrieval_confidence {
+            push_kv(out, 1, "retrieval_confidence", format!("{confidence:?}"));
+        }
+        if let Some(reason) = &diagnostics.selection.abstention_reason {
+            push_kv(out, 1, "abstention_reason", reason);
+        }
+        push_string_list(
+            out,
+            1,
+            "omitted_high_value",
+            &diagnostics.selection.omitted_high_value,
+        );
+    }
+
+    push_string_list(out, 1, "caveats", &diagnostics.caveats);
+    push_string_list(out, 1, "selection_caveats", &diagnostics.selection.caveats);
 }
 
 pub fn render_compressed_context_toon(pack: &CompressedContextPack) -> String {
@@ -567,8 +689,45 @@ mod tests {
     use chrono::Utc;
     use open_kioku_core::{
         ChangeBoundary, Confidence, ContextHandleId, EvidenceId, EvidenceSourceType, FileRange,
-        ImpactReport, RiskReport, ScoreComponent,
+        ImpactReport, RetrievalSourceCount, RetrievalSourceKind, RiskReport, ScoreComponent,
     };
+
+    #[test]
+    fn default_retrieval_diagnostics_stay_compact() {
+        let mut out = String::new();
+        push_retrieval_diagnostics(&mut out, &RetrievalDiagnostics::default());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn renders_fail_closed_retrieval_telemetry_in_toon() {
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.selection.abstention_reason = Some("no_task_relevant_candidates".into());
+        diagnostics.selection.omitted_high_value = vec!["exact candidate omitted".into()];
+        diagnostics.selection.ambiguity_unresolved_count = 2;
+        diagnostics.selection.unattributed_selected_file_count = 1;
+        diagnostics.selection.retrieval_confidence = Some(Confidence::Low);
+        diagnostics.selection.source_stream_mix = vec![RetrievalSourceCount {
+            source: RetrievalSourceKind::Lexical,
+            selected_file_count: 1,
+        }];
+        diagnostics.caveats = vec!["ambiguous target".into()];
+        diagnostics.selection.caveats = vec!["unresolved selection".into()];
+
+        let mut out = String::new();
+        push_retrieval_diagnostics(&mut out, &diagnostics);
+
+        assert!(out.contains("retrieval:"));
+        assert!(out.contains("abstention_reason: no_task_relevant_candidates"));
+        assert!(out.contains("omitted_high_value[1]{text}:"));
+        assert!(out.contains("exact candidate omitted"));
+        assert!(out.contains("ambiguity_unresolved_count: 2"));
+        assert!(out.contains("unattributed_selected_file_count: 1"));
+        assert!(out.contains("retrieval_confidence: Low"));
+        assert!(out.contains("source_stream_mix[1]{source,selected_file_count}:"));
+        assert!(out.contains("Lexical | 1"));
+        assert!(out.contains("selection_caveats[1]{text}:"));
+    }
 
     #[test]
     fn renders_compressed_context_as_columnar_toon() {
