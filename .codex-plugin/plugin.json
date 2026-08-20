@@ -1,6 +1,6 @@
 {
   "name": "open-kioku",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Local-first code intelligence for AI agents — code search, symbol resolution, impact analysis, dependency graphs, and context packs from a local Open Kioku index. No hosted index or embeddings API required.",
   "author": {
     "name": "Shiv Yadav",
