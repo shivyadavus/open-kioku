@@ -104,7 +104,7 @@ PY
     scripts/validate-versions.sh
     cargo test -p open-kioku-ingest git_is_authoritative_for_nested_scope_and_tracked_files
     cargo test -p open-kioku-ingest batched_check_drains_large_git_output_without_deadlocking
-    cargo test -p open-kioku-ingest --test discovery_acceptance
+    cargo test -p open-kioku-ingest --test ignore_discovery
 
     git config user.name 'github-actions[bot]'
     git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
