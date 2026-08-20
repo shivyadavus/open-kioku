@@ -19,65 +19,46 @@ jobs:
   dispatch-and-verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Dispatch immutable V3 release workflow and verify conclusion
+      - name: Dispatch V3.0.1 hotfix publication and verify conclusion
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git fetch --force --tags origin
-          tag=v3.0.0
-          tag_sha="$(git rev-list -n 1 "$tag")"
-          test -n "$tag_sha"
-
           python3 - <<'PY'
           import json
           import os
-          import subprocess
           import time
           import urllib.request
 
           repo = os.environ['GITHUB_REPOSITORY']
           token = os.environ['GH_TOKEN']
-          tag = 'v3.0.0'
-          tag_sha = subprocess.check_output(
-              ['git', 'rev-list', '-n', '1', tag], text=True
-          ).strip()
+          workflow = 'v3-0-1-hotfix-publish.yml'
           api = f'https://api.github.com/repos/{repo}'
           headers = {
               'Accept': 'application/vnd.github+json',
               'Authorization': f'Bearer {token}',
               'X-GitHub-Api-Version': '2022-11-28',
               'Content-Type': 'application/json',
-              'User-Agent': 'open-kioku-v3-publication-dispatch',
+              'User-Agent': 'open-kioku-v3-0-1-hotfix-dispatch',
           }
 
           def request(path, *, method='GET', body=None):
               data = None if body is None else json.dumps(body).encode()
-              req = urllib.request.Request(
-                  api + path, data=data, method=method, headers=headers
-              )
+              req = urllib.request.Request(api + path, data=data, method=method, headers=headers)
               with urllib.request.urlopen(req, timeout=30) as response:
                   raw = response.read()
                   return response.status, json.loads(raw) if raw else None
 
-          def matching_runs():
-              _, payload = request('/actions/workflows/release.yml/runs?event=workflow_dispatch&per_page=30')
-              return [
-                  run for run in payload.get('workflow_runs', [])
-                  if run.get('head_sha') == tag_sha
-                  and run.get('event') == 'workflow_dispatch'
-              ]
+          def runs():
+              _, payload = request(f'/actions/workflows/{workflow}/runs?event=workflow_dispatch&per_page=30')
+              return payload.get('workflow_runs', [])
 
-          before = {run['id'] for run in matching_runs()}
+          before = {run['id'] for run in runs()}
           status, _ = request(
-              '/actions/workflows/release.yml/dispatches',
+              f'/actions/workflows/{workflow}/dispatches',
               method='POST',
-              body={'ref': tag},
+              body={'ref': 'main'},
           )
           if status != 204:
               raise SystemExit(f'unexpected dispatch status: {status}')
@@ -85,27 +66,21 @@ jobs:
           run = None
           for _ in range(40):
               time.sleep(3)
-              fresh = [run for run in matching_runs() if run['id'] not in before]
+              fresh = [item for item in runs() if item['id'] not in before]
               if fresh:
                   run = max(fresh, key=lambda item: item['id'])
                   break
           if run is None:
-              raise SystemExit('release workflow dispatch succeeded but no new V3 run appeared')
+              raise SystemExit('hotfix dispatch succeeded but no workflow run appeared')
 
           run_id = run['id']
-          run_url = run['html_url']
-          print(f'V3 release run: {run_url}')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(f'V3 release run: {run_url}\n')
-
+          print(f"V3.0.1 hotfix run: {run['html_url']}")
           while run.get('status') != 'completed':
-              time.sleep(10)
+              time.sleep(15)
               _, run = request(f'/actions/runs/{run_id}')
 
           conclusion = run.get('conclusion') or 'unknown'
-          print(f'V3 release conclusion: {conclusion}')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(f'V3 release conclusion: {conclusion}\n')
+          print(f'V3.0.1 hotfix conclusion: {conclusion}')
           if conclusion != 'success':
-              raise SystemExit(f'V3 release workflow failed: {run_url}')
+              raise SystemExit(f"V3.0.1 hotfix failed: {run['html_url']}")
           PY
