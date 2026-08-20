@@ -165,7 +165,7 @@ jobs:
         with:
           toolchain: 1.97.1
 
-      - name: Generate release trust artifacts
+      - name: Generate SHA256SUMS SBOM.cargo-metadata.json PROVENANCE.json THIRD_PARTY_NOTICES.md
         shell: bash
         run: |
           set -euo pipefail
