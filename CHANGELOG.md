@@ -9,6 +9,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [3.0.1] — 2026-08-19
+
+### Fixed
+- Fixed repository discovery so nested `.gitignore` rules stay scoped to their declaring directory instead of excluding unrelated source trees.
+- Made Git authoritative for ignore decisions in Git repositories, preserving tracked-file semantics, nested negation, and standard Git excludes.
+- Scoped nested `.okignore` rules correctly, protected large ignore batches from pipe deadlocks, and added a warning when filtering collapses a supported-source index to zero.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [3.0.0] — 2026-08-17
 
 ### Added
@@ -416,3 +435,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 [0.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.0
 
 [3.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.0
+[3.0.1]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.1

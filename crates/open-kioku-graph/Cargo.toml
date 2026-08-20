@@ -12,9 +12,9 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
-open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
-open-kioku-storage = { version = "3.0.0", path = "../open-kioku-storage" }
+open-kioku-core = { version = "3.0.1", path = "../open-kioku-core" }
+open-kioku-errors = { version = "3.0.1", path = "../open-kioku-errors" }
+open-kioku-storage = { version = "3.0.1", path = "../open-kioku-storage" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
