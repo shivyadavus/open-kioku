@@ -251,10 +251,24 @@ fn refresh_context_pack_retrieval_telemetry(
     }
 }
 
+fn has_selection_retrieval_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
+    let selection = &diagnostics.selection;
+    selection.budget.max_tokens > 0
+        || !selection.source_stream_mix.is_empty()
+        || selection.exact_evidence_count > 0
+        || selection.ambiguity_unresolved_count > 0
+        || selection.unattributed_selected_file_count > 0
+        || selection.retrieval_confidence.is_some()
+        || selection.abstention_reason.is_some()
+        || !selection.omitted_high_value.is_empty()
+}
+
 fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+    let has_selection_telemetry = has_selection_retrieval_telemetry(diagnostics);
     if diagnostics.sources_attempted.is_empty()
         && diagnostics.caveats.is_empty()
         && diagnostics.selection.caveats.is_empty()
+        && !has_selection_telemetry
     {
         return;
     }
@@ -285,6 +299,8 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             diagnostics.selection.available_context_tokens,
             diagnostics.selection.estimated_tokens_selected
         ));
+    }
+    if has_selection_telemetry {
         if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
@@ -370,6 +386,8 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
             diagnostics.selection.available_context_tokens,
             diagnostics.selection.estimated_tokens_selected
         ));
+    }
+    if has_selection_retrieval_telemetry(diagnostics) {
         if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
@@ -2928,6 +2946,83 @@ mod tests {
                 .map(|entry| entry.selected_file_count),
             Some(1)
         );
+    }
+
+    #[test]
+    fn zero_token_renderers_preserve_fail_closed_selection_telemetry() {
+        let diagnostics = RetrievalDiagnostics {
+            selection: open_kioku_core::ContextSelectionDiagnostics {
+                budget: ContextBudget {
+                    max_tokens: 0,
+                    ..ContextBudget::from_file_limit(4)
+                },
+                exact_evidence_count: 1,
+                ambiguity_unresolved_count: 2,
+                retrieval_confidence: Some(Confidence::Low),
+                abstention_reason: Some("no_candidate_fit_context_selection".into()),
+                omitted_high_value: vec![
+                    "src/high_value.rs:10-20 exact evidence omitted by zero-token budget".into(),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("Abstention reason: `no_candidate_fit_context_selection`"));
+        assert!(markdown.contains("High-value omissions:"));
+        assert!(markdown
+            .contains("src/high_value.rs:10-20 exact evidence omitted by zero-token budget"));
+        assert!(markdown.contains("Retrieval confidence: `Low`"));
+        assert!(
+            markdown.contains("Exact-evidence selections: `1`; ambiguity/unresolved signals: `2`")
+        );
+        assert!(!markdown.contains("Context budget:"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("RETRIEVAL_ABSTENTION_REASON: no_candidate_fit_context_selection"));
+        assert!(prompt.contains(
+            "CONTEXT_HIGH_VALUE_OMISSION: src/high_value.rs:10-20 exact evidence omitted by zero-token budget"
+        ));
+        assert!(prompt.contains("RETRIEVAL_CONFIDENCE: Low"));
+        assert!(prompt.contains("RETRIEVAL_EXACT_EVIDENCE_COUNT: 1"));
+        assert!(prompt.contains("RETRIEVAL_AMBIGUITY_UNRESOLVED_COUNT: 2"));
+        assert!(!prompt.contains("CONTEXT_BUDGET:"));
+    }
+
+    #[test]
+    fn positive_budget_renderers_keep_budget_summary_and_selection_telemetry() {
+        let diagnostics = RetrievalDiagnostics {
+            selection: open_kioku_core::ContextSelectionDiagnostics {
+                budget: ContextBudget {
+                    max_tokens: 1_000,
+                    reserve_for_instructions: 100,
+                    reserve_for_validation: 100,
+                    ..ContextBudget::from_file_limit(4)
+                },
+                available_context_tokens: 800,
+                exact_evidence_count: 1,
+                retrieval_confidence: Some(Confidence::High),
+                abstention_reason: Some("positive_budget_control".into()),
+                omitted_high_value: vec!["control omission".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(markdown.contains("Context budget: `1000` tokens (`800` available after reserves)"));
+        assert!(markdown.contains("Abstention reason: `positive_budget_control`"));
+        assert!(markdown.contains("control omission"));
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(prompt.contains("CONTEXT_BUDGET: max=1000 available=800"));
+        assert!(prompt.contains("RETRIEVAL_ABSTENTION_REASON: positive_budget_control"));
+        assert!(prompt.contains("CONTEXT_HIGH_VALUE_OMISSION: control omission"));
     }
 
     #[test]
