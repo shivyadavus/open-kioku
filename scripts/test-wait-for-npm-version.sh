@@ -33,7 +33,7 @@ FAKE_NPM_EXPECTED_VERSION=9.8.7 \
 NPM_BIN="$TMP/npm" \
 NPM_VIEW_ATTEMPTS=4 \
 NPM_VIEW_DELAY_SECONDS=0 \
-  "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7
+  bash "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7
 
 test "$(cat "$STATE")" = "3"
 
@@ -45,7 +45,7 @@ FAKE_NPM_EXPECTED_VERSION=9.8.7 \
 NPM_BIN="$TMP/npm" \
 NPM_VIEW_ATTEMPTS=2 \
 NPM_VIEW_DELAY_SECONDS=0 \
-  "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7 >"$TMP/exhaust.out" 2>"$TMP/exhaust.err"
+  bash "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7 >"$TMP/exhaust.out" 2>"$TMP/exhaust.err"
 status=$?
 set -e
 if [[ "$status" -eq 0 ]]; then
@@ -56,7 +56,7 @@ grep -q "Timed out waiting for open-kioku@9.8.7" "$TMP/exhaust.err"
 test "$(cat "$STATE")" = "2"
 
 set +e
-NPM_VIEW_ATTEMPTS=0 "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7 >"$TMP/invalid.out" 2>"$TMP/invalid.err"
+NPM_VIEW_ATTEMPTS=0 bash "$ROOT/scripts/wait-for-npm-version.sh" open-kioku 9.8.7 >"$TMP/invalid.out" 2>"$TMP/invalid.err"
 status=$?
 set -e
 if [[ "$status" -ne 2 ]]; then
