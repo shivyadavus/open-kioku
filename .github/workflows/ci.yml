@@ -17,9 +17,71 @@ jobs:
           ref: agent/cc7-bounded-primary-authority
           fetch-depth: 0
       - name: Apply production patch
+        shell: python
         run: |
-          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnBhdGggPSBQYXRoKCJjcmF0ZXMvb3Blbi1raW9rdS1jb250ZXh0L3NyYy9saWIucnMiKQp0ZXh0ID0gcGF0aC5yZWFkX3RleHQoKQpyZXBsYWNlbWVudHMgPSBbCigoIiIiICAgICAgICBsZXQgcHJpbWFyeV9zeW1ib2xzID0gcHJpbWFyeQogICAgICAgICAgICAuaXRlcigpCiAgICAgICAgICAgIC5maWx0ZXJfbWFwKHxyZXN1bHR8IHJlc3VsdC5zeW1ib2wuY2xvbmUoKSkKICAgICAgICAgICAgLnRha2UoMTApCiAgICAgICAgICAgIC5jb2xsZWN0Ojp8VmVjPF8+PigpOwogICAgICAgIGxldCBpbXBhY3QgPSBpZiBleHBhbmRfaW1wYWN0IHsKICAgICAgICAgICAgaWYgbGV0IFNvbWUoZmlyc3QpID0gcHJpbWFyeS5maXJzdCgpIHsKIiIiLCAiIiIgICAgICAgIC8vIE1hdGVyaWFsaXplIHRoZSBjYWxsZXItdmlzaWJsZSBwcmltYXJ5IHNlbGVjdGlvbiBvbmNlLiBEb3duc3RyZWFtIGF1dGhvcml0eSBtdXN0IGJlCiAgICAgICAgLy8gZGVyaXZlZCBvbmx5IGZyb20gZXZpZGVuY2UgdGhhdCBzdXJ2aXZlZCB0aGUgcHJpbWFyeSBsaW1pdDsgaGlkZGVuIHJldHJpZXZhbCBjYW5kaWRhdGVzCiAgICAgICAgLy8gY2Fubm90IHdpZGVuIHN5bWJvbHMsIGRlcGVuZGVuY3kgc2VlZHMsIG9yIHRoZSBhbGxvd2VkIGVkaXQgYm91bmRhcnkuCiAgICAgICAgbGV0IG11dCBwcmltYXJ5X2ZpbGVzID0gYm91bmRlZF9wcmltYXJ5X3Jlc3VsdHMocHJpbWFyeSwgbGltaXQpOwogICAgICAgIGxldCBwcmltYXJ5X3N5bWJvbHMgPSBwcmltYXJ5X2ZpbGVzCiAgICAgICAgICAgIC5pdGVyKCkKICAgICAgICAgICAgLmZpbHRlcl9tYXAofHJlc3VsdHwgcmVzdWx0LnN5bWJvbC5jbG9uZSgpKQogICAgICAgICAgICAudGFrZSgxMCkKICAgICAgICAgICAgLmNvbGxlY3Q6OjxWZWNfPj4oKTsKICAgICAgICBsZXQgaW1wYWN0ID0gaWYgZXhwYW5kX2ltcGFjdCB7CiAgICAgICAgICAgIGlmIGxldCBTb21lKGZpcnN0KSA9IHByaW1hcnlfZmlsZXMuZmlyc3QoKSB7CiIiIiksCigoIiIiICAgICAgICBmb3IgcmVzdWx0IGluIHByaW1hcnkuaXRlcigpLnRha2UoNSkgewoiIiIsICIiIiAgICAgICAgZm9yIHJlc3VsdCBpbiBwcmltYXJ5X2ZpbGVzLml0ZXIoKS50YWtlKDUpIHsKIiIiKSwKKCIiIiAgICAgICAgbGV0IG11dCBwcmltYXJ5X2ZpbGVzID0gcHJpbWFyeS5pdGVyKCkudGFrZShsaW1pdCkuY2xvbmVkKCkuY29sbGVjdDo6PFZlYzxfPj4oKTsKIiIiLCAiIiksCigoIiIiICAgICAgICBsZXQgYWxsb3dlZF9maWxlcyA9IHByaW1hcnkKICAgICAgICAgICAgLml0ZXIoKQogICAgICAgICAgICAudGFrZSg4KQogICAgICAgICAgICAubWFwKHxyZXN1bHR8IHJlc3VsdC5wYXRoLmNsb25lKCkpCiAgICAgICAgICAgIC5jb2xsZWN0Ojp8VmVjPF8+PigpOwoiIiIsICIiIiAgICAgICAgbGV0IGFsbG93ZWRfZmlsZXMgPSBwcmltYXJ5X2ZpbGVzCiAgICAgICAgICAgIC5pdGVyKCkKICAgICAgICAgICAgLnRha2UoOCkKICAgICAgICAgICAgLm1hcCh8cmVzdWx0fCByZXN1bHQucGF0aC5jbG9uZSgpKQogICAgICAgICAgICAuY29sbGVjdDo6PFZlYzxfPj4oKTsKIiIiKSwKXQpmb3Igb2xkLCBuZXcgaW4gcmVwbGFjZW1lbnRzOgogICAgaWYgb2xkIG5vdCBpbiB0ZXh0OgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoInBhdGNoIGFuY2hvciBtaXNzaW5nOiAiICsgcmVwcihvbGRbOjgwXSkpCiAgICB0ZXh0ID0gdGV4dC5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKaGVscGVyX2FuY2hvciA9ICJmbiBhcHBseV9yZXF1aXJlZF9ldmlkZW5jZV9wb2xpY3koXG4iCmhlbHBlciA9ICIiImZuIGJvdW5kZWRfcHJpbWFyeV9yZXN1bHRzKHByaW1hcnk6IFZlYzxTZWFyY2hSZXN1bHQ+LCBsaW1pdDogdXNpemUpIC0+IFZlYzxTZWFyY2hSZXN1bHQ+IHsKICAgIHByaW1hcnkuaW50b19pdGVyKCkudGFrZShsaW1pdCkuY29sbGVjdCgpCn0KCiIiIgppZiBoZWxwZXIgbm90IGluIHRleHQ6CiAgICBpZiBoZWxwZXJfYW5jaG9yIG5vdCBpbiB0ZXh0OgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoImhlbHBlciBpbnNlcnRpb24gYW5jaG9yIG1pc3NpbmciKQogICAgdGV4dCA9IHRleHQucmVwbGFjZShoZWxwZXJfYW5jaG9yLCBoZWxwZXIgKyBoZWxwZXJfYW5jaG9yLCAxKQoKdGVzdF9hbmNob3IgPSAiIiIgICAgI1t0ZXN0XQogICAgZm4gY29udGV4dF9wYWNrX3RlbGVtZXRyeV9jb3VudHNfc2VsZWN0ZWRfc291cmNlc19vbmNlX3Blcl9maWxlX2FuZF9wcmVzZXJ2ZXNfZXhhY3RfYXV0aG9yaXR5KCkKIiIiCnRlc3QgPSAiIiIgICAgI1t0ZXN0XQogICAgZm4gcHJpbWFyeV9saW1pdF9yZW1vdmVzX2hpZGRlbl9jYW5kaWRhdGVzX2JlZm9yZV9kb3duc3RyZWFtX2F1dGhvcml0eV9kZXJpdmF0aW9uKCkgewogICAgICAgIGxldCB2aXNpYmxlID0gU2VhcmNoUmVzdWx0IHsKICAgICAgICAgICAgcGF0aDogInNyYy92aXNpYmxlLnJzIi5pbnRvKCksCiAgICAgICAgICAgIGxpbmVfcmFuZ2U6IE5vbmUsCiAgICAgICAgICAgIHNuaXBwZXQ6ICJmbnZpc2libGUoKSB7fSIucmVwbGFjZSgiZm52aXNpYmxlIiwgImZuIHZpc2libGUiKS5pbnRvKCksCiAgICAgICAgICAgIHN5bWJvbDogTm9uZSwKICAgICAgICAgICAgc2NvcmU6IDIuMCwKICAgICAgICAgICAgbWF0Y2hfcmVhc29uOiAidmlzaWJsZSBmaXh0dXJlIi5pbnRvKCksCiAgICAgICAgICAgIGV2aWRlbmNlOiBWZWM6Om5ldygpLAogICAgICAgICAgICBldmlkZW5jZV9yZWZzOiB2ZWNbInZpc2libGU6ZXZpZGVuY2UiLmludG8oKV0sCiAgICAgICAgICAgIGNvbmZpZGVuY2U6IDAuOSwKICAgICAgICAgICAgc2NvcmVfYnJlYWtkb3duOiBWZWM6Om5ldygpLAogICAgICAgIH07CiAgICAgICAgbGV0IGhpZGRlbiA9IFNlYXJjaFJlc3VsdCB7CiAgICAgICAgICAgIHBhdGg6ICJzcmMvaGlkZGVuLnJzIi5pbnRvKCksCiAgICAgICAgICAgIGxpbmVfcmFuZ2U6IE5vbmUsCiAgICAgICAgICAgIHNuaXBwZXQ6ICJmbmhpZGRlbigpIHt9Ii5yZXBsYWNlKCJmbmhpZGRlbiIsICJmbiBoaWRkZW4iKS5pbnRvKCksCiAgICAgICAgICAgIHN5bWJvbDogTm9uZSwKICAgICAgICAgICAgc2NvcmU6IDEuMCwKICAgICAgICAgICAgbWF0Y2hfcmVhc29uOiAiaGlkZGVuIGZpeHR1cmUiLmludG8oKSwKICAgICAgICAgICAgZXZpZGVuY2U6IFZlYzo6bmV3KCksCiAgICAgICAgICAgIGV2aWRlbmNlX3JlZnM6IHZlY1siaGlkZGVuOmV2aWRlbmNlIi5pbnRvKCldLAogICAgICAgICAgICBjb25maWRlbmNlOiAwLjgsCiAgICAgICAgICAgIHNjb3JlX2JyZWFrZG93bjogVmVjOjpuZXcoKSwKICAgICAgICB9OwogICAgICAgIGxldCBib3VuZGVkID0gYm91bmRlZF9wcmltYXJ5X3Jlc3VsdHModmVjIVt2aXNpYmxlLmNsb25lKCksIGhpZGRlbl0sIDEpOwogICAgICAgIGFzc2VydF9lcSEoYm91bmRlZC5sZW4oKSwgMSk7CiAgICAgICAgYXNzZXJ0X2VxIShib3VuZGVkWzBdLnBhdGgsIHZpc2libGUucGF0aCk7CiAgICAgICAgYXNzZXJ0X2VxIShib3VuZGVkWzBdLmV2aWRlbmNlX3JlZnMsIHZpc2libGUuZXZpZGVuY2VfcmVmcyk7CiAgICAgICAgYXNzZXJ0IShib3VuZGVkCiAgICAgICAgICAgIC5pdGVyKCkKICAgICAgICAgICAgLmFsbCh8cmVzdWx0fCByZXN1bHQucGF0aCAhPSBQYXRoOjpuZXcoInNyYy9oaWRkZW4ucnMiKSkpOwogICAgfQoKIiIiCmlmIHRlc3Qgbm90IGluIHRleHQ6CiAgICBpZiB0ZXN0X2FuY2hvciBub3QgaW4gdGV4dDoKICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KCJ0ZXN0IGluc2VydGlvbiBhbmNob3IgbWlzc2luZyIpCiAgICB0ZXh0ID0gdGV4dC5yZXBsYWNlKHRlc3RfYW5jaG9yLCB0ZXN0ICsgdGVzdF9hbmNob3IsIDEpCnBhdGgud3JpdGVfdGV4dCh0ZXh0KQo=' | base64 -d > /tmp/agent-307.py
-          python /tmp/agent-307.py
+          from pathlib import Path
+          path = Path("crates/open-kioku-context/src/lib.rs")
+          text = path.read_text()
+          old = "        let primary_symbols = primary\n            .iter()\n            .filter_map(|result| result.symbol.clone())\n            .take(10)\n            .collect::<Vec<_>>();\n        let impact = if expand_impact {\n            if let Some(first) = primary.first() {\n"
+          new = "        // Materialize the caller-visible primary selection once. Downstream authority must be\n        // derived only from evidence that survived the primary limit; hidden retrieval candidates\n        // cannot widen symbols, dependency seeds, or the allowed edit boundary.\n        let mut primary_files = bounded_primary_results(primary, limit);\n        let primary_symbols = primary_files\n            .iter()\n            .filter_map(|result| result.symbol.clone())\n            .take(10)\n            .collect::<Vec<_>>();\n        let impact = if expand_impact {\n            if let Some(first) = primary_files.first() {\n"
+          if old not in text: raise SystemExit("primary symbol anchor missing")
+          text = text.replace(old, new, 1)
+          old = "        for result in primary.iter().take(5) {\n"
+          if old not in text: raise SystemExit("dependency anchor missing")
+          text = text.replace(old, "        for result in primary_files.iter().take(5) {\n", 1)
+          old = "        let mut primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();\n"
+          if old not in text: raise SystemExit("late primary declaration missing")
+          text = text.replace(old, "", 1)
+          old = "        let allowed_files = primary\n            .iter()\n            .take(8)\n            .map(|result| result.path.clone())\n            .collect::<Vec<_>>();\n"
+          new = "        let allowed_files = primary_files\n            .iter()\n            .take(8)\n            .map(|result| result.path.clone())\n            .collect::<Vec<_>>();\n"
+          if old not in text: raise SystemExit("allowed files anchor missing")
+          text = text.replace(old, new, 1)
+          anchor = "fn apply_required_evidence_policy(\n"
+          helper = "fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {\n    primary.into_iter().take(limit).collect()\n}\n\n"
+          if helper not in text:
+              if anchor not in text: raise SystemExit("helper anchor missing")
+              text = text.replace(anchor, helper + anchor, 1)
+          anchor = "    #[test]\n    fn context_pack_telemetry_counts_selected_sources_once_per_file_and_preserves_exact_authority()\n"
+          lines = [
+              "    #[test]",
+              "    fn primary_limit_removes_hidden_candidates_before_downstream_authority_derivation() {",
+              "        let visible = SearchResult {",
+              "            path: \"src/visible.rs\".into(),",
+              "            line_range: None,",
+              "            snippet: \"fn visible() {}\".into(),",
+              "            symbol: None,",
+              "            score: 2.0,",
+              "            match_reason: \"visible fixture\".into(),",
+              "            evidence: Vec::new(),",
+              "            evidence_refs: vec![\"visible:evidence\".into()],",
+              "            confidence: 0.9,",
+              "            score_breakdown: Vec::new(),",
+              "        };",
+              "        let hidden = SearchResult {",
+              "            path: \"src/hidden.rs\".into(),",
+              "            line_range: None,",
+              "            snippet: \"fn hidden() {}\".into(),",
+              "            symbol: None,",
+              "            score: 1.0,",
+              "            match_reason: \"hidden fixture\".into(),",
+              "            evidence: Vec::new(),",
+              "            evidence_refs: vec![\"hidden:evidence\".into()],",
+              "            confidence: 0.8,",
+              "            score_breakdown: Vec::new(),",
+              "        };",
+              "        let bounded = bounded_primary_results(vec![visible.clone(), hidden], 1);",
+              "        assert_eq!(bounded.len(), 1);",
+              "        assert_eq!(bounded[0].path, visible.path);",
+              "        assert_eq!(bounded[0].evidence_refs, visible.evidence_refs);",
+              "        assert!(bounded.iter().all(|result| result.path != Path::new(\"src/hidden.rs\")));",
+              "    }",
+              "",
+          ]
+          test = "\n".join(lines) + "\n"
+          if test not in text:
+              if anchor not in text: raise SystemExit("test anchor missing")
+              text = text.replace(anchor, test + anchor, 1)
+          path.write_text(text)
       - name: Restore production workflow surface
         run: |
           git checkout origin/main -- .github/workflows/ci.yml
