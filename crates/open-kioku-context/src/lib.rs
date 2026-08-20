@@ -253,8 +253,7 @@ fn refresh_context_pack_retrieval_telemetry(
 
 fn has_selection_retrieval_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
     let selection = &diagnostics.selection;
-    selection.budget.max_tokens > 0
-        || !selection.source_stream_mix.is_empty()
+    !selection.source_stream_mix.is_empty()
         || selection.exact_evidence_count > 0
         || selection.ambiguity_unresolved_count > 0
         || selection.unattributed_selected_file_count > 0
@@ -300,7 +299,7 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             diagnostics.selection.estimated_tokens_selected
         ));
     }
-    if has_selection_telemetry {
+    if diagnostics.selection.budget.max_tokens > 0 || has_selection_telemetry {
         if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
@@ -387,7 +386,8 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
             diagnostics.selection.estimated_tokens_selected
         ));
     }
-    if has_selection_retrieval_telemetry(diagnostics) {
+    if diagnostics.selection.budget.max_tokens > 0 || has_selection_retrieval_telemetry(diagnostics)
+    {
         if !diagnostics.selection.source_stream_mix.is_empty() {
             let source_mix = diagnostics
                 .selection
