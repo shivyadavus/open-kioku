@@ -272,7 +272,7 @@ jobs:
             publish_package "packages/${package}"
           done
           publish_package packages/npm
-          test "$(npm view open-kioku@${{ needs.publish.outputs.version }} version)" = "${{ needs.publish.outputs.version }}"
+          bash scripts/wait-for-npm-version.sh open-kioku "${{ needs.publish.outputs.version }}"
 
   publish-crates:
     needs: publish
