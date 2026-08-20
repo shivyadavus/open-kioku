@@ -1,0 +1,95 @@
+name: Agent CC7 zero-token renderer refinement
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+
+      - name: Keep the fix presentation-narrow
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-context/src/lib.rs')
+          text = path.read_text()
+
+          old_helper = '''fn has_selection_retrieval_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
+              let selection = &diagnostics.selection;
+              selection.budget.max_tokens > 0
+                  || !selection.source_stream_mix.is_empty()
+                  || selection.exact_evidence_count > 0
+                  || selection.ambiguity_unresolved_count > 0
+                  || selection.unattributed_selected_file_count > 0
+                  || selection.retrieval_confidence.is_some()
+                  || selection.abstention_reason.is_some()
+                  || !selection.omitted_high_value.is_empty()
+          }
+          '''
+          new_helper = '''fn has_selection_retrieval_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
+              let selection = &diagnostics.selection;
+              !selection.source_stream_mix.is_empty()
+                  || selection.exact_evidence_count > 0
+                  || selection.ambiguity_unresolved_count > 0
+                  || selection.unattributed_selected_file_count > 0
+                  || selection.retrieval_confidence.is_some()
+                  || selection.abstention_reason.is_some()
+                  || !selection.omitted_high_value.is_empty()
+          }
+          '''
+          if text.count(old_helper) != 1:
+              raise SystemExit(f'expected one telemetry helper, found {text.count(old_helper)}')
+          text = text.replace(old_helper, new_helper, 1)
+
+          old_markdown = '''    if has_selection_telemetry {
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+          '''
+          new_markdown = '''    if diagnostics.selection.budget.max_tokens > 0 || has_selection_telemetry {
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+          '''
+          if text.count(old_markdown) != 1:
+              raise SystemExit(f'expected one markdown selection block, found {text.count(old_markdown)}')
+          text = text.replace(old_markdown, new_markdown, 1)
+
+          old_prompt = '''    if has_selection_retrieval_telemetry(diagnostics) {
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+          '''
+          new_prompt = '''    if diagnostics.selection.budget.max_tokens > 0
+                  || has_selection_retrieval_telemetry(diagnostics)
+              {
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+          '''
+          if text.count(old_prompt) != 1:
+              raise SystemExit(f'expected one prompt selection block, found {text.count(old_prompt)}')
+          text = text.replace(old_prompt, new_prompt, 1)
+          path.write_text(text)
+
+      - name: Validate refinement
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-context zero_token_renderers_preserve_fail_closed_selection_telemetry
+          cargo test -p open-kioku-context positive_budget_renderers_keep_budget_summary_and_selection_telemetry
+          cargo clippy -p open-kioku-context --all-targets --all-features -- -D warnings
+
+      - name: Finalize clean product branch
+        run: |
+          rm .github/workflows/agent-cc7-zero-token-refine-315.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- crates/open-kioku-context/src/lib.rs .github/workflows/agent-cc7-zero-token-refine-315.yml
+          git commit -m "fix(cc7): keep zero-token telemetry rendering narrow"
+          git push origin HEAD:agent/cc7-zero-token-render-315
