@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Local-first code intelligence for AI agents — code search, symbol resolution, impact analysis, dependency graphs, and context packs from a local Open Kioku index. No hosted index or embeddings API required.",
-    "version": "3.0.0"
+    "version": "3.0.2"
   },
   "plugins": [
     {
@@ -16,7 +16,7 @@
         "repo": "shivyadavus/open-kioku"
       },
       "description": "Local-first code intelligence for AI agents — BM25 + regex code search, symbol resolution, call-graph traversal, impact analysis, architecture detection, and token-efficient context packs from a local native binary. Index once, query locally. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
-      "version": "3.0.0",
+      "version": "3.0.2",
       "author": {
         "name": "Shiv Yadav",
         "email": "shivyadavus@users.noreply.github.com"
