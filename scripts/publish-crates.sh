@@ -3,9 +3,9 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/publish-crates.sh [--dry-run|--publish]
+Usage: scripts/publish-crates.sh [--preflight|--dry-run|--publish]
 
-Publishes Open Kioku workspace crates to crates.io in dependency order.
+Validates and publishes Open Kioku workspace crates to crates.io in dependency order.
 
 Environment:
   EXPECTED_VERSION       Optional version guard, for example 1.0.1.
@@ -16,7 +16,7 @@ EOF
 
 MODE="${1:---dry-run}"
 case "$MODE" in
-  --dry-run | --publish) ;;
+  --preflight | --dry-run | --publish) ;;
   -h | --help)
     usage
     exit 0
@@ -63,6 +63,11 @@ if invalid:
         print(f"  - {problem}", file=sys.stderr)
     sys.exit(1)
 PY
+
+if [[ "$MODE" == "--preflight" ]]; then
+  echo "crates.io publication preflight passed for workspace version ${VERSION}"
+  exit 0
+fi
 
 if [[ "$MODE" == "--publish" && -z "${CARGO_REGISTRY_TOKEN:-}" && "${CI:-0}" == "true" ]]; then
   echo "CARGO_REGISTRY_TOKEN is required for --publish in CI." >&2
