@@ -1,6 +1,7 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.4.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.5.0";
 const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
+const RETRIEVAL_BASELINE_DIMENSIONS_VERSION: &str = "2.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 
@@ -215,6 +216,8 @@ struct RetrievalStrategyIdentity {
 struct RetrievalBaselineDelta {
     strategy: String,
     split: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     recall_at_10: f64,
     mean_reciprocal_rank: f64,
     file_f1_at_10: f64,
@@ -268,7 +271,7 @@ struct RetrievalStrategyReport {
     cases: Vec<RetrievalCaseReport>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct RetrievalQualityMetrics {
     positive_cases: usize,
     no_gold_cases: usize,
@@ -327,6 +330,8 @@ struct RetrievalCaseReport {
 #[derive(Debug, Serialize, Deserialize)]
 struct RetrievalQualityBaseline {
     schema_version: String,
+    #[serde(default)]
+    quality_dimensions_version: Option<String>,
     corpus_id: String,
     case_count: usize,
     token_estimator: String,
@@ -340,6 +345,10 @@ struct RetrievalStrategyQualityBaseline {
     summary: RetrievalQualityMetrics,
     by_language: BTreeMap<String, RetrievalQualityMetrics>,
     by_task_family: BTreeMap<String, RetrievalQualityMetrics>,
+    #[serde(default)]
+    by_query_shape: BTreeMap<String, RetrievalQualityMetrics>,
+    #[serde(default)]
+    by_task_family_query_shape: BTreeMap<String, RetrievalQualityMetrics>,
     by_split: BTreeMap<String, RetrievalQualityMetrics>,
 }
 
@@ -646,8 +655,7 @@ fn load_and_apply_query_shape_labels(
     if labels.corpus_id != corpus.corpus_id {
         anyhow::bail!(
             "query-shape labels target corpus `{}` but retrieval corpus is `{}`",
-            labels.corpus_id,
-            corpus.corpus_id
+            labels.corpus_id, corpus.corpus_id
         );
     }
 
@@ -1628,6 +1636,25 @@ fn load_retrieval_quality_baseline(path: &Path) -> anyhow::Result<RetrievalQuali
         .with_context(|| format!("failed to parse retrieval baseline {}", path.display()))
 }
 
+fn retrieval_baseline_delta(
+    strategy: &str,
+    split: &str,
+    scope: Option<String>,
+    current: &RetrievalQualityMetrics,
+    previous: &RetrievalQualityMetrics,
+) -> RetrievalBaselineDelta {
+    RetrievalBaselineDelta {
+        strategy: strategy.into(),
+        split: split.into(),
+        scope,
+        recall_at_10: current.recall_at_10 - previous.recall_at_10,
+        mean_reciprocal_rank: current.mean_reciprocal_rank - previous.mean_reciprocal_rank,
+        file_f1_at_10: current.file_f1_at_10 - previous.file_f1_at_10,
+        no_gold_false_positive_rate: current.no_gold_false_positive_rate
+            - previous.no_gold_false_positive_rate,
+    }
+}
+
 fn compare_retrieval_baseline(
     strategies: &[RetrievalStrategyReport],
     baseline: &RetrievalQualityBaseline,
@@ -1641,6 +1668,18 @@ fn compare_retrieval_baseline(
         incompatibilities.push(format!(
             "schema {} != {}",
             baseline.schema_version, RETRIEVAL_BENCH_SCHEMA_VERSION
+        ));
+    }
+    if baseline.quality_dimensions_version.as_deref()
+        != Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION)
+    {
+        incompatibilities.push(format!(
+            "quality_dimensions_version {} != {}; regenerate the retrieval baseline so query-shape quality is explicitly covered",
+            baseline
+                .quality_dimensions_version
+                .as_deref()
+                .unwrap_or("legacy/missing"),
+            RETRIEVAL_BASELINE_DIMENSIONS_VERSION
         ));
     }
     if baseline.corpus_id != corpus_id {
@@ -1691,24 +1730,79 @@ fn compare_retrieval_baseline(
             (Some(current), Some(previous)) => ("holdout", &current.quality, previous),
             _ => ("overall", &current.summary.quality, &previous.summary),
         };
-        deltas.push(RetrievalBaselineDelta {
-            strategy: current.strategy.clone(),
-            split: split.into(),
-            recall_at_10: current_quality.recall_at_10 - previous_quality.recall_at_10,
-            mean_reciprocal_rank: current_quality.mean_reciprocal_rank
-                - previous_quality.mean_reciprocal_rank,
-            file_f1_at_10: current_quality.file_f1_at_10 - previous_quality.file_f1_at_10,
-            no_gold_false_positive_rate: current_quality.no_gold_false_positive_rate
-                - previous_quality.no_gold_false_positive_rate,
-        });
+        deltas.push(retrieval_baseline_delta(
+            &current.strategy,
+            split,
+            None,
+            current_quality,
+            previous_quality,
+        ));
+
+        if current.by_query_shape.keys().collect::<Vec<_>>()
+            != previous.by_query_shape.keys().collect::<Vec<_>>()
+        {
+            caveats.push(format!(
+                "strategy {} query-shape baseline keys differ from the live report; query-shape regression deltas omitted for this strategy",
+                current.strategy
+            ));
+        } else {
+            for (shape, current_summary) in &current.by_query_shape {
+                let previous_quality = previous
+                    .by_query_shape
+                    .get(shape)
+                    .expect("query-shape key sets were checked above");
+                deltas.push(retrieval_baseline_delta(
+                    &current.strategy,
+                    "query_shape",
+                    Some(shape.clone()),
+                    &current_summary.quality,
+                    previous_quality,
+                ));
+            }
+        }
+
+        if current
+            .by_task_family_query_shape
+            .keys()
+            .collect::<Vec<_>>()
+            != previous
+                .by_task_family_query_shape
+                .keys()
+                .collect::<Vec<_>>()
+        {
+            caveats.push(format!(
+                "strategy {} task-family/query-shape baseline keys differ from the live report; combined regression deltas omitted for this strategy",
+                current.strategy
+            ));
+        } else {
+            for (scope, current_summary) in &current.by_task_family_query_shape {
+                let previous_quality = previous
+                    .by_task_family_query_shape
+                    .get(scope)
+                    .expect("task-family/query-shape key sets were checked above");
+                deltas.push(retrieval_baseline_delta(
+                    &current.strategy,
+                    "task_family_query_shape",
+                    Some(scope.clone()),
+                    &current_summary.quality,
+                    previous_quality,
+                ));
+            }
+        }
     }
-    deltas.sort_by(|left, right| left.strategy.cmp(&right.strategy));
+    deltas.sort_by(|left, right| {
+        left.strategy
+            .cmp(&right.strategy)
+            .then_with(|| left.split.cmp(&right.split))
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
     deltas
 }
 
 fn retrieval_quality_baseline(report: &RetrievalBenchReport) -> RetrievalQualityBaseline {
     RetrievalQualityBaseline {
         schema_version: report.schema_version.to_string(),
+        quality_dimensions_version: Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION.into()),
         corpus_id: report.corpus_id.clone(),
         case_count: report.case_count,
         token_estimator: report.token_estimator.to_string(),
@@ -1726,6 +1820,16 @@ fn retrieval_quality_baseline(report: &RetrievalBenchReport) -> RetrievalQuality
                     .collect(),
                 by_task_family: strategy
                     .by_task_family
+                    .iter()
+                    .map(|(key, summary)| (key.clone(), summary.quality.clone()))
+                    .collect(),
+                by_query_shape: strategy
+                    .by_query_shape
+                    .iter()
+                    .map(|(key, summary)| (key.clone(), summary.quality.clone()))
+                    .collect(),
+                by_task_family_query_shape: strategy
+                    .by_task_family_query_shape
                     .iter()
                     .map(|(key, summary)| (key.clone(), summary.quality.clone()))
                     .collect(),
@@ -1857,12 +1961,13 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
         }
     }
     if !report.baseline_deltas.is_empty() {
-        out.push_str("## Regression deltas vs checked-in baseline\n\nPositive Recall/MRR/F1 is improvement; negative no-gold FP is improvement.\n\n| Strategy | Split | Δ R@10 | Δ MRR | Δ F1@10 | Δ no-gold FP |\n|---|---|---:|---:|---:|---:|\n");
+        out.push_str("## Regression deltas vs checked-in baseline\n\nPositive Recall/MRR/F1 is improvement; negative no-gold FP is improvement.\n\n| Strategy | Dimension | Scope | Δ R@10 | Δ MRR | Δ F1@10 | Δ no-gold FP |\n|---|---|---|---:|---:|---:|---:|\n");
         for delta in &report.baseline_deltas {
             out.push_str(&format!(
-                "| {} | {} | {:+.3} | {:+.3} | {:+.3} | {:+.3} |\n",
+                "| {} | {} | {} | {:+.3} | {:+.3} | {:+.3} | {:+.3} |\n",
                 delta.strategy,
                 delta.split,
+                delta.scope.as_deref().unwrap_or("-"),
                 delta.recall_at_10,
                 delta.mean_reciprocal_rank,
                 delta.file_f1_at_10,
@@ -1981,7 +2086,7 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             out.push('\n');
         }
     }
-    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests and the corpus schema are part of the baseline so corpus drift is visible. Advisory retrieval measurements are also excluded until explicitly promoted.\n");
+    out.push_str("## Reproducibility\n\nLatency is reported for observability but excluded from the checked-in deterministic quality baseline. Fixture content digests, corpus schema, and baseline quality-dimension version are part of compatibility checks so corpus or query-shape coverage drift is visible. Advisory retrieval measurements are also excluded until explicitly promoted.\n");
     out
 }
 
@@ -2065,6 +2170,19 @@ mod retrieval_bench_tests {
             returned_any: no_gold,
             latency_ms: 10.0,
         }
+    }
+
+    fn report_with_shape(
+        id: &str,
+        task_family: RetrievalTaskFamily,
+        shape: open_kioku_core::QueryShape,
+        rank: usize,
+    ) -> RetrievalCaseReport {
+        let mut case = report(id, false, &[Some(rank)]);
+        case.task_family = task_family;
+        case.expected_query_shape = Some(shape);
+        case.actual_query_shape = shape;
+        case
     }
 
     #[test]
@@ -2227,7 +2345,7 @@ mod retrieval_bench_tests {
     }
 
     #[test]
-    fn deterministic_baseline_excludes_latency() {
+    fn deterministic_baseline_excludes_latency_and_includes_query_shape_quality() {
         let strategy = build_retrieval_strategy_report(
             RetrievalStrategy::Lexical,
             vec![report("positive", false, &[Some(1)])],
@@ -2258,16 +2376,102 @@ mod retrieval_bench_tests {
                 vec![report("advisory", false, &[Some(1)])],
             )],
         };
-        let json = serde_json::to_string(&retrieval_quality_baseline(&report)).unwrap();
+        let baseline = retrieval_quality_baseline(&report);
+        let json = serde_json::to_string(&baseline).unwrap();
+        assert_eq!(
+            baseline.quality_dimensions_version.as_deref(),
+            Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION)
+        );
+        assert!(baseline.strategies[0].by_query_shape.contains_key("conceptual"));
+        assert!(baseline.strategies[0]
+            .by_task_family_query_shape
+            .contains_key("issue_to_code:conceptual"));
         assert!(!json.contains("latency"));
         assert!(!json.contains("p95_ms"));
         assert!(!json.contains("cc2:rrf_unweighted"));
     }
+
     #[test]
-    fn baseline_comparison_reports_quality_deltas_without_latency() {
+    fn query_shape_baseline_is_deterministic_across_case_insertion_order() {
+        let first = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![
+                report_with_shape(
+                    "error",
+                    RetrievalTaskFamily::TraceToCode,
+                    open_kioku_core::QueryShape::ErrorTrace,
+                    1,
+                ),
+                report_with_shape(
+                    "exact",
+                    RetrievalTaskFamily::IssueToCode,
+                    open_kioku_core::QueryShape::ExactIdentifier,
+                    2,
+                ),
+            ],
+        );
+        let second = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![
+                report_with_shape(
+                    "exact",
+                    RetrievalTaskFamily::IssueToCode,
+                    open_kioku_core::QueryShape::ExactIdentifier,
+                    2,
+                ),
+                report_with_shape(
+                    "error",
+                    RetrievalTaskFamily::TraceToCode,
+                    open_kioku_core::QueryShape::ErrorTrace,
+                    1,
+                ),
+            ],
+        );
+        let quality_map = |strategy: RetrievalStrategyReport| RetrievalStrategyQualityBaseline {
+            strategy: strategy.strategy,
+            summary: strategy.summary.quality,
+            by_language: strategy
+                .by_language
+                .into_iter()
+                .map(|(key, value)| (key, value.quality))
+                .collect(),
+            by_task_family: strategy
+                .by_task_family
+                .into_iter()
+                .map(|(key, value)| (key, value.quality))
+                .collect(),
+            by_query_shape: strategy
+                .by_query_shape
+                .into_iter()
+                .map(|(key, value)| (key, value.quality))
+                .collect(),
+            by_task_family_query_shape: strategy
+                .by_task_family_query_shape
+                .into_iter()
+                .map(|(key, value)| (key, value.quality))
+                .collect(),
+            by_split: strategy
+                .by_split
+                .into_iter()
+                .map(|(key, value)| (key, value.quality))
+                .collect(),
+        };
+        assert_eq!(
+            serde_json::to_string(&quality_map(first)).unwrap(),
+            serde_json::to_string(&quality_map(second)).unwrap()
+        );
+    }
+
+    #[test]
+    fn baseline_comparison_reports_quality_and_query_shape_deltas_without_latency() {
         let current = build_retrieval_strategy_report(
             RetrievalStrategy::Fusion,
-            vec![report("current", false, &[Some(1)])],
+            vec![report_with_shape(
+                "current",
+                RetrievalTaskFamily::TraceToCode,
+                open_kioku_core::QueryShape::ErrorTrace,
+                1,
+            )],
         );
         let previous_quality = RetrievalQualityMetrics {
             recall_at_10: 0.5,
@@ -2278,6 +2482,7 @@ mod retrieval_bench_tests {
         };
         let baseline = RetrievalQualityBaseline {
             schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
+            quality_dimensions_version: Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION.into()),
             corpus_id: "fixture".into(),
             case_count: 1,
             token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
@@ -2287,6 +2492,14 @@ mod retrieval_bench_tests {
                 summary: previous_quality.clone(),
                 by_language: BTreeMap::new(),
                 by_task_family: BTreeMap::new(),
+                by_query_shape: BTreeMap::from([(
+                    "error_trace".into(),
+                    previous_quality.clone(),
+                )]),
+                by_task_family_query_shape: BTreeMap::from([(
+                    "trace_to_code:error_trace".into(),
+                    previous_quality.clone(),
+                )]),
                 by_split: BTreeMap::from([("holdout".into(), previous_quality)]),
             }],
         };
@@ -2300,14 +2513,119 @@ mod retrieval_bench_tests {
             &mut caveats,
         );
         assert!(caveats.is_empty());
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].strategy, "fusion");
-        assert_eq!(deltas[0].split, "overall");
-        assert!(deltas[0].recall_at_10 > 0.0);
+        assert_eq!(deltas.len(), 3);
+        assert!(deltas.iter().any(|delta| {
+            delta.split == "query_shape" && delta.scope.as_deref() == Some("error_trace")
+        }));
+        assert!(deltas.iter().any(|delta| {
+            delta.split == "task_family_query_shape"
+                && delta.scope.as_deref() == Some("trace_to_code:error_trace")
+        }));
         let json = serde_json::to_string(&deltas).unwrap();
         assert!(!json.contains("latency"));
     }
 
+    #[test]
+    fn degraded_query_shape_is_visible_even_when_aggregate_metrics_match() {
+        let mut current_error = report_with_shape(
+            "error",
+            RetrievalTaskFamily::TraceToCode,
+            open_kioku_core::QueryShape::ErrorTrace,
+            2,
+        );
+        current_error.reciprocal_rank = 0.5;
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![current_error],
+        );
+        let mut previous = retrieval_quality_baseline(&RetrievalBenchReport {
+            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
+            report_version: RETRIEVAL_REPORT_VERSION,
+            provenance: RetrievalReportProvenance {
+                open_kioku_version: env!("CARGO_PKG_VERSION"),
+                corpus_revision: "0123456789012345678901234567890123456789".into(),
+                cases_sha256: "sha256:test".into(),
+                frozen_fixture_revisions_verified: true,
+            },
+            corpus_id: "fixture".into(),
+            cases_file: "cases.json".into(),
+            case_count: 1,
+            limit: 20,
+            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR,
+            fixture_digests: BTreeMap::new(),
+            strategy_identities: BTreeMap::new(),
+            baseline_deltas: Vec::new(),
+            advisory_comparisons: Vec::new(),
+            query_shape_benchmark: None,
+            caveats: Vec::new(),
+            strategies: vec![build_retrieval_strategy_report(
+                RetrievalStrategy::Fusion,
+                vec![report_with_shape(
+                    "previous",
+                    RetrievalTaskFamily::TraceToCode,
+                    open_kioku_core::QueryShape::ErrorTrace,
+                    1,
+                )],
+            )],
+            stream_ablations: Vec::new(),
+        });
+        previous.strategies[0].summary = current.summary.quality.clone();
+        previous.strategies[0].by_split = current
+            .by_split
+            .iter()
+            .map(|(key, value)| (key.clone(), value.quality.clone()))
+            .collect();
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &previous,
+            "fixture",
+            1,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+        assert!(caveats.is_empty());
+        let aggregate = deltas.iter().find(|delta| delta.scope.is_none()).unwrap();
+        assert_eq!(aggregate.mean_reciprocal_rank, 0.0);
+        let error_trace = deltas
+            .iter()
+            .find(|delta| {
+                delta.split == "query_shape"
+                    && delta.scope.as_deref() == Some("error_trace")
+            })
+            .unwrap();
+        assert!(error_trace.mean_reciprocal_rank < 0.0);
+    }
+
+    #[test]
+    fn legacy_baseline_dimensions_fail_closed_with_actionable_caveat() {
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![report("current", false, &[Some(1)])],
+        );
+        let baseline = RetrievalQualityBaseline {
+            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
+            quality_dimensions_version: None,
+            corpus_id: "fixture".into(),
+            case_count: 1,
+            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
+            fixture_digests: BTreeMap::new(),
+            strategies: Vec::new(),
+        };
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            1,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+        assert!(deltas.is_empty());
+        assert_eq!(caveats.len(), 1);
+        assert!(caveats[0].contains("quality_dimensions_version"));
+        assert!(caveats[0].contains("regenerate the retrieval baseline"));
+    }
 
     #[test]
     fn baseline_comparison_fails_closed_for_a_different_corpus() {
@@ -2317,6 +2635,7 @@ mod retrieval_bench_tests {
         );
         let baseline = RetrievalQualityBaseline {
             schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
+            quality_dimensions_version: Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION.into()),
             corpus_id: "different-corpus".into(),
             case_count: 1,
             token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
@@ -2326,6 +2645,8 @@ mod retrieval_bench_tests {
                 summary: RetrievalQualityMetrics::default(),
                 by_language: BTreeMap::new(),
                 by_task_family: BTreeMap::new(),
+                by_query_shape: BTreeMap::new(),
+                by_task_family_query_shape: BTreeMap::new(),
                 by_split: BTreeMap::new(),
             }],
         };
@@ -2353,5 +2674,4 @@ mod retrieval_bench_tests {
         assert_eq!(semantic.model.as_deref(), Some("local-hash"));
         assert_eq!(semantic.backend.as_deref(), Some("exact-flat"));
     }
-
 }
