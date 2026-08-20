@@ -5,7 +5,7 @@ REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 GH_TOKEN="${GH_TOKEN:?GH_TOKEN is required}"
 RELEASE_BRANCH="release/v3.0.1"
 RELEASE_TAG="v3.0.1"
-FIX_SHA="e6f09f04d4000bec618f00aac426191aff4a76b5"
+RELEASE_BASE_SHA="c5afa5f4958c95097687deaa209b27fa403da1df"
 
 api() {
   local method="$1"
@@ -46,12 +46,14 @@ PY
 )"
 
   if [[ "$current_version" == "3.0.0" ]]; then
-    test "$(git rev-parse HEAD)" = "$FIX_SHA"
+    test "$(git rev-parse HEAD)" = "$RELEASE_BASE_SHA"
 
-    # Keep product source pinned to the tested fix while carrying only release
-    # orchestration and release-metadata changes on the patch branch.
-    git show origin/main:.github/workflows/release.yml > .github/workflows/release.yml
-    sed -i 's/Generate release trust artifacts/Generate SHA256SUMS SBOM.cargo-metadata.json PROVENANCE.json THIRD_PARTY_NOTICES.md/' .github/workflows/release.yml
+    # The release workflow is staged separately on this branch through the
+    # repository API. Runtime candidate preparation must never mutate workflow
+    # files, because GitHub deliberately blocks GITHUB_TOKEN workflow updates.
+    git diff --quiet e6f09f04d4000bec618f00aac426191aff4a76b5 HEAD -- \
+      Cargo.toml Cargo.lock crates packages \
+      .cursor-plugin .claude-plugin .codex-plugin claude_plugin.json
 
     python3 - <<'PY'
 from pathlib import Path
