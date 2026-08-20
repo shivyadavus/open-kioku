@@ -145,12 +145,7 @@ fn push_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnosti
     }
 
     push_string_list(out, 1, "caveats", &diagnostics.caveats);
-    push_string_list(
-        out,
-        1,
-        "selection_caveats",
-        &diagnostics.selection.caveats,
-    );
+    push_string_list(out, 1, "selection_caveats", &diagnostics.selection.caveats);
 }
 
 pub fn render_compressed_context_toon(pack: &CompressedContextPack) -> String {
