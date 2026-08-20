@@ -65,7 +65,7 @@
     },
     {
       "name": "ok-windows-x86_64.exe",
-      "sha256": "75c3549aac72dc80b0b2943c0d736689f04edbdfe8fddb3bf9e87092b4a40033",
+      "sha256": "2aa4f168f00d1246223956129d9f7b120e2a1e3e0d597509411ed1f4df1f6d74",
       "channels": [
         "github-release",
         "npm"
