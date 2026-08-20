@@ -30,8 +30,19 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-METADATA="$(cargo metadata --no-deps --format-version 1)"
-VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])' <<<"$METADATA")"
+METADATA_FILE="$(mktemp)"
+ORDER="$(mktemp)"
+trap 'rm -f "$METADATA_FILE" "$ORDER"' EXIT
+
+cargo metadata --no-deps --format-version 1 > "$METADATA_FILE"
+VERSION="$(python3 - "$METADATA_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle)["packages"][0]["version"])
+PY
+)"
 if [[ -n "${EXPECTED_VERSION:-}" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
   echo "Expected version $EXPECTED_VERSION, found $VERSION" >&2
   exit 1
@@ -40,12 +51,12 @@ fi
 # crates.io rejects packages with missing required listing metadata. Validate the
 # complete publishable workspace before the first upload so a bad manifest cannot
 # leave a release partially published and therefore impossible to roll back.
-METADATA="$METADATA" python3 - <<'PY'
+python3 - "$METADATA_FILE" <<'PY'
 import json
-import os
 import sys
 
-metadata = json.loads(os.environ["METADATA"])
+with open(sys.argv[1], encoding="utf-8") as handle:
+    metadata = json.load(handle)
 workspace_ids = set(metadata["workspace_members"])
 invalid = []
 for package in metadata["packages"]:
@@ -86,12 +97,12 @@ if [[ "${PUBLISH_ALLOW_DIRTY:-0}" == "1" ]]; then
   CARGO_PUBLISH_ARGS+=(--allow-dirty)
 fi
 
-ORDER="$(mktemp)"
-METADATA="$METADATA" python3 - <<'PY' > "$ORDER"
+python3 - "$METADATA_FILE" <<'PY' > "$ORDER"
 import json
-import os
+import sys
 
-metadata = json.loads(os.environ["METADATA"])
+with open(sys.argv[1], encoding="utf-8") as handle:
+    metadata = json.load(handle)
 workspace_ids = set(metadata["workspace_members"])
 packages = {pkg["id"]: pkg for pkg in metadata["packages"] if pkg["id"] in workspace_ids}
 by_name = {pkg["name"]: pkg for pkg in packages.values()}
@@ -193,5 +204,3 @@ while IFS= read -r crate; do
     sleep 15
   fi
 done < "$ORDER"
-
-rm -f "$ORDER"
