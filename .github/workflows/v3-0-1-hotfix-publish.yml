@@ -1,11 +1,7 @@
-# trigger: v3.0.1 immediate hotfix publication
 name: V3.0.1 ignore hotfix publication
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/v3-0-1-hotfix-publish.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
