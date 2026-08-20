@@ -1,1 +1,2 @@
 Trigger immutable v3.0.2 cumulative hotfix publication from the current mainline release candidate.
+Re-dispatch after the publication workflow landed on main.
