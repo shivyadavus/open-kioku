@@ -1,4 +1,4 @@
-name: V3.0.1 hotfix publication
+name: V3 hotfix publication dispatch
 
 on:
   pull_request:
@@ -6,24 +6,43 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - .github/v3-0-1-release-trigger
+      - .github/v3-0-2-release-trigger
 
 permissions:
   contents: write
   actions: write
 
 concurrency:
-  group: v3-0-1-hotfix-publication
+  group: v3-hotfix-publication-dispatch
   cancel-in-progress: false
 
 jobs:
-  publish:
+  dispatch:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Detect hotfix trigger
+        id: trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          changed="$(git diff --name-only origin/main...HEAD)"
+          if grep -Fxq '.github/v3-0-2-release-trigger' <<<"$changed"; then
+            echo 'version=3.0.2' >> "$GITHUB_OUTPUT"
+          elif grep -Fxq '.github/v3-0-1-release-trigger' <<<"$changed"; then
+            echo 'version=3.0.1' >> "$GITHUB_OUTPUT"
+          else
+            echo 'no supported hotfix trigger found' >&2
+            exit 1
+          fi
+
       - name: Execute v3.0.1 hotfix orchestrator
+        if: steps.trigger.outputs.version == '3.0.1'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,3 +51,12 @@ jobs:
           cp scripts/v301-hotfix-orchestrate.sh /tmp/v301-hotfix-orchestrate.sh
           chmod +x /tmp/v301-hotfix-orchestrate.sh
           /tmp/v301-hotfix-orchestrate.sh
+
+      - name: Dispatch v3.0.2 cumulative hotfix publication
+        if: steps.trigger.outputs.version == '3.0.2'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run v3-0-2-hotfix-publish.yml --ref main
