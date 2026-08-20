@@ -2,6 +2,11 @@ name: V3.0.1 ignore hotfix publication
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/v3-0-1-release-trigger
 
 permissions:
   contents: write
@@ -19,6 +24,7 @@ env:
 
 jobs:
   prepare:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.sha }}
