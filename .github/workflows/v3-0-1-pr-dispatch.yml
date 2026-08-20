@@ -52,11 +52,13 @@ jobs:
           chmod +x /tmp/v301-hotfix-orchestrate.sh
           /tmp/v301-hotfix-orchestrate.sh
 
-      - name: Dispatch v3.0.2 cumulative hotfix publication
+      - name: Execute v3.0.2 hotfix orchestrator
         if: steps.trigger.outputs.version == '3.0.2'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh workflow run v3-0-2-hotfix-publish.yml --ref main
+          cp scripts/v302-hotfix-orchestrate.sh /tmp/v302-hotfix-orchestrate.sh
+          chmod +x /tmp/v302-hotfix-orchestrate.sh
+          /tmp/v302-hotfix-orchestrate.sh
