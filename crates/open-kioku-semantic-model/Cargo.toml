@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Shared semantic-model types and contracts for Open Kioku local code intelligence"
 
 [dependencies]
 open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
