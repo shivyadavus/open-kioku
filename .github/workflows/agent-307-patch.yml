@@ -1,0 +1,134 @@
+name: agent-307-bounded-primary-patch
+
+on:
+  push:
+    branches: [agent/cc7-bounded-primary-authority]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc7-bounded-primary-authority
+          fetch-depth: 0
+      - name: Apply bounded-primary authority fix
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('crates/open-kioku-context/src/lib.rs')
+          text = path.read_text()
+          replacements = [
+              ('''        let primary_symbols = primary
+            .iter()
+            .filter_map(|result| result.symbol.clone())
+            .take(10)
+            .collect::<Vec<_>>();
+        let impact = if expand_impact {
+            if let Some(first) = primary.first() {
+''', '''        // Materialize the caller-visible primary selection once. Downstream authority must be
+        // derived only from evidence that survived the primary limit; hidden retrieval candidates
+        // cannot widen symbols, dependency seeds, or the allowed edit boundary.
+        let mut primary_files = bounded_primary_results(primary, limit);
+        let primary_symbols = primary_files
+            .iter()
+            .filter_map(|result| result.symbol.clone())
+            .take(10)
+            .collect::<Vec<_>>();
+        let impact = if expand_impact {
+            if let Some(first) = primary_files.first() {
+'''),
+              ('''        for result in primary.iter().take(5) {
+''', '''        for result in primary_files.iter().take(5) {
+'''),
+              ('''        let mut primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();
+''', ''''''),
+              ('''        let allowed_files = primary
+            .iter()
+            .take(8)
+            .map(|result| result.path.clone())
+            .collect::<Vec<_>>();
+''', '''        let allowed_files = primary_files
+            .iter()
+            .take(8)
+            .map(|result| result.path.clone())
+            .collect::<Vec<_>>();
+'''),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'patch anchor missing: {old[:60]!r}')
+              text = text.replace(old, new, 1)
+          helper_anchor = 'fn apply_required_evidence_policy(\n'
+          helper = '''fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {
+    primary.into_iter().take(limit).collect()
+}
+
+'''
+          if helper not in text:
+              text = text.replace(helper_anchor, helper + helper_anchor, 1)
+          test_anchor = '''    #[test]
+    fn context_pack_telemetry_counts_selected_sources_once_per_file_and_preserves_exact_authority()
+'''
+          test = '''    #[test]
+    fn primary_limit_removes_hidden_candidates_before_downstream_authority_derivation() {
+        let visible = SearchResult {
+            path: "src/visible.rs".into(),
+            line_range: None,
+            snippet: "fn visible() {}".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "visible fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["visible:evidence".into()],
+            confidence: 0.9,
+            score_breakdown: Vec::new(),
+        };
+        let hidden = SearchResult {
+            path: "src/hidden.rs".into(),
+            line_range: None,
+            snippet: "fn hidden() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "hidden fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["hidden:evidence".into()],
+            confidence: 0.8,
+            score_breakdown: Vec::new(),
+        };
+        let bounded = bounded_primary_results(vec![visible.clone(), hidden], 1);
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].path, visible.path);
+        assert_eq!(bounded[0].evidence_refs, visible.evidence_refs);
+        assert!(bounded
+            .iter()
+            .all(|result| result.path != Path::new("src/hidden.rs")));
+    }
+
+'''
+          if test not in text:
+              if test_anchor not in text:
+                  raise SystemExit('test insertion anchor missing')
+              text = text.replace(test_anchor, test + test_anchor, 1)
+          path.write_text(text)
+      - name: Remove branch-only patch workflow
+        run: rm .github/workflows/agent-307-patch.yml
+      - name: Format and targeted test
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-context
+      - name: Commit fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- crates/open-kioku-context/src/lib.rs .github/workflows/agent-307-patch.yml
+          git commit -m "fix(cc7): bound downstream authority to visible primary context"
+          git push origin HEAD:agent/cc7-bounded-primary-authority
