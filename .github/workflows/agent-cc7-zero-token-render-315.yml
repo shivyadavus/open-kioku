@@ -1,0 +1,427 @@
+name: Agent CC7 zero-token renderer patch
+
+on:
+  push:
+    branches:
+      - agent/cc7-zero-token-render-315
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused renderer and regression patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/open-kioku-context/src/lib.rs')
+          text = path.read_text()
+
+          markdown_old = r'''fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+              if diagnostics.sources_attempted.is_empty()
+                  && diagnostics.caveats.is_empty()
+                  && diagnostics.selection.caveats.is_empty()
+              {
+                  return;
+              }
+              out.push_str("## Retrieval\n\n");
+              out.push_str(&format!(
+                  "- Task family: `{:?}` (confidence `{:.2}`)\n",
+                  diagnostics.routing.task_family, diagnostics.routing.confidence
+              ));
+              for reason in &diagnostics.routing.reasons {
+                  out.push_str(&format!("  - Routing rationale: {reason}\n"));
+              }
+              if !diagnostics.sources_attempted.is_empty() {
+                  out.push_str(&format!(
+                      "- Attempted: `{}`\n",
+                      retrieval_source_list(&diagnostics.sources_attempted)
+                  ));
+              }
+              if !diagnostics.sources_succeeded.is_empty() {
+                  out.push_str(&format!(
+                      "- Succeeded: `{}`\n",
+                      retrieval_source_list(&diagnostics.sources_succeeded)
+                  ));
+              }
+              if diagnostics.selection.budget.max_tokens > 0 {
+                  out.push_str(&format!(
+                      "- Context budget: `{}` tokens (`{}` available after reserves); selected estimate `{}`\n",
+                      diagnostics.selection.budget.max_tokens,
+                      diagnostics.selection.available_context_tokens,
+                      diagnostics.selection.estimated_tokens_selected
+                  ));
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+                      let source_mix = diagnostics
+                          .selection
+                          .source_stream_mix
+                          .iter()
+                          .map(|entry| {
+                              format!(
+                                  "{}={}",
+                                  retrieval_source_label(entry.source),
+                                  entry.selected_file_count
+                              )
+                          })
+                          .collect::<Vec<_>>()
+                          .join(", ");
+                      out.push_str(&format!("- Selected source mix: `{source_mix}`\n"));
+                  }
+                  out.push_str(&format!(
+                      "- Exact-evidence selections: `{}`; ambiguity/unresolved signals: `{}`\n",
+                      diagnostics.selection.exact_evidence_count,
+                      diagnostics.selection.ambiguity_unresolved_count
+                  ));
+                  if diagnostics.selection.unattributed_selected_file_count > 0 {
+                      out.push_str(&format!(
+                          "- Selected files without retrieval-trace attribution: `{}`\n",
+                          diagnostics.selection.unattributed_selected_file_count
+                      ));
+                  }
+                  if let Some(confidence) = diagnostics.selection.retrieval_confidence {
+                      out.push_str(&format!(
+                          "- Retrieval confidence: `{:?}` (qualitative ContextPack confidence, not a calibrated probability)\n",
+                          confidence
+                      ));
+                  }
+                  if let Some(reason) = &diagnostics.selection.abstention_reason {
+                      out.push_str(&format!("- Abstention reason: `{reason}`\n"));
+                  }
+                  if !diagnostics.selection.omitted_high_value.is_empty() {
+                      out.push_str("- High-value omissions:\n");
+                      for omission in &diagnostics.selection.omitted_high_value {
+                          out.push_str(&format!("  - {omission}\n"));
+                      }
+                  }
+              }
+              if !diagnostics.caveats.is_empty() {
+                  out.push_str("- Caveats:\n");
+                  for caveat in &diagnostics.caveats {
+                      out.push_str(&format!("  - {caveat}\n"));
+                  }
+              }
+              if !diagnostics.selection.caveats.is_empty() {
+                  out.push_str("- Selection caveats:\n");
+                  for caveat in &diagnostics.selection.caveats {
+                      out.push_str(&format!("  - {caveat}\n"));
+                  }
+              }
+              out.push('\n');
+          }
+          '''
+          markdown_new = r'''fn has_selection_retrieval_telemetry(diagnostics: &RetrievalDiagnostics) -> bool {
+              let selection = &diagnostics.selection;
+              selection.budget.max_tokens > 0
+                  || !selection.source_stream_mix.is_empty()
+                  || selection.exact_evidence_count > 0
+                  || selection.ambiguity_unresolved_count > 0
+                  || selection.unattributed_selected_file_count > 0
+                  || selection.retrieval_confidence.is_some()
+                  || selection.abstention_reason.is_some()
+                  || !selection.omitted_high_value.is_empty()
+          }
+
+          fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnostics) {
+              let has_selection_telemetry = has_selection_retrieval_telemetry(diagnostics);
+              if diagnostics.sources_attempted.is_empty()
+                  && diagnostics.caveats.is_empty()
+                  && diagnostics.selection.caveats.is_empty()
+                  && !has_selection_telemetry
+              {
+                  return;
+              }
+              out.push_str("## Retrieval\n\n");
+              out.push_str(&format!(
+                  "- Task family: `{:?}` (confidence `{:.2}`)\n",
+                  diagnostics.routing.task_family, diagnostics.routing.confidence
+              ));
+              for reason in &diagnostics.routing.reasons {
+                  out.push_str(&format!("  - Routing rationale: {reason}\n"));
+              }
+              if !diagnostics.sources_attempted.is_empty() {
+                  out.push_str(&format!(
+                      "- Attempted: `{}`\n",
+                      retrieval_source_list(&diagnostics.sources_attempted)
+                  ));
+              }
+              if !diagnostics.sources_succeeded.is_empty() {
+                  out.push_str(&format!(
+                      "- Succeeded: `{}`\n",
+                      retrieval_source_list(&diagnostics.sources_succeeded)
+                  ));
+              }
+              if diagnostics.selection.budget.max_tokens > 0 {
+                  out.push_str(&format!(
+                      "- Context budget: `{}` tokens (`{}` available after reserves); selected estimate `{}`\n",
+                      diagnostics.selection.budget.max_tokens,
+                      diagnostics.selection.available_context_tokens,
+                      diagnostics.selection.estimated_tokens_selected
+                  ));
+              }
+              if has_selection_telemetry {
+                  if !diagnostics.selection.source_stream_mix.is_empty() {
+                      let source_mix = diagnostics
+                          .selection
+                          .source_stream_mix
+                          .iter()
+                          .map(|entry| {
+                              format!(
+                                  "{}={}",
+                                  retrieval_source_label(entry.source),
+                                  entry.selected_file_count
+                              )
+                          })
+                          .collect::<Vec<_>>()
+                          .join(", ");
+                      out.push_str(&format!("- Selected source mix: `{source_mix}`\n"));
+                  }
+                  out.push_str(&format!(
+                      "- Exact-evidence selections: `{}`; ambiguity/unresolved signals: `{}`\n",
+                      diagnostics.selection.exact_evidence_count,
+                      diagnostics.selection.ambiguity_unresolved_count
+                  ));
+                  if diagnostics.selection.unattributed_selected_file_count > 0 {
+                      out.push_str(&format!(
+                          "- Selected files without retrieval-trace attribution: `{}`\n",
+                          diagnostics.selection.unattributed_selected_file_count
+                      ));
+                  }
+                  if let Some(confidence) = diagnostics.selection.retrieval_confidence {
+                      out.push_str(&format!(
+                          "- Retrieval confidence: `{:?}` (qualitative ContextPack confidence, not a calibrated probability)\n",
+                          confidence
+                      ));
+                  }
+                  if let Some(reason) = &diagnostics.selection.abstention_reason {
+                      out.push_str(&format!("- Abstention reason: `{reason}`\n"));
+                  }
+                  if !diagnostics.selection.omitted_high_value.is_empty() {
+                      out.push_str("- High-value omissions:\n");
+                      for omission in &diagnostics.selection.omitted_high_value {
+                          out.push_str(&format!("  - {omission}\n"));
+                      }
+                  }
+              }
+              if !diagnostics.caveats.is_empty() {
+                  out.push_str("- Caveats:\n");
+                  for caveat in &diagnostics.caveats {
+                      out.push_str(&format!("  - {caveat}\n"));
+                  }
+              }
+              if !diagnostics.selection.caveats.is_empty() {
+                  out.push_str("- Selection caveats:\n");
+                  for caveat in &diagnostics.selection.caveats {
+                      out.push_str(&format!("  - {caveat}\n"));
+                  }
+              }
+              out.push('\n');
+          }
+          '''
+          if text.count(markdown_old) != 1:
+              raise SystemExit(f'expected exactly one markdown renderer block, found {text.count(markdown_old)}')
+          text = text.replace(markdown_old, markdown_new, 1)
+
+          prompt_old = r'''    if diagnostics.selection.budget.max_tokens > 0 {
+              out.push_str(&format!(
+                  "CONTEXT_BUDGET: max={} available={} selected_estimate={}\n",
+                  diagnostics.selection.budget.max_tokens,
+                  diagnostics.selection.available_context_tokens,
+                  diagnostics.selection.estimated_tokens_selected
+              ));
+              if !diagnostics.selection.source_stream_mix.is_empty() {
+                  let source_mix = diagnostics
+                      .selection
+                      .source_stream_mix
+                      .iter()
+                      .map(|entry| {
+                          format!(
+                              "{}={}",
+                              retrieval_source_label(entry.source),
+                              entry.selected_file_count
+                          )
+                      })
+                      .collect::<Vec<_>>()
+                      .join(",");
+                  out.push_str(&format!("RETRIEVAL_SELECTED_SOURCE_MIX: {source_mix}\n"));
+              }
+              out.push_str(&format!(
+                  "RETRIEVAL_EXACT_EVIDENCE_COUNT: {}\nRETRIEVAL_AMBIGUITY_UNRESOLVED_COUNT: {}\n",
+                  diagnostics.selection.exact_evidence_count,
+                  diagnostics.selection.ambiguity_unresolved_count
+              ));
+              if diagnostics.selection.unattributed_selected_file_count > 0 {
+                  out.push_str(&format!(
+                      "RETRIEVAL_UNATTRIBUTED_SELECTED_FILE_COUNT: {}\n",
+                      diagnostics.selection.unattributed_selected_file_count
+                  ));
+              }
+              if let Some(confidence) = diagnostics.selection.retrieval_confidence {
+                  out.push_str(&format!("RETRIEVAL_CONFIDENCE: {:?}\n", confidence));
+              }
+              if let Some(reason) = &diagnostics.selection.abstention_reason {
+                  out.push_str(&format!("RETRIEVAL_ABSTENTION_REASON: {reason}\n"));
+              }
+              for omission in &diagnostics.selection.omitted_high_value {
+                  out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
+              }
+          }
+          '''
+          prompt_new = r'''    if diagnostics.selection.budget.max_tokens > 0 {
+              out.push_str(&format!(
+                  "CONTEXT_BUDGET: max={} available={} selected_estimate={}\n",
+                  diagnostics.selection.budget.max_tokens,
+                  diagnostics.selection.available_context_tokens,
+                  diagnostics.selection.estimated_tokens_selected
+              ));
+          }
+          if has_selection_retrieval_telemetry(diagnostics) {
+              if !diagnostics.selection.source_stream_mix.is_empty() {
+                  let source_mix = diagnostics
+                      .selection
+                      .source_stream_mix
+                      .iter()
+                      .map(|entry| {
+                          format!(
+                              "{}={}",
+                              retrieval_source_label(entry.source),
+                              entry.selected_file_count
+                          )
+                      })
+                      .collect::<Vec<_>>()
+                      .join(",");
+                  out.push_str(&format!("RETRIEVAL_SELECTED_SOURCE_MIX: {source_mix}\n"));
+              }
+              out.push_str(&format!(
+                  "RETRIEVAL_EXACT_EVIDENCE_COUNT: {}\nRETRIEVAL_AMBIGUITY_UNRESOLVED_COUNT: {}\n",
+                  diagnostics.selection.exact_evidence_count,
+                  diagnostics.selection.ambiguity_unresolved_count
+              ));
+              if diagnostics.selection.unattributed_selected_file_count > 0 {
+                  out.push_str(&format!(
+                      "RETRIEVAL_UNATTRIBUTED_SELECTED_FILE_COUNT: {}\n",
+                      diagnostics.selection.unattributed_selected_file_count
+                  ));
+              }
+              if let Some(confidence) = diagnostics.selection.retrieval_confidence {
+                  out.push_str(&format!("RETRIEVAL_CONFIDENCE: {:?}\n", confidence));
+              }
+              if let Some(reason) = &diagnostics.selection.abstention_reason {
+                  out.push_str(&format!("RETRIEVAL_ABSTENTION_REASON: {reason}\n"));
+              }
+              for omission in &diagnostics.selection.omitted_high_value {
+                  out.push_str(&format!("CONTEXT_HIGH_VALUE_OMISSION: {omission}\n"));
+              }
+          }
+          '''
+          if text.count(prompt_old) != 1:
+              raise SystemExit(f'expected exactly one prompt renderer block, found {text.count(prompt_old)}')
+          text = text.replace(prompt_old, prompt_new, 1)
+
+          test_anchor = r'''    #[test]
+              fn context_pack_telemetry_fails_closed_when_selected_file_lacks_trace_attribution() {
+          '''
+          tests = r'''    #[test]
+              fn zero_token_renderers_preserve_fail_closed_selection_telemetry() {
+                  let diagnostics = RetrievalDiagnostics {
+                      selection: open_kioku_core::ContextSelectionDiagnostics {
+                          budget: ContextBudget {
+                              max_tokens: 0,
+                              ..ContextBudget::from_file_limit(4)
+                          },
+                          exact_evidence_count: 1,
+                          ambiguity_unresolved_count: 2,
+                          retrieval_confidence: Some(Confidence::Low),
+                          abstention_reason: Some("no_candidate_fit_context_selection".into()),
+                          omitted_high_value: vec![
+                              "src/high_value.rs:10-20 exact evidence omitted by zero-token budget".into(),
+                          ],
+                          ..Default::default()
+                      },
+                      ..Default::default()
+                  };
+
+                  let mut markdown = String::new();
+                  write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+                  assert!(markdown.contains("Abstention reason: `no_candidate_fit_context_selection`"));
+                  assert!(markdown.contains("High-value omissions:"));
+                  assert!(markdown.contains("src/high_value.rs:10-20 exact evidence omitted by zero-token budget"));
+                  assert!(markdown.contains("Retrieval confidence: `Low`"));
+                  assert!(markdown.contains("Exact-evidence selections: `1`; ambiguity/unresolved signals: `2`"));
+                  assert!(!markdown.contains("Context budget:"));
+
+                  let mut prompt = String::new();
+                  write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+                  assert!(prompt.contains("RETRIEVAL_ABSTENTION_REASON: no_candidate_fit_context_selection"));
+                  assert!(prompt.contains(
+                      "CONTEXT_HIGH_VALUE_OMISSION: src/high_value.rs:10-20 exact evidence omitted by zero-token budget"
+                  ));
+                  assert!(prompt.contains("RETRIEVAL_CONFIDENCE: Low"));
+                  assert!(prompt.contains("RETRIEVAL_EXACT_EVIDENCE_COUNT: 1"));
+                  assert!(prompt.contains("RETRIEVAL_AMBIGUITY_UNRESOLVED_COUNT: 2"));
+                  assert!(!prompt.contains("CONTEXT_BUDGET:"));
+              }
+
+              #[test]
+              fn positive_budget_renderers_keep_budget_summary_and_selection_telemetry() {
+                  let diagnostics = RetrievalDiagnostics {
+                      selection: open_kioku_core::ContextSelectionDiagnostics {
+                          budget: ContextBudget {
+                              max_tokens: 1_000,
+                              reserve_for_instructions: 100,
+                              reserve_for_validation: 100,
+                              ..ContextBudget::from_file_limit(4)
+                          },
+                          available_context_tokens: 800,
+                          exact_evidence_count: 1,
+                          retrieval_confidence: Some(Confidence::High),
+                          abstention_reason: Some("positive_budget_control".into()),
+                          omitted_high_value: vec!["control omission".into()],
+                          ..Default::default()
+                      },
+                      ..Default::default()
+                  };
+
+                  let mut markdown = String::new();
+                  write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+                  assert!(markdown.contains("Context budget: `1000` tokens (`800` available after reserves)"));
+                  assert!(markdown.contains("Abstention reason: `positive_budget_control`"));
+                  assert!(markdown.contains("control omission"));
+
+                  let mut prompt = String::new();
+                  write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+                  assert!(prompt.contains("CONTEXT_BUDGET: max=1000 available=800"));
+                  assert!(prompt.contains("RETRIEVAL_ABSTENTION_REASON: positive_budget_control"));
+                  assert!(prompt.contains("CONTEXT_HIGH_VALUE_OMISSION: control omission"));
+              }
+
+          '''
+          if text.count(test_anchor) != 1:
+              raise SystemExit(f'expected exactly one telemetry test anchor, found {text.count(test_anchor)}')
+          text = text.replace(test_anchor, tests + test_anchor, 1)
+
+          path.write_text(text)
+
+      - name: Format and validate focused regression
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test -p open-kioku-context zero_token_renderers_preserve_fail_closed_selection_telemetry
+          cargo test -p open-kioku-context positive_budget_renderers_keep_budget_summary_and_selection_telemetry
+          cargo clippy -p open-kioku-context --all-targets --all-features -- -D warnings
+
+      - name: Finalize branch without patch transport workflow
+        run: |
+          rm .github/workflows/agent-cc7-zero-token-render-315.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- crates/open-kioku-context/src/lib.rs .github/workflows/agent-cc7-zero-token-render-315.yml
+          git commit -m "fix(cc7): preserve zero-token renderer telemetry"
+          git push origin HEAD:agent/cc7-zero-token-render-315
