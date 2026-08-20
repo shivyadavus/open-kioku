@@ -590,27 +590,31 @@ impl<'a> ContextPackBuilder<'a> {
         if augment_runtime_candidates {
             augment_primary_with_runtime(self.store, task, &mut primary, limit)?;
         }
-        let primary_symbols = primary
+        // Materialize the caller-visible primary selection once. Downstream authority must be
+        // derived only from evidence that survived the primary limit; hidden retrieval candidates
+        // cannot widen symbols, dependency seeds, or the allowed edit boundary.
+        let mut primary_files = bounded_primary_results(primary, limit);
+        let primary_symbols = primary_files
             .iter()
             .filter_map(|result| result.symbol.clone())
             .take(10)
             .collect::<Vec<_>>();
         let impact = if expand_impact {
-            if let Some(first) = primary.first() {
+            if let Some(first) = primary_files.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
                     .with_history_store(self.history_store)
                     .for_file(&first.path)?
             } else {
                 empty_impact(task)
             }
-        } else if primary.is_empty() {
+        } else if primary_files.is_empty() {
             empty_impact(task)
         } else {
             bounded_impact(task)
         };
 
         let mut dependency_edges: Vec<GraphEdge> = Vec::new();
-        for result in primary.iter().take(5) {
+        for result in primary_files.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
             if let Ok((_nodes, edges)) = self.store.neighbors(&node_id, 20) {
                 dependency_edges
@@ -621,7 +625,6 @@ impl<'a> ContextPackBuilder<'a> {
         dependency_edges.dedup_by(|a, b| a.id == b.id);
         dependency_edges.truncate(50);
 
-        let mut primary_files = primary.iter().take(limit).cloned().collect::<Vec<_>>();
         let mut supporting_files = impact
             .direct_impacts
             .iter()
@@ -697,7 +700,7 @@ impl<'a> ContextPackBuilder<'a> {
             .chain(runtime_evidence.clone())
             .chain(git_evidence)
             .collect::<Vec<_>>();
-        let allowed_files = primary
+        let allowed_files = primary_files
             .iter()
             .take(8)
             .map(|result| result.path.clone())
@@ -778,6 +781,10 @@ impl<'a> ContextPackBuilder<'a> {
             confidence_breakdown,
         })
     }
+}
+
+fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {
+    primary.into_iter().take(limit).collect()
 }
 
 fn apply_required_evidence_policy(
@@ -2791,6 +2798,41 @@ mod tests {
         assert!(!intent.documentation_target);
         let ranked = rerank_fused_for_task(vec![docs, code], &intent, &diagnostics);
         assert_eq!(ranked[0].path, Path::new("src/engine.rs"));
+    }
+
+    #[test]
+    fn primary_limit_removes_hidden_candidates_before_downstream_authority_derivation() {
+        let visible = SearchResult {
+            path: "src/visible.rs".into(),
+            line_range: None,
+            snippet: "fn visible() {}".into(),
+            symbol: None,
+            score: 2.0,
+            match_reason: "visible fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["visible:evidence".into()],
+            confidence: 0.9,
+            score_breakdown: Vec::new(),
+        };
+        let hidden = SearchResult {
+            path: "src/hidden.rs".into(),
+            line_range: None,
+            snippet: "fn hidden() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "hidden fixture".into(),
+            evidence: Vec::new(),
+            evidence_refs: vec!["hidden:evidence".into()],
+            confidence: 0.8,
+            score_breakdown: Vec::new(),
+        };
+        let bounded = bounded_primary_results(vec![visible.clone(), hidden], 1);
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0].path, visible.path);
+        assert_eq!(bounded[0].evidence_refs, visible.evidence_refs);
+        assert!(bounded
+            .iter()
+            .all(|result| result.path != Path::new("src/hidden.rs")));
     }
 
     #[test]
