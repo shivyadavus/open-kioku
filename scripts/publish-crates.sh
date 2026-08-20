@@ -30,11 +30,39 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+METADATA="$(cargo metadata --no-deps --format-version 1)"
+VERSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])' <<<"$METADATA")"
 if [[ -n "${EXPECTED_VERSION:-}" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
   echo "Expected version $EXPECTED_VERSION, found $VERSION" >&2
   exit 1
 fi
+
+# crates.io rejects packages with missing required listing metadata. Validate the
+# complete publishable workspace before the first upload so a bad manifest cannot
+# leave a release partially published and therefore impossible to roll back.
+METADATA="$METADATA" python3 - <<'PY'
+import json
+import os
+import sys
+
+metadata = json.loads(os.environ["METADATA"])
+workspace_ids = set(metadata["workspace_members"])
+invalid = []
+for package in metadata["packages"]:
+    if package["id"] not in workspace_ids:
+        continue
+    # Cargo metadata uses an empty publish list for publish = false.
+    if package.get("publish") == []:
+        continue
+    if not (package.get("description") or "").strip():
+        invalid.append(f"{package['name']}: missing non-empty package.description")
+
+if invalid:
+    print("crates.io publication preflight failed before any upload:", file=sys.stderr)
+    for problem in sorted(invalid):
+        print(f"  - {problem}", file=sys.stderr)
+    sys.exit(1)
+PY
 
 if [[ "$MODE" == "--publish" && -z "${CARGO_REGISTRY_TOKEN:-}" && "${CI:-0}" == "true" ]]; then
   echo "CARGO_REGISTRY_TOKEN is required for --publish in CI." >&2
@@ -54,13 +82,11 @@ if [[ "${PUBLISH_ALLOW_DIRTY:-0}" == "1" ]]; then
 fi
 
 ORDER="$(mktemp)"
-python3 - <<'PY' > "$ORDER"
+METADATA="$METADATA" python3 - <<'PY' > "$ORDER"
 import json
-import subprocess
+import os
 
-metadata = json.loads(
-    subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
-)
+metadata = json.loads(os.environ["METADATA"])
 workspace_ids = set(metadata["workspace_members"])
 packages = {pkg["id"]: pkg for pkg in metadata["packages"] if pkg["id"] in workspace_ids}
 by_name = {pkg["name"]: pkg for pkg in packages.values()}
@@ -75,7 +101,8 @@ def visit(package_id):
     for dep in package["dependencies"]:
         if dep.get("path") and dep["name"] in by_name:
             visit(by_name[dep["name"]]["id"])
-    order.append(package["name"])
+    if package.get("publish") != []:
+        order.append(package["name"])
 
 for member_id in metadata["workspace_members"]:
     visit(member_id)
