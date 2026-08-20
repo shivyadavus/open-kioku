@@ -30,11 +30,14 @@ api() {
   fi
 }
 
-git fetch origin main "$RELEASE_BRANCH" --tags
+git fetch origin \
+  '+refs/heads/main:refs/remotes/origin/main' \
+  '+refs/heads/release/v3.0.1:refs/remotes/origin/release/v3.0.1' \
+  --tags
 git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
 
 if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
-  echo "$RELEASE_TAG already exists locally; release preparation is complete"
+  echo "$RELEASE_TAG already exists locally; skipping candidate mutation"
 else
   current_version="$(python3 - <<'PY'
 import tomllib
@@ -45,8 +48,8 @@ PY
   if [[ "$current_version" == "3.0.0" ]]; then
     test "$(git rev-parse HEAD)" = "$FIX_SHA"
 
-    # Use the current two-phase release workflow but keep the release branch
-    # self-validating under the checked-in trust-gate contract.
+    # Keep product source pinned to the tested fix while carrying only release
+    # orchestration and release-metadata changes on the patch branch.
     git show origin/main:.github/workflows/release.yml > .github/workflows/release.yml
     sed -i 's/Generate release trust artifacts/Generate SHA256SUMS SBOM.cargo-metadata.json PROVENANCE.json THIRD_PARTY_NOTICES.md/' .github/workflows/release.yml
 
@@ -129,10 +132,10 @@ run_url=''
 for _ in $(seq 1 60); do
   sleep 3
   payload="$(api GET '/actions/workflows/release.yml/runs?event=workflow_dispatch&per_page=30')"
-  result="$(python3 - "$before_file" <<'PY' <<<"$payload"
-import json, sys
+  result="$(PAYLOAD="$payload" python3 - "$before_file" <<'PY'
+import json, os, sys
 before = set(open(sys.argv[1], encoding='utf-8').read().split())
-data = json.load(sys.stdin)
+data = json.loads(os.environ['PAYLOAD'])
 fresh = [r for r in data.get('workflow_runs', []) if str(r['id']) not in before]
 if fresh:
     run = max(fresh, key=lambda r: r['id'])
