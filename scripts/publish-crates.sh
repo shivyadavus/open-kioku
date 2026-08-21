@@ -3,9 +3,9 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/publish-crates.sh [--dry-run|--publish]
+Usage: scripts/publish-crates.sh [--preflight|--dry-run|--publish]
 
-Publishes Open Kioku workspace crates to crates.io in dependency order.
+Validates and publishes Open Kioku workspace crates to crates.io in dependency order.
 
 Environment:
   EXPECTED_VERSION       Optional version guard, for example 1.0.1.
@@ -16,7 +16,7 @@ EOF
 
 MODE="${1:---dry-run}"
 case "$MODE" in
-  --dry-run | --publish) ;;
+  --preflight | --dry-run | --publish) ;;
   -h | --help)
     usage
     exit 0
@@ -30,10 +30,54 @@ esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+METADATA_FILE="$(mktemp)"
+ORDER="$(mktemp)"
+trap 'rm -f "$METADATA_FILE" "$ORDER"' EXIT
+
+cargo metadata --no-deps --format-version 1 > "$METADATA_FILE"
+VERSION="$(python3 - "$METADATA_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle)["packages"][0]["version"])
+PY
+)"
 if [[ -n "${EXPECTED_VERSION:-}" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
   echo "Expected version $EXPECTED_VERSION, found $VERSION" >&2
   exit 1
+fi
+
+# crates.io rejects packages with missing required listing metadata. Validate the
+# complete publishable workspace before the first upload so a bad manifest cannot
+# leave a release partially published and therefore impossible to roll back.
+python3 - "$METADATA_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    metadata = json.load(handle)
+workspace_ids = set(metadata["workspace_members"])
+invalid = []
+for package in metadata["packages"]:
+    if package["id"] not in workspace_ids:
+        continue
+    # Cargo metadata uses an empty publish list for publish = false.
+    if package.get("publish") == []:
+        continue
+    if not (package.get("description") or "").strip():
+        invalid.append(f"{package['name']}: missing non-empty package.description")
+
+if invalid:
+    print("crates.io publication preflight failed before any upload:", file=sys.stderr)
+    for problem in sorted(invalid):
+        print(f"  - {problem}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+if [[ "$MODE" == "--preflight" ]]; then
+  echo "crates.io publication preflight passed for workspace version ${VERSION}"
+  exit 0
 fi
 
 if [[ "$MODE" == "--publish" && -z "${CARGO_REGISTRY_TOKEN:-}" && "${CI:-0}" == "true" ]]; then
@@ -53,14 +97,12 @@ if [[ "${PUBLISH_ALLOW_DIRTY:-0}" == "1" ]]; then
   CARGO_PUBLISH_ARGS+=(--allow-dirty)
 fi
 
-ORDER="$(mktemp)"
-python3 - <<'PY' > "$ORDER"
+python3 - "$METADATA_FILE" <<'PY' > "$ORDER"
 import json
-import subprocess
+import sys
 
-metadata = json.loads(
-    subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
-)
+with open(sys.argv[1], encoding="utf-8") as handle:
+    metadata = json.load(handle)
 workspace_ids = set(metadata["workspace_members"])
 packages = {pkg["id"]: pkg for pkg in metadata["packages"] if pkg["id"] in workspace_ids}
 by_name = {pkg["name"]: pkg for pkg in packages.values()}
@@ -75,7 +117,8 @@ def visit(package_id):
     for dep in package["dependencies"]:
         if dep.get("path") and dep["name"] in by_name:
             visit(by_name[dep["name"]]["id"])
-    order.append(package["name"])
+    if package.get("publish") != []:
+        order.append(package["name"])
 
 for member_id in metadata["workspace_members"]:
     visit(member_id)
@@ -157,9 +200,7 @@ while IFS= read -r crate; do
     echo "== publish ${crate} ${VERSION} =="
     cargo publish "${CARGO_PUBLISH_ARGS[@]}" -p "$crate"
     wait_for_crate_version "$crate" "$VERSION"
-    echo "Waiting 15s to allow crates.io index propagation and avoid rate limits..."
-    sleep 15
+    echo "Waiting 20s to allow crates.io index propagation and avoid rate limits..."
+    sleep 20
   fi
 done < "$ORDER"
-
-rm -f "$ORDER"
