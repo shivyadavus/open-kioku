@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description.workspace = true
 
 [dependencies]
 open-kioku-core = { version = "3.0.1", path = "../open-kioku-core" }
