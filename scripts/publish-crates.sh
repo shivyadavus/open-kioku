@@ -200,7 +200,7 @@ while IFS= read -r crate; do
     echo "== publish ${crate} ${VERSION} =="
     cargo publish "${CARGO_PUBLISH_ARGS[@]}" -p "$crate"
     wait_for_crate_version "$crate" "$VERSION"
-    echo "Waiting 15s to allow crates.io index propagation and avoid rate limits..."
-    sleep 15
+    echo "Waiting 20s to allow crates.io index propagation and avoid rate limits..."
+    sleep 20
   fi
 done < "$ORDER"
