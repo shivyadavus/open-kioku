@@ -101,6 +101,21 @@ mod tests {
     }
 
     #[test]
+    fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
+        let notes = (0..105)
+            .map(|index| format!("quality note {index:03}"))
+            .collect::<Vec<_>>();
+        let mut output = String::new();
+
+        append_status_quality_notes(&mut output, &notes);
+
+        assert!(output.contains("quality note 099"));
+        assert!(!output.contains("quality note 100"));
+        assert!(output.contains("5 additional quality notes omitted"));
+        assert!(output.contains("ok status --json"));
+    }
+
+    #[test]
     fn document_corpus_mode_benchmark_preserves_context_provenance() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();

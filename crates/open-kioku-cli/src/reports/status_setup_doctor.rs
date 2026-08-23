@@ -37,6 +37,25 @@ fn analysis_semantics_compatibility_for_manifest(
     )
 }
 
+const STATUS_QUALITY_NOTES_LIMIT: usize = 100;
+
+fn append_status_quality_notes(out: &mut String, notes: &[String]) {
+    if notes.is_empty() {
+        return;
+    }
+
+    out.push_str("\nQuality notes:\n");
+    for note in notes.iter().take(STATUS_QUALITY_NOTES_LIMIT) {
+        out.push_str(&format!("- {note}\n"));
+    }
+    let omitted = notes.len().saturating_sub(STATUS_QUALITY_NOTES_LIMIT);
+    if omitted > 0 {
+        out.push_str(&format!(
+            "- {omitted} additional quality notes omitted; use `ok status --json` for complete details.\n"
+        ));
+    }
+}
+
 fn render_status_markdown(
     repo: &Path,
     manifest: Option<&IndexManifest>,
@@ -124,12 +143,7 @@ fn render_status_markdown(
                 out.push_str(&format!("- {}\n", note));
             }
         }
-        if !manifest.quality.quality_notes.is_empty() {
-            out.push_str("\nQuality notes:\n");
-            for note in &manifest.quality.quality_notes {
-                out.push_str(&format!("- {}\n", note));
-            }
-        }
+        append_status_quality_notes(&mut out, &manifest.quality.quality_notes);
     } else {
         out.push_str(
             "No index manifest was found. Run `ok index .` before handing this repo to an agent.\n",

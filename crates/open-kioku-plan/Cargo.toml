@@ -12,14 +12,14 @@ categories.workspace = true
 
 [dependencies]
 clap.workspace = true
-open-kioku-context = { version = "3.0.0", path = "../open-kioku-context" }
-open-kioku-contract = { version = "3.0.0", path = "../open-kioku-contract" }
-open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
-open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
-open-kioku-format = { version = "3.0.0", path = "../open-kioku-format" }
-open-kioku-impact = { version = "3.0.0", path = "../open-kioku-impact" }
-open-kioku-storage = { version = "3.0.0", path = "../open-kioku-storage" }
-open-kioku-tests = { version = "3.0.0", path = "../open-kioku-tests" }
+open-kioku-context = { version = "3.0.3", path = "../open-kioku-context" }
+open-kioku-contract = { version = "3.0.3", path = "../open-kioku-contract" }
+open-kioku-core = { version = "3.0.3", path = "../open-kioku-core" }
+open-kioku-errors = { version = "3.0.3", path = "../open-kioku-errors" }
+open-kioku-format = { version = "3.0.3", path = "../open-kioku-format" }
+open-kioku-impact = { version = "3.0.3", path = "../open-kioku-impact" }
+open-kioku-storage = { version = "3.0.3", path = "../open-kioku-storage" }
+open-kioku-tests = { version = "3.0.3", path = "../open-kioku-tests" }
 serde_json.workspace = true
 serde.workspace = true
 schemars.workspace = true
@@ -29,4 +29,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
-open-kioku-storage-sqlite = { version = "3.0.0", path = "../open-kioku-storage-sqlite" }
+open-kioku-storage-sqlite = { version = "3.0.3", path = "../open-kioku-storage-sqlite" }

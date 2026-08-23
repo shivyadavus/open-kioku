@@ -7,6 +7,6 @@ repository.workspace = true
 description = "Shared semantic-model types and contracts for Open Kioku local code intelligence"
 
 [dependencies]
-open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
+open-kioku-core = { version = "3.0.3", path = "../open-kioku-core" }
 serde = { workspace = true, features = ["derive"] }
 schemars = { workspace = true }

@@ -48,7 +48,7 @@ exclude = ["crates/open-kioku-tests/fixtures/rust-fixture"]
 resolver = "2"
 
 [workspace.package]
-version = "3.0.0"
+version = "3.0.3"
 edition = "2021"
 license = "Elastic-2.0"
 repository = "https://github.com/shivyadavus/open-kioku"
@@ -56,7 +56,7 @@ homepage = "https://openkioku.com"
 description = "Local-first code intelligence for AI agents. Plan before edit. Verify after edit."
 keywords = ["mcp", "code-search", "code-intelligence", "local-first", "ai"]
 categories = ["development-tools"]
-rust-version = "1.78"
+rust-version = "1.86"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -75,7 +75,7 @@ schemars = { version = "0.8", features = ["chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tantivy = "0.22"
+tantivy = "0.26"
 tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "time", "sync"] }

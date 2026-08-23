@@ -108,17 +108,13 @@ pub(crate) fn resolve_bare_call_outcome(
     if ctx.language != Language::Java {
         let mut same_file_candidates = ctx
             .symbols
-            .by_file
-            .get(ctx.file_id)
-            .map(|symbols| symbols.as_slice())
-            .unwrap_or(&[])
+            .lookup_file_name(ctx.file_id, &call.callee_name)
             .iter()
             .filter(|id| {
                 ctx.symbols
                     .get(id)
                     .map(|symbol| {
-                        symbol.name == call.callee_name
-                            && symbol.parent_symbol_id.is_none()
+                        symbol.parent_symbol_id.is_none()
                             && matches!(symbol.kind, SymbolKind::Function)
                     })
                     .unwrap_or(false)
@@ -234,19 +230,12 @@ fn nearest_lexical_scope_candidates(
         }
         let mut candidates = ctx
             .symbols
-            .by_file
-            .get(ctx.file_id)
-            .map(|symbols| symbols.as_slice())
-            .unwrap_or(&[])
+            .lookup_file_scope_name(ctx.file_id, &scope_id, &call.callee_name)
             .iter()
             .filter(|id| {
                 ctx.symbols
                     .get(id)
-                    .map(|symbol| {
-                        symbol.name == call.callee_name
-                            && matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
-                            && symbol.scope_id.as_ref() == Some(&scope_id)
-                    })
+                    .map(|symbol| matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method))
                     .unwrap_or(false)
             })
             .cloned()

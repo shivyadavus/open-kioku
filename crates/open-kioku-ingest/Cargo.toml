@@ -14,16 +14,16 @@ categories.workspace = true
 chrono.workspace = true
 globset.workspace = true
 ignore.workspace = true
-open-kioku-config = { version = "3.0.0", path = "../open-kioku-config" }
-open-kioku-core = { version = "3.0.0", path = "../open-kioku-core" }
-open-kioku-architecture = { version = "3.0.0", path = "../open-kioku-architecture" }
-open-kioku-errors = { version = "3.0.0", path = "../open-kioku-errors" }
-open-kioku-git = { version = "3.0.0", path = "../open-kioku-git" }
-open-kioku-languages = { version = "3.0.0", path = "../open-kioku-languages" }
-open-kioku-parse = { version = "3.0.0", path = "../open-kioku-parse" }
-open-kioku-resolution = { version = "3.0.0", path = "../open-kioku-resolution" }
-open-kioku-scip = { version = "3.0.0", path = "../open-kioku-scip" }
-open-kioku-semantic-model = { version = "3.0.0", path = "../open-kioku-semantic-model" }
+open-kioku-config = { version = "3.0.3", path = "../open-kioku-config" }
+open-kioku-core = { version = "3.0.3", path = "../open-kioku-core" }
+open-kioku-architecture = { version = "3.0.3", path = "../open-kioku-architecture" }
+open-kioku-errors = { version = "3.0.3", path = "../open-kioku-errors" }
+open-kioku-git = { version = "3.0.3", path = "../open-kioku-git" }
+open-kioku-languages = { version = "3.0.3", path = "../open-kioku-languages" }
+open-kioku-parse = { version = "3.0.3", path = "../open-kioku-parse" }
+open-kioku-resolution = { version = "3.0.3", path = "../open-kioku-resolution" }
+open-kioku-scip = { version = "3.0.3", path = "../open-kioku-scip" }
+open-kioku-semantic-model = { version = "3.0.3", path = "../open-kioku-semantic-model" }
 rayon.workspace = true
 roxmltree.workspace = true
 serde.workspace = true
