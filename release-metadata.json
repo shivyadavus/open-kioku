@@ -20,39 +20,62 @@
   "artifacts": [
     {
       "name": "ok-linux-x86_64",
-      "sha256": "7d3d5a8b1ae148d1e0a4ac0f42929117bdefc32dd837dfde63f07d03b0e0d51b",
-      "channels": ["github-release", "cargo-binstall", "npm"]
+      "sha256": "7561eeb1c2ded349ba0a59e3218265590a0b32be854fc58eebd91a415be13b07",
+      "channels": [
+        "github-release",
+        "cargo-binstall",
+        "npm"
+      ]
     },
     {
       "name": "ok-linux-x86_64.sha256",
-      "channels": ["github-release"]
+      "channels": [
+        "github-release"
+      ]
     },
     {
       "name": "ok-linux-arm64",
-      "sha256": "7172278a4829927b5ebdced76b28b612139e2e2f466f6cbe29a32228e8cc0e18",
-      "channels": ["github-release", "cargo-binstall", "npm"]
+      "sha256": "9859635c31dca4c5ab56eda28c5fb012fb11acd20ffc988a856489ff18bf1bdc",
+      "channels": [
+        "github-release",
+        "cargo-binstall",
+        "npm"
+      ]
     },
     {
       "name": "ok-linux-arm64.sha256",
-      "channels": ["github-release"]
+      "channels": [
+        "github-release"
+      ]
     },
     {
       "name": "ok-macos-arm64",
-      "sha256": "19145ce9c279e651a73de4c8a6d57c7dde1cbea5a8ce7ad99c7dc93292f1c1a7",
-      "channels": ["github-release", "cargo-binstall", "npm"]
+      "sha256": "979dfb43077d054b2bbfb83a0bc84ce3db93842a304216a56eb052dd02a5b44e",
+      "channels": [
+        "github-release",
+        "cargo-binstall",
+        "npm"
+      ]
     },
     {
       "name": "ok-macos-arm64.sha256",
-      "channels": ["github-release"]
+      "channels": [
+        "github-release"
+      ]
     },
     {
       "name": "ok-windows-x86_64.exe",
-      "sha256": "a5fb519811002926a43ce574d5664c936478dc6199b26de9508aa4f9516892b7",
-      "channels": ["github-release", "npm"]
+      "sha256": "4089aa78c1537b78a645e5c0a1a25538f96529dfe61d866d848ccf54ad7e777e",
+      "channels": [
+        "github-release",
+        "npm"
+      ]
     },
     {
       "name": "ok-windows-x86_64.exe.sha256",
-      "channels": ["github-release"]
+      "channels": [
+        "github-release"
+      ]
     }
   ]
 }
