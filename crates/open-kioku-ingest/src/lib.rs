@@ -673,8 +673,13 @@ impl Indexer {
 
             let mut legacy_calls_map: HashMap<(&FileId, u32, &str), Option<SymbolId>> =
                 HashMap::new();
+            let mut legacy_call_facts_by_file: HashMap<FileId, Vec<&AnalysisFact>> = HashMap::new();
             for fact in &registry_report.analysis_facts {
                 if fact.edge_type == GraphEdgeType::Calls {
+                    legacy_call_facts_by_file
+                        .entry(fact.file_id.clone())
+                        .or_default()
+                        .push(fact);
                     if let Some(range) = &fact.range {
                         let target_id = symbols_by_qualified
                             .get(fact.target.as_str())
@@ -773,9 +778,10 @@ impl Indexer {
                             .cloned()
                             .flatten()
                             .or_else(|| {
-                                registry_report
-                                    .analysis_facts
-                                    .iter()
+                                legacy_call_facts_by_file
+                                    .get(&call.file_id)
+                                    .into_iter()
+                                    .flatten()
                                     .find(|fact| {
                                         fact.edge_type == GraphEdgeType::Calls
                                             && fact.file_id == call.file_id

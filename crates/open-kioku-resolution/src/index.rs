@@ -8,6 +8,8 @@ pub struct SymbolIndex {
     pub by_name: HashMap<String, SmallVec<[SymbolId; 4]>>,
     pub by_qualified: HashMap<String, SmallVec<[SymbolId; 2]>>,
     pub by_file: HashMap<FileId, Vec<SymbolId>>,
+    pub by_file_name: HashMap<(FileId, String), SmallVec<[SymbolId; 2]>>,
+    pub by_file_scope_name: HashMap<(FileId, ScopeId, String), SmallVec<[SymbolId; 2]>>,
     pub by_module: HashMap<ModuleId, Vec<SymbolId>>,
     pub by_parent: HashMap<SymbolId, Vec<SymbolId>>,
 }
@@ -31,6 +33,18 @@ impl SymbolIndex {
                 .entry(sym.file_id.clone())
                 .or_default()
                 .push(sym.id.clone());
+            index
+                .by_file_name
+                .entry((sym.file_id.clone(), sym.name.clone()))
+                .or_default()
+                .push(sym.id.clone());
+            if let Some(scope_id) = &sym.scope_id {
+                index
+                    .by_file_scope_name
+                    .entry((sym.file_id.clone(), scope_id.clone(), sym.name.clone()))
+                    .or_default()
+                    .push(sym.id.clone());
+            }
             if let Some(mod_id) = &sym.module_id {
                 index
                     .by_module
@@ -59,6 +73,14 @@ impl SymbolIndex {
             values.sort_by(|left, right| left.0.cmp(&right.0));
             values.dedup();
         }
+        for values in index.by_file_name.values_mut() {
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            values.dedup();
+        }
+        for values in index.by_file_scope_name.values_mut() {
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            values.dedup();
+        }
         for values in index.by_module.values_mut() {
             values.sort_by(|left, right| left.0.cmp(&right.0));
             values.dedup();
@@ -76,6 +98,25 @@ impl SymbolIndex {
 
     pub fn lookup_name(&self, name: &str) -> &[SymbolId] {
         self.by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn lookup_file_scope_name(
+        &self,
+        file_id: &FileId,
+        scope_id: &ScopeId,
+        name: &str,
+    ) -> &[SymbolId] {
+        self.by_file_scope_name
+            .get(&(file_id.clone(), scope_id.clone(), name.to_owned()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn lookup_file_name(&self, file_id: &FileId, name: &str) -> &[SymbolId] {
+        self.by_file_name
+            .get(&(file_id.clone(), name.to_owned()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -209,6 +250,65 @@ mod tests {
                 .map(|id| id.0.as_str())
                 .collect::<Vec<_>>(),
             vec!["symbol:a", "symbol:b"]
+        );
+        assert_eq!(
+            forward
+                .lookup_file_scope_name(
+                    &FileId::new("file:lib.rs"),
+                    &ScopeId::new("scope:file"),
+                    "run"
+                )
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            forward
+                .lookup_file_name(&FileId::new("file:lib.rs"), "run")
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["symbol:a", "symbol:b"]
+        );
+    }
+
+    #[test]
+    fn file_scope_name_lookup_is_deterministic_and_exact() {
+        let mut first = symbol("symbol:a", "run", "file:lib.rs");
+        first.scope_id = Some(ScopeId::new("scope:inner"));
+        let mut second = symbol("symbol:b", "run", "file:lib.rs");
+        second.scope_id = Some(ScopeId::new("scope:inner"));
+        let mut third = symbol("symbol:c", "run", "file:lib.rs");
+        third.scope_id = Some(ScopeId::new("scope:outer"));
+
+        let forward = SymbolIndex::build(vec![first.clone(), second.clone(), third.clone()]);
+        let reversed = SymbolIndex::build(vec![third, second, first]);
+        let file_id = FileId::new("file:lib.rs");
+        let inner = ScopeId::new("scope:inner");
+
+        assert_eq!(
+            forward.lookup_file_scope_name(&file_id, &inner, "run"),
+            reversed.lookup_file_scope_name(&file_id, &inner, "run")
+        );
+        assert_eq!(
+            forward
+                .lookup_file_scope_name(&file_id, &inner, "run")
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["symbol:a", "symbol:b"]
+        );
+        assert!(forward
+            .lookup_file_scope_name(&file_id, &inner, "other")
+            .is_empty());
+        assert_eq!(
+            forward
+                .lookup_file_name(&file_id, "run")
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["symbol:a", "symbol:b", "symbol:c"]
         );
     }
 

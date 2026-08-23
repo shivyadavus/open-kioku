@@ -9,6 +9,53 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [3.0.3] — 2026-08-22
+
+### Changed
+- Upgraded the persistent lexical search backend from Tantivy 0.22 to Tantivy 0.26.1 while preserving score-ordered BM25 results and compatibility with existing indexes.
+- Raised the Rust MSRV to 1.86, the minimum supported by Tantivy 0.26.1.
+
+### Fixed
+- Removed large-repository indexing hot spots by pre-indexing legacy call facts and deterministic same-file and lexical-scope symbol candidates instead of repeatedly scanning global fact and symbol collections.
+- Bounded human-readable status quality diagnostics to 100 deterministic notes with an explicit omitted count and a pointer to the complete JSON report, preventing multi-megabyte terminal output without hiding totals.
+- Preserved complete semantic functionality across deterministic local embeddings, persistent HNSW ANN, and opt-in Jina neural embeddings.
+
+### Compatibility
+- Existing Tantivy 0.22 indexes remain searchable, and a normal full index rebuild recreates the lexical index using Tantivy 0.26.1.
+- The supported release artifacts remain Linux x86_64/ARM64 GNU, macOS ARM64, and Windows x86_64.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
+## [3.0.2] — 2026-08-20
+
+### Fixed
+- Fixed repository discovery so nested `.gitignore` and `.okignore` rules remain correctly scoped, tracked Git files remain indexable, large ignore batches cannot deadlock, and zero-result filtering is reported instead of silently succeeding.
+- Kept Context Compiler ambiguity telemetry consistent across top-level and selection-scoped diagnostics without borrowing authority from ambiguous legacy traces.
+- Reported exact, graph, and validation candidates as high-value omissions when the context budget has zero remaining capacity.
+- Bound downstream Context Compiler authority to the caller-visible primary selection so hidden retrieval candidates cannot widen symbols, dependency seeds, impact anchoring, or allowed edit boundaries.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [3.0.0] — 2026-08-17
 
 ### Added
@@ -416,3 +463,5 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 [0.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v0.1.0
 
 [3.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.0
+[3.0.2]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.2
+[3.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.3
