@@ -66,27 +66,24 @@ jobs:
           changelog = Path('CHANGELOG.md')
           text = changelog.read_text(encoding='utf-8')
           if '## [3.0.2]' not in text:
-              section = '''## [3.0.2] — 2026-08-20
-
-### Fixed
-- Fixed repository discovery so nested `.gitignore` and `.okignore` rules remain correctly scoped, tracked Git files remain indexable, large ignore batches cannot deadlock, and zero-result filtering is reported instead of silently succeeding.
-- Kept Context Compiler ambiguity telemetry consistent across top-level and selection-scoped diagnostics without borrowing authority from ambiguous legacy traces.
-- Reported exact, graph, and validation candidates as high-value omissions when the context budget has zero remaining capacity.
-- Bound downstream Context Compiler authority to the caller-visible primary selection so hidden retrieval candidates cannot widen symbols, dependency seeds, impact anchoring, or allowed edit boundaries.
-
-### Artifacts
-- `ok-linux-x86_64`
-- `ok-linux-x86_64.sha256`
-- `ok-linux-arm64`
-- `ok-linux-arm64.sha256`
-- `ok-macos-arm64`
-- `ok-macos-arm64.sha256`
-- `ok-windows-x86_64.exe`
-- `ok-windows-x86_64.exe.sha256`
-
----
-
-'''
+              section = (
+                  '## [3.0.2] — 2026-08-20\n\n'
+                  '### Fixed\n'
+                  '- Fixed repository discovery so nested `.gitignore` and `.okignore` rules remain correctly scoped, tracked Git files remain indexable, large ignore batches cannot deadlock, and zero-result filtering is reported instead of silently succeeding.\n'
+                  '- Kept Context Compiler ambiguity telemetry consistent across top-level and selection-scoped diagnostics without borrowing authority from ambiguous legacy traces.\n'
+                  '- Reported exact, graph, and validation candidates as high-value omissions when the context budget has zero remaining capacity.\n'
+                  '- Bound downstream Context Compiler authority to the caller-visible primary selection so hidden retrieval candidates cannot widen symbols, dependency seeds, impact anchoring, or allowed edit boundaries.\n\n'
+                  '### Artifacts\n'
+                  '- `ok-linux-x86_64`\n'
+                  '- `ok-linux-x86_64.sha256`\n'
+                  '- `ok-linux-arm64`\n'
+                  '- `ok-linux-arm64.sha256`\n'
+                  '- `ok-macos-arm64`\n'
+                  '- `ok-macos-arm64.sha256`\n'
+                  '- `ok-windows-x86_64.exe`\n'
+                  '- `ok-windows-x86_64.exe.sha256`\n\n'
+                  '---\n\n'
+              )
               marker = '## [3.0.0] — 2026-08-17\n'
               if marker not in text:
                   raise SystemExit('3.0.0 changelog marker missing')
