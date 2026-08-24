@@ -1254,6 +1254,61 @@ fn tool_output_schema() -> Value {
     })
 }
 
+fn tool_category(name: &str) -> &'static str {
+    match name {
+        "repo_status" | "list_files" | "list_languages" => "repository",
+        "list_symbols"
+        | "search_symbols"
+        | "get_definition"
+        | "get_references"
+        | "get_implementations"
+        | "get_callers"
+        | "get_callees"
+        | "get_symbol_context"
+        | "explain_file"
+        | "explain_symbol" => "code-intelligence",
+        "search_code"
+        | "search_files"
+        | "regex_search"
+        | "semantic_status"
+        | "semantic_search"
+        | "hybrid_search"
+        | "explain_search_result"
+        | "structural_search" => "search",
+        "detect_architecture"
+        | "architecture_boundaries"
+        | "architecture_violations"
+        | "architecture_policy_validate"
+        | "architecture_policy_check"
+        | "architecture_policy_explain"
+        | "summarize_architecture" => "architecture",
+        "dependency_path" | "impact_analysis" | "module_dependencies" | "explain_flow" => {
+            "dependencies"
+        }
+        "history_provenance_lookup"
+        | "churn_analysis"
+        | "history_similar_changes"
+        | "ownership_lookup"
+        | "reviewer_suggestions" => "history",
+        "build_context_pack" | "build_compressed_context" | "retrieve_context" => "context",
+        "plan_change"
+        | "preflight_change"
+        | "create_change_contract"
+        | "get_change_contract"
+        | "propose_patch" => "planning",
+        "remember_fact" | "search_memory" => "memory",
+        "find_tests_for_change"
+        | "recommend_validation_plan"
+        | "explain_test_coverage"
+        | "verify_change"
+        | "verify_change_contract"
+        | "explain_verification" => "validation",
+        "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => "runtime",
+        "get_evidence_schema" | "query_evidence_graph" => "evidence-graph",
+        _ => "repository-intelligence",
+    }
+}
+
 fn tool_description(name: &str, base: &str) -> String {
     let guidance = match name {
         "repo_status" => "Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
@@ -1401,7 +1456,11 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
             "experimental": maturity == "experimental",
             "inputSchema": schema,
             "outputSchema": tool_output_schema(),
-            "annotations": tool_annotations(name)
+            "annotations": tool_annotations(name),
+            "_meta": {
+                "io.open-kioku/category": tool_category(name),
+                "io.open-kioku/maturity": maturity
+            }
         }));
     }
 
@@ -3612,6 +3671,7 @@ paths = ["src/**"]
         .await
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
+        assert_eq!(tools_ro.len(), 58, "the documented MCP inventory changed");
         for retired_tool in ["apply_patch", "review_patch", "validate_patch"] {
             assert!(
                 tools_ro.iter().all(|tool| tool["name"] != retired_tool),
@@ -3654,6 +3714,39 @@ paths = ["src/**"]
                 tool["annotations"]["openWorldHint"].is_boolean(),
                 "{name} should expose openWorldHint"
             );
+            assert!(
+                tool["_meta"]["io.open-kioku/category"]
+                    .as_str()
+                    .is_some_and(|category| !category.is_empty()),
+                "{name} should expose a machine-readable routing category"
+            );
+            assert_eq!(
+                tool["_meta"]["io.open-kioku/maturity"], tool["maturity"],
+                "{name} should expose consistent maturity metadata"
+            );
+
+            let schema = tool["inputSchema"].as_object().unwrap();
+            assert_eq!(schema.get("type"), Some(&json!("object")));
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .expect("tool input schema properties");
+            for (property_name, property) in properties {
+                assert!(
+                    property["description"]
+                        .as_str()
+                        .is_some_and(|description| !description.is_empty()),
+                    "{name}.{property_name} should describe its input"
+                );
+            }
+            if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                for property_name in required {
+                    assert!(
+                        properties.contains_key(property_name.as_str().unwrap()),
+                        "{name} requires an undeclared input property"
+                    );
+                }
+            }
         }
         let provenance = tools_ro
             .iter()

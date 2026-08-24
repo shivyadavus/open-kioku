@@ -232,6 +232,7 @@ pub fn execute_graph_query(
 
     let mut rows: Vec<HashMap<String, serde_json::Value>> = Vec::new();
     let MatchClause { path } = &query.match_clause;
+    let mut used_indexed_anchor = false;
 
     let check_node = |node: &open_kioku_core::GraphNode, expr: &NodeExpr| -> bool {
         if let Some(t) = &expr.node_type {
@@ -242,12 +243,17 @@ pub fn execute_graph_query(
         true
     };
 
-    let apply_filters = |row: &HashMap<String, serde_json::Value>| -> QueryResult<bool> {
+    let apply_filters = |row: &HashMap<String, serde_json::Value>,
+                         skip_filter: Option<&FilterExpr>|
+     -> QueryResult<bool> {
         let Some(where_clause) = &query.where_clause else {
             return Ok(true);
         };
 
         for filter in &where_clause.filters {
+            if skip_filter.is_some_and(|skip| std::ptr::eq(skip, filter)) {
+                continue;
+            }
             let val = match row.get(&filter.variable) {
                 Some(v) => v,
                 None => return Ok(false),
@@ -303,19 +309,149 @@ pub fn execute_graph_query(
                 ));
             };
 
+            let anchor_filter = query.where_clause.as_ref().and_then(|where_clause| {
+                where_clause.filters.iter().find_map(|filter| {
+                    if filter.operator != FilterOperator::Equals
+                        || !matches!(filter.field.as_str(), "id" | "label")
+                    {
+                        return None;
+                    }
+                    if source.variable.as_deref() == Some(filter.variable.as_str()) {
+                        Some((true, filter))
+                    } else if target.variable.as_deref() == Some(filter.variable.as_str()) {
+                        Some((false, filter))
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            let mut anchored_edges = Vec::new();
+            if let Some((anchor_is_source, filter)) = anchor_filter {
+                let anchor_expr = if anchor_is_source { source } else { target };
+                let anchor_nodes = if filter.field == "id" {
+                    match store.node_by_id(&filter.value) {
+                        Ok(node) => Some(node.into_iter().collect::<Vec<_>>()),
+                        Err(OkError::Unsupported(_)) => None,
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    let mut nodes = Vec::new();
+                    let mut node_offset = 0;
+                    loop {
+                        match store.nodes_by_label(
+                            &filter.value,
+                            anchor_expr.node_type.clone(),
+                            NODE_SCAN_BATCH_SIZE,
+                            node_offset,
+                        ) {
+                            Ok(batch) => {
+                                let batch_len = batch.len();
+                                nodes.extend(batch);
+                                if batch_len < NODE_SCAN_BATCH_SIZE {
+                                    break;
+                                }
+                                node_offset = node_offset.saturating_add(NODE_SCAN_BATCH_SIZE);
+                            }
+                            Err(OkError::Unsupported(_)) => {
+                                nodes.clear();
+                                break;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    if nodes.is_empty() && node_offset == 0 {
+                        match store.nodes_by_label(
+                            &filter.value,
+                            anchor_expr.node_type.clone(),
+                            1,
+                            0,
+                        ) {
+                            Err(OkError::Unsupported(_)) => None,
+                            Err(error) => return Err(error.into()),
+                            Ok(_) => Some(nodes),
+                        }
+                    } else {
+                        Some(nodes)
+                    }
+                };
+
+                if let Some(anchor_nodes) = anchor_nodes {
+                    used_indexed_anchor = true;
+                    'anchors: for anchor in anchor_nodes {
+                        if start_time.elapsed() > deadline {
+                            return Err(GraphQueryError::Timeout);
+                        }
+                        if !check_node(&anchor, anchor_expr) {
+                            continue;
+                        }
+                        let outgoing = match (anchor_is_source, &edge.direction) {
+                            (true, Direction::Forward) | (false, Direction::Reverse) => true,
+                            (true, Direction::Reverse) | (false, Direction::Forward) => false,
+                        };
+                        let mut edge_offset = 0;
+                        loop {
+                            match store.edges_by_type_for_node(
+                                edge_type.clone(),
+                                &anchor.id.0,
+                                outgoing,
+                                EDGE_SCAN_BATCH_SIZE,
+                                edge_offset,
+                            ) {
+                                Ok(batch) => {
+                                    let batch_len = batch.len();
+                                    anchored_edges.extend(batch);
+                                    if batch_len < EDGE_SCAN_BATCH_SIZE {
+                                        break;
+                                    }
+                                    edge_offset = edge_offset.saturating_add(EDGE_SCAN_BATCH_SIZE);
+                                }
+                                Err(OkError::Unsupported(_)) => {
+                                    used_indexed_anchor = false;
+                                    anchored_edges.clear();
+                                    break 'anchors;
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
+                    }
+                    anchored_edges.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+                    anchored_edges.dedup_by(|left, right| left.id == right.id);
+                }
+            }
+
             let mut curr_offset = 0;
+            let mut anchored_offset: usize = 0;
+            let skip_anchor_filter = if used_indexed_anchor {
+                anchor_filter.map(|(_, filter)| filter)
+            } else {
+                None
+            };
 
             'paging: while rows.len() < target_rows {
                 if start_time.elapsed() > deadline {
                     return Err(GraphQueryError::Timeout);
                 }
 
-                let batch =
-                    store.edges_by_type(edge_type.clone(), EDGE_SCAN_BATCH_SIZE, curr_offset)?;
+                let batch = if used_indexed_anchor {
+                    let end = anchored_offset
+                        .saturating_add(EDGE_SCAN_BATCH_SIZE)
+                        .min(anchored_edges.len());
+                    let batch = anchored_edges[anchored_offset..end].to_vec();
+                    anchored_offset = end;
+                    batch
+                } else {
+                    let batch = store.edges_by_type(
+                        edge_type.clone(),
+                        EDGE_SCAN_BATCH_SIZE,
+                        curr_offset,
+                    )?;
+                    curr_offset = curr_offset.saturating_add(EDGE_SCAN_BATCH_SIZE);
+                    batch
+                };
                 if batch.is_empty() {
                     break;
                 }
-                curr_offset = curr_offset.saturating_add(EDGE_SCAN_BATCH_SIZE);
 
                 for e in batch {
                     if start_time.elapsed() > deadline {
@@ -360,7 +496,7 @@ pub fn execute_graph_query(
                         row.insert(v.clone(), serde_json::to_value(&e)?);
                     }
 
-                    if apply_filters(&row)? {
+                    if apply_filters(&row, skip_anchor_filter)? {
                         rows.push(row);
                     }
                 }
@@ -439,7 +575,7 @@ pub fn execute_graph_query(
                             if let Some(v) = &target.variable {
                                 row.insert(v.clone(), serde_json::to_value(&curr_node)?);
                             }
-                            if apply_filters(&row)? {
+                            if apply_filters(&row, None)? {
                                 rows.push(row);
                             }
                         }
@@ -499,7 +635,11 @@ pub fn execute_graph_query(
         offset,
         has_more,
         warnings,
-        caveats: vec!["Filters applied in-memory after indexed edge lookup.".into()],
+        caveats: vec![if used_indexed_anchor {
+            "Equality filter anchored by indexed node and edge lookup.".into()
+        } else {
+            "Filters applied in-memory after indexed edge lookup.".into()
+        }],
     })
 }
 
@@ -1311,6 +1451,28 @@ mod tests {
                 .collect())
         }
 
+        fn nodes_by_label(
+            &self,
+            label: &str,
+            node_type: Option<GraphNodeType>,
+            limit: usize,
+            offset: usize,
+        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphNode>> {
+            Ok(self
+                .nodes
+                .values()
+                .filter(|node| {
+                    node.label == label
+                        && node_type
+                            .as_ref()
+                            .is_none_or(|expected| &node.node_type == expected)
+                })
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
         fn edges_by_type(
             &self,
             edge_type: GraphEdgeType,
@@ -1321,6 +1483,31 @@ mod tests {
                 .edges
                 .iter()
                 .filter(|edge| edge.edge_type == edge_type)
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        fn edges_by_type_for_node(
+            &self,
+            edge_type: GraphEdgeType,
+            node_id: &str,
+            outgoing: bool,
+            limit: usize,
+            offset: usize,
+        ) -> open_kioku_errors::Result<Vec<open_kioku_core::GraphEdge>> {
+            Ok(self
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.edge_type == edge_type
+                        && if outgoing {
+                            edge.from.0 == node_id
+                        } else {
+                            edge.to.0 == node_id
+                        }
+                })
                 .skip(offset)
                 .take(limit)
                 .cloned()
@@ -1474,6 +1661,44 @@ mod tests {
         .unwrap();
         assert_eq!(res.rows.len(), 2);
         assert!(res.has_more);
+    }
+
+    #[test]
+    fn test_one_hop_equality_filter_uses_indexed_anchor() {
+        let mut store = MockGraphStore {
+            nodes: std::collections::HashMap::new(),
+            edges: Vec::new(),
+        };
+        store.nodes.insert(
+            "root".into(),
+            test_node("root", "root", GraphNodeType::File),
+        );
+        for idx in 0..3 {
+            let id = format!("fn{idx}");
+            store.nodes.insert(
+                id.clone(),
+                test_node(&id, &format!("function-{idx}"), GraphNodeType::Function),
+            );
+            store.edges.push(test_edge(
+                &format!("edge{idx}"),
+                "root",
+                &id,
+                GraphEdgeType::Defines,
+            ));
+        }
+
+        let query = parse_graph_query(
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label = 'function-1' RETURN f, s",
+        )
+        .unwrap();
+        let result = execute_graph_query(&store, &query, GraphQueryOptions::default()).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][1]["id"], "fn1");
+        assert_eq!(
+            result.caveats,
+            vec!["Equality filter anchored by indexed node and edge lookup."]
+        );
     }
 
     #[test]

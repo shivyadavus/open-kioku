@@ -9,6 +9,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [3.0.4] — 2026-08-23
+
+### Fixed
+- Made concurrent readers wait for short-lived SQLite schema writers instead of failing with `database is locked` on large indexes.
+- Anchored one-hop graph equality queries through indexed node labels, symbol names, and directional edge endpoints, eliminating full edge scans for exact Java definition, call, and implementation lookups.
+- Ranked exact symbol and file-stem identities ahead of broader camel-case prefix matches while preserving natural-language workflow relevance and explicit score provenance.
+
+### Validated
+- Indexed a large Java repository: 9,312 indexed files, 136,212 symbols, 136,646 chunks, 211,057 graph nodes, and 707,271 graph edges.
+- Reproduced the full structural index deterministically, validated concurrent lexical and graph reads, and built 272,858 semantic vectors with both exact-flat and persistent HNSW backends.
+
+### Changed
+- Added machine-readable MCP routing categories alongside titles, detailed usage guidance, schemas, maturity, and safety annotations for all 58 tools, with a regression test that rejects incomplete tool metadata.
+
+### Compatibility
+- Existing indexes are upgraded in place with the new graph-label index; no functionality or semantic backend is removed.
+- Compiler-grade Java SCIP remains optional and externally provided. Structural Java indexing remains fully operational when an upstream `scip-java` build integration is unavailable.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
+
+---
+
 ## [3.0.3] — 2026-08-22
 
 ### Changed
@@ -465,3 +495,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 [3.0.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.0
 [3.0.2]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.2
 [3.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.3
+[3.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.4

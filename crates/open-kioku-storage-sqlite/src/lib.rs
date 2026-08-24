@@ -17,11 +17,13 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
 pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 3;
 const SQLITE_GRAPH_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const HISTORY_SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS git_commits (
@@ -135,6 +137,9 @@ impl SqliteStore {
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(storage_err)?;
+        connection
+            .busy_timeout(SQLITE_BUSY_TIMEOUT)
+            .map_err(storage_err)?;
         let store = Self {
             path,
             connection: Mutex::new(connection),
@@ -2680,6 +2685,45 @@ impl GraphStore for SqliteStore {
         collect_json(rows)
     }
 
+    fn nodes_by_label(
+        &self,
+        label: &str,
+        node_type: Option<GraphNodeType>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = clamp_limit(limit) as i64;
+        let offset = offset as i64;
+        let node_type = node_type.map(|value| format!("{value:?}"));
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT graph_nodes.json
+                FROM graph_nodes
+                WHERE (
+                    graph_nodes.label = ?1
+                    OR graph_nodes.symbol_id IN (
+                        SELECT symbols.id FROM symbols WHERE symbols.name = ?1
+                    )
+                )
+                AND (?2 IS NULL OR graph_nodes.node_type = ?2)
+                ORDER BY graph_nodes.id
+                LIMIT ?3 OFFSET ?4
+                "#,
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![label, node_type, limit, offset], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
     fn all_graph_nodes(&self) -> Result<Vec<GraphNode>> {
         let conn = self
             .connection
@@ -2715,6 +2759,35 @@ impl GraphStore for SqliteStore {
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![type_str, limit, offset], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn edges_by_type_for_node(
+        &self,
+        edge_type: GraphEdgeType,
+        node_id: &str,
+        outgoing: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<GraphEdge>> {
+        require_authoritative_relationship_semantics(self)?;
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = clamp_limit(limit) as i64;
+        let offset = offset as i64;
+        let edge_type = format!("{edge_type:?}");
+        let endpoint_column = if outgoing { "from_id" } else { "to_id" };
+        let sql = format!(
+            "SELECT json FROM graph_edges WHERE {endpoint_column} = ?1 AND edge_type = ?2 ORDER BY id LIMIT ?3 OFFSET ?4"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![node_id, edge_type, limit, offset], |row| {
                 row.get::<_, String>(0)
             })
             .map_err(storage_err)?;
@@ -2856,6 +2929,11 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
     // Add indexes (these are idempotent via IF NOT EXISTS)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
+        [],
+    )
+    .map_err(storage_err)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_label ON graph_nodes(label)",
         [],
     )
     .map_err(storage_err)?;
@@ -3612,6 +3690,26 @@ mod tests {
 
     fn make_store() -> SqliteStore {
         SqliteStore::open(":memory:").expect("in-memory store")
+    }
+
+    #[test]
+    fn open_waits_for_a_concurrent_schema_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        drop(SqliteStore::open(&path).unwrap());
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let open_path = path.clone();
+        let opener = std::thread::spawn(move || SqliteStore::open(open_path));
+        std::thread::sleep(Duration::from_millis(100));
+        blocker.execute_batch("COMMIT").unwrap();
+
+        opener
+            .join()
+            .expect("concurrent opener thread panicked")
+            .expect("store should wait for the schema writer lock");
     }
 
     fn make_current_store() -> SqliteStore {
@@ -5304,6 +5402,7 @@ mod tests {
                  WHERE type = 'index'
                    AND name IN (
                      'idx_graph_nodes_type',
+                     'idx_graph_nodes_label',
                      'idx_graph_nodes_file',
                      'idx_graph_nodes_symbol',
                      'idx_graph_edges_type',
@@ -5315,7 +5414,82 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(index_count, 7);
+        assert_eq!(index_count, 8);
+    }
+
+    #[test]
+    fn test_indexed_graph_anchor_lookups() {
+        let store = make_store();
+        let file = make_file("f1", "src/DispatcherServlet.java");
+        let symbol = make_symbol("s1", "DispatcherServlet", "f1");
+        let manifest = make_manifest();
+        let files = vec![file];
+        let symbols = vec![symbol];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &symbols,
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let file_node = GraphNode {
+            id: NodeId::new("file:src/DispatcherServlet.java"),
+            node_type: GraphNodeType::File,
+            label: "src/DispatcherServlet.java".into(),
+            file_id: Some(FileId::new("f1")),
+            ..Default::default()
+        };
+        let symbol_node = GraphNode {
+            id: NodeId::new("symbol:s1"),
+            node_type: GraphNodeType::Function,
+            label: "org.springframework.web.DispatcherServlet".into(),
+            file_id: Some(FileId::new("f1")),
+            symbol_id: Some(SymbolId::new("s1")),
+            ..Default::default()
+        };
+        let edge = GraphEdge {
+            id: EdgeId::new("e1"),
+            from: file_node.id.clone(),
+            to: symbol_node.id.clone(),
+            edge_type: GraphEdgeType::Defines,
+            evidence: evidence(),
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[file_node, symbol_node], std::slice::from_ref(&edge))
+            .unwrap();
+
+        let nodes = store
+            .nodes_by_label("DispatcherServlet", Some(GraphNodeType::Function), 10, 0)
+            .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id.0, "symbol:s1");
+
+        let outgoing = store
+            .edges_by_type_for_node(
+                GraphEdgeType::Defines,
+                "file:src/DispatcherServlet.java",
+                true,
+                10,
+                0,
+            )
+            .unwrap();
+        let incoming = store
+            .edges_by_type_for_node(GraphEdgeType::Defines, "symbol:s1", false, 10, 0)
+            .unwrap();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].id, edge.id);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].id, edge.id);
     }
 
     #[test]

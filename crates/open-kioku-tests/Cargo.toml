@@ -12,12 +12,12 @@ categories.workspace = true
 
 [dependencies]
 assert_cmd = "2.1.2"
-open-kioku-config = { version = "3.0.3", path = "../open-kioku-config" }
-open-kioku-core = { version = "3.0.3", path = "../open-kioku-core" }
-open-kioku-errors = { version = "3.0.3", path = "../open-kioku-errors" }
-open-kioku-graph = { version = "3.0.3", path = "../open-kioku-graph" }
-open-kioku-ingest = { version = "3.0.3", path = "../open-kioku-ingest" }
-open-kioku-storage = { version = "3.0.3", path = "../open-kioku-storage" }
+open-kioku-config = { version = "3.0.4", path = "../open-kioku-config" }
+open-kioku-core = { version = "3.0.4", path = "../open-kioku-core" }
+open-kioku-errors = { version = "3.0.4", path = "../open-kioku-errors" }
+open-kioku-graph = { version = "3.0.4", path = "../open-kioku-graph" }
+open-kioku-ingest = { version = "3.0.4", path = "../open-kioku-ingest" }
+open-kioku-storage = { version = "3.0.4", path = "../open-kioku-storage" }
 predicates = "3.1.4"
 rusqlite.workspace = true
 serde_json.workspace = true

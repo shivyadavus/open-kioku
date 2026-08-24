@@ -144,6 +144,28 @@ See [`demo/proof/verification-dogfood.json`](demo/proof/verification-dogfood.jso
 
 A separate public-repository audit indexed 4,600+ files, 46,000+ symbols, and 8,900+ tests locally in 33.1s. Methodology, revisions, caveats, and language limitations are recorded in [`docs/large-repo-proof.md`](docs/large-repo-proof.md).
 
+### Large Java repository validation
+
+The 3.0.4 release candidate was also tested end to end on a large Java repository. The workload and limitations are included so the results remain reproducible and useful.
+
+| Measurement | Result |
+|---|---:|
+| Tracked source files / Java files | 11,404 / 9,247 |
+| Indexed files / symbols / chunks | 9,312 / 136,212 / 136,646 |
+| Graph nodes / edges | 211,057 / 707,271 |
+| Tests / imports | 67,810 / 87,148 |
+| Cold structural index | 14m 44s |
+| Repeat full structural rebuild | 8m 22s |
+| Exact class lookup, fresh process | 3.82s |
+| Exact definition / implementation graph queries | 2.88s / 4.50s |
+| Exact-flat semantic build | 272,858 vectors in 33.33s; 0 failures |
+| Persistent HNSW build | 272,858 vectors in 5m 02s; 0 failures |
+| Structural / HNSW disk footprint | 4.7 GB / 2.35 GB |
+
+The repeat index reproduced the same file, symbol, chunk, node, and edge totals. Four parallel graph reads completed without SQLite lock failures. Exact symbol identity ranked ahead of broader prefix matches, and exact graph queries used indexed anchors instead of scanning the full edge table.
+
+These are observed local workstation timings, not a universal performance guarantee. Hardware, repository shape, Git history, enabled evidence sources, and semantic model affect runtime and storage. Compiler-grade Java SCIP evidence remains optional; when an external SCIP build integration is unavailable, Open Kioku keeps structural Java indexing operational and reports the missing evidence rather than overstating certainty.
+
 ## Local Semantic Retrieval
 
 Semantic search is optional. The default repository-intelligence workflow does not require a hosted embedding service.
@@ -254,6 +276,8 @@ ok mcp install zed --repo /absolute/path/to/repo
 ```
 
 The default MCP server is local, read-only, and communicates over stdio.
+
+Its 58 tools are advertised with MCP titles, task-specific usage and “do not use” guidance, input and output schemas, standard read-only/destructive/idempotent/open-world annotations, stable-versus-experimental maturity, and machine-readable routing categories. A metadata regression test rejects newly added tools that omit these agent-discovery fields or leave input properties undocumented.
 
 Agent setup guides: [Claude](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html).
 
