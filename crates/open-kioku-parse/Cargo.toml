@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-open-kioku-core = { version = "3.0.3", path = "../open-kioku-core" }
-open-kioku-tree-sitter = { version = "3.0.3", path = "../open-kioku-tree-sitter" }
+open-kioku-core = { version = "3.0.4", path = "../open-kioku-core" }
+open-kioku-tree-sitter = { version = "3.0.4", path = "../open-kioku-tree-sitter" }
 regex.workspace = true
 sha2.workspace = true

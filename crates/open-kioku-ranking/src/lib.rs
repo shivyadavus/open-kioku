@@ -99,7 +99,6 @@ struct SignalSpec<'a> {
 impl RankingFeatures {
     pub fn from_result(result: &SearchResult, query: Option<&str>) -> Self {
         let path = result.path.to_string_lossy().to_ascii_lowercase();
-        let text = searchable_result_text(result);
         let evidence = result.evidence.join(" ").to_ascii_lowercase();
         let reason = result.match_reason.to_ascii_lowercase();
         let exact_reference = if reason.contains("exact symbol reference")
@@ -193,11 +192,9 @@ impl RankingFeatures {
             && validation_proximity <= 0.0;
         let text_relevance = if semantic_only { 0.0 } else { result.score };
         let path_quality_penalty = path_quality_penalty(&path, result.score);
-        let symbol_name_hit = result
-            .symbol
-            .as_ref()
-            .filter(|symbol| text.contains(&symbol.name.to_ascii_lowercase()))
-            .map(|_| 0.15)
+        let symbol_name_hit = query
+            .filter(|query| exact_identity_match(result, query))
+            .map(|_| 1.0)
             .unwrap_or_default();
 
         Self {
@@ -265,9 +262,23 @@ pub fn rerank_with_options(
         }
     }
     results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let (a_exact, b_exact) = options
+            .query
+            .as_deref()
+            .map(|query| {
+                (
+                    exact_identity_match(a, query),
+                    exact_identity_match(b, query),
+                )
+            })
+            .unwrap_or_default();
+        b_exact
+            .cmp(&a_exact)
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.path.cmp(&b.path))
     });
     results
@@ -329,7 +340,8 @@ fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
             raw_value: features.boundary_fit,
             weight: weights.boundary_fit,
             evidence_ids: evidence_ids.clone(),
-            rationale: "source-like paths are better primary edit candidates",
+            rationale:
+                "source-like paths and symbol-bounded chunks are better primary edit candidates",
         },
         SignalSpec {
             signal: RankingSignal::RuntimeCorroboration,
@@ -449,25 +461,6 @@ fn path_quality_penalty(path: &str, score: f32) -> f32 {
     penalty
 }
 
-fn searchable_result_text(result: &SearchResult) -> String {
-    format!(
-        "{} {} {} {}",
-        result.path.display(),
-        result.snippet,
-        result
-            .symbol
-            .as_ref()
-            .map(|symbol| symbol.qualified_name.as_str())
-            .unwrap_or_default(),
-        result
-            .symbol
-            .as_ref()
-            .map(|symbol| symbol.name.as_str())
-            .unwrap_or_default()
-    )
-    .to_ascii_lowercase()
-}
-
 fn component_signal_value(result: &SearchResult, names: &[&str]) -> Option<f32> {
     result
         .score_breakdown
@@ -494,6 +487,15 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
         return 0.0;
     }
     if query
+        .map(|query| exact_identity_match(result, query))
+        .unwrap_or(false)
+    {
+        return 18.0;
+    }
+    if query.map(is_structured_identifier).unwrap_or(false) {
+        return if result.symbol.is_some() { 0.63 } else { 0.03 };
+    }
+    if query
         .map(|query| query_matches_path(query, path))
         .unwrap_or(false)
     {
@@ -508,7 +510,7 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
         .and_then(|value| value.to_str())
         .map(|value| value.to_ascii_lowercase())
     else {
-        return 0.03;
+        return 0.63;
     };
     if query
         .map(|query| query_matches_symbol_or_stem(query, &symbol.name, &stem))
@@ -516,8 +518,33 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     {
         18.0
     } else {
-        0.03
+        0.63
     }
+}
+
+fn exact_identity_match(result: &SearchResult, query: &str) -> bool {
+    let query = normalize_identifier(query);
+    if query.is_empty() {
+        return false;
+    }
+    let file_stem_matches = result
+        .path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|stem| normalize_identifier(stem) == query);
+    file_stem_matches
+        || result.symbol.as_ref().is_some_and(|symbol| {
+            normalize_identifier(&symbol.name) == query
+                || normalize_identifier(&symbol.qualified_name) == query
+        })
+}
+
+fn is_structured_identifier(query: &str) -> bool {
+    !query.chars().any(char::is_whitespace)
+        && (query.chars().any(|ch| ch.is_ascii_uppercase())
+            || query
+                .chars()
+                .any(|ch| matches!(ch, '_' | '-' | ':' | '.' | '/' | '\\')))
 }
 
 fn query_matches_path(query: &str, path: &str) -> bool {
@@ -775,6 +802,70 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "boundary_fit" && component.raw_value > 1.0));
+    }
+
+    #[test]
+    fn exact_structured_identifier_outranks_a_higher_scoring_prefix_match() {
+        let mut exact = make_result("src/DispatcherServlet.java", 32.0);
+        exact.symbol = Some(Symbol {
+            id: SymbolId::new("dispatcher-servlet"),
+            name: "DispatcherServlet".into(),
+            qualified_name: "org.springframework.web.DispatcherServlet".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("exact"),
+            range: Some(LineRange::single(1)),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        });
+        let mut prefix = make_result("src/Dispatcher.java", 42.0);
+        prefix.symbol = Some(Symbol {
+            id: SymbolId::new("dispatcher"),
+            name: "Dispatcher".into(),
+            qualified_name: "org.springframework.cglib.Dispatcher".into(),
+            kind: SymbolKind::Class,
+            file_id: FileId::new("prefix"),
+            range: Some(LineRange::single(1)),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        });
+
+        let results = rerank_with_options(
+            vec![prefix, exact],
+            &RankingOptions {
+                query: Some("DispatcherServlet".into()),
+                ..RankingOptions::default()
+            },
+        );
+
+        assert_eq!(results[0].path, Path::new("src/DispatcherServlet.java"));
+        assert!(results[0]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "exact_reference"));
+        assert!(!results[1]
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == "exact_reference"));
+        assert_eq!(
+            results[1]
+                .score_breakdown
+                .iter()
+                .find(|component| component.signal == "boundary_fit")
+                .map(|component| component.raw_value),
+            Some(0.63)
+        );
     }
 
     #[test]

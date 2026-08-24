@@ -22,6 +22,10 @@
     ],
     "tools": [
       {
+        "_meta": {
+          "io.open-kioku/category": "repository",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -49,6 +53,10 @@
         "title": "Open Kioku Repo Status"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "repository",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -85,6 +93,10 @@
         "title": "Open Kioku List Files"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "repository",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -112,6 +124,10 @@
         "title": "Open Kioku List Languages"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -152,6 +168,10 @@
         "title": "Open Kioku List Symbols"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -192,6 +212,10 @@
         "title": "Open Kioku Search Symbols"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -219,6 +243,10 @@
         "title": "Open Kioku Detect Architecture"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -246,6 +274,10 @@
         "title": "Open Kioku Architecture Boundaries"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -273,6 +305,10 @@
         "title": "Open Kioku Architecture Violations"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -305,6 +341,10 @@
         "title": "Open Kioku Architecture Policy Validate"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -332,6 +372,10 @@
         "title": "Open Kioku Architecture Policy Check"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -392,6 +436,10 @@
         "title": "Open Kioku Architecture Policy Explain"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -443,6 +491,10 @@
         "title": "Open Kioku Search Code"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -494,6 +546,10 @@
         "title": "Open Kioku Search Files"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -537,6 +593,10 @@
         "title": "Open Kioku Regex Search"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -564,6 +624,10 @@
         "title": "Open Kioku Semantic Status"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -607,6 +671,10 @@
         "title": "Open Kioku Semantic Search"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -650,6 +718,10 @@
         "title": "Open Kioku Hybrid Search"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -689,6 +761,10 @@
         "title": "Open Kioku Explain Search Result"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "search",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -728,6 +804,10 @@
         "title": "Open Kioku Structural Search"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -763,6 +843,10 @@
         "title": "Open Kioku Get Definition"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -802,6 +886,10 @@
         "title": "Open Kioku Get References"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -841,6 +929,10 @@
         "title": "Open Kioku Get Implementations"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -880,6 +972,10 @@
         "title": "Open Kioku Get Callers"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -919,6 +1015,10 @@
         "title": "Open Kioku Get Callees"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -954,6 +1054,10 @@
         "title": "Open Kioku Get Symbol Context"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "dependencies",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -994,6 +1098,10 @@
         "title": "Open Kioku Dependency Path"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "dependencies",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1029,6 +1137,10 @@
         "title": "Open Kioku Impact Analysis"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "history",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1081,6 +1193,10 @@
         "title": "Open Kioku History Provenance Lookup"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "history",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1138,6 +1254,10 @@
         "title": "Open Kioku Churn Analysis"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "history",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1196,6 +1316,10 @@
         "title": "Open Kioku History Similar Changes"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "history",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1231,6 +1355,10 @@
         "title": "Open Kioku Ownership Lookup"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "history",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1266,6 +1394,10 @@
         "title": "Open Kioku Reviewer Suggestions"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "dependencies",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1305,6 +1437,10 @@
         "title": "Open Kioku Module Dependencies"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "context",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1353,6 +1489,10 @@
         "title": "Open Kioku Build Context Pack"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "context",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -1400,6 +1540,10 @@
         "title": "Open Kioku Build Compressed Context"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "context",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1435,6 +1579,10 @@
         "title": "Open Kioku Retrieve Context"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "planning",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1487,6 +1635,10 @@
         "title": "Open Kioku Plan Change"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "planning",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1540,6 +1692,10 @@
         "title": "Open Kioku Preflight Change"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "planning",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -1618,6 +1774,10 @@
         "title": "Open Kioku Create Change Contract"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "planning",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1662,6 +1822,10 @@
         "title": "Open Kioku Get Change Contract"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "memory",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -1711,6 +1875,10 @@
         "title": "Open Kioku Remember Fact"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "memory",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1750,6 +1918,10 @@
         "title": "Open Kioku Search Memory"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1785,6 +1957,10 @@
         "title": "Open Kioku Explain File"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "code-intelligence",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1820,6 +1996,10 @@
         "title": "Open Kioku Explain Symbol"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "dependencies",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1852,6 +2032,10 @@
         "title": "Open Kioku Explain Flow"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "architecture",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1879,6 +2063,10 @@
         "title": "Open Kioku Summarize Architecture"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1918,6 +2106,10 @@
         "title": "Open Kioku Find Tests For Change"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1957,6 +2149,10 @@
         "title": "Open Kioku Recommend Validation Plan"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -1993,6 +2189,10 @@
         "title": "Open Kioku Explain Test Coverage"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "planning",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2028,6 +2228,10 @@
         "title": "Open Kioku Propose Patch"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -2106,6 +2310,10 @@
         "title": "Open Kioku Verify Change"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
@@ -2221,6 +2429,10 @@
         "title": "Open Kioku Verify Change Contract"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "validation",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2278,6 +2490,10 @@
         "title": "Open Kioku Explain Verification"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "runtime",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2310,6 +2526,10 @@
         "title": "Open Kioku Map Stacktrace To Code"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "runtime",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2345,6 +2565,10 @@
         "title": "Open Kioku Find Errors For Symbol"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "runtime",
+          "io.open-kioku/maturity": "experimental"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2377,6 +2601,10 @@
         "title": "Open Kioku Find Recent Failures"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "evidence-graph",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,
@@ -2404,6 +2632,10 @@
         "title": "Open Kioku Get Evidence Schema"
       },
       {
+        "_meta": {
+          "io.open-kioku/category": "evidence-graph",
+          "io.open-kioku/maturity": "stable"
+        },
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": true,

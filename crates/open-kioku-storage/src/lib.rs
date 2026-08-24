@@ -579,6 +579,18 @@ pub trait GraphStore: Send + Sync {
         ))
     }
 
+    fn nodes_by_label(
+        &self,
+        _label: &str,
+        _node_type: Option<GraphNodeType>,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<GraphNode>> {
+        Err(OkError::Unsupported(
+            "nodes_by_label is not implemented by this graph store".into(),
+        ))
+    }
+
     fn all_graph_nodes(&self) -> Result<Vec<GraphNode>> {
         Err(OkError::Unsupported(
             "all_graph_nodes is not implemented by this graph store".into(),
@@ -593,6 +605,19 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Vec<GraphEdge>> {
         Err(OkError::Unsupported(
             "edges_by_type is not implemented by this graph store".into(),
+        ))
+    }
+
+    fn edges_by_type_for_node(
+        &self,
+        _edge_type: GraphEdgeType,
+        _node_id: &str,
+        _outgoing: bool,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<Vec<GraphEdge>> {
+        Err(OkError::Unsupported(
+            "edges_by_type_for_node is not implemented by this graph store".into(),
         ))
     }
 
