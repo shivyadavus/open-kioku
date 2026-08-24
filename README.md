@@ -146,7 +146,7 @@ A separate public-repository audit indexed 4,600+ files, 46,000+ symbols, and 8,
 
 ### Large Java repository validation
 
-The 3.0.4 release candidate was also tested end to end on a large Java repository. The workload and limitations are included so the results remain reproducible and useful.
+The 3.0.4 release was tested end to end on a large Java repository. The workload and limitations are included so the results remain reproducible and useful.
 
 | Measurement | Result |
 |---|---:|
