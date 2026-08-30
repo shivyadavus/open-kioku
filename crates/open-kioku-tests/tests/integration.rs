@@ -214,10 +214,8 @@ fn normalize_plan_response(value: &mut serde_json::Value, repo_paths: &[String])
                 }
             }
         }
-        serde_json::Value::Number(number) => {
-            if number.is_f64() {
-                *value = serde_json::Value::from(0.0);
-            }
+        serde_json::Value::Number(number) if number.is_f64() => {
+            *value = serde_json::Value::from(0.0);
         }
         _ => {}
     }
