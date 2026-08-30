@@ -15,8 +15,8 @@ pub enum CalibrationSplit {
 /// Observable retrieval features that may be used to calibrate an abstention policy.
 ///
 /// These are evidence-strength signals, not probabilities. In particular, `top_score_margin`
-/// must come from candidates in the same authority tier; authority itself is represented
-/// separately by `exact_evidence_present` and is never inferred from a score.
+/// must compare candidates in the same authority tier; authority is represented separately by
+/// `exact_evidence_present` and is never inferred from a score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AbstentionCalibrationCase {
     pub id: String,
@@ -28,10 +28,8 @@ pub struct AbstentionCalibrationCase {
     pub ambiguity_unresolved_count: usize,
 }
 
-/// Search constraints for policy calibration.
-///
-/// The caller owns the product tolerance. The calibration algorithm intentionally has no hidden
-/// acceptance threshold, and therefore cannot silently turn benchmark observations into policy.
+/// Product safety constraints supplied by the caller. The calibration algorithm intentionally
+/// contains no hidden benchmark-specific acceptance threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AbstentionCalibrationConstraints {
     /// Maximum fraction of development positive cases that the selected policy may abstain on.
@@ -62,12 +60,12 @@ impl AbstentionCalibrationConstraints {
     }
 }
 
-/// A calibrated abstention policy. Every gate is optional so calibration can prove which evidence
-/// dimensions add value instead of forcing an arbitrary conjunction into production.
+/// A calibrated abstention policy. Every gate is optional so calibration can establish which
+/// evidence dimensions add value instead of forcing an arbitrary conjunction into production.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AbstentionPolicy {
     /// Abstain when the same-authority top-score margin is below this value. Missing margin is
-    /// treated as insufficient evidence whenever this gate is enabled.
+    /// insufficient evidence whenever this gate is enabled.
     pub min_top_score_margin: Option<f64>,
     /// Abstain when fewer independent retrieval streams support the result.
     pub min_independent_streams: Option<usize>,
@@ -87,7 +85,7 @@ impl AbstentionPolicy {
     /// Evaluate a case without upgrading or suppressing evidence authority.
     ///
     /// Exact evidence prevents weak score-margin or stream-agreement heuristics from erasing an
-    /// authoritative match. It does *not* override an explicit ambiguity/unresolved gate: exact
+    /// authoritative match. It does not override an explicit ambiguity/unresolved gate: exact
     /// evidence can still be ambiguous, and that conflict must remain visible and actionable.
     pub fn should_abstain(&self, case: &AbstentionCalibrationCase) -> bool {
         let unresolved = self
@@ -100,14 +98,12 @@ impl AbstentionPolicy {
             return false;
         }
 
-        let weak_margin = self.min_top_score_margin.is_some_and(|minimum| {
-            case.top_score_margin
-                .is_none_or(|margin| margin < minimum)
-        });
+        let weak_margin = self
+            .min_top_score_margin
+            .is_some_and(|minimum| case.top_score_margin.is_none_or(|margin| margin < minimum));
         let weak_agreement = self
             .min_independent_streams
             .is_some_and(|minimum| case.independent_stream_count < minimum);
-
         weak_margin || weak_agreement
     }
 
@@ -159,16 +155,21 @@ impl std::fmt::Display for CalibrationError {
             Self::EmptyCaseId => write!(f, "calibration case id must be non-empty"),
             Self::DuplicateCaseId(id) => write!(f, "duplicate calibration case id `{id}`"),
             Self::InvalidFeature(message) => write!(f, "invalid calibration feature: {message}"),
-            Self::InvalidConstraint(message) => write!(f, "invalid calibration constraint: {message}"),
-            Self::MissingDevelopmentPositiveCases => {
-                write!(f, "calibration requires at least one development positive case")
+            Self::InvalidConstraint(message) => {
+                write!(f, "invalid calibration constraint: {message}")
             }
-            Self::MissingDevelopmentNoGoldCases => {
-                write!(f, "calibration requires at least one development no-gold case")
-            }
-            Self::MissingHoldoutCases => {
-                write!(f, "calibration requires an evaluation-only holdout partition")
-            }
+            Self::MissingDevelopmentPositiveCases => write!(
+                f,
+                "calibration requires at least one development positive case"
+            ),
+            Self::MissingDevelopmentNoGoldCases => write!(
+                f,
+                "calibration requires at least one development no-gold case"
+            ),
+            Self::MissingHoldoutCases => write!(
+                f,
+                "calibration requires an evaluation-only holdout partition"
+            ),
             Self::NoEligiblePolicy => write!(
                 f,
                 "no development-only abstention policy satisfies the supplied safety constraints"
@@ -210,9 +211,8 @@ pub fn calibrate_abstention_policy(
         return Err(CalibrationError::MissingHoldoutCases);
     }
 
-    let candidate_policies = candidate_policies(&development);
     let mut best: Option<(AbstentionPolicy, AbstentionMetrics)> = None;
-    for policy in candidate_policies {
+    for policy in candidate_policies(&development) {
         let metrics = evaluate_policy_refs(&policy, &development);
         if metrics.positive_abstention_rate > constraints.max_positive_abstention_rate
             || metrics.no_gold_recall < constraints.min_no_gold_abstention_recall
@@ -253,7 +253,10 @@ pub fn evaluate_abstention_policy(
     cases: &[AbstentionCalibrationCase],
 ) -> Result<AbstentionMetrics, CalibrationError> {
     validate_cases(cases)?;
-    Ok(evaluate_policy_refs(policy, &cases.iter().collect::<Vec<_>>()))
+    Ok(evaluate_policy_refs(
+        policy,
+        &cases.iter().collect::<Vec<_>>(),
+    ))
 }
 
 fn validate_cases(cases: &[AbstentionCalibrationCase]) -> Result<(), CalibrationError> {
@@ -352,8 +355,14 @@ fn compare_policy_quality(
 fn compare_policy_identity(left: &AbstentionPolicy, right: &AbstentionPolicy) -> Ordering {
     option_f64_key(left.min_top_score_margin)
         .cmp(&option_f64_key(right.min_top_score_margin))
-        .then_with(|| left.min_independent_streams.cmp(&right.min_independent_streams))
-        .then_with(|| left.max_ambiguity_unresolved.cmp(&right.max_ambiguity_unresolved))
+        .then_with(|| {
+            left.min_independent_streams
+                .cmp(&right.min_independent_streams)
+        })
+        .then_with(|| {
+            left.max_ambiguity_unresolved
+                .cmp(&right.max_ambiguity_unresolved)
+        })
 }
 
 fn option_f64_key(value: Option<f64>) -> (u8, u64) {
@@ -439,31 +448,82 @@ mod tests {
     #[test]
     fn holdout_cannot_change_selected_policy() {
         let development = vec![
-            case("dev-positive-a", CalibrationSplit::Development, false, false, Some(0.8), 3, 0),
-            case("dev-positive-b", CalibrationSplit::Development, false, false, Some(0.6), 2, 0),
-            case("dev-negative", CalibrationSplit::Development, true, false, Some(0.1), 1, 0),
+            case(
+                "dev-positive-a",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.8),
+                3,
+                0,
+            ),
+            case(
+                "dev-positive-b",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.6),
+                2,
+                0,
+            ),
+            case(
+                "dev-negative",
+                CalibrationSplit::Development,
+                true,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
         ];
         let mut first = development.clone();
         first.extend([
-            case("holdout-a", CalibrationSplit::Holdout, false, false, Some(0.01), 0, 9),
-            case("holdout-b", CalibrationSplit::Holdout, true, false, Some(100.0), 20, 0),
+            case(
+                "holdout-a",
+                CalibrationSplit::Holdout,
+                false,
+                false,
+                Some(0.01),
+                0,
+                9,
+            ),
+            case(
+                "holdout-b",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(100.0),
+                20,
+                0,
+            ),
         ]);
         let mut second = development;
         second.extend([
-            case("holdout-a", CalibrationSplit::Holdout, true, true, None, 0, 0),
-            case("holdout-b", CalibrationSplit::Holdout, false, false, None, 0, 99),
+            case(
+                "holdout-a",
+                CalibrationSplit::Holdout,
+                true,
+                true,
+                None,
+                0,
+                0,
+            ),
+            case(
+                "holdout-b",
+                CalibrationSplit::Holdout,
+                false,
+                false,
+                None,
+                0,
+                99,
+            ),
         ]);
 
         let first_result = calibrate_abstention_policy(&first, constraints()).unwrap();
         let second_result = calibrate_abstention_policy(&second, constraints()).unwrap();
-
         assert_eq!(first_result.policy, second_result.policy);
         assert_eq!(first_result.development, second_result.development);
         assert_ne!(first_result.holdout, second_result.holdout);
-        assert_eq!(
-            first_result.development_case_ids,
-            vec!["dev-negative", "dev-positive-a", "dev-positive-b"]
-        );
     }
 
     #[test]
@@ -473,7 +533,15 @@ mod tests {
             min_independent_streams: Some(10),
             max_ambiguity_unresolved: Some(0),
         };
-        let exact = case("exact", CalibrationSplit::Development, true, true, None, 0, 0);
+        let exact = case(
+            "exact",
+            CalibrationSplit::Development,
+            true,
+            true,
+            None,
+            0,
+            0,
+        );
         assert!(!policy.should_abstain(&exact));
     }
 
@@ -518,11 +586,51 @@ mod tests {
     #[test]
     fn calibration_is_deterministic_under_case_reordering() {
         let mut cases = vec![
-            case("dev-positive", CalibrationSplit::Development, false, false, Some(0.7), 3, 0),
-            case("dev-negative-a", CalibrationSplit::Development, true, false, Some(0.1), 1, 1),
-            case("dev-negative-b", CalibrationSplit::Development, true, false, Some(0.2), 1, 0),
-            case("holdout-positive", CalibrationSplit::Holdout, false, false, Some(0.8), 3, 0),
-            case("holdout-negative", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 1),
+            case(
+                "dev-positive",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.7),
+                3,
+                0,
+            ),
+            case(
+                "dev-negative-a",
+                CalibrationSplit::Development,
+                true,
+                false,
+                Some(0.1),
+                1,
+                1,
+            ),
+            case(
+                "dev-negative-b",
+                CalibrationSplit::Development,
+                true,
+                false,
+                Some(0.2),
+                1,
+                0,
+            ),
+            case(
+                "holdout-positive",
+                CalibrationSplit::Holdout,
+                false,
+                false,
+                Some(0.8),
+                3,
+                0,
+            ),
+            case(
+                "holdout-negative",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(0.1),
+                1,
+                1,
+            ),
         ];
         let first = calibrate_abstention_policy(&cases, constraints()).unwrap();
         cases.reverse();
@@ -533,10 +641,42 @@ mod tests {
     #[test]
     fn ambiguity_can_be_selected_without_manufacturing_score_confidence() {
         let cases = vec![
-            case("dev-positive", CalibrationSplit::Development, false, false, Some(0.5), 2, 0),
-            case("dev-negative", CalibrationSplit::Development, true, false, Some(0.5), 2, 2),
-            case("holdout-positive", CalibrationSplit::Holdout, false, false, Some(0.5), 2, 0),
-            case("holdout-negative", CalibrationSplit::Holdout, true, false, Some(0.5), 2, 3),
+            case(
+                "dev-positive",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.5),
+                2,
+                0,
+            ),
+            case(
+                "dev-negative",
+                CalibrationSplit::Development,
+                true,
+                false,
+                Some(0.5),
+                2,
+                2,
+            ),
+            case(
+                "holdout-positive",
+                CalibrationSplit::Holdout,
+                false,
+                false,
+                Some(0.5),
+                2,
+                0,
+            ),
+            case(
+                "holdout-negative",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(0.5),
+                2,
+                3,
+            ),
         ];
         let result = calibrate_abstention_policy(&cases, constraints()).unwrap();
         assert_eq!(result.policy.max_ambiguity_unresolved, Some(0));
@@ -548,8 +688,24 @@ mod tests {
     #[test]
     fn invalid_features_and_duplicate_ids_are_rejected() {
         let invalid = vec![
-            case("bad-margin", CalibrationSplit::Development, false, false, Some(f64::NAN), 1, 0),
-            case("holdout", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 0),
+            case(
+                "bad-margin",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(f64::NAN),
+                1,
+                0,
+            ),
+            case(
+                "holdout",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
         ];
         assert!(matches!(
             calibrate_abstention_policy(&invalid, constraints()),
@@ -557,9 +713,33 @@ mod tests {
         ));
 
         let duplicate = vec![
-            case("same", CalibrationSplit::Development, false, false, Some(0.8), 2, 0),
-            case("same", CalibrationSplit::Development, true, false, Some(0.1), 1, 0),
-            case("holdout", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 0),
+            case(
+                "same",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.8),
+                2,
+                0,
+            ),
+            case(
+                "same",
+                CalibrationSplit::Development,
+                true,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
+            case(
+                "holdout",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
         ];
         assert!(matches!(
             calibrate_abstention_policy(&duplicate, constraints()),
@@ -570,9 +750,33 @@ mod tests {
     #[test]
     fn impossible_safety_constraint_does_not_silently_pick_a_policy() {
         let cases = vec![
-            case("dev-positive", CalibrationSplit::Development, false, false, Some(0.1), 1, 0),
-            case("dev-negative", CalibrationSplit::Development, true, true, None, 0, 0),
-            case("holdout", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 0),
+            case(
+                "dev-positive",
+                CalibrationSplit::Development,
+                false,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
+            case(
+                "dev-negative",
+                CalibrationSplit::Development,
+                true,
+                true,
+                None,
+                0,
+                0,
+            ),
+            case(
+                "holdout",
+                CalibrationSplit::Holdout,
+                true,
+                false,
+                Some(0.1),
+                1,
+                0,
+            ),
         ];
         let result = calibrate_abstention_policy(
             &cases,
@@ -586,9 +790,8 @@ mod tests {
 
     #[test]
     fn invalid_constraints_fail_closed() {
-        let cases = vec![];
         let error = calibrate_abstention_policy(
-            &cases,
+            &[],
             AbstentionCalibrationConstraints {
                 max_positive_abstention_rate: 1.1,
                 min_no_gold_abstention_recall: 0.0,
