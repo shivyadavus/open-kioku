@@ -1,5 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.5.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.6.0";
 const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
 const RETRIEVAL_BASELINE_DIMENSIONS_VERSION: &str = "2.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
@@ -297,8 +297,18 @@ struct RetrievalLatencyMetrics {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
+struct RetrievalAbstentionMetrics {
+    abstained_cases: usize,
+    correct_no_gold_abstentions: usize,
+    incorrect_positive_abstentions: usize,
+    precision: f64,
+    recall: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 struct RetrievalMetricSummary {
     quality: RetrievalQualityMetrics,
+    abstention: RetrievalAbstentionMetrics,
     latency: RetrievalLatencyMetrics,
 }
 
@@ -496,7 +506,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         caveats.push(caveat);
     }
     caveats.push(
-        "abstention precision/recall is not reported until calibrated abstention ships; no-gold false-positive rate remains the active negative-case signal".into(),
+        "abstention precision/recall measures empty-result abstention behavior and remains advisory until CC6 calibration selects thresholds from the development/calibration split; no-gold false-positive rate remains the active release-gated negative-case signal".into(),
     );
     caveats.push(
         "cc4:routed_contextpack is advisory and executes task classification, query-shape classification, routing policy, routed candidate caps, fusion, budget selection, and ContextPack construction; it does not alter the frozen generic-fusion release gate".into(),
@@ -1366,6 +1376,22 @@ fn summarize_retrieval_cases(cases: &[RetrievalCaseReport]) -> RetrievalMetricSu
     } else {
         no_gold.iter().filter(|case| case.returned_any).count() as f64 / no_gold.len() as f64
     };
+    let correct_no_gold_abstentions = no_gold
+        .iter()
+        .filter(|case| !case.returned_any)
+        .count();
+    let incorrect_positive_abstentions = positives
+        .iter()
+        .filter(|case| !case.returned_any)
+        .count();
+    let abstained_cases = correct_no_gold_abstentions + incorrect_positive_abstentions;
+    let abstention = RetrievalAbstentionMetrics {
+        abstained_cases,
+        correct_no_gold_abstentions,
+        incorrect_positive_abstentions,
+        precision: retrieval_ratio(correct_no_gold_abstentions, abstained_cases),
+        recall: retrieval_ratio(correct_no_gold_abstentions, no_gold.len()),
+    };
     let mut latencies = cases.iter().map(|case| case.latency_ms).collect::<Vec<_>>();
     latencies.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1386,6 +1412,7 @@ fn summarize_retrieval_cases(cases: &[RetrievalCaseReport]) -> RetrievalMetricSu
             no_gold_false_positive_rate,
             token_budget_gold_yield,
         },
+        abstention,
         latency: RetrievalLatencyMetrics {
             mean_ms: retrieval_mean(&latencies),
             p50_ms: retrieval_percentile(&latencies, 0.50),
@@ -1945,7 +1972,7 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
     for strategy in &report.strategies {
         let quality = &strategy.summary.quality;
         out.push_str(&format!(
-            "## {}\n\n| Metric | Value |\n|---|---:|\n| Recall@1 | {:.3} |\n| Recall@5 | {:.3} |\n| Recall@10 | {:.3} |\n| Recall@20 | {:.3} |\n| Precision@10 | {:.3} |\n| MRR | {:.3} |\n| File F1@10 | {:.3} |\n| No-gold false-positive rate | {:.3} |\n| p50 latency (observational) | {:.2} ms |\n| p95 latency (observational) | {:.2} ms |\n\n",
+            "## {}\n\n| Metric | Value |\n|---|---:|\n| Recall@1 | {:.3} |\n| Recall@5 | {:.3} |\n| Recall@10 | {:.3} |\n| Recall@20 | {:.3} |\n| Precision@10 | {:.3} |\n| MRR | {:.3} |\n| File F1@10 | {:.3} |\n| No-gold false-positive rate | {:.3} |\n| Abstention precision (advisory) | {:.3} |\n| Abstention recall (advisory) | {:.3} |\n| p50 latency (observational) | {:.2} ms |\n| p95 latency (observational) | {:.2} ms |\n\n",
             strategy.strategy,
             quality.recall_at_1,
             quality.recall_at_5,
@@ -1955,6 +1982,8 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             quality.mean_reciprocal_rank,
             quality.file_f1_at_10,
             quality.no_gold_false_positive_rate,
+            strategy.summary.abstention.precision,
+            strategy.summary.abstention.recall,
             strategy.summary.latency.p50_ms,
             strategy.summary.latency.p95_ms
         ));
@@ -2307,6 +2336,58 @@ mod retrieval_bench_tests {
             strategies: Vec::new(),
             stream_ablations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn abstention_quality_reports_precision_and_recall_without_tuning_holdout() {
+        let mut positive_returned = report("positive-returned", false, &[Some(1)]);
+        positive_returned.returned_any = true;
+        let mut positive_abstained = report("positive-abstained", false, &[None]);
+        positive_abstained.returned_any = false;
+        let mut no_gold_abstained = report("no-gold-abstained", true, &[]);
+        no_gold_abstained.returned_any = false;
+        let mut no_gold_returned = report("no-gold-returned", true, &[]);
+        no_gold_returned.returned_any = true;
+
+        let summary = summarize_retrieval_cases(&[
+            positive_returned,
+            positive_abstained,
+            no_gold_abstained,
+            no_gold_returned,
+        ]);
+
+        assert_eq!(summary.abstention.abstained_cases, 2);
+        assert_eq!(summary.abstention.correct_no_gold_abstentions, 1);
+        assert_eq!(summary.abstention.incorrect_positive_abstentions, 1);
+        assert_eq!(summary.abstention.precision, 0.5);
+        assert_eq!(summary.abstention.recall, 0.5);
+        assert_eq!(summary.quality.no_gold_false_positive_rate, 0.5);
+    }
+
+    #[test]
+    fn abstention_quality_is_serialized_for_breakdown_slices() {
+        let mut positive = report("positive", false, &[Some(1)]);
+        positive.returned_any = true;
+        let mut no_gold = report("no-gold", true, &[]);
+        no_gold.returned_any = false;
+        let strategy = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![positive, no_gold],
+        );
+
+        let value = serde_json::to_value(&strategy).unwrap();
+        assert_eq!(value.pointer("/summary/abstention/precision").and_then(serde_json::Value::as_f64), Some(1.0));
+        assert_eq!(value.pointer("/summary/abstention/recall").and_then(serde_json::Value::as_f64), Some(1.0));
+        assert_eq!(
+            value.pointer("/by_task_family/issue_to_code/abstention/correct_no_gold_abstentions")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            value.pointer("/by_language/rust/abstention/incorrect_positive_abstentions")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
