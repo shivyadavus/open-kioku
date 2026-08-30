@@ -227,7 +227,8 @@ fn validate_holdout_metrics(metrics: &AbstentionMetrics) -> Result<(), Abstentio
         != metrics.correct_no_gold_abstentions + metrics.incorrect_positive_abstentions
     {
         return Err(AbstentionActivationError::InvalidEvaluationEvidence(
-            "abstained holdout count is inconsistent with positive/no-gold abstention counts".into(),
+            "abstained holdout count is inconsistent with positive/no-gold abstention counts"
+                .into(),
         ));
     }
 
@@ -237,16 +238,13 @@ fn validate_holdout_metrics(metrics: &AbstentionMetrics) -> Result<(), Abstentio
         ("positive_abstention_rate", metrics.positive_abstention_rate),
     ] {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return Err(AbstentionActivationError::InvalidEvaluationEvidence(format!(
-                "holdout {name} must be a finite value in [0, 1]"
-            )));
+            return Err(AbstentionActivationError::InvalidEvaluationEvidence(
+                format!("holdout {name} must be a finite value in [0, 1]"),
+            ));
         }
     }
 
-    let expected_precision = ratio(
-        metrics.correct_no_gold_abstentions,
-        metrics.abstained_cases,
-    );
+    let expected_precision = ratio(metrics.correct_no_gold_abstentions, metrics.abstained_cases);
     let expected_recall = ratio(metrics.correct_no_gold_abstentions, metrics.no_gold_cases);
     let expected_positive_rate = ratio(
         metrics.incorrect_positive_abstentions,
@@ -262,9 +260,9 @@ fn validate_holdout_metrics(metrics: &AbstentionMetrics) -> Result<(), Abstentio
         ),
     ] {
         if (actual - expected).abs() > f64::EPSILON {
-            return Err(AbstentionActivationError::InvalidEvaluationEvidence(format!(
-                "holdout {name} is inconsistent with its source counts"
-            )));
+            return Err(AbstentionActivationError::InvalidEvaluationEvidence(
+                format!("holdout {name} is inconsistent with its source counts"),
+            ));
         }
     }
     Ok(())
@@ -294,7 +292,9 @@ fn evaluate_cost_gate(
     let Some(observed) = observed else {
         blockers.push(blocker(
             missing_kind,
-            format!("activation criterion for {label} is configured but no measurement is available"),
+            format!(
+                "activation criterion for {label} is configured but no measurement is available"
+            ),
         ));
         return;
     };
