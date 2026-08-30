@@ -1,0 +1,1069 @@
+{
+  "content": [
+    {
+      "text": "<STRUCTURED_CONTENT_AS_TEXT>",
+      "type": "text"
+    }
+  ],
+  "structuredContent": {
+    "confidence_breakdown": {
+      "blockers": [
+        "4 negative evidence signal(s) lowered confidence"
+      ],
+      "caveats": [
+        "exact symbol/reference evidence is absent",
+        "no validation target was selected",
+        "runtime corroboration is absent",
+        "exact symbol/reference evidence is unavailable",
+        "runtime evidence is unavailable",
+        "history evidence is unavailable",
+        "coverage or JUnit evidence is unavailable",
+        "optional evidence pass did not complete: SCIP was enabled but no SCIP index was imported"
+      ],
+      "components": [
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "how narrowly allowed edit files bound the proposed change",
+          "raw_value": 0.0,
+          "signal": "boundary_tightness",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "amount of independent indexed evidence near the selected context",
+          "raw_value": 0.0,
+          "signal": "evidence_density",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "explicit exact symbol references or SCIP signals",
+          "raw_value": 0.0,
+          "signal": "exact_references",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "absence of low-confidence, missing-anchor, or no-match evidence",
+          "raw_value": 0.0,
+          "signal": "negative_evidence",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "runtime traces, incidents, or error signals that support the context",
+          "raw_value": 0.0,
+          "signal": "runtime_corroboration",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "selected tests with runnable commands",
+          "raw_value": 0.0,
+          "signal": "test_coverage",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
+          "rationale": "presence of validation targets for the likely change",
+          "raw_value": 0.0,
+          "signal": "validation_availability",
+          "weight": 0.0
+        }
+      ],
+      "overall_enum": "low",
+      "overall_score": 0.0
+    },
+    "confidence_summary": "overall Low (0.48) from evidence density, references, validation, boundaries, runtime, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
+    "evidence": [
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "BM25 lexical match from local Tantivy index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `function` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `function` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `subtract OR function` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `subtract function` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `function OR next` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `function next` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "BM25 lexical match from local Tantivy index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `subtract OR function` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `subtract function` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `function OR next` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `function next` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/main.rs"
+        },
+        "id": "impact:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "impact report derived from indexed symbols and lexical references",
+        "source": "open-kioku-impact",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+        "source": "open-kioku-relationships:complexity",
+        "source_type": "static_analysis",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 1
+          },
+          "path": "src/main.rs"
+        },
+        "id": "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+        "source": "open-kioku-relationships:complexity",
+        "source_type": "static_analysis",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": null,
+          "path": "src/main.rs"
+        },
+        "id": "impact:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "impact report derived from indexed symbols and lexical references",
+        "source": "open-kioku-impact",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 7,
+            "start": 5
+          },
+          "path": "src/main.rs"
+        },
+        "id": "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+        "source": "open-kioku-relationships:complexity",
+        "source_type": "static_analysis",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 1
+          },
+          "path": "src/main.rs"
+        },
+        "id": "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+        "source": "open-kioku-relationships:complexity",
+        "source_type": "static_analysis",
+        "symbol_id": "<ID>"
+      }
+    ],
+    "evidence_by_section": {
+      "boundary": [
+        "search:src/main.rs:1-4:0",
+        "search:src/main.rs:1-4:1",
+        "search:src/main.rs:5-7:0",
+        "search:src/main.rs:5-7:1",
+        "search:src/routes.rs:2-3:0",
+        "search:src/routes.rs:2-3:1",
+        "search:src/routes.rs:4-6:0",
+        "search:src/routes.rs:4-6:1"
+      ],
+      "history": [],
+      "impact": [
+        "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61",
+        "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
+        "impact:src/main.rs"
+      ],
+      "negative_evidence": [
+        "negative:exact_references:add-a-subtract-function-next-to-add-no",
+        "negative:history:add-a-subtract-function-next-to-add-no",
+        "negative:runtime:add-a-subtract-function-next-to-add-no",
+        "negative:validation:add-a-subtract-function-next-to-add-no"
+      ],
+      "primary_context": [
+        "search:src/main.rs:1-4:0",
+        "search:src/main.rs:1-4:1",
+        "search:src/main.rs:5-7:0",
+        "search:src/main.rs:5-7:1",
+        "search:src/routes.rs:2-3:0",
+        "search:src/routes.rs:2-3:1",
+        "search:src/routes.rs:4-6:0",
+        "search:src/routes.rs:4-6:1"
+      ],
+      "validation": []
+    },
+    "evidence_quality": {
+      "ambiguous_edge_count": 0,
+      "caveats": [
+        "exact symbol/reference evidence is unavailable",
+        "runtime evidence is unavailable",
+        "history evidence is unavailable",
+        "coverage or JUnit evidence is unavailable",
+        "optional evidence pass did not complete: SCIP was enabled but no SCIP index was imported"
+      ],
+      "exact_reference_available": false,
+      "failed_optional_passes": [
+        "SCIP was enabled but no SCIP index was imported"
+      ],
+      "freshness": "fresh",
+      "history_available": false,
+      "index_mode": "full",
+      "runtime_available": false,
+      "skipped_path_count": 0,
+      "test_coverage_available": false,
+      "unresolved_import_count": 0
+    },
+    "impact": {
+      "direct_impacts": [],
+      "evidence": [
+        {
+          "confidence": "medium",
+          "file_range": {
+            "line_range": null,
+            "path": "src/main.rs"
+          },
+          "id": "impact:src/main.rs",
+          "indexed_at": "<TIMESTAMP>",
+          "message": "impact report derived from indexed symbols and lexical references",
+          "source": "open-kioku-impact",
+          "source_type": "lexical",
+          "symbol_id": "<ID>"
+        },
+        {
+          "confidence": "medium",
+          "file_range": {
+            "line_range": {
+              "end": 7,
+              "start": 5
+            },
+            "path": "src/main.rs"
+          },
+          "id": "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
+          "indexed_at": "<TIMESTAMP>",
+          "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+          "source": "open-kioku-relationships:complexity",
+          "source_type": "static_analysis",
+          "symbol_id": "<ID>"
+        },
+        {
+          "confidence": "medium",
+          "file_range": {
+            "line_range": {
+              "end": 3,
+              "start": 1
+            },
+            "path": "src/main.rs"
+          },
+          "id": "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61",
+          "indexed_at": "<TIMESTAMP>",
+          "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
+          "source": "open-kioku-relationships:complexity",
+          "source_type": "static_analysis",
+          "symbol_id": "<ID>"
+        }
+      ],
+      "indirect_impacts": [],
+      "risk_report": {
+        "level": "low",
+        "reasons": [
+          "2 complexity/hot-path risk signal(s) touch this file"
+        ],
+        "score": 0.0
+      },
+      "score_breakdown": [
+        {
+          "contribution": 0.0,
+          "evidence_ids": [
+            "impact:src/main.rs"
+          ],
+          "normalized_value": 0.0,
+          "rationale": "impact risk from count of exact and lexical direct dependents",
+          "raw_value": 0.0,
+          "signal": "direct_reference_density",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [
+            "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
+            "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61"
+          ],
+          "normalized_value": 0.0,
+          "rationale": "impact risk adjusted by complexity, nested-loop, recursion, and hot-path static signals",
+          "raw_value": 0.0,
+          "signal": "complexity_hot_path",
+          "weight": 0.0
+        }
+      ],
+      "target": "src/main.rs"
+    },
+    "memory_facts": [],
+    "negative_evidence": [
+      {
+        "confidence": 0.0,
+        "inspected_sources": [
+          "search_result.evidence",
+          "search_result.match_reason"
+        ],
+        "query": "add a subtract function next to add",
+        "reason": "no explicit exact symbol reference or SCIP evidence was found",
+        "scope": "exact_references",
+        "suggested_next_probe": "Run `ok scip setup .` and re-index with `ok index . --with-scip auto`."
+      },
+      {
+        "confidence": 0.0,
+        "inspected_sources": [
+          "plan.evidence",
+          "search_result.evidence"
+        ],
+        "query": "add a subtract function next to add",
+        "reason": "no churn, ownership, similar-change, reviewer, or historical validation evidence was available",
+        "scope": "history",
+        "suggested_next_probe": "Run `ok history similar --path src/main.rs` or `git log --name-only -- src/main.rs` to inspect history manually."
+      },
+      {
+        "confidence": 0.0,
+        "inspected_sources": [
+          "runtime_signals",
+          "search_result.evidence"
+        ],
+        "query": "add a subtract function next to add",
+        "reason": "no runtime trace, incident, or error artifact corroborated the selected context",
+        "scope": "runtime",
+        "suggested_next_probe": "Import or configure runtime artifacts, then rerun `ok plan`."
+      },
+      {
+        "confidence": 0.0,
+        "inspected_sources": [
+          "indexed_tests",
+          "test_selector"
+        ],
+        "query": "add a subtract function next to add",
+        "reason": "no nearby validation target was selected",
+        "scope": "validation",
+        "suggested_next_probe": "Run `ok tests src/main.rs` to inspect validation candidates for the top file."
+      }
+    ],
+    "primary_context": [
+      {
+        "confidence": 0.0,
+        "evidence": [
+          "BM25 lexical match from local Tantivy index",
+          "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
+          "query variant `function` matched local index",
+          "expanded task query `function` matched indexed search",
+          "query variant `subtract OR function` matched local index",
+          "expanded task query `subtract function` matched indexed search",
+          "query variant `function OR next` matched local index",
+          "expanded task query `function next` matched indexed search"
+        ],
+        "evidence_refs": [
+          "search:src/main.rs:1-4:0",
+          "search:src/main.rs:1-4:1",
+          "search:src/main.rs:5-7:0",
+          "search:src/main.rs:5-7:1"
+        ],
+        "line_range": {
+          "end": 7,
+          "start": 5
+        },
+        "match_reason": "tantivy hybrid lexical match",
+        "path": "src/main.rs",
+        "score": 0.0,
+        "score_breakdown": [
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/main.rs:5-7:0",
+              "search:src/main.rs:5-7:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "BM25 score from local Tantivy index",
+            "raw_value": 0.0,
+            "signal": "bm25_relevance",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/main.rs:5-7:0",
+              "search:src/main.rs:5-7:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
+            "raw_value": 0.0,
+            "signal": "query_variant_boost",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/main.rs:1-4:0",
+              "search:src/main.rs:1-4:1",
+              "search:src/main.rs:5-7:0",
+              "search:src/main.rs:5-7:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "source rank 1 with Heuristic authority: fusion_profile=rrf_unweighted; production lexical index ranked this file",
+            "raw_value": 0.0,
+            "signal": "retrieval_rrf:lexical",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/main.rs:1-4:0",
+              "search:src/main.rs:1-4:1",
+              "search:src/main.rs:5-7:0",
+              "search:src/main.rs:5-7:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
+            "raw_value": 0.0,
+            "signal": "score_reconciliation",
+            "weight": 0.0
+          }
+        ],
+        "snippet": "pub fn add(a: i32, b: i32) -> i32 {",
+        "symbol": {
+          "confidence": "high",
+          "file_id": "<ID>",
+          "id": "5ed00a1939707fa2c0b5175bf7da9bf2659e7aa2d9e52a06b27ad0aee76a47a9",
+          "kind": "function",
+          "language": "rust",
+          "name": "add",
+          "provenance": "tree_sitter",
+          "qualified_name": "src::main::add",
+          "range": {
+            "end": 7,
+            "start": 5
+          },
+          "scope_id": "src/main.rs:scope:file:0",
+          "signature": "fn(a: i32, b: i32) i32",
+          "visibility": "public"
+        }
+      },
+      {
+        "confidence": 0.0,
+        "evidence": [
+          "BM25 lexical match from local Tantivy index",
+          "query variant `subtract OR function` matched local index",
+          "expanded task query `subtract function` matched indexed search",
+          "query variant `function OR next` matched local index",
+          "expanded task query `function next` matched indexed search"
+        ],
+        "evidence_refs": [
+          "search:src/routes.rs:2-3:0",
+          "search:src/routes.rs:2-3:1",
+          "search:src/routes.rs:4-6:0",
+          "search:src/routes.rs:4-6:1"
+        ],
+        "line_range": {
+          "end": 3,
+          "start": 2
+        },
+        "match_reason": "tantivy hybrid lexical match",
+        "path": "src/routes.rs",
+        "score": 0.0,
+        "score_breakdown": [
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/routes.rs:2-3:0",
+              "search:src/routes.rs:2-3:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "BM25 score from local Tantivy index",
+            "raw_value": 0.0,
+            "signal": "bm25_relevance",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/routes.rs:2-3:0",
+              "search:src/routes.rs:2-3:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "query variant, path, symbol, or graph-node boost applied to lexical result",
+            "raw_value": 0.0,
+            "signal": "query_variant_boost",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/routes.rs:2-3:0",
+              "search:src/routes.rs:2-3:1",
+              "search:src/routes.rs:4-6:0",
+              "search:src/routes.rs:4-6:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "source rank 2 with Heuristic authority: fusion_profile=rrf_unweighted; production lexical index ranked this file",
+            "raw_value": 0.0,
+            "signal": "retrieval_rrf:lexical",
+            "weight": 0.0
+          },
+          {
+            "contribution": 0.0,
+            "evidence_ids": [
+              "search:src/routes.rs:2-3:0",
+              "search:src/routes.rs:2-3:1",
+              "search:src/routes.rs:4-6:0",
+              "search:src/routes.rs:4-6:1"
+            ],
+            "normalized_value": 0.0,
+            "rationale": "adjusted component total to match surfaced score: tantivy hybrid lexical match",
+            "raw_value": 0.0,
+            "signal": "score_reconciliation",
+            "weight": 0.0
+          }
+        ],
+        "snippet": "pub async fn orders_route() {}",
+        "symbol": {
+          "confidence": "high",
+          "file_id": "<ID>",
+          "id": "a100f28a2ccf7c7c5f67a4d17ab54e3467bef98693563618d033a55422a9a021",
+          "kind": "function",
+          "language": "rust",
+          "name": "orders_route",
+          "provenance": "tree_sitter",
+          "qualified_name": "src::routes::orders_route",
+          "range": {
+            "end": 2,
+            "start": 2
+          },
+          "scope_id": "src/routes.rs:scope:file:0",
+          "signature": "fn()",
+          "visibility": "public"
+        }
+      }
+    ],
+    "recommended_change_boundary": {
+      "allowed_files": [
+        "src/main.rs",
+        "src/routes.rs"
+      ],
+      "allowed_rules": [
+        {
+          "evidence_refs": [
+            "search:src/main.rs:1-4:0",
+            "search:src/main.rs:1-4:1",
+            "search:src/main.rs:5-7:0",
+            "search:src/main.rs:5-7:1"
+          ],
+          "path": "src/main.rs",
+          "reason": "primary context matched the requested edit intent",
+          "symbols": [
+            "src::main::add"
+          ]
+        },
+        {
+          "evidence_refs": [
+            "search:src/routes.rs:2-3:0",
+            "search:src/routes.rs:2-3:1",
+            "search:src/routes.rs:4-6:0",
+            "search:src/routes.rs:4-6:1"
+          ],
+          "path": "src/routes.rs",
+          "reason": "primary context matched the requested edit intent",
+          "symbols": [
+            "src::routes::orders_route"
+          ]
+        }
+      ],
+      "allowed_symbols": [],
+      "caution_files": [],
+      "caution_rules": [],
+      "evidence_refs": [
+        "search:src/main.rs:1-4:0",
+        "search:src/main.rs:1-4:1",
+        "search:src/main.rs:5-7:0",
+        "search:src/main.rs:5-7:1",
+        "search:src/routes.rs:2-3:0",
+        "search:src/routes.rs:2-3:1",
+        "search:src/routes.rs:4-6:0",
+        "search:src/routes.rs:4-6:1"
+      ],
+      "expansion_requirements": [
+        {
+          "reason": "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.",
+          "required_evidence_refs": [
+            "search:src/main.rs:1-4:0",
+            "search:src/main.rs:1-4:1",
+            "search:src/main.rs:5-7:0",
+            "search:src/main.rs:5-7:1",
+            "search:src/routes.rs:2-3:0",
+            "search:src/routes.rs:2-3:1",
+            "search:src/routes.rs:4-6:0",
+            "search:src/routes.rs:4-6:1"
+          ]
+        }
+      ],
+      "forbidden_files": [
+        "**/*Generated*",
+        "**/generated/**",
+        "**/secrets/**",
+        ".git/**",
+        ".ok/**",
+        "build/**",
+        "dist/**",
+        "generated/**",
+        "node_modules/**",
+        "target/**",
+        "third_party/**",
+        "vendor/**"
+      ],
+      "forbidden_rules": [
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "**/*Generated*",
+          "reason": "generated sources should be changed through their source generator"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "**/generated/**",
+          "reason": "generated sources should be changed through their source generator"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "**/secrets/**",
+          "reason": "security-sensitive secret paths are outside normal edit boundaries"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": ".git/**",
+          "reason": "git internals are never part of product edits"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": ".ok/**",
+          "reason": "Open Kioku local index artifacts are generated state"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "build/**",
+          "reason": "build output is generated state"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "dist/**",
+          "reason": "distribution output is generated state"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "generated/**",
+          "reason": "generated sources should be changed through their source generator"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "node_modules/**",
+          "reason": "vendored package dependencies are out of scope"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "target/**",
+          "reason": "Rust build output is generated state"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "third_party/**",
+          "reason": "third-party dependencies require a separate explicit change"
+        },
+        {
+          "evidence_refs": [
+            "boundary:default-forbidden"
+          ],
+          "pattern": "vendor/**",
+          "reason": "vendored dependencies require a separate explicit change"
+        }
+      ],
+      "signal_hooks": {
+        "architecture_components": [
+          "architecture_boundaries",
+          "architecture_violations",
+          "architecture_policy_check"
+        ],
+        "cochange_sources": [
+          "similar_change_overlap",
+          "historical_prs"
+        ],
+        "ownership_sources": [
+          "CODEOWNERS",
+          "git_history"
+        ]
+      }
+    },
+    "recommended_next_steps": [
+      "Inspect the primary context files and symbol ranges before editing.",
+      "No indexed tests were found; choose a manual validation command.",
+      "Keep edits within allowed files unless new evidence justifies expanding scope."
+    ],
+    "relevant_symbols": [
+      {
+        "confidence": "high",
+        "file_id": "<ID>",
+        "id": "5ed00a1939707fa2c0b5175bf7da9bf2659e7aa2d9e52a06b27ad0aee76a47a9",
+        "kind": "function",
+        "language": "rust",
+        "name": "add",
+        "provenance": "tree_sitter",
+        "qualified_name": "src::main::add",
+        "range": {
+          "end": 7,
+          "start": 5
+        },
+        "scope_id": "src/main.rs:scope:file:0",
+        "signature": "fn(a: i32, b: i32) i32",
+        "visibility": "public"
+      },
+      {
+        "confidence": "high",
+        "file_id": "<ID>",
+        "id": "a100f28a2ccf7c7c5f67a4d17ab54e3467bef98693563618d033a55422a9a021",
+        "kind": "function",
+        "language": "rust",
+        "name": "orders_route",
+        "provenance": "tree_sitter",
+        "qualified_name": "src::routes::orders_route",
+        "range": {
+          "end": 2,
+          "start": 2
+        },
+        "scope_id": "src/routes.rs:scope:file:0",
+        "signature": "fn()",
+        "visibility": "public"
+      }
+    ],
+    "risk": {
+      "level": "medium",
+      "reasons": [
+        "2 complexity/hot-path risk signal(s) touch this file",
+        "Evidence quality caveat: exact symbol/reference evidence is unavailable",
+        "Evidence quality caveat: runtime evidence is unavailable",
+        "Evidence quality caveat: history evidence is unavailable",
+        "Evidence quality caveat: coverage or JUnit evidence is unavailable",
+        "Evidence quality caveat: optional evidence pass did not complete: SCIP was enabled but no SCIP index was imported"
+      ],
+      "score": 0.0
+    },
+    "runtime_signals": [],
+    "score_breakdown": [
+      {
+        "contribution": 0.0,
+        "evidence_ids": [
+          "risk:reason:0",
+          "risk:reason:1",
+          "risk:reason:2",
+          "risk:reason:3",
+          "risk:reason:4",
+          "risk:reason:5"
+        ],
+        "normalized_value": 0.0,
+        "rationale": "plan risk is `medium` from merged context and impact risk",
+        "raw_value": 0.0,
+        "signal": "plan_risk_score",
+        "weight": 0.0
+      }
+    ],
+    "summary": "Found 2 primary context item(s), 0 direct impact candidate(s), 0 validation candidate(s), 0 history signal(s), 0 repo memory fact(s); risk is medium.",
+    "task": "add a subtract function next to add",
+    "tool_calls": [
+      {
+        "arguments": {
+          "limit": 12,
+          "query": "add a subtract function next to add"
+        },
+        "purpose": "Find indexed evidence for the task.",
+        "tool": "search_code"
+      },
+      {
+        "arguments": {
+          "path": "src/main.rs"
+        },
+        "purpose": "Estimate likely downstream files for the primary source file.",
+        "tool": "impact_analysis"
+      },
+      {
+        "arguments": {
+          "format": "markdown",
+          "limit": 12,
+          "task": "add a subtract function next to add"
+        },
+        "purpose": "Assemble primary files, symbols, tests, and boundaries.",
+        "tool": "build_context_pack"
+      },
+      {
+        "arguments": {
+          "limit": 8,
+          "path": "src/main.rs"
+        },
+        "purpose": "Find indexed validation candidates for the primary source file.",
+        "tool": "find_tests_for_change"
+      },
+      {
+        "arguments": {
+          "limit": 8,
+          "query": "add a subtract function next to add"
+        },
+        "purpose": "Check whether prior repo facts exist for this task.",
+        "tool": "search_memory"
+      }
+    ],
+    "validation": []
+  }
+}

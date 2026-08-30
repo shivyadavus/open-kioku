@@ -167,6 +167,145 @@ fn test_mcp_tools_list_snapshot() {
     std::fs::remove_dir_all(&temp).unwrap();
 }
 
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Recursively normalize nondeterministic values in a `plan_change` response so
+/// the golden snapshot captures schema/shape rather than machine-specific values:
+/// - timestamp fields become "<TIMESTAMP>"
+/// - internal numeric ids assigned in index-insertion order become "<ID>"
+/// - floating-point scores/weights become 0.0 (rankings for the tiny fixture are
+///   deterministic, but float scoring internals are not part of the contract)
+/// - absolute repo paths become "<REPO>"
+fn normalize_plan_response(value: &mut serde_json::Value, repo_paths: &[String]) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                match key.as_str() {
+                    "indexed_at" | "occurred_at" | "generated_at" | "created_at" | "updated_at" => {
+                        *entry = serde_json::Value::String("<TIMESTAMP>".into());
+                    }
+                    "file_id" | "symbol_id" => {
+                        *entry = serde_json::Value::String("<ID>".into());
+                    }
+                    _ => normalize_plan_response(entry, repo_paths),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_plan_response(item, repo_paths);
+            }
+        }
+        serde_json::Value::String(text) => {
+            for repo_path in repo_paths {
+                if text.contains(repo_path.as_str()) {
+                    *text = text.replace(repo_path.as_str(), "<REPO>");
+                }
+            }
+        }
+        serde_json::Value::Number(number) => {
+            if number.is_f64() {
+                *value = serde_json::Value::from(0.0);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn test_mcp_plan_change_snapshot() {
+    let temp = std::env::temp_dir().join(format!("kioku-test-plan-{}", uuid::Uuid::new_v4()));
+    copy_dir_recursive(&fixture_dir("rust-fixture"), &temp);
+
+    // Init & Index a deterministic fixture repo.
+    Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["init", "."])
+        .assert()
+        .success();
+    Command::cargo_bin("ok")
+        .unwrap()
+        .current_dir(&temp)
+        .args(["index", "."])
+        .assert()
+        .success();
+
+    // MCP tools/call plan_change with a fixed task against the fixture.
+    let mcp_req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"add a subtract function next to add","limit":5,"format":"json"}}}"#;
+    let mut cmd = Command::cargo_bin("ok").unwrap();
+    let assert = cmd
+        .current_dir(&temp)
+        .args(["mcp", "serve", "--repo", "."])
+        .write_stdin(mcp_req)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("structuredContent"));
+
+    let output = assert.get_output();
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let json_lines: Vec<&str> = stdout_str.lines().filter(|l| l.starts_with("{")).collect();
+    let last_json = json_lines.last().expect("should output JSON");
+    let parsed: serde_json::Value = serde_json::from_str(last_json).unwrap();
+
+    let mut result = parsed
+        .get("result")
+        .cloned()
+        .expect("plan_change should return a JSON-RPC result");
+
+    // The text content block duplicates structuredContent as pretty-printed JSON;
+    // keep only the envelope shape for it.
+    let content = result
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("result should include a content array");
+    assert_eq!(content.len(), 1, "expected a single text content block");
+    assert_eq!(content[0]["type"], "text");
+    content[0]["text"] = serde_json::Value::String("<STRUCTURED_CONTENT_AS_TEXT>".into());
+
+    // Normalize nondeterministic values. Cover both the tempdir path and its
+    // canonicalized form (macOS /var vs /private/var).
+    let mut repo_paths = vec![temp.to_string_lossy().into_owned()];
+    if let Ok(canonical) = temp.canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if !repo_paths.contains(&canonical) {
+            repo_paths.push(canonical);
+        }
+    }
+    normalize_plan_response(&mut result, &repo_paths);
+
+    let formatted = serde_json::to_string_pretty(&result).unwrap();
+    let snapshot_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots");
+    std::fs::create_dir_all(&snapshot_dir).unwrap();
+    let snapshot_file = snapshot_dir.join("plan_change.json");
+
+    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+        std::fs::write(&snapshot_file, formatted).unwrap();
+    } else if snapshot_file.exists() {
+        let expected = std::fs::read_to_string(&snapshot_file).unwrap();
+        assert_eq!(
+            expected.trim(),
+            formatted.trim(),
+            "plan_change.json snapshot mismatch"
+        );
+    } else {
+        std::fs::write(&snapshot_file, formatted).unwrap();
+    }
+
+    std::fs::remove_dir_all(&temp).unwrap();
+}
+
 #[test]
 fn test_cli_graph_schema_markdown() {
     let mut cmd = Command::cargo_bin("ok").unwrap();
