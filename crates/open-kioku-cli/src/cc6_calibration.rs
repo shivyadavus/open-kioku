@@ -129,6 +129,8 @@ pub struct AbstentionMetrics {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AbstentionCalibrationResult {
     pub policy: AbstentionPolicy,
+    /// Safety envelope used to select the policy, retained for report auditability.
+    pub constraints: AbstentionCalibrationConstraints,
     pub development: AbstentionMetrics,
     pub holdout: AbstentionMetrics,
     /// Stable case identities make it auditable which partition selected policy parameters.
@@ -240,6 +242,7 @@ pub fn calibrate_abstention_policy(
     let holdout_metrics = evaluate_policy_refs(&policy, &holdout);
     Ok(AbstentionCalibrationResult {
         policy,
+        constraints,
         development: development_metrics,
         holdout: holdout_metrics,
         development_case_ids: development.iter().map(|case| case.id.clone()).collect(),
