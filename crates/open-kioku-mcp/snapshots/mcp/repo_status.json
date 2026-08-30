@@ -77,6 +77,17 @@
       "root": "."
     },
     "schema_version": 1,
+    "semantic_lifecycle": {
+      "ann_active": false,
+      "ann_profile": null,
+      "failed_count": 0,
+      "last_rebuilt_at": null,
+      "ready": false,
+      "rebuild_reasons": [],
+      "rebuild_required": false,
+      "state": "disabled",
+      "vector_count": 0
+    },
     "symbol_count": 2
   }
 }
