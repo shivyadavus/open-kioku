@@ -29,14 +29,12 @@ jobs:
       - name: List targeted mutations
         run: |
           cargo mutants --list \
-            --file crates/open-kioku-cli/src/bench/retrieval.rs \
             --re 'append_retrieval_group_deltas|compare_retrieval_baseline' \
             --package open-kioku-cli | tee mutants-list.txt
           test -s mutants-list.txt
       - name: Run targeted mutation tests
         run: >-
           cargo mutants --no-shuffle --in-place
-          --file crates/open-kioku-cli/src/bench/retrieval.rs
           --re 'append_retrieval_group_deltas|compare_retrieval_baseline'
           --package open-kioku-cli --test-package open-kioku-cli
       - uses: actions/upload-artifact@v4
