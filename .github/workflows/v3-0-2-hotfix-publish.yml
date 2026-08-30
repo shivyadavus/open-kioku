@@ -29,7 +29,7 @@ jobs:
     outputs:
       candidate_sha: ${{ steps.candidate.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: release/v3.0.2
           fetch-depth: 0
@@ -113,7 +113,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.candidate_sha }}
           fetch-depth: 0
@@ -155,7 +155,7 @@ jobs:
             binary_name: ok-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.candidate_sha }}
 
@@ -212,7 +212,7 @@ jobs:
     outputs:
       release_sha: ${{ steps.final.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: release/v3.0.2
           fetch-depth: 0
@@ -338,7 +338,7 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.publish.outputs.release_sha }}
 
@@ -391,7 +391,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.publish.outputs.release_sha }}
 

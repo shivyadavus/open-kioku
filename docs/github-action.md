@@ -21,7 +21,7 @@ jobs:
   evidence:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: shivyadavus/open-kioku-action@v1
         with:
           task: "change token expiration"
