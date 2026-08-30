@@ -1,11 +1,10 @@
 # One-shot V3 publication trigger. Remove after the release is confirmed.
 name: V3 release finalizer
 
+# Manual dispatch only: the former push self-trigger re-fired this archived
+# one-shot workflow whenever the file was touched.
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/v3-release-finalizer.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
