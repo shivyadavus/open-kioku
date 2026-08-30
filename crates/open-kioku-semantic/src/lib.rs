@@ -80,6 +80,18 @@ pub struct SemanticStatus {
     pub current_dir: PathBuf,
     pub manifest: Option<SemanticManifest>,
     pub notes: Vec<String>,
+    /// Whether the semantic index must be (re)built before it can serve queries.
+    #[serde(default)]
+    pub rebuild_required: bool,
+    /// Machine-readable reasons behind `rebuild_required`, in stable order.
+    #[serde(default)]
+    pub rebuild_reasons: Vec<String>,
+    /// When the current semantic generation was last successfully built (manifest `created_at`).
+    #[serde(default)]
+    pub last_rebuilt_at: Option<String>,
+    /// Fraction of persisted vectors the last build recorded as stale, when vectors exist.
+    #[serde(default)]
+    pub stale_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +215,14 @@ impl<'a> SemanticIndexManager<'a> {
                 current_dir: current,
                 manifest: None,
                 notes,
+                rebuild_required: self.config.enabled,
+                rebuild_reasons: if self.config.enabled {
+                    vec!["semantic index has not been built; run `ok semantic index`".into()]
+                } else {
+                    Vec::new()
+                },
+                last_rebuilt_at: None,
+                stale_ratio: None,
             };
         }
 
@@ -227,6 +247,19 @@ impl<'a> SemanticIndexManager<'a> {
             .as_ref()
             .map(|manifest| !self.compatible(manifest))
             .unwrap_or(false);
+        let mut rebuild_reasons = Vec::new();
+        if corrupt {
+            rebuild_reasons.push("semantic index is corrupt or incomplete".to_string());
+        }
+        if source_stale {
+            rebuild_reasons.push(
+                "authoritative index generation changed since the last semantic rebuild"
+                    .to_string(),
+            );
+        } else if stale {
+            rebuild_reasons
+                .push("semantic configuration changed since the last semantic rebuild".to_string());
+        }
         if source_stale {
             notes.push(
                 "semantic index is stale for the current authoritative index generation; rebuild semantic index"
@@ -276,6 +309,11 @@ impl<'a> SemanticIndexManager<'a> {
             failed_count: stats.failed_count,
             disk_usage_bytes: dir_size(&current),
             current_dir: current,
+            rebuild_required: !rebuild_reasons.is_empty(),
+            last_rebuilt_at: manifest.as_ref().map(|value| value.created_at.clone()),
+            stale_ratio: (stats.vector_count > 0)
+                .then(|| stats.stale_count as f64 / stats.vector_count as f64),
+            rebuild_reasons,
             manifest,
             notes,
         }

@@ -106,6 +106,10 @@ fn lifecycle_status_distinguishes_authoritative_generation_staleness() {
     assert_eq!(indexed.vector_count, 1);
     assert_eq!(indexed.backend, "usearch-hnsw-f32");
     assert_eq!(indexed.model, "local-hash");
+    assert!(!indexed.rebuild_required);
+    assert!(indexed.rebuild_reasons.is_empty());
+    assert!(indexed.last_rebuilt_at.is_some());
+    assert_eq!(indexed.stale_ratio, Some(0.0));
 
     persist_snapshot(
         repo,
@@ -126,6 +130,12 @@ fn lifecycle_status_distinguishes_authoritative_generation_staleness() {
         note.contains("stale for the current authoritative index generation")
             && note.contains("rebuild semantic index")
     }));
+    assert!(stale.rebuild_required);
+    assert!(stale
+        .rebuild_reasons
+        .iter()
+        .any(|reason| reason.contains("authoritative index generation changed")));
+    assert!(stale.last_rebuilt_at.is_some());
 }
 
 #[test]
@@ -162,6 +172,15 @@ fn lifecycle_status_distinguishes_semantic_profile_incompatibility() {
         .notes
         .iter()
         .any(|note| note.contains("authoritative index generation")));
+    assert!(mismatched.rebuild_required);
+    assert!(mismatched
+        .rebuild_reasons
+        .iter()
+        .any(|reason| reason.contains("semantic configuration changed")));
+    assert!(!mismatched
+        .rebuild_reasons
+        .iter()
+        .any(|reason| reason.contains("authoritative index generation")));
 }
 
 #[test]
@@ -198,4 +217,35 @@ fn lifecycle_status_fails_closed_when_ann_artifact_disappears() {
 
     let error = manager.search("corrupt_status_token", 5).unwrap_err();
     assert!(error.to_string().contains("semantic index is corrupt"));
+    assert!(corrupt.rebuild_required);
+    assert!(corrupt
+        .rebuild_reasons
+        .iter()
+        .any(|reason| reason.contains("corrupt or incomplete")));
+}
+
+#[test]
+fn lifecycle_status_requires_initial_build_when_enabled_but_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+    let config = semantic_config();
+
+    let missing = SemanticIndexManager::new(repo, &store, &config).status();
+    assert_eq!(missing.state, "missing");
+    assert!(!missing.ready);
+    assert!(missing.rebuild_required);
+    assert!(missing
+        .rebuild_reasons
+        .iter()
+        .any(|reason| reason.contains("has not been built")));
+    assert!(missing.last_rebuilt_at.is_none());
+    assert!(missing.stale_ratio.is_none());
+
+    let mut disabled_config = config.clone();
+    disabled_config.enabled = false;
+    let disabled = SemanticIndexManager::new(repo, &store, &disabled_config).status();
+    assert_eq!(disabled.state, "disabled");
+    assert!(!disabled.rebuild_required);
+    assert!(disabled.rebuild_reasons.is_empty());
 }

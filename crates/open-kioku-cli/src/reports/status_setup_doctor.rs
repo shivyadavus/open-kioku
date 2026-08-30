@@ -28,6 +28,16 @@ fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
     Ok(SqliteStore::open(&index_path)?.manifest()?)
 }
 
+fn semantic_lifecycle_status(repo: &Path) -> Option<open_kioku_semantic::SemanticStatus> {
+    let index_path = repo.join(".ok/index.sqlite");
+    if !index_path.exists() {
+        return None;
+    }
+    let config = OkConfig::load_from_repo(repo).ok()?;
+    let store = SqliteStore::open(&index_path).ok()?;
+    Some(SemanticIndexManager::new(repo, &store, &config.semantic).status())
+}
+
 fn analysis_semantics_compatibility_for_manifest(
     manifest: Option<&IndexManifest>,
 ) -> open_kioku_core::AnalysisSemanticsCompatibility {
@@ -148,6 +158,40 @@ fn render_status_markdown(
         out.push_str(
             "No index manifest was found. Run `ok index .` before handing this repo to an agent.\n",
         );
+    }
+
+    if let Some(semantic) = semantic_lifecycle_status(repo) {
+        if semantic.state != "disabled" {
+            out.push_str("\n## Semantic Index\n\n");
+            out.push_str("| Metric | Value |\n| --- | ---: |\n");
+            out.push_str(&format!("| State | `{}` |\n", semantic.state));
+            out.push_str(&format!("| Backend | `{}` |\n", semantic.backend));
+            out.push_str(&format!("| ANN active | `{}` |\n", semantic.ann_active));
+            if let Some(profile) = &semantic.ann_profile {
+                out.push_str(&format!("| ANN profile | `{profile}` |\n"));
+            }
+            out.push_str(&format!("| Vectors | {} |\n", semantic.vector_count));
+            if semantic.failed_count > 0 {
+                out.push_str(&format!("| Failed vectors | {} |\n", semantic.failed_count));
+            }
+            if let Some(ratio) = semantic.stale_ratio {
+                out.push_str(&format!("| Stale ratio at last build | {ratio:.3} |\n"));
+            }
+            out.push_str(&format!(
+                "| Last rebuilt | `{}` |\n",
+                semantic.last_rebuilt_at.as_deref().unwrap_or("never")
+            ));
+            out.push_str(&format!(
+                "| Rebuild required | `{}` |\n",
+                semantic.rebuild_required
+            ));
+            if !semantic.rebuild_reasons.is_empty() {
+                out.push_str("\nRebuild reasons:\n");
+                for reason in &semantic.rebuild_reasons {
+                    out.push_str(&format!("- {reason}\n"));
+                }
+            }
+        }
     }
 
     out.push_str("\n## Readiness Checks\n\n");
@@ -1006,6 +1050,47 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         });
         if !compatible {
             next_steps.push(compatibility.recommended_action.clone());
+        }
+    }
+
+    if let Some(semantic) = semantic_lifecycle_status(&repo) {
+        if semantic.state == "disabled" {
+            checks.push(DoctorCheck {
+                name: "semantic-lifecycle",
+                status: CheckStatus::Pass,
+                message: "semantic search is disabled in ok.toml (explicit local opt-in)".into(),
+            });
+        } else if semantic.rebuild_required {
+            checks.push(DoctorCheck {
+                name: "semantic-lifecycle",
+                status: CheckStatus::Warn,
+                message: format!(
+                    "{}; {}",
+                    semantic.state,
+                    semantic.rebuild_reasons.join("; ")
+                ),
+            });
+            next_steps
+                .push("Run `ok semantic index` to rebuild the local semantic index.".into());
+        } else {
+            let backend_note = if semantic.ann_active {
+                format!(
+                    "ANN active ({})",
+                    semantic.ann_profile.as_deref().unwrap_or("unknown profile")
+                )
+            } else {
+                format!("backend {}", semantic.backend)
+            };
+            checks.push(DoctorCheck {
+                name: "semantic-lifecycle",
+                status: CheckStatus::Pass,
+                message: format!(
+                    "ready; {} vectors, {}, last rebuilt {}",
+                    semantic.vector_count,
+                    backend_note,
+                    semantic.last_rebuilt_at.as_deref().unwrap_or("unknown")
+                ),
+            });
         }
     }
 

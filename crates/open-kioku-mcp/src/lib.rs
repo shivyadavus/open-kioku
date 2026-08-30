@@ -336,6 +336,21 @@ async fn dispatch(
                     "analysis_semantics_status".into(),
                     serde_json::to_value(compatibility)?,
                 );
+                let semantic = SemanticIndexManager::new(repo, store, &config.semantic).status();
+                object.insert(
+                    "semantic_lifecycle".into(),
+                    json!({
+                        "state": semantic.state,
+                        "ready": semantic.ready,
+                        "ann_active": semantic.ann_active,
+                        "ann_profile": semantic.ann_profile,
+                        "vector_count": semantic.vector_count,
+                        "failed_count": semantic.failed_count,
+                        "rebuild_required": semantic.rebuild_required,
+                        "rebuild_reasons": semantic.rebuild_reasons,
+                        "last_rebuilt_at": semantic.last_rebuilt_at,
+                    }),
+                );
             }
             Ok(status)
         }
@@ -1377,7 +1392,7 @@ fn tool_description(name: &str, base: &str) -> String {
 
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
-        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed.", json!({"type":"object","properties":{}})),
+        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, and local semantic index lifecycle health (state, ANN activity, and rebuild requirements).", json!({"type":"object","properties":{}})),
         ("list_files", "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of files to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip. Defaults to 0."}}})),
         ("list_languages", "List all programming languages detected and indexed in the repository, alongside support status.", json!({"type":"object","properties":{}})),
         ("list_symbols", "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names by exact match. If omitted, returns all symbols ordered by name."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
