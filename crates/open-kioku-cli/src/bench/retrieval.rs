@@ -1655,6 +1655,36 @@ fn retrieval_baseline_delta(
     }
 }
 
+fn append_retrieval_group_deltas(
+    deltas: &mut Vec<RetrievalBaselineDelta>,
+    caveats: &mut Vec<String>,
+    strategy: &str,
+    split: &str,
+    dimension_label: &str,
+    current: &BTreeMap<String, RetrievalMetricSummary>,
+    previous: &BTreeMap<String, RetrievalQualityMetrics>,
+) {
+    if current.keys().ne(previous.keys()) {
+        caveats.push(format!(
+            "strategy {strategy} {dimension_label} baseline keys differ from the live report; {dimension_label} regression deltas omitted for this strategy"
+        ));
+        return;
+    }
+
+    for (scope, current_summary) in current {
+        let previous_quality = previous
+            .get(scope)
+            .expect("group key sets were checked above");
+        deltas.push(retrieval_baseline_delta(
+            strategy,
+            split,
+            Some(scope.clone()),
+            &current_summary.quality,
+            previous_quality,
+        ));
+    }
+}
+
 fn compare_retrieval_baseline(
     strategies: &[RetrievalStrategyReport],
     baseline: &RetrievalQualityBaseline,
@@ -1737,6 +1767,25 @@ fn compare_retrieval_baseline(
             current_quality,
             previous_quality,
         ));
+
+        append_retrieval_group_deltas(
+            &mut deltas,
+            caveats,
+            &current.strategy,
+            "language",
+            "language",
+            &current.by_language,
+            &previous.by_language,
+        );
+        append_retrieval_group_deltas(
+            &mut deltas,
+            caveats,
+            &current.strategy,
+            "task_family",
+            "task-family",
+            &current.by_task_family,
+            &previous.by_task_family,
+        );
 
         if current.by_query_shape.keys().collect::<Vec<_>>()
             != previous.by_query_shape.keys().collect::<Vec<_>>()
@@ -2185,6 +2234,81 @@ mod retrieval_bench_tests {
         case
     }
 
+    fn quality_baseline_for(
+        strategy: &RetrievalStrategyReport,
+    ) -> RetrievalStrategyQualityBaseline {
+        RetrievalStrategyQualityBaseline {
+            strategy: strategy.strategy.clone(),
+            summary: strategy.summary.quality.clone(),
+            by_language: strategy
+                .by_language
+                .iter()
+                .map(|(key, value)| (key.clone(), value.quality.clone()))
+                .collect(),
+            by_task_family: strategy
+                .by_task_family
+                .iter()
+                .map(|(key, value)| (key.clone(), value.quality.clone()))
+                .collect(),
+            by_query_shape: strategy
+                .by_query_shape
+                .iter()
+                .map(|(key, value)| (key.clone(), value.quality.clone()))
+                .collect(),
+            by_task_family_query_shape: strategy
+                .by_task_family_query_shape
+                .iter()
+                .map(|(key, value)| (key.clone(), value.quality.clone()))
+                .collect(),
+            by_split: strategy
+                .by_split
+                .iter()
+                .map(|(key, value)| (key.clone(), value.quality.clone()))
+                .collect(),
+        }
+    }
+
+    fn compatible_baseline(
+        case_count: usize,
+        strategy: RetrievalStrategyQualityBaseline,
+    ) -> RetrievalQualityBaseline {
+        RetrievalQualityBaseline {
+            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
+            quality_dimensions_version: Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION.into()),
+            corpus_id: "fixture".into(),
+            case_count,
+            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
+            fixture_digests: BTreeMap::new(),
+            strategies: vec![strategy],
+        }
+    }
+
+    fn report_with_deltas(deltas: Vec<RetrievalBaselineDelta>) -> RetrievalBenchReport {
+        RetrievalBenchReport {
+            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION,
+            report_version: RETRIEVAL_REPORT_VERSION,
+            provenance: RetrievalReportProvenance {
+                open_kioku_version: env!("CARGO_PKG_VERSION"),
+                corpus_revision: "0123456789012345678901234567890123456789".into(),
+                cases_sha256: "sha256:test".into(),
+                frozen_fixture_revisions_verified: true,
+            },
+            corpus_id: "fixture".into(),
+            cases_file: "cases.json".into(),
+            case_count: 0,
+            limit: 20,
+            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR,
+            fixture_digests: BTreeMap::new(),
+            strategy_identities: BTreeMap::new(),
+            baseline_deltas: deltas,
+            advisory_comparisons: Vec::new(),
+            query_shape_benchmark: None,
+            caveats: Vec::new(),
+            strategies: Vec::new(),
+            stream_ablations: Vec::new(),
+        }
+    }
+
     #[test]
     fn routed_contextpack_comparison_reports_overall_and_task_family_deltas() {
         let fusion_cases = vec![report("fusion", false, &[Some(1)])];
@@ -2480,18 +2604,16 @@ mod retrieval_bench_tests {
             no_gold_false_positive_rate: 0.5,
             ..Default::default()
         };
-        let baseline = RetrievalQualityBaseline {
-            schema_version: RETRIEVAL_BENCH_SCHEMA_VERSION.into(),
-            quality_dimensions_version: Some(RETRIEVAL_BASELINE_DIMENSIONS_VERSION.into()),
-            corpus_id: "fixture".into(),
-            case_count: 1,
-            token_estimator: RETRIEVAL_TOKEN_ESTIMATOR.into(),
-            fixture_digests: BTreeMap::new(),
-            strategies: vec![RetrievalStrategyQualityBaseline {
+        let baseline = compatible_baseline(
+            1,
+            RetrievalStrategyQualityBaseline {
                 strategy: "fusion".into(),
                 summary: previous_quality.clone(),
-                by_language: BTreeMap::new(),
-                by_task_family: BTreeMap::new(),
+                by_language: BTreeMap::from([("rust".into(), previous_quality.clone())]),
+                by_task_family: BTreeMap::from([(
+                    "trace_to_code".into(),
+                    previous_quality.clone(),
+                )]),
                 by_query_shape: BTreeMap::from([(
                     "error_trace".into(),
                     previous_quality.clone(),
@@ -2501,8 +2623,8 @@ mod retrieval_bench_tests {
                     previous_quality.clone(),
                 )]),
                 by_split: BTreeMap::from([("holdout".into(), previous_quality)]),
-            }],
-        };
+            },
+        );
         let mut caveats = Vec::new();
         let deltas = compare_retrieval_baseline(
             &[current],
@@ -2513,7 +2635,14 @@ mod retrieval_bench_tests {
             &mut caveats,
         );
         assert!(caveats.is_empty());
-        assert_eq!(deltas.len(), 3);
+        assert_eq!(deltas.len(), 5);
+        assert!(deltas.iter().any(|delta| {
+            delta.split == "language" && delta.scope.as_deref() == Some("rust")
+        }));
+        assert!(deltas.iter().any(|delta| {
+            delta.split == "task_family"
+                && delta.scope.as_deref() == Some("trace_to_code")
+        }));
         assert!(deltas.iter().any(|delta| {
             delta.split == "query_shape" && delta.scope.as_deref() == Some("error_trace")
         }));
@@ -2595,6 +2724,254 @@ mod retrieval_bench_tests {
             })
             .unwrap();
         assert!(error_trace.mean_reciprocal_rank < 0.0);
+    }
+
+    #[test]
+    fn degraded_language_is_visible_even_when_aggregate_metrics_match() {
+        let mut rust = report("rust", false, &[Some(2)]);
+        rust.language = "rust".into();
+        let mut python = report("python", false, &[Some(1)]);
+        python.language = "python".into();
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![rust, python],
+        );
+        let mut previous = quality_baseline_for(&current);
+        previous.by_language.get_mut("rust").unwrap().mean_reciprocal_rank = 1.0;
+        let baseline = compatible_baseline(2, previous);
+
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            2,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+
+        assert!(caveats.is_empty());
+        assert_eq!(
+            deltas
+                .iter()
+                .find(|delta| delta.scope.is_none())
+                .unwrap()
+                .mean_reciprocal_rank,
+            0.0
+        );
+        assert_eq!(
+            deltas
+                .iter()
+                .find(|delta| {
+                    delta.split == "language" && delta.scope.as_deref() == Some("rust")
+                })
+                .unwrap()
+                .mean_reciprocal_rank,
+            -0.5
+        );
+    }
+
+    #[test]
+    fn degraded_task_family_is_visible_even_when_aggregate_metrics_match() {
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![
+                report_with_shape(
+                    "issue",
+                    RetrievalTaskFamily::IssueToCode,
+                    open_kioku_core::QueryShape::Conceptual,
+                    1,
+                ),
+                report_with_shape(
+                    "trace",
+                    RetrievalTaskFamily::TraceToCode,
+                    open_kioku_core::QueryShape::ErrorTrace,
+                    2,
+                ),
+            ],
+        );
+        let mut previous = quality_baseline_for(&current);
+        previous
+            .by_task_family
+            .get_mut("trace_to_code")
+            .unwrap()
+            .mean_reciprocal_rank = 1.0;
+        let baseline = compatible_baseline(2, previous);
+
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            2,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+
+        assert!(caveats.is_empty());
+        assert_eq!(
+            deltas
+                .iter()
+                .find(|delta| delta.scope.is_none())
+                .unwrap()
+                .mean_reciprocal_rank,
+            0.0
+        );
+        assert_eq!(
+            deltas
+                .iter()
+                .find(|delta| {
+                    delta.split == "task_family"
+                        && delta.scope.as_deref() == Some("trace_to_code")
+                })
+                .unwrap()
+                .mean_reciprocal_rank,
+            -0.5
+        );
+    }
+
+    #[test]
+    fn language_key_mismatches_are_fail_visible_and_never_partial() {
+        let mut rust = report("rust", false, &[Some(1)]);
+        rust.language = "rust".into();
+        let mut python = report("python", false, &[Some(1)]);
+        python.language = "python".into();
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![rust, python],
+        );
+
+        for key_to_remove in ["python", "rust"] {
+            let mut previous = quality_baseline_for(&current);
+            previous.by_language.remove(key_to_remove);
+            let baseline = compatible_baseline(2, previous);
+            let mut caveats = Vec::new();
+            let deltas = compare_retrieval_baseline(
+                std::slice::from_ref(&current),
+                &baseline,
+                "fixture",
+                2,
+                &BTreeMap::new(),
+                &mut caveats,
+            );
+            assert!(caveats.iter().any(|caveat| caveat.contains("language baseline keys differ")));
+            assert!(!deltas.iter().any(|delta| delta.split == "language"));
+            assert!(deltas.iter().any(|delta| delta.split == "query_shape"));
+        }
+
+        let mut previous = quality_baseline_for(&current);
+        previous
+            .by_language
+            .insert("typescript".into(), RetrievalQualityMetrics::default());
+        let baseline = compatible_baseline(2, previous);
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            2,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+        assert!(caveats.iter().any(|caveat| caveat.contains("language baseline keys differ")));
+        assert!(!deltas.iter().any(|delta| delta.split == "language"));
+    }
+
+    #[test]
+    fn task_family_key_mismatches_are_fail_visible_and_never_partial() {
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![
+                report_with_shape(
+                    "issue",
+                    RetrievalTaskFamily::IssueToCode,
+                    open_kioku_core::QueryShape::Conceptual,
+                    1,
+                ),
+                report_with_shape(
+                    "trace",
+                    RetrievalTaskFamily::TraceToCode,
+                    open_kioku_core::QueryShape::ErrorTrace,
+                    1,
+                ),
+            ],
+        );
+
+        for key_to_remove in ["issue_to_code", "trace_to_code"] {
+            let mut previous = quality_baseline_for(&current);
+            previous.by_task_family.remove(key_to_remove);
+            let baseline = compatible_baseline(2, previous);
+            let mut caveats = Vec::new();
+            let deltas = compare_retrieval_baseline(
+                std::slice::from_ref(&current),
+                &baseline,
+                "fixture",
+                2,
+                &BTreeMap::new(),
+                &mut caveats,
+            );
+            assert!(caveats.iter().any(|caveat| caveat.contains("task-family baseline keys differ")));
+            assert!(!deltas.iter().any(|delta| delta.split == "task_family"));
+            assert!(deltas
+                .iter()
+                .any(|delta| delta.split == "task_family_query_shape"));
+        }
+
+        let mut previous = quality_baseline_for(&current);
+        previous.by_task_family.insert(
+            "documentation_lookup".into(),
+            RetrievalQualityMetrics::default(),
+        );
+        let baseline = compatible_baseline(2, previous);
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            2,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+        assert!(caveats.iter().any(|caveat| caveat.contains("task-family baseline keys differ")));
+        assert!(!deltas.iter().any(|delta| delta.split == "task_family"));
+    }
+
+    #[test]
+    fn markdown_renders_language_and_task_family_deltas_in_deterministic_order() {
+        let mut rust = report("rust", false, &[Some(2)]);
+        rust.language = "rust".into();
+        let mut python = report("python", false, &[Some(1)]);
+        python.language = "python".into();
+        python.task_family = RetrievalTaskFamily::TraceToCode;
+        let current = build_retrieval_strategy_report(
+            RetrievalStrategy::Fusion,
+            vec![rust, python],
+        );
+        let baseline = compatible_baseline(2, quality_baseline_for(&current));
+        let mut caveats = Vec::new();
+        let deltas = compare_retrieval_baseline(
+            &[current],
+            &baseline,
+            "fixture",
+            2,
+            &BTreeMap::new(),
+            &mut caveats,
+        );
+        let markdown = render_retrieval_markdown(&report_with_deltas(deltas));
+
+        let python_row = markdown.find("| fusion | language | python |").unwrap();
+        let rust_row = markdown.find("| fusion | language | rust |").unwrap();
+        let issue_row = markdown
+            .find("| fusion | task_family | issue_to_code |")
+            .unwrap();
+        let trace_row = markdown
+            .find("| fusion | task_family | trace_to_code |")
+            .unwrap();
+        assert!(python_row < rust_row);
+        assert!(rust_row < issue_row);
+        assert!(issue_row < trace_row);
+        assert_eq!(markdown.matches("| fusion | language |").count(), 2);
+        assert_eq!(markdown.matches("| fusion | task_family |").count(), 2);
     }
 
     #[test]
