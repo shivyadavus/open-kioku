@@ -1,3 +1,30 @@
+//! Reversible compression of context packs into compact, retrievable handles.
+//!
+//! A [`ContextPack`] produced by the planner can be far too large to hand to a
+//! model directly: it carries full file snippets for every primary and
+//! supporting file plus the validation plan. This crate shrinks such a pack
+//! into a [`CompressedContextPack`] whose entries are short one-line
+//! [`ContextHandle`] summaries, while the full original text of every entry is
+//! persisted locally in a SQLite database (by default `.ok/context.sqlite`
+//! under the repository root). Each handle carries a stable content-derived id
+//! (`ctx:<hash>`), so a caller can later exchange the id for the untruncated
+//! original via [`ContextHandleStore::retrieve`] — compression is lossless as
+//! long as the local store is available.
+//!
+//! Token figures on handles and packs are cheap heuristics (word count vs.
+//! `len / 4`), intended only for reporting the estimated compression ratio,
+//! not for exact budget accounting.
+//!
+//! Typical flow:
+//!
+//! 1. Open a store with [`ContextHandleStore::open_repo`] (or
+//!    [`ContextHandleStore::open`] for an explicit database path).
+//! 2. Compress a pack with [`ContextHandleStore::compress_pack`].
+//! 3. When the full text of an entry is needed again, call
+//!    [`ContextHandleStore::retrieve`] with the handle id.
+
+#![warn(missing_docs)]
+
 use chrono::Utc;
 use open_kioku_core::{
     CompressedContextPack, Confidence, ContextHandle, ContextHandleId, ContextPack, Evidence,
@@ -11,14 +38,30 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// SQLite-backed store that maps context handle ids to their original text.
+///
+/// The store owns a single SQLite connection guarded by a [`Mutex`], so one
+/// instance can be shared across threads. Writes use `INSERT OR REPLACE`
+/// keyed on the content-derived handle id, which makes
+/// [`compress_pack`](Self::compress_pack) idempotent: compressing the same
+/// pack twice produces the same handles and does not duplicate rows.
 pub struct ContextHandleStore {
     connection: Mutex<Connection>,
 }
 
+/// A handle paired with the full original text it was compressed from.
+///
+/// Returned by [`ContextHandleStore::retrieve`] when a handle id is found in
+/// the store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievedContext {
+    /// The compact handle as it appeared in the compressed pack, including
+    /// its summary, entities, and token estimates.
     pub handle: ContextHandle,
+    /// The untruncated original text (e.g. a file snippet or a validation
+    /// test description) that the handle stands in for.
     pub original: String,
+    /// When this entry was written to the store (UTC).
     pub created_at: chrono::DateTime<Utc>,
 }
 
@@ -30,6 +73,17 @@ struct StoredContext {
 }
 
 impl ContextHandleStore {
+    /// Opens (or creates) a handle store backed by the SQLite file at `path`.
+    ///
+    /// Missing parent directories are created, and the `context_handles`
+    /// schema is initialized if it does not exist yet, so this is safe to
+    /// call on a fresh repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OkError::Storage`] if the parent directory cannot be
+    /// created, the database cannot be opened, or schema initialization
+    /// fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -44,10 +98,36 @@ impl ContextHandleStore {
         Ok(store)
     }
 
+    /// Opens the store at the repository's default location,
+    /// `<repo>/.ok/context.sqlite` (see [`default_context_path`]).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`open`](Self::open).
     pub fn open_repo(repo: impl AsRef<Path>) -> Result<Self> {
         Self::open(default_context_path(repo))
     }
 
+    /// Compresses a context pack into handles, persisting each original.
+    ///
+    /// Every primary file (kind `"primary"`), supporting file (kind
+    /// `"impact"`), and validation-plan test (kind `"test"`) becomes one
+    /// [`ContextHandle`] whose one-line summary replaces the original text in
+    /// the returned pack. Handles are sorted by id and deduplicated, so
+    /// identical snippets collapse to a single entry. The returned pack's
+    /// token estimates and `compression_ratio` are heuristic word-count
+    /// figures (a ratio of `1.0` is reported when the pack is empty), and a
+    /// single heuristic [`Evidence`] entry records that compression took
+    /// place.
+    ///
+    /// Originals are written with `INSERT OR REPLACE` under content-derived
+    /// ids, so calling this repeatedly with the same pack is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OkError::Storage`] if the SQLite write fails or the
+    /// connection mutex is poisoned, or a serialization error if an entry
+    /// cannot be encoded as JSON.
     pub fn compress_pack(&self, pack: &ContextPack) -> Result<CompressedContextPack> {
         let mut handles = Vec::new();
         for result in &pack.primary_files {
@@ -109,6 +189,17 @@ impl ContextHandleStore {
         })
     }
 
+    /// Looks up the original text stored for a handle id.
+    ///
+    /// Returns `Ok(None)` if the id is unknown to this store — for example
+    /// when the handle came from a different repository's database or the
+    /// store file was deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OkError::Storage`] if the SQLite query fails or the
+    /// connection mutex is poisoned, or a deserialization error if the
+    /// stored JSON row cannot be decoded.
     pub fn retrieve(&self, handle: &ContextHandleId) -> Result<Option<RetrievedContext>> {
         let conn = self
             .connection
@@ -211,10 +302,18 @@ impl ContextHandleStore {
     }
 }
 
+/// Returns the default context store path for a repository:
+/// `<repo>/.ok/context.sqlite`.
+///
+/// This is where [`ContextHandleStore::open_repo`] keeps compressed context
+/// originals; the path is purely computed and is not created or checked for
+/// existence here.
 pub fn default_context_path(repo: impl AsRef<Path>) -> PathBuf {
     repo.as_ref().join(".ok/context.sqlite")
 }
 
+/// Builds the one-line handle summary: the kind, a compacted title, and the
+/// first eight words of the first non-empty line of the original.
 fn summarize(kind: &str, title: &str, original: &str) -> String {
     let signal = original
         .lines()
@@ -232,6 +331,8 @@ fn summarize(kind: &str, title: &str, original: &str) -> String {
     }
 }
 
+/// Heuristic token count: the larger of the whitespace word count and
+/// `len / 4` bytes, so dense code without spaces is not undercounted.
 fn estimate_tokens(value: &str) -> usize {
     value.split_whitespace().count().max(value.len() / 4)
 }
@@ -240,6 +341,8 @@ fn compressed_token_estimate(summary: &str) -> usize {
     summary.split_whitespace().count().saturating_add(3).max(4)
 }
 
+/// Shortens `path/to/file.rs:10-20` titles to `file.rs:10-20`; titles without
+/// a trailing line range are returned unchanged.
 fn compact_title(title: &str) -> String {
     let Some((path, range)) = title.rsplit_once(':') else {
         return title.into();
@@ -259,6 +362,8 @@ fn line_suffix(range: &Option<LineRange>) -> String {
         .unwrap_or_default()
 }
 
+/// Returns the first `len` hex nibbles of the SHA-256 digest of `value`,
+/// used to derive stable, content-addressed handle and evidence ids.
 fn stable_hash(value: &str, len: usize) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
