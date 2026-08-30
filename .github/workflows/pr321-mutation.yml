@@ -19,29 +19,9 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run focused tests
         run: cargo test -p open-kioku-cli retrieval_bench_tests
-      - name: List targeted mutations
-        run: |
-          cargo mutants --list \
-            --re 'append_retrieval_group_deltas|compare_retrieval_baseline' \
-            --package open-kioku-cli | tee mutants-list.txt
-          test -s mutants-list.txt
       - name: Run targeted mutation tests
-        run: >-
-          cargo mutants --no-shuffle --in-place
-          --re 'append_retrieval_group_deltas|compare_retrieval_baseline'
-          --package open-kioku-cli --test-package open-kioku-cli
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pr321-mutants-out
-          path: |
-            mutants-list.txt
-            mutants.out
-          if-no-files-found: error
+        run: python3 scripts/pr321_mutation_test.py
