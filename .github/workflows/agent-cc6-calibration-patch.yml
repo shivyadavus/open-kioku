@@ -1,0 +1,377 @@
+name: Agent CC6 calibration patch
+
+on:
+  push:
+    branches:
+      - agent/cc6-frozen-calibration
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/cc6-frozen-calibration
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply focused CC6 benchmark integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          calib = Path('crates/open-kioku-cli/src/cc6_calibration.rs')
+          text = calib.read_text()
+          old = '''pub struct AbstentionCalibrationResult {
+    pub policy: AbstentionPolicy,
+    pub development: AbstentionMetrics,
+    pub holdout: AbstentionMetrics,
+'''
+          new = '''pub struct AbstentionCalibrationResult {
+    pub policy: AbstentionPolicy,
+    /// Safety envelope used to select the policy. Keeping this in the result makes benchmark
+    /// reports auditable and prevents thresholds from becoming implicit configuration.
+    pub constraints: AbstentionCalibrationConstraints,
+    pub development: AbstentionMetrics,
+    pub holdout: AbstentionMetrics,
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          old = '''    Ok(AbstentionCalibrationResult {
+        policy,
+        development: development_metrics,
+'''
+          new = '''    Ok(AbstentionCalibrationResult {
+        policy,
+        constraints,
+        development: development_metrics,
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          calib.write_text(text)
+
+          path = Path('crates/open-kioku-cli/src/bench/retrieval.rs')
+          text = path.read_text()
+          text = text.replace('const RETRIEVAL_REPORT_VERSION: &str = "1.6.0";', 'const RETRIEVAL_REPORT_VERSION: &str = "1.7.0";', 1)
+          anchor = 'const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];\n'
+          insert = '''const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
+// Advisory CC6 calibration is constrained to zero observed positive abstentions on development.
+// No minimum no-gold recall is imposed: if development evidence cannot separate negatives safely,
+// calibration is allowed to retain the never-abstain policy rather than manufacturing a gain.
+const RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE: f64 = 0.0;
+const RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL: f64 = 0.0;
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          anchor = '''    #[serde(skip_serializing_if = "Option::is_none")]
+    query_shape_benchmark: Option<RetrievalQueryShapeBenchmark>,
+    caveats: Vec<String>,
+'''
+          insert = '''    #[serde(skip_serializing_if = "Option::is_none")]
+    query_shape_benchmark: Option<RetrievalQueryShapeBenchmark>,
+    /// Development-only CC6 policy selection with untouched holdout evaluation. Advisory only;
+    /// the policy is not applied to production ContextPack construction by this benchmark.
+    abstention_calibration: Option<cc6_calibration::AbstentionCalibrationResult>,
+    caveats: Vec<String>,
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          anchor = '    let mut cc2_cases = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();\n'
+          insert = '''    let mut cc2_cases = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();
+    let mut cc6_abstention_cases = Vec::with_capacity(corpus.cases.len());
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          old = '''        cc2_cases
+            .entry("cc4:routed_contextpack".into())
+            .or_default()
+            .push(run_routed_contextpack_retrieval_case(
+                &store, case, budgets, limit,
+            )?);
+'''
+          new = '''        let (routed_report, abstention_case) = run_routed_contextpack_retrieval_case(
+            &store, case, budgets, limit,
+        )?;
+        cc2_cases
+            .entry("cc4:routed_contextpack".into())
+            .or_default()
+            .push(routed_report);
+        cc6_abstention_cases.push(abstention_case);
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          anchor = '''    let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
+    let mut caveats = Vec::new();
+'''
+          insert = '''    let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
+    let mut caveats = Vec::new();
+    let abstention_calibration = Some(
+        cc6_calibration::calibrate_abstention_policy(
+            &cc6_abstention_cases,
+            cc6_calibration::AbstentionCalibrationConstraints {
+                max_positive_abstention_rate:
+                    RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE,
+                min_no_gold_abstention_recall:
+                    RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("CC6 routed abstention calibration failed: {error}"))?,
+    );
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          old = '''    caveats.push(
+        "abstention precision/recall measures empty-result abstention behavior and remains advisory until CC6 calibration selects thresholds from the development/calibration split; no-gold false-positive rate remains the active release-gated negative-case signal".into(),
+    );
+'''
+          new = '''    caveats.push(
+        "CC6 abstention calibration is advisory: candidate thresholds are derived only from development cases, the selected policy is evaluated unchanged on holdout, and the policy is not applied to production ContextPack construction; no-gold false-positive rate remains the active release-gated negative-case signal".into(),
+    );
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        advisory_comparisons,
+        query_shape_benchmark,
+        caveats,
+'''
+          new = '''        advisory_comparisons,
+        query_shape_benchmark,
+        abstention_calibration,
+        caveats,
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''fn run_routed_contextpack_retrieval_case(
+    store: &SqliteStore,
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    limit: usize,
+) -> anyhow::Result<RetrievalCaseReport> {
+'''
+          new = '''fn run_routed_contextpack_retrieval_case(
+    store: &SqliteStore,
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    limit: usize,
+) -> anyhow::Result<(
+    RetrievalCaseReport,
+    cc6_calibration::AbstentionCalibrationCase,
+)> {
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    let compatibility_pack = builder.build(&case.query, limit)?;
+    let latency_ms = duration_ms(started.elapsed());
+    let mut report = score_retrieval_case(
+        case,
+        token_budgets,
+        compatibility_pack.primary_files,
+        latency_ms,
+    );
+'''
+          new = '''    let compatibility_pack = builder.build(&case.query, limit)?;
+    let latency_ms = duration_ms(started.elapsed());
+    let abstention_case = routed_abstention_calibration_case(case, &compatibility_pack);
+    let mut report = score_retrieval_case(
+        case,
+        token_budgets,
+        compatibility_pack.primary_files,
+        latency_ms,
+    );
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    Ok(report)
+}
+
+fn retrieval_candidate_pool(
+'''
+          new = '''    Ok((report, abstention_case))
+}
+
+fn routed_abstention_calibration_case(
+    case: &RetrievalCase,
+    pack: &open_kioku_core::ContextPack,
+) -> cc6_calibration::AbstentionCalibrationCase {
+    let traced = pack
+        .primary_files
+        .iter()
+        .filter_map(|result| {
+            let unit = open_kioku_core::RetrievalUnitKey::from_result(result);
+            let trace = pack
+                .retrieval_diagnostics
+                .traces
+                .iter()
+                .find(|trace| trace.unit_key.as_ref() == Some(&unit))?;
+            Some((
+                trace.authority,
+                result.score as f64,
+                trace
+                    .contributions
+                    .iter()
+                    .map(|contribution| contribution.source)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let top_score_margin = same_authority_top_score_margin(&traced);
+    let independent_stream_count = traced.first().map(|(_, _, streams)| *streams).unwrap_or(0);
+
+    cc6_calibration::AbstentionCalibrationCase {
+        id: case.id.clone(),
+        split: match case.split {
+            RetrievalSplit::Development => cc6_calibration::CalibrationSplit::Development,
+            RetrievalSplit::Holdout => cc6_calibration::CalibrationSplit::Holdout,
+        },
+        no_gold_expected: case.no_gold_expected,
+        exact_evidence_present: pack.retrieval_diagnostics.selection.exact_evidence_count > 0,
+        top_score_margin,
+        independent_stream_count,
+        ambiguity_unresolved_count: pack
+            .retrieval_diagnostics
+            .selection
+            .ambiguity_unresolved_count,
+    }
+}
+
+/// Margin between the top candidate and the next candidate in the same authority tier. A result in
+/// a different tier is not comparable: numeric ranking score never substitutes for authority.
+fn same_authority_top_score_margin(
+    traced: &[(open_kioku_core::RetrievalAuthority, f64, usize)],
+) -> Option<f64> {
+    let (top_authority, top_score, _) = *traced.first()?;
+    if !top_score.is_finite() {
+        return None;
+    }
+    let (_, second_score, _) = traced
+        .iter()
+        .copied()
+        .skip(1)
+        .find(|(authority, score, _)| *authority == top_authority && score.is_finite())?;
+    let margin = top_score - second_score;
+    (margin >= 0.0).then_some(margin)
+}
+
+fn retrieval_candidate_pool(
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          # Every test report literal that previously had query-shape followed by caveats gets an
+          # explicit absent calibration value; the live report above uses the measured result.
+          text = text.replace(
+              '            query_shape_benchmark: None,\n            caveats:',
+              '            query_shape_benchmark: None,\n            abstention_calibration: None,\n            caveats:'
+          )
+
+          anchor = '''    if let Some(query_shape) = &report.query_shape_benchmark {
+'''
+          insert = '''    if let Some(calibration) = &report.abstention_calibration {
+        out.push_str("## CC6 abstention calibration (advisory)\\n\\n");
+        out.push_str(&format!(
+            "- Development safety envelope: positive abstention rate <= `{:.3}`, no-gold abstention recall >= `{:.3}`\\n- Selected policy: margin `{:?}`, independent streams `{:?}`, ambiguity maximum `{:?}`\\n- Development: precision `{:.3}`, no-gold recall `{:.3}`, positive abstention rate `{:.3}`\\n- Untouched holdout: precision `{:.3}`, no-gold recall `{:.3}`, positive abstention rate `{:.3}`\\n- Development cases: `{}`; holdout cases: `{}`\\n\\n",
+            calibration.constraints.max_positive_abstention_rate,
+            calibration.constraints.min_no_gold_abstention_recall,
+            calibration.policy.min_top_score_margin,
+            calibration.policy.min_independent_streams,
+            calibration.policy.max_ambiguity_unresolved,
+            calibration.development.precision,
+            calibration.development.no_gold_recall,
+            calibration.development.positive_abstention_rate,
+            calibration.holdout.precision,
+            calibration.holdout.no_gold_recall,
+            calibration.holdout.positive_abstention_rate,
+            calibration.development_case_ids.len(),
+            calibration.holdout_case_ids.len(),
+        ));
+    }
+
+    if let Some(query_shape) = &report.query_shape_benchmark {
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          anchor = '''    if !report.stream_ablations.is_empty() {
+'''
+          insert = '''    if let Some(calibration) = &report.abstention_calibration {
+        println!(
+            "CC6 abstention (advisory): dev no-gold recall {:.3}, dev positive abstention {:.3}, holdout no-gold recall {:.3}, holdout positive abstention {:.3}",
+            calibration.development.no_gold_recall,
+            calibration.development.positive_abstention_rate,
+            calibration.holdout.no_gold_recall,
+            calibration.holdout.positive_abstention_rate,
+        );
+    }
+    if !report.stream_ablations.is_empty() {
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          # Add adversarial helper coverage near the start of retrieval_bench_tests.
+          anchor = '''    #[test]
+    fn abstention_quality_reports_precision_and_recall_without_tuning_holdout() {
+'''
+          insert = '''    #[test]
+    fn cc6_margin_compares_only_candidates_in_the_top_authority_tier() {
+        use open_kioku_core::RetrievalAuthority;
+        let traced = vec![
+            (RetrievalAuthority::Exact, 0.90, 2),
+            (RetrievalAuthority::Heuristic, 0.89, 4),
+            (RetrievalAuthority::Exact, 0.60, 1),
+        ];
+        assert_eq!(same_authority_top_score_margin(&traced), Some(0.30));
+    }
+
+    #[test]
+    fn cc6_margin_fails_closed_without_a_comparable_or_monotonic_candidate() {
+        use open_kioku_core::RetrievalAuthority;
+        assert_eq!(
+            same_authority_top_score_margin(&[
+                (RetrievalAuthority::Exact, 0.9, 1),
+                (RetrievalAuthority::Heuristic, 0.1, 1),
+            ]),
+            None
+        );
+        assert_eq!(
+            same_authority_top_score_margin(&[
+                (RetrievalAuthority::Heuristic, 0.2, 1),
+                (RetrievalAuthority::Heuristic, 0.3, 1),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn abstention_quality_reports_precision_and_recall_without_tuning_holdout() {
+'''
+          assert anchor in text
+          text = text.replace(anchor, insert, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          cargo test -p open-kioku-cli cc6_calibration
+          cargo test -p open-kioku-cli retrieval_bench_tests
+      - name: Commit production patch and remove transport workflow
+        shell: bash
+        run: |
+          rm .github/workflows/agent-cc6-calibration-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add crates/open-kioku-cli/src/cc6_calibration.rs crates/open-kioku-cli/src/bench/retrieval.rs .github/workflows/agent-cc6-calibration-patch.yml
+          git commit -m "feat(cc6): calibrate abstention on frozen routed benchmark"
+          git push origin HEAD:agent/cc6-frozen-calibration
