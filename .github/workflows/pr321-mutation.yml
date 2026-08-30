@@ -1,0 +1,40 @@
+name: pr321-mutation
+
+on:
+  pull_request:
+    paths:
+      - crates/open-kioku-cli/src/bench/retrieval.rs
+
+permissions:
+  contents: read
+
+jobs:
+  changed-code-mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run focused tests
+        run: cargo test -p open-kioku-cli retrieval_bench_tests
+      - name: Build changed-code mutation diff
+        run: git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > pr.diff
+      - name: Run changed-code mutation tests
+        run: >-
+          cargo mutants --no-shuffle --in-place --in-diff pr.diff
+          --package open-kioku-cli --test-package open-kioku-cli
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr321-mutants-out
+          path: mutants.out
+          if-no-files-found: warn
