@@ -83,6 +83,31 @@ include!("commands/onboarding.rs");
 include!("commands/snapshot.rs");
 include!("search.rs");
 
+/// Render the machine-readable version report for `ok --version --json` as a
+/// single-line JSON object.
+pub fn version_json_line() -> String {
+    serde_json::json!({
+        "name": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "crate": env!("CARGO_PKG_NAME"),
+        "description": env!("CARGO_PKG_DESCRIPTION"),
+    })
+    .to_string()
+}
+
+/// Handle `ok --version --json` (either flag order, `-V` included) before clap
+/// intercepts `--version`. Returns true when the version report was printed.
+pub fn try_print_version_json(args: &[String]) -> bool {
+    let is_version_flag = |arg: &str| arg == "--version" || arg == "-V";
+    let requested = args.len() == 2
+        && args.iter().any(|arg| is_version_flag(arg))
+        && args.iter().any(|arg| arg == "--json");
+    if requested {
+        println!("{}", version_json_line());
+    }
+    requested
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

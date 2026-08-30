@@ -36,6 +36,11 @@ enum Command {
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
+    /// Report index readiness and quality for a repository.
+    #[command(after_help = "Examples:
+  ok status
+  ok status --json
+  ok status --markdown --write ok-status.md")]
     Status {
         #[arg(default_value = ".")]
         repo: PathBuf,
@@ -65,6 +70,11 @@ enum Command {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Search the indexed repository for code or graph matches.
+    #[command(after_help = "Examples:
+  ok search \"token refresh\"
+  ok search Worker --kind graph --limit 5
+  ok search issue_token --json")]
     Search {
         query: String,
         #[arg(long, default_value_t = 20)]
@@ -852,6 +862,11 @@ enum ExplainCommand {
 }
 
 #[derive(Args)]
+/// Analyze the blast radius of changing a file, a symbol, or a Git range.
+#[command(after_help = "Examples:
+  ok impact --file src/auth.rs
+  ok impact --symbol issue_token --json
+  ok impact --since HEAD~1")]
 struct ImpactArgs {
     #[arg(long)]
     file: Option<PathBuf>,

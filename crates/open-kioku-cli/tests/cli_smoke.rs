@@ -71,6 +71,61 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 }
 
 #[test]
+fn version_json_reports_machine_readable_metadata() {
+    for args in [
+        ["--version", "--json"],
+        ["--json", "--version"],
+        ["-V", "--json"],
+        ["--json", "-V"],
+    ] {
+        let output = run({
+            let mut command = ok();
+            command.args(args);
+            command
+        });
+        assert_eq!(
+            output.lines().count(),
+            1,
+            "version report should be a single JSON line, got: {output}"
+        );
+        let report: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(report["name"], "ok");
+        assert_eq!(report["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(report["crate"], "open-kioku-cli");
+    }
+
+    let plain = run({
+        let mut command = ok();
+        command.arg("--version");
+        command
+    });
+    assert_eq!(plain.trim(), format!("ok {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn subcommand_help_includes_copyable_examples() {
+    for (subcommand, example) in [
+        ("search", "ok search \"token refresh\""),
+        ("impact", "ok impact --file src/auth.rs"),
+        ("status", "ok status --markdown --write ok-status.md"),
+    ] {
+        let help = run({
+            let mut command = ok();
+            command.arg(subcommand).arg("--help");
+            command
+        });
+        assert!(
+            help.contains("Examples:"),
+            "{subcommand} --help should list examples:\n{help}"
+        );
+        assert!(
+            help.contains(example),
+            "{subcommand} --help should include `{example}`:\n{help}"
+        );
+    }
+}
+
+#[test]
 fn agent_setup_is_safe_idempotent_and_verifies_local_mcp() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
