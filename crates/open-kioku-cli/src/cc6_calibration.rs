@@ -86,10 +86,16 @@ impl AbstentionPolicy {
 
     /// Evaluate a case without upgrading or suppressing evidence authority.
     ///
-    /// Exact evidence is a hard safety override: a weak heuristic margin or missing corroborating
-    /// stream cannot erase exact retrieval evidence. Any future production integration must retain
-    /// this precedence independently from calibration quality.
+    /// Exact evidence prevents weak score-margin or stream-agreement heuristics from erasing an
+    /// authoritative match. It does *not* override an explicit ambiguity/unresolved gate: exact
+    /// evidence can still be ambiguous, and that conflict must remain visible and actionable.
     pub fn should_abstain(&self, case: &AbstentionCalibrationCase) -> bool {
+        let unresolved = self
+            .max_ambiguity_unresolved
+            .is_some_and(|maximum| case.ambiguity_unresolved_count > maximum);
+        if unresolved {
+            return true;
+        }
         if case.exact_evidence_present {
             return false;
         }
@@ -101,11 +107,8 @@ impl AbstentionPolicy {
         let weak_agreement = self
             .min_independent_streams
             .is_some_and(|minimum| case.independent_stream_count < minimum);
-        let unresolved = self
-            .max_ambiguity_unresolved
-            .is_some_and(|maximum| case.ambiguity_unresolved_count > maximum);
 
-        weak_margin || weak_agreement || unresolved
+        weak_margin || weak_agreement
     }
 
     fn complexity(&self) -> usize {
@@ -228,8 +231,6 @@ pub fn calibrate_abstention_policy(
     let Some((policy, development_metrics)) = best else {
         return Err(CalibrationError::NoEligiblePolicy);
     };
-    // A no-op profile is useful as an explicit negative result only when the caller allowed zero
-    // no-gold recall. It must not be mislabeled as evidence that calibrated abstention improved.
     if policy == AbstentionPolicy::never_abstain()
         && constraints.min_no_gold_abstention_recall > 0.0
     {
@@ -243,7 +244,7 @@ pub fn calibrate_abstention_policy(
         holdout: holdout_metrics,
         development_case_ids: development.iter().map(|case| case.id.clone()).collect(),
         holdout_case_ids: holdout.iter().map(|case| case.id.clone()).collect(),
-        selection_basis: "policy parameters selected exclusively from development cases; holdout is evaluation-only; exact evidence is a non-abstention safety override".into(),
+        selection_basis: "policy parameters selected exclusively from development cases; holdout is evaluation-only; exact evidence protects against weak score/agreement gates but never suppresses explicit ambiguity".into(),
     })
 }
 
@@ -344,9 +345,7 @@ fn compare_policy_quality(
                 .partial_cmp(&metrics.positive_abstention_rate)
                 .unwrap_or(Ordering::Equal)
         })
-        // Prefer the smallest explainable policy when quality is identical.
         .then_with(|| best_policy.complexity().cmp(&policy.complexity()))
-        // Last tie-break is stable and independent of input order or holdout contents.
         .then_with(|| compare_policy_identity(best_policy, policy))
 }
 
@@ -468,22 +467,33 @@ mod tests {
     }
 
     #[test]
-    fn exact_evidence_is_never_erased_by_calibrated_weakness_signals() {
+    fn exact_evidence_is_not_erased_by_weak_margin_or_agreement() {
         let policy = AbstentionPolicy {
             min_top_score_margin: Some(100.0),
             min_independent_streams: Some(10),
             max_ambiguity_unresolved: Some(0),
         };
-        let exact = case(
-            "exact",
-            CalibrationSplit::Development,
-            true,
-            true,
-            None,
-            0,
-            100,
-        );
+        let exact = case("exact", CalibrationSplit::Development, true, true, None, 0, 0);
         assert!(!policy.should_abstain(&exact));
+    }
+
+    #[test]
+    fn exact_evidence_does_not_suppress_explicit_ambiguity() {
+        let policy = AbstentionPolicy {
+            min_top_score_margin: Some(100.0),
+            min_independent_streams: Some(10),
+            max_ambiguity_unresolved: Some(0),
+        };
+        let ambiguous_exact = case(
+            "ambiguous-exact",
+            CalibrationSplit::Development,
+            false,
+            true,
+            Some(1.0),
+            10,
+            1,
+        );
+        assert!(policy.should_abstain(&ambiguous_exact));
     }
 
     #[test]
@@ -538,7 +548,7 @@ mod tests {
     #[test]
     fn invalid_features_and_duplicate_ids_are_rejected() {
         let invalid = vec![
-            case("dup", CalibrationSplit::Development, false, false, Some(f64::NAN), 1, 0),
+            case("bad-margin", CalibrationSplit::Development, false, false, Some(f64::NAN), 1, 0),
             case("holdout", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 0),
         ];
         assert!(matches!(
@@ -561,7 +571,7 @@ mod tests {
     fn impossible_safety_constraint_does_not_silently_pick_a_policy() {
         let cases = vec![
             case("dev-positive", CalibrationSplit::Development, false, false, Some(0.1), 1, 0),
-            case("dev-negative", CalibrationSplit::Development, true, true, None, 0, 100),
+            case("dev-negative", CalibrationSplit::Development, true, true, None, 0, 0),
             case("holdout", CalibrationSplit::Holdout, true, false, Some(0.1), 1, 0),
         ];
         let result = calibrate_abstention_policy(
