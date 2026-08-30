@@ -1094,7 +1094,7 @@ fn run_routed_contextpack_retrieval_case(
     let started = Instant::now();
     let compatibility_pack = builder.build(&case.query, limit)?;
     let latency_ms = duration_ms(started.elapsed());
-    let abstention_case = routed_abstention_calibration_case(case, &compatibility_pack);
+    let abstention_case = routed_abstention_calibration_case(case, &compatibility_pack)?;
     let mut report = score_retrieval_case(
         case,
         token_budgets,
@@ -1139,18 +1139,24 @@ fn run_routed_contextpack_retrieval_case(
 fn routed_abstention_calibration_case(
     case: &RetrievalCase,
     pack: &open_kioku_core::ContextPack,
-) -> cc6_calibration::AbstentionCalibrationCase {
+) -> anyhow::Result<cc6_calibration::AbstentionCalibrationCase> {
     let traced = pack
         .primary_files
         .iter()
-        .filter_map(|result| {
+        .map(|result| {
             let unit = open_kioku_core::RetrievalUnitKey::from_result(result);
             let trace = pack
                 .retrieval_diagnostics
                 .traces
                 .iter()
-                .find(|trace| trace.unit_key.as_ref() == Some(&unit))?;
-            Some((
+                .find(|trace| trace.unit_key.as_ref() == Some(&unit))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "CC6 calibration requires exact trace provenance for selected unit {:?}",
+                        unit
+                    )
+                })?;
+            Ok((
                 trace.authority,
                 result.score as f64,
                 trace
@@ -1161,8 +1167,8 @@ fn routed_abstention_calibration_case(
                     .len(),
             ))
         })
-        .collect::<Vec<_>>();
-    cc6_calibration::AbstentionCalibrationCase {
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(cc6_calibration::AbstentionCalibrationCase {
         id: case.id.clone(),
         split: match case.split {
             RetrievalSplit::Development => cc6_calibration::CalibrationSplit::Development,
@@ -1176,7 +1182,7 @@ fn routed_abstention_calibration_case(
             .retrieval_diagnostics
             .selection
             .ambiguity_unresolved_count,
-    }
+    })
 }
 
 fn same_authority_top_score_margin(
@@ -2084,9 +2090,12 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
     if let Some(calibration) = &report.abstention_calibration {
         out.push_str("## CC6 abstention calibration (advisory)\n\n");
         out.push_str(&format!(
-            "- Development constraints: positive abstention <= `{:.3}`, no-gold recall >= `{:.3}`\n- Development: no-gold recall `{:.3}`, positive abstention `{:.3}`\n- Untouched holdout: no-gold recall `{:.3}`, positive abstention `{:.3}`\n\n",
+            "- Development constraints: positive abstention <= `{:.3}`, no-gold recall >= `{:.3}`\n- Selected policy: margin `{:?}`, independent streams `{:?}`, unresolved ambiguity max `{:?}`\n- Development: no-gold recall `{:.3}`, positive abstention `{:.3}`\n- Untouched holdout: no-gold recall `{:.3}`, positive abstention `{:.3}`\n\n",
             calibration.constraints.max_positive_abstention_rate,
             calibration.constraints.min_no_gold_abstention_recall,
+            calibration.policy.min_top_score_margin,
+            calibration.policy.min_independent_streams,
+            calibration.policy.max_ambiguity_unresolved,
             calibration.development.no_gold_recall,
             calibration.development.positive_abstention_rate,
             calibration.holdout.no_gold_recall,
