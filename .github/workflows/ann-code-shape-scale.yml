@@ -61,7 +61,7 @@ jobs:
         vector_count: [50000, 100000, 300000, 1000000]
         dimensions: [384, 768]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
