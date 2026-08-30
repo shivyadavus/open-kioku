@@ -1,10 +1,9 @@
 name: V3 canonical publication
 
+# Archived one-shot publication vehicle for v3.0.0. Manual dispatch only:
+# the former push self-trigger republished release assets whenever this file
+# was touched (e.g. by a routine action-version bump).
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/v3-canonical-publish.yml
   workflow_dispatch:
 
 permissions:

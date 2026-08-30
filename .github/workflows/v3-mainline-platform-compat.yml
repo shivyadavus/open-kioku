@@ -1,12 +1,10 @@
 # One-shot V3 supported-platform alignment. Workflow YAML changes land via connector.
 name: V3 mainline platform compatibility
 
+# Manual dispatch only: the former push self-trigger re-fired this archived
+# one-shot workflow whenever the file was touched on its release branch.
 on:
-  push:
-    branches:
-      - release/v3.0.0-mainline
-    paths:
-      - .github/workflows/v3-mainline-platform-compat.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
