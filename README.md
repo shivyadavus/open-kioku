@@ -115,9 +115,12 @@ A plan can include:
 
 After the edit, verification checks the actual change against the plan rather than treating a successful command exit as proof that the right files changed.
 
-## Dogfooded Proof
+## Measured Proof
 
-The homepage includes proof artifacts produced from a pinned `main` build at commit `acbc5bcb387551501b3bc350247d25c133116d75`.
+Public proof is tied to an identifiable Open Kioku build. The current large-Java
+record uses the immutable `v3.0.4` release at source commit
+`84ca3d09209495f6c842f9ecdf670c0dac945e72`; older dogfood artifacts remain
+available as explicitly versioned historical evidence.
 
 ### Local semantic scale
 
@@ -146,7 +149,11 @@ A separate public-repository audit indexed 4,600+ files, 46,000+ symbols, and 8,
 
 ### Large Java repository validation
 
-The 3.0.4 release was tested end to end on a large Java repository. The workload and limitations are included so the results remain reproducible and useful.
+The 3.0.4 release was tested end to end on a large Java repository. The public
+artifact makes the release identity, host profile, configuration, method,
+aggregate workload, measurements, quality checks, and limitations auditable.
+The repository identity and revision are intentionally withheld, so this is a
+scale record rather than an exactly replayable corpus.
 
 | Measurement | Result |
 |---|---:|
@@ -165,6 +172,9 @@ The 3.0.4 release was tested end to end on a large Java repository. The workload
 The repeat index reproduced the same file, symbol, chunk, node, and edge totals. Four parallel graph reads completed without SQLite lock failures. Exact symbol identity ranked ahead of broader prefix matches, and exact graph queries used indexed anchors instead of scanning the full edge table.
 
 These are observed local workstation timings, not a universal performance guarantee. Hardware, repository shape, Git history, enabled evidence sources, and semantic model affect runtime and storage. Compiler-grade Java SCIP evidence remains optional; when an external SCIP build integration is unavailable, Open Kioku keeps structural Java indexing operational and reports the missing evidence rather than overstating certainty.
+
+Inspect the [machine-readable evidence](demo/proof/large-java-3.0.4.json) and
+[methodology and caveats](docs/large-java-validation-3.0.4.md).
 
 ## Local Semantic Retrieval
 
@@ -198,7 +208,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
   - uses: shivyadavus/open-kioku-action@v1
     with:
       task: "change token expiration"

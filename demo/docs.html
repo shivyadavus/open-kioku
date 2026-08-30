@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Open Kioku documentation: install, connect an MCP client, plan changes, verify edits, and inspect measured proof." />
+<meta name="theme-color" content="#07090d" />
+<link rel="canonical" href="https://www.openkioku.com/docs.html" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Open Kioku documentation" />
+<meta property="og:description" content="Start with Open Kioku, connect a coding agent, and inspect release-linked proof." />
+<meta property="og:url" content="https://www.openkioku.com/docs.html" />
+<meta property="og:image" content="https://www.openkioku.com/og-image.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<title>Documentation — Open Kioku</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="site.css" />
+</head>
+<body>
+<div class="noise"></div><div class="glow g1"></div><div class="glow g2"></div>
+<div class="nav-wrap"><div class="wrap"><nav>
+<a href="index.html" class="brand" aria-label="Open Kioku home">
+<svg viewBox="0 0 64 64" role="img" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#57e6c4"/><stop offset="1" stop-color="#8c86ff"/></linearGradient></defs><rect x="1" y="1" width="62" height="62" rx="16" fill="#0b0e13" stroke="rgba(255,255,255,.14)"/><ellipse cx="32" cy="32" rx="22" ry="14" fill="none" stroke="url(#lg)" stroke-width="2"/><path d="M25 25l-7 7 7 7M39 25l7 7-7 7" fill="none" stroke="url(#lg)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="2.6" fill="#57e6c4"/></svg>
+<span>Open Kioku</span></a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav"><span class="sr-only">Open navigation</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></button>
+<div class="nav-links" id="primary-nav"><a href="index.html#proof">Proof</a><a href="index.html#workflow">Workflow</a><a href="docs.html" aria-current="page">Docs</a><a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a></div>
+</nav></div></div>
+<main>
+<section class="docs-hero"><div class="wrap"><div class="kicker">Documentation</div><h1>Start with evidence.<br />Keep uncertainty visible.</h1><p class="lead">Install Open Kioku, connect your coding agent over local MCP, and use the plan → edit → verify loop on the repository you already have.</p><div class="actions"><a class="btn btn-primary" href="#start">Quickstart <span>→</span></a><a class="btn btn-secondary" href="https://github.com/shivyadavus/open-kioku/tree/main/docs">All reference docs ↗</a></div></div></section>
+<section id="start" class="docs-section"><div class="wrap"><div class="docs-grid">
+<article class="docs-card docs-primary"><div class="kicker">First win</div><h2>Install and connect</h2><p>The setup command indexes the current repository, writes repository-scoped agent guidance and MCP configuration, and checks that the local server responds.</p><pre><code>npm install -g open-kioku
+ok setup agent cursor --repo . --apply</code></pre><p class="docs-hint">Use <code>claude</code> instead of <code>cursor</code> for Claude Code. Run without <code>--apply</code> first to preview changes.</p></article>
+<div class="docs-list">
+<a class="docs-link" href="cursor-setup.html"><span><b>Cursor</b><small>Repository-scoped MCP setup</small></span><span>→</span></a>
+<a class="docs-link" href="claude-code-setup.html"><span><b>Claude Code</b><small>Local stdio MCP setup</small></span><span>→</span></a>
+<a class="docs-link" href="codex-setup.html"><span><b>Codex</b><small>Connect Open Kioku tools</small></span><span>→</span></a>
+<a class="docs-link" href="gemini-cli-setup.html"><span><b>Gemini CLI</b><small>Local repository evidence</small></span><span>→</span></a>
+</div></div></div></section>
+<section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">Core workflow</div><h2 class="section-title">Plan before editing. Verify after.</h2></div><div class="features">
+<article class="feature"><div class="feature-icon">01</div><h3>Build local evidence</h3><p><code>ok index .</code> stores symbols, relationships, tests, history, documentation, and optional semantics under <code>.ok/</code>.</p></article>
+<article class="feature"><div class="feature-icon">02</div><h3>Compile a plan</h3><p><code>ok plan "your task"</code> returns bounded context, impact candidates, validation targets, provenance, and explicit caveats.</p></article>
+<article class="feature"><div class="feature-icon">03</div><h3>Verify the change</h3><p>Use <code>verify_change</code> or the CLI verification flow to compare actual edits with planned boundaries and validation evidence.</p></article>
+</div></div></section>
+<section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">Evidence you can inspect</div><h2 class="section-title">Proof, methodology, and limitations.</h2><p class="section-copy">Performance claims are observations tied to a release and host—not universal guarantees.</p></div><div class="docs-proof-grid">
+<a class="docs-link" href="proof/large-java-3.0.4.json"><span><b>Large-Java JSON evidence</b><small>Release, environment, workload, results, and caveats</small></span><span>↗</span></a>
+<a class="docs-link" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-java-validation-3.0.4.md"><span><b>Validation methodology</b><small>Procedure, evidence boundary, and limitations</small></span><span>↗</span></a>
+<a class="docs-link" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-repo-proof.md"><span><b>Public large-repository proof</b><small>Replayable repository audit</small></span><span>↗</span></a>
+<a class="docs-link" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/proof.md"><span><b>Proof model</b><small>How Open Kioku reports usefulness and uncertainty</small></span><span>↗</span></a>
+</div></div></section>
+</main>
+<footer><div class="wrap foot"><div>Open Kioku · documentation and measured proof.</div><div class="foot-links"><a href="index.html">Product</a><a href="https://github.com/shivyadavus/open-kioku">Source</a><a href="proof/large-java-3.0.4.json">Proof</a></div></div></footer>
+<script src="site.js"></script>
+</body>
+</html>

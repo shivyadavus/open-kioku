@@ -25,3 +25,4 @@ open-kioku-demo/
 
 # Private launch drafts
 docs/launch/
+.playwright-cli/

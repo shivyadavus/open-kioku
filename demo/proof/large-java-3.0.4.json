@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "proof_kind": "anonymized_large_java_validation",
+  "recorded_at": "2026-08-23",
+  "release": {
+    "version": "3.0.4",
+    "tag": "v3.0.4",
+    "source_sha": "84ca3d09209495f6c842f9ecdf670c0dac945e72",
+    "release_url": "https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.4"
+  },
+  "privacy": {
+    "repository_identity": "withheld",
+    "repository_revision": "withheld",
+    "source_paths_included": false,
+    "source_snippets_included": false,
+    "reason": "The repository name and revision are intentionally withheld; only aggregate workload and result measurements are published.",
+    "reproducibility_scope": "The artifact supports method review and scale comparison. It cannot reproduce the identical source workload without revealing the repository."
+  },
+  "host_profile": {
+    "operating_system": "macOS 13.7.6 (22H625)",
+    "architecture": "x86_64",
+    "cpu": "Intel Core i5-1038NG7 @ 2.00GHz",
+    "logical_cpu_count": 8,
+    "memory_bytes": 17179869184,
+    "storage_note": "Local APFS workspace; free-space and background-load conditions were not controlled."
+  },
+  "workload": {
+    "tracked_source_files": 11404,
+    "java_files": 9247,
+    "indexed_files": 9312,
+    "symbols": 136212,
+    "chunks": 136646,
+    "graph_nodes": 211057,
+    "graph_edges": 707271,
+    "tests": 67810,
+    "imports": 87148,
+    "semantic_vectors": 272858
+  },
+  "method": {
+    "timing_wrapper": "/usr/bin/time -lp",
+    "process_model": "Each reported query timing used a fresh CLI process. Structural totals were read after command completion.",
+    "structural_index": "Run a full structural index, then run the same full index path again and compare persisted totals.",
+    "exact_lookup": "Resolve one exact Java class identity from a fresh process.",
+    "graph_queries": "Run exact definition and implementation graph queries from fresh processes after structural indexing.",
+    "semantic_exact_flat": "Rebuild local-hash semantic evidence with semantic.backend=exact-flat.",
+    "semantic_hnsw": "Rebuild the same local-hash evidence with semantic.backend=usearch-hnsw-f32.",
+    "concurrency": "Run four graph-read processes concurrently against the completed structural index.",
+    "command_templates": [
+      "/usr/bin/time -lp ok index <repo>",
+      "/usr/bin/time -lp ok index <repo>",
+      "/usr/bin/time -lp ok --repo <repo> --json symbol definition <exact-class-name>",
+      "/usr/bin/time -lp ok --repo <repo> --json graph query <exact-definition-query>",
+      "/usr/bin/time -lp ok --repo <repo> --json graph query <exact-implementation-query>",
+      "/usr/bin/time -lp ok --repo <repo> semantic rebuild",
+      "/usr/bin/time -lp ok --repo <repo> semantic rebuild"
+    ]
+  },
+  "configuration": {
+    "structural_index_mode": "full",
+    "semantic_provider": "local",
+    "semantic_model": "local-hash",
+    "semantic_dimensions": 384,
+    "exact_flat_backend": "exact-flat",
+    "hnsw_backend": "usearch-hnsw-f32",
+    "compiler_grade_scip_available": false
+  },
+  "measurements": {
+    "cold_structural_index_seconds": 884,
+    "repeat_full_structural_index_seconds": 502,
+    "exact_class_lookup_fresh_process_seconds": 3.82,
+    "exact_definition_graph_query_seconds": 2.88,
+    "exact_implementation_graph_query_seconds": 4.50,
+    "exact_flat_semantic_build_seconds": 33.33,
+    "exact_flat_failed_vectors": 0,
+    "hnsw_semantic_build_seconds": 302,
+    "hnsw_failed_vectors": 0,
+    "structural_disk_bytes_approx": 5046586573,
+    "hnsw_disk_bytes_approx": 2523293286
+  },
+  "quality_checks": {
+    "repeat_structural_totals_identical": true,
+    "parallel_graph_reader_count": 4,
+    "parallel_graph_lock_failures": 0,
+    "exact_identity_ranked_before_prefix_match": true,
+    "exact_graph_queries_used_indexed_anchors": true,
+    "optional_scip_absence_reported": true
+  },
+  "limitations": [
+    "These are single-workstation observations, not universal latency or storage guarantees.",
+    "Repository identity and revision are withheld, so the exact source workload cannot be independently replayed.",
+    "Hardware, filesystem state, background load, Git history, enabled evidence, and semantic model can materially change results.",
+    "Compiler-grade Java SCIP evidence was unavailable; structural Java indexing remained operational and reported that caveat."
+  ]
+}
