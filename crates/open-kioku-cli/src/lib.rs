@@ -62,6 +62,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub mod cc6_calibration;
+pub mod cc6_readiness;
 
 include!("bench/retrieval.rs");
 include!("types.rs");
