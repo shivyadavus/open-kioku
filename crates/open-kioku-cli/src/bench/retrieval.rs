@@ -1,9 +1,11 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.6.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.7.0";
 const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
 const RETRIEVAL_BASELINE_DIMENSIONS_VERSION: &str = "2.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
+const RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE: f64 = 0.0;
+const RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL: f64 = 0.0;
 
 #[derive(Args, Debug, Clone)]
 struct RetrievalBenchArgs {
@@ -252,6 +254,8 @@ struct RetrievalBenchReport {
     advisory_comparisons: Vec<RetrievalStrategyComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_shape_benchmark: Option<RetrievalQueryShapeBenchmark>,
+    /// Development-selected, untouched-holdout CC6 calibration. Advisory only.
+    abstention_calibration: Option<cc6_calibration::AbstentionCalibrationResult>,
     caveats: Vec<String>,
     strategies: Vec<RetrievalStrategyReport>,
     /// Advisory source/fusion/routing measurements. Excluded from the frozen generic retrieval
@@ -408,6 +412,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     let mut lexical_cases = Vec::with_capacity(corpus.cases.len());
     let mut fusion_cases = Vec::with_capacity(corpus.cases.len());
     let mut cc2_cases = BTreeMap::<String, Vec<RetrievalCaseReport>>::new();
+    let mut cc6_abstention_cases = Vec::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
         let fixture = fixtures
             .get(&case.repo_fixture)
@@ -479,12 +484,13 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
                 None,
                 &open_kioku_context::candidates::FusionConfig::evidence_prior_weighted(),
             )?);
+        let (routed_report, abstention_case) =
+            run_routed_contextpack_retrieval_case(&store, case, budgets, limit)?;
         cc2_cases
             .entry("cc4:routed_contextpack".into())
             .or_default()
-            .push(run_routed_contextpack_retrieval_case(
-                &store, case, budgets, limit,
-            )?);
+            .push(routed_report);
+        cc6_abstention_cases.push(abstention_case);
     }
 
     let strategies = vec![
@@ -502,6 +508,16 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
     };
     let (corpus_revision, revision_caveat) = retrieval_corpus_revision(&cases_file);
     let mut caveats = Vec::new();
+    let abstention_calibration = Some(
+        cc6_calibration::calibrate_abstention_policy(
+            &cc6_abstention_cases,
+            cc6_calibration::AbstentionCalibrationConstraints {
+                max_positive_abstention_rate: RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE,
+                min_no_gold_abstention_recall: RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("CC6 routed abstention calibration failed: {error}"))?,
+    );
     if let Some(caveat) = revision_caveat {
         caveats.push(caveat);
     }
@@ -557,6 +573,7 @@ fn run_retrieval_bench(args: RetrievalBenchArgs) -> anyhow::Result<RetrievalBenc
         baseline_deltas,
         advisory_comparisons,
         query_shape_benchmark,
+        abstention_calibration,
         caveats,
         strategies,
         stream_ablations,
@@ -1069,7 +1086,7 @@ fn run_routed_contextpack_retrieval_case(
     case: &RetrievalCase,
     token_budgets: &[usize],
     limit: usize,
-) -> anyhow::Result<RetrievalCaseReport> {
+) -> anyhow::Result<(RetrievalCaseReport, cc6_calibration::AbstentionCalibrationCase)> {
     let builder = open_kioku_context::ContextPackBuilder::new(
         store as &dyn open_kioku_storage::OkStore,
     )
@@ -1077,6 +1094,7 @@ fn run_routed_contextpack_retrieval_case(
     let started = Instant::now();
     let compatibility_pack = builder.build(&case.query, limit)?;
     let latency_ms = duration_ms(started.elapsed());
+    let abstention_case = routed_abstention_calibration_case(case, &compatibility_pack);
     let mut report = score_retrieval_case(
         case,
         token_budgets,
@@ -1115,7 +1133,67 @@ fn run_routed_contextpack_retrieval_case(
         );
     }
 
-    Ok(report)
+    Ok((report, abstention_case))
+}
+
+fn routed_abstention_calibration_case(
+    case: &RetrievalCase,
+    pack: &open_kioku_core::ContextPack,
+) -> cc6_calibration::AbstentionCalibrationCase {
+    let traced = pack
+        .primary_files
+        .iter()
+        .filter_map(|result| {
+            let unit = open_kioku_core::RetrievalUnitKey::from_result(result);
+            let trace = pack
+                .retrieval_diagnostics
+                .traces
+                .iter()
+                .find(|trace| trace.unit_key.as_ref() == Some(&unit))?;
+            Some((
+                trace.authority,
+                result.score as f64,
+                trace
+                    .contributions
+                    .iter()
+                    .map(|contribution| contribution.source)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    cc6_calibration::AbstentionCalibrationCase {
+        id: case.id.clone(),
+        split: match case.split {
+            RetrievalSplit::Development => cc6_calibration::CalibrationSplit::Development,
+            RetrievalSplit::Holdout => cc6_calibration::CalibrationSplit::Holdout,
+        },
+        no_gold_expected: case.no_gold_expected,
+        exact_evidence_present: pack.retrieval_diagnostics.selection.exact_evidence_count > 0,
+        top_score_margin: same_authority_top_score_margin(&traced),
+        independent_stream_count: traced.first().map(|(_, _, streams)| *streams).unwrap_or(0),
+        ambiguity_unresolved_count: pack
+            .retrieval_diagnostics
+            .selection
+            .ambiguity_unresolved_count,
+    }
+}
+
+fn same_authority_top_score_margin(
+    traced: &[(open_kioku_core::RetrievalAuthority, f64, usize)],
+) -> Option<f64> {
+    let (top_authority, top_score, _) = *traced.first()?;
+    if !top_score.is_finite() {
+        return None;
+    }
+    let second_score = traced
+        .iter()
+        .skip(1)
+        .find_map(|(authority, score, _)| {
+            (*authority == top_authority && score.is_finite()).then_some(*score)
+        })?;
+    let margin = top_score - second_score;
+    (margin >= 0.0).then_some(margin)
 }
 
 fn retrieval_candidate_pool(
@@ -2003,6 +2081,19 @@ fn render_retrieval_markdown(report: &RetrievalBenchReport) -> String {
             out.push_str("No holdout cases.\n\n");
         }
     }
+    if let Some(calibration) = &report.abstention_calibration {
+        out.push_str("## CC6 abstention calibration (advisory)\n\n");
+        out.push_str(&format!(
+            "- Development constraints: positive abstention <= `{:.3}`, no-gold recall >= `{:.3}`\n- Development: no-gold recall `{:.3}`, positive abstention `{:.3}`\n- Untouched holdout: no-gold recall `{:.3}`, positive abstention `{:.3}`\n\n",
+            calibration.constraints.max_positive_abstention_rate,
+            calibration.constraints.min_no_gold_abstention_recall,
+            calibration.development.no_gold_recall,
+            calibration.development.positive_abstention_rate,
+            calibration.holdout.no_gold_recall,
+            calibration.holdout.positive_abstention_rate,
+        ));
+    }
+
     if let Some(query_shape) = &report.query_shape_benchmark {
         out.push_str(&format!(
             "## Query-shape classification (frozen labels)\n\n- Labeled retrieval cases: `{}`\n- Classification accuracy: `{:.3}`\n- Misclassification rate: `{:.3}`\n- Adversarial probe accuracy: `{:.3}` (`{}` probes)\n- Label digest: `{}`\n\n",
@@ -2332,10 +2423,42 @@ mod retrieval_bench_tests {
             baseline_deltas: deltas,
             advisory_comparisons: Vec::new(),
             query_shape_benchmark: None,
+            abstention_calibration: None,
             caveats: Vec::new(),
             strategies: Vec::new(),
             stream_ablations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cc6_margin_uses_only_the_top_authority_tier() {
+        use open_kioku_core::RetrievalAuthority;
+        let margin = same_authority_top_score_margin(&[
+            (RetrievalAuthority::Exact, 0.90, 2),
+            (RetrievalAuthority::Heuristic, 0.89, 4),
+            (RetrievalAuthority::Exact, 0.60, 1),
+        ])
+        .unwrap();
+        assert!((margin - 0.30).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cc6_margin_fails_closed_without_comparable_monotonic_evidence() {
+        use open_kioku_core::RetrievalAuthority;
+        assert_eq!(
+            same_authority_top_score_margin(&[
+                (RetrievalAuthority::Exact, 0.9, 1),
+                (RetrievalAuthority::Heuristic, 0.1, 1),
+            ]),
+            None
+        );
+        assert_eq!(
+            same_authority_top_score_margin(&[
+                (RetrievalAuthority::Heuristic, 0.2, 1),
+                (RetrievalAuthority::Heuristic, 0.3, 1),
+            ]),
+            None
+        );
     }
 
     #[test]
@@ -2574,6 +2697,7 @@ mod retrieval_bench_tests {
             baseline_deltas: Vec::new(),
             advisory_comparisons: Vec::new(),
             query_shape_benchmark: None,
+            abstention_calibration: None,
             caveats: Vec::new(),
             strategies: vec![strategy],
             stream_ablations: vec![build_named_retrieval_strategy_report(
@@ -2767,6 +2891,7 @@ mod retrieval_bench_tests {
             baseline_deltas: Vec::new(),
             advisory_comparisons: Vec::new(),
             query_shape_benchmark: None,
+            abstention_calibration: None,
             caveats: Vec::new(),
             strategies: vec![build_retrieval_strategy_report(
                 RetrievalStrategy::Fusion,
