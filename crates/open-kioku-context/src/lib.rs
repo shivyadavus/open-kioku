@@ -621,6 +621,7 @@ impl<'a> ContextPackBuilder<'a> {
             if let Some(first) = primary_files.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
                     .with_history_store(self.history_store)
+                    .with_graph_store(Some(self.store as &dyn open_kioku_storage::GraphStore))
                     .for_file(&first.path)?
             } else {
                 empty_impact(task)
@@ -2448,6 +2449,8 @@ fn classify_intent(task: &str) -> &'static str {
 
 fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
     open_kioku_core::ImpactReport {
+        proven_impact: Vec::new(),
+        possible_impact: Vec::new(),
         target: task.into(),
         direct_impacts: Vec::new(),
         indirect_impacts: Vec::new(),
@@ -2479,6 +2482,8 @@ fn empty_impact(task: &str) -> open_kioku_core::ImpactReport {
 
 fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
     open_kioku_core::ImpactReport {
+        proven_impact: Vec::new(),
+        possible_impact: Vec::new(),
         target: task.into(),
         direct_impacts: Vec::new(),
         indirect_impacts: Vec::new(),

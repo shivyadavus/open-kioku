@@ -767,6 +767,8 @@ mod tests {
             primary_context: Vec::new(),
             relevant_symbols: Vec::new(),
             impact: ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: "src/auth.rs".into(),
                 direct_impacts: Vec::new(),
                 indirect_impacts: Vec::new(),

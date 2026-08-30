@@ -1,20 +1,29 @@
 use chrono::Utc;
 use open_kioku_core::{
-    search_result_evidence_ids, AnalysisFact, ChurnSummary, CodeChunk, Confidence, Evidence,
-    EvidenceId, EvidenceSourceType, File, FileId, FileRange, GraphEdgeType, GraphNodeType,
-    HistorySignalQuery, HistorySignalSummary, ImpactReport, RiskReport, ScoreComponent,
-    SearchResult, Symbol, SymbolOccurrence,
+    identity, search_result_evidence_ids, AnalysisFact, ChurnSummary, CodeChunk, Confidence,
+    Evidence, EvidenceId, EvidenceSourceType, File, FileId, FileRange, GraphEdge, GraphEdgeType,
+    GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary, ImpactReport, NodeId,
+    RelationshipImpact, RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
+use open_kioku_evidence::{RelationshipUseClass, RelationshipUsePolicy};
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::{HistoryStore, MetadataStore, SearchIndex};
+use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, SearchIndex};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+
+/// Bounded number of changed-file symbols used to seed relationship-edge impact discovery.
+const RELATIONSHIP_IMPACT_SYMBOL_SEEDS: usize = 16;
+/// Bounded neighbor fan-out per seed node.
+const RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT: usize = 40;
+/// Bounded size of each relationship impact list in the report.
+const RELATIONSHIP_IMPACT_LIMIT: usize = 25;
 
 pub struct ImpactEngine<'a> {
     store: &'a dyn MetadataStore,
     search_index: Option<&'a dyn SearchIndex>,
     history_store: Option<&'a dyn HistoryStore>,
+    graph_store: Option<&'a dyn GraphStore>,
 }
 
 impl<'a> ImpactEngine<'a> {
@@ -23,6 +32,7 @@ impl<'a> ImpactEngine<'a> {
             store,
             search_index: None,
             history_store: None,
+            graph_store: None,
         }
     }
 
@@ -33,6 +43,13 @@ impl<'a> ImpactEngine<'a> {
 
     pub fn with_history_store(mut self, history_store: Option<&'a dyn HistoryStore>) -> Self {
         self.history_store = history_store;
+        self
+    }
+
+    /// Enable relationship-edge impact classification. Without a graph store the report's
+    /// `proven_impact`/`possible_impact` lists stay empty rather than guessing.
+    pub fn with_graph_store(mut self, graph_store: Option<&'a dyn GraphStore>) -> Self {
+        self.graph_store = graph_store;
         self
     }
 
@@ -298,10 +315,18 @@ impl<'a> ImpactEngine<'a> {
             .as_ref()
             .map(|signals| history_signal_evidence(signals, path))
             .unwrap_or_default();
+        let (proven_impact, possible_impact) = match (self.graph_store, &file) {
+            (Some(graph), Some(file)) => {
+                relationship_impacts(graph, self.store, file, &target_symbols)?
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
         let mut report = ImpactReport {
             target: path.display().to_string(),
             direct_impacts: direct,
             indirect_impacts: indirect,
+            proven_impact,
+            possible_impact,
             risk_report: RiskReport {
                 level: if score > 0.6 {
                     "high"
@@ -819,6 +844,141 @@ fn service_search_terms(fact: &AnalysisFact) -> Vec<String> {
     terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     terms.dedup();
     terms
+}
+
+/// Relationship edge types that assert a structural dependency on the changed code.
+fn is_dependency_edge_type(edge_type: &GraphEdgeType) -> bool {
+    matches!(
+        edge_type,
+        GraphEdgeType::Calls
+            | GraphEdgeType::References
+            | GraphEdgeType::UsesType
+            | GraphEdgeType::Implements
+            | GraphEdgeType::Extends
+            | GraphEdgeType::Imports
+            | GraphEdgeType::DependsOn
+    )
+}
+
+/// Classify inbound relationship edges around the changed file into proven versus possible
+/// impact. Authority is recomputed from typed proofs through the shared fail-closed policy, so a
+/// heuristic same-name edge can only ever surface as a possibility.
+fn relationship_impacts(
+    graph: &dyn GraphStore,
+    store: &dyn MetadataStore,
+    target_file: &File,
+    symbols: &[Symbol],
+) -> Result<(Vec<RelationshipImpact>, Vec<RelationshipImpact>)> {
+    let policy = RelationshipUsePolicy::proven_and_possible();
+    let files_by_id = store
+        .list_files(usize::MAX, 0)?
+        .into_iter()
+        .map(|file| (file.id.clone(), file))
+        .collect::<HashMap<FileId, File>>();
+
+    let mut seeds: Vec<(NodeId, String)> = Vec::new();
+    if let Ok(node_id) = identity::try_file_node_id(&target_file.path) {
+        seeds.push((node_id, target_file.path.display().to_string()));
+    }
+    for symbol in symbols
+        .iter()
+        .filter(|symbol| symbol.file_id == target_file.id)
+        .take(RELATIONSHIP_IMPACT_SYMBOL_SEEDS)
+    {
+        seeds.push((
+            identity::symbol_node_id(symbol),
+            symbol.qualified_name.clone(),
+        ));
+    }
+
+    let mut proven = Vec::new();
+    let mut possible = Vec::new();
+    for (node_id, source_label) in &seeds {
+        let Ok((nodes, edges)) = graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)
+        else {
+            continue;
+        };
+        let nodes_by_id = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<HashMap<NodeId, &GraphNode>>();
+        for edge in &edges {
+            if edge.to != *node_id || !is_dependency_edge_type(&edge.edge_type) {
+                continue;
+            }
+            let Some(impact) =
+                relationship_impact_entry(edge, &nodes_by_id, &files_by_id, source_label)
+            else {
+                continue;
+            };
+            match policy.classify(edge) {
+                RelationshipUseClass::Proven => proven.push(impact),
+                RelationshipUseClass::Possible => possible.push(impact),
+                RelationshipUseClass::Excluded => {}
+            }
+        }
+    }
+
+    for list in [&mut proven, &mut possible] {
+        list.sort_by(|a, b| {
+            (&a.path, &a.symbol, &a.edge_type).cmp(&(&b.path, &b.symbol, &b.edge_type))
+        });
+        list.dedup_by(|a, b| {
+            a.path == b.path && a.symbol == b.symbol && a.edge_type == b.edge_type
+        });
+        list.truncate(RELATIONSHIP_IMPACT_LIMIT);
+    }
+    Ok((proven, possible))
+}
+
+fn relationship_impact_entry(
+    edge: &GraphEdge,
+    nodes_by_id: &HashMap<NodeId, &GraphNode>,
+    files_by_id: &HashMap<FileId, File>,
+    source_label: &str,
+) -> Option<RelationshipImpact> {
+    let from_node = nodes_by_id.get(&edge.from)?;
+    let path = from_node
+        .file_id
+        .as_ref()
+        .and_then(|file_id| files_by_id.get(file_id))
+        .map(|file| file.path.clone())?;
+    let symbol = from_node
+        .symbol_id
+        .is_some()
+        .then(|| from_node.label.clone());
+    let authority = edge.relationship_authority();
+    let mut proof_kinds = edge
+        .relationship_proofs()
+        .iter()
+        .map(|proof| proof.kind)
+        .collect::<Vec<_>>();
+    proof_kinds.sort();
+    proof_kinds.dedup();
+    let ambiguous = open_kioku_evidence::edge_is_ambiguous(edge);
+    let proof_summary = if proof_kinds.is_empty() {
+        "no structural proof".to_string()
+    } else {
+        proof_kinds
+            .iter()
+            .map(|kind| format!("{kind:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reason = format!(
+        "{:?} edge from `{}` into `{source_label}` ({proof_summary})",
+        edge.edge_type, from_node.label
+    );
+    Some(RelationshipImpact {
+        path,
+        symbol,
+        source: source_label.to_string(),
+        edge_type: edge.edge_type.clone(),
+        authority,
+        proof_kinds,
+        ambiguous,
+        reason,
+    })
 }
 
 fn exact_reference_impacts(
@@ -1675,5 +1835,192 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "history_churn"));
+    }
+
+    #[test]
+    fn heuristic_same_name_edge_never_becomes_proven_impact() {
+        use open_kioku_core::{
+            identity, Evidence, GraphEdge, GraphNode, RelationshipAuthority, RelationshipProof,
+            RelationshipProofKind,
+        };
+
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let make_file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let target_file = make_file("target", "src/auth.rs");
+        let caller_file = make_file("caller", "src/session.rs");
+        let unrelated_file = make_file("unrelated", "src/billing.rs");
+        let make_symbol = |id: &str, name: &str, qualified: &str, file: &File| Symbol {
+            id: SymbolId::new(id),
+            name: name.into(),
+            qualified_name: qualified.into(),
+            kind: SymbolKind::Function,
+            file_id: file.id.clone(),
+            range: Some(LineRange { start: 1, end: 4 }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let target_symbol = make_symbol(
+            "symbol:auth::issue_token",
+            "issue_token",
+            "auth::issue_token",
+            &target_file,
+        );
+        let caller_symbol = make_symbol(
+            "symbol:session::refresh",
+            "refresh",
+            "session::refresh",
+            &caller_file,
+        );
+        // Same short name as the target in an unrelated module: the classic false-impact trap.
+        let unrelated_symbol = make_symbol(
+            "symbol:billing::issue_token",
+            "issue_token",
+            "billing::issue_token",
+            &unrelated_file,
+        );
+
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 3,
+            symbol_count: 3,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[
+                    target_file.clone(),
+                    caller_file.clone(),
+                    unrelated_file.clone(),
+                ],
+                symbols: &[
+                    target_symbol.clone(),
+                    caller_symbol.clone(),
+                    unrelated_symbol.clone(),
+                ],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let symbol_node = |symbol: &Symbol, file: &File| GraphNode {
+            id: identity::symbol_node_id(symbol),
+            node_type: GraphNodeType::Function,
+            label: symbol.qualified_name.clone(),
+            file_id: Some(file.id.clone()),
+            symbol_id: Some(symbol.id.clone()),
+            ..Default::default()
+        };
+        let nodes = vec![
+            symbol_node(&target_symbol, &target_file),
+            symbol_node(&caller_symbol, &caller_file),
+            symbol_node(&unrelated_symbol, &unrelated_file),
+        ];
+
+        let target_node_id = identity::symbol_node_id(&target_symbol);
+        let mut proven_edge = GraphEdge {
+            id: open_kioku_core::EdgeId::new("edge:proven"),
+            from: identity::symbol_node_id(&caller_symbol),
+            to: target_node_id.clone(),
+            edge_type: GraphEdgeType::References,
+            evidence: Evidence::default(),
+            ..Default::default()
+        };
+        proven_edge
+            .set_relationship_proofs(vec![RelationshipProof::new(
+                RelationshipProofKind::ExactReference,
+                "test-exact-reference",
+                1,
+            )])
+            .unwrap();
+        // No proofs at all: a same-name heuristic guess.
+        let heuristic_edge = GraphEdge {
+            id: open_kioku_core::EdgeId::new("edge:heuristic"),
+            from: identity::symbol_node_id(&unrelated_symbol),
+            to: target_node_id,
+            edge_type: GraphEdgeType::Calls,
+            evidence: Evidence::default(),
+            ..Default::default()
+        };
+        store
+            .replace_graph(&nodes, &[proven_edge, heuristic_edge])
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/auth.rs"))
+            .unwrap();
+
+        assert_eq!(report.proven_impact.len(), 1, "{:?}", report.proven_impact);
+        let proven = &report.proven_impact[0];
+        assert_eq!(proven.path, PathBuf::from("src/session.rs"));
+        assert_eq!(proven.symbol.as_deref(), Some("session::refresh"));
+        assert_eq!(proven.authority, RelationshipAuthority::Authoritative);
+        assert_eq!(
+            proven.proof_kinds,
+            vec![RelationshipProofKind::ExactReference]
+        );
+
+        assert!(
+            report
+                .possible_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/billing.rs")
+                    && impact.authority == RelationshipAuthority::Heuristic),
+            "{:?}",
+            report.possible_impact
+        );
+        assert!(
+            !report
+                .proven_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/billing.rs")),
+            "heuristic same-name edge must never be presented as proven impact"
+        );
+    }
+
+    #[test]
+    fn relationship_impacts_are_empty_without_a_graph_store() {
+        let store = make_store();
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("src/missing.rs"))
+            .unwrap();
+        assert!(report.proven_impact.is_empty());
+        assert!(report.possible_impact.is_empty());
     }
 }

@@ -938,6 +938,8 @@ fn contract_to_plan_report(contract: &ChangeContractV1) -> PlanReport {
         primary_context: Vec::new(),
         relevant_symbols: Vec::new(),
         impact: ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
             target: contract.task.clone(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -2697,7 +2699,9 @@ fn changed_impact(
                 .map(|path| normalize_path(path)),
         )
         .collect::<BTreeSet<_>>();
-    let impact_engine = ImpactEngine::new(store).with_search_index(search_index);
+    let impact_engine = ImpactEngine::new(store)
+        .with_search_index(search_index)
+        .with_graph_store(Some(store));
     let mut findings = Vec::new();
     let mut seen = BTreeSet::new();
     for path in changed_files {
@@ -3839,6 +3843,8 @@ mod tests {
             primary_context: vec![],
             relevant_symbols: vec![],
             impact: open_kioku_core::ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: "target".into(),
                 direct_impacts: vec![],
                 indirect_impacts: vec![],

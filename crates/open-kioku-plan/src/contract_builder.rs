@@ -787,6 +787,8 @@ mod tests {
             primary_context: vec![],
             relevant_symbols: vec![],
             impact: open_kioku_core::ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: "target".into(),
                 direct_impacts: vec![],
                 indirect_impacts: vec![],
@@ -865,6 +867,8 @@ mod tests {
                 visibility: open_kioku_core::Visibility::Unknown,
             }],
             impact: open_kioku_core::ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: "target".into(),
                 direct_impacts: vec![],
                 indirect_impacts: vec![],
