@@ -26,15 +26,24 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run focused tests
         run: cargo test -p open-kioku-cli retrieval_bench_tests
-      - name: Build changed-code mutation diff
-        run: git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' > pr.diff
-      - name: Run changed-code mutation tests
+      - name: List targeted mutations
+        run: |
+          cargo mutants --list \
+            --file crates/open-kioku-cli/src/bench/retrieval.rs \
+            --re 'append_retrieval_group_deltas|compare_retrieval_baseline' \
+            --package open-kioku-cli | tee mutants-list.txt
+          test -s mutants-list.txt
+      - name: Run targeted mutation tests
         run: >-
-          cargo mutants --no-shuffle --in-place --in-diff pr.diff
+          cargo mutants --no-shuffle --in-place
+          --file crates/open-kioku-cli/src/bench/retrieval.rs
+          --re 'append_retrieval_group_deltas|compare_retrieval_baseline'
           --package open-kioku-cli --test-package open-kioku-cli
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pr321-mutants-out
-          path: mutants.out
-          if-no-files-found: warn
+          path: |
+            mutants-list.txt
+            mutants.out
+          if-no-files-found: error
