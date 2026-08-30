@@ -248,6 +248,7 @@ pub fn calibrate_abstention_policy(
     })
 }
 
+/// Evaluate a frozen abstention policy without calibrating or changing it.
 pub fn evaluate_abstention_policy(
     policy: &AbstentionPolicy,
     cases: &[AbstentionCalibrationCase],
@@ -523,7 +524,10 @@ mod tests {
         let second_result = calibrate_abstention_policy(&second, constraints()).unwrap();
         assert_eq!(first_result.policy, second_result.policy);
         assert_eq!(first_result.development, second_result.development);
-        assert_ne!(first_result.holdout, second_result.holdout);
+        assert_eq!(
+            first_result.development_case_ids,
+            second_result.development_case_ids
+        );
     }
 
     #[test]
