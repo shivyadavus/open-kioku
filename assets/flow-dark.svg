@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 300" width="920" height="300" role="img" aria-label="Open Kioku pipeline: evidence streams feed an evidence model, the context compiler produces a bounded ContextPack, and the workflow runs plan, edit, verify, prove.">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#57e6c4"/>
+      <stop offset="1" stop-color="#8c86ff"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#5b6b7c"/>
+    </marker>
+  </defs>
+  <style>
+    .chip { fill: #11161d; stroke: #2a3340; }
+    .chiptext { font: 500 11px ui-sans-serif, -apple-system, 'Segoe UI', sans-serif; fill: #9fb0c0; }
+    .box { fill: #11161d; stroke: #2a3340; }
+    .boxtitle { font: 700 14px ui-sans-serif, -apple-system, 'Segoe UI', sans-serif; fill: #eef4fb; }
+    .boxsub { font: 400 10.5px ui-sans-serif, -apple-system, 'Segoe UI', sans-serif; fill: #7c8b9b; }
+    .stage { font: 700 13px ui-monospace, 'SF Mono', Menlo, monospace; fill: #eef4fb; }
+    .flowline { stroke: #5b6b7c; stroke-width: 1.4; fill: none; }
+  </style>
+
+  <!-- Evidence stream chips (3x3) -->
+  <g>
+    <rect class="chip" x="20"  y="38"  width="104" height="30" rx="15"/><text class="chiptext" x="72"  y="57" text-anchor="middle">code + symbols</text>
+    <rect class="chip" x="132" y="38"  width="104" height="30" rx="15"/><text class="chiptext" x="184" y="57" text-anchor="middle">relationships</text>
+    <rect class="chip" x="20"  y="76"  width="104" height="30" rx="15"/><text class="chiptext" x="72"  y="95" text-anchor="middle">tests + coverage</text>
+    <rect class="chip" x="132" y="76"  width="104" height="30" rx="15"/><text class="chiptext" x="184" y="95" text-anchor="middle">git history</text>
+    <rect class="chip" x="20"  y="114" width="104" height="30" rx="15"/><text class="chiptext" x="72"  y="133" text-anchor="middle">runtime</text>
+    <rect class="chip" x="132" y="114" width="104" height="30" rx="15"/><text class="chiptext" x="184" y="133" text-anchor="middle">docs</text>
+    <rect class="chip" x="20"  y="152" width="104" height="30" rx="15"/><text class="chiptext" x="72"  y="171" text-anchor="middle">architecture</text>
+    <rect class="chip" x="132" y="152" width="104" height="30" rx="15"/><text class="chiptext" x="184" y="171" text-anchor="middle">local semantics</text>
+  </g>
+
+  <!-- Evidence model -->
+  <path class="flowline" d="M244 110 H286" marker-end="url(#arrow)"/>
+  <rect class="box" x="294" y="76" width="150" height="68" rx="14"/>
+  <rect x="294" y="76" width="150" height="3" rx="1.5" fill="url(#accent)"/>
+  <text class="boxtitle" x="369" y="105" text-anchor="middle">Evidence model</text>
+  <text class="boxsub" x="369" y="124" text-anchor="middle">exact facts stay authoritative</text>
+
+  <!-- Context compiler -->
+  <path class="flowline" d="M452 110 H494" marker-end="url(#arrow)"/>
+  <rect class="box" x="502" y="76" width="170" height="68" rx="14"/>
+  <rect x="502" y="76" width="170" height="3" rx="1.5" fill="url(#accent)"/>
+  <text class="boxtitle" x="587" y="105" text-anchor="middle">Context compiler</text>
+  <text class="boxsub" x="587" y="124" text-anchor="middle">fusion · budgets · provenance</text>
+
+  <!-- ContextPack -->
+  <path class="flowline" d="M680 110 H722" marker-end="url(#arrow)"/>
+  <rect class="box" x="730" y="76" width="168" height="68" rx="14"/>
+  <rect x="730" y="76" width="168" height="3" rx="1.5" fill="url(#accent)"/>
+  <text class="boxtitle" x="814" y="105" text-anchor="middle">ContextPack</text>
+  <text class="boxsub" x="814" y="124" text-anchor="middle">bounded · caveats included</text>
+
+  <!-- Workflow rail -->
+  <path class="flowline" d="M814 152 V186"/>
+  <g>
+    <rect class="box" x="294" y="196" width="604" height="52" rx="26"/>
+    <text class="stage" x="368" y="228" text-anchor="middle" fill="#57e6c4">plan</text>
+    <text class="stage" x="466" y="228" text-anchor="middle">→</text>
+    <text class="stage" x="546" y="228" text-anchor="middle">edit</text>
+    <text class="stage" x="626" y="228" text-anchor="middle">→</text>
+    <text class="stage" x="706" y="228" text-anchor="middle" fill="#57e6c4">verify</text>
+    <text class="stage" x="786" y="228" text-anchor="middle">→</text>
+    <text class="stage" x="852" y="228" text-anchor="middle" fill="#8c86ff">prove</text>
+  </g>
+  <text class="boxsub" x="294" y="270">Retrieval may speculate. Structural graph truth may not.</text>
+</svg>
