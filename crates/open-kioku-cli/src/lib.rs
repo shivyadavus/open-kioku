@@ -61,7 +61,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-mod cc6_calibration;
+pub mod cc6_calibration;
 
 include!("bench/retrieval.rs");
 include!("types.rs");
