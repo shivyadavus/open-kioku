@@ -81,14 +81,20 @@
       "embedding_implementation": "open-kioku-local-hash-v1",
       "failed_count": 0,
       "indexed_count": 0,
+      "last_rebuilt_at": null,
       "manifest": null,
       "model": "local-hash",
       "model_artifact_sha256": null,
       "notes": [],
       "provider": "local",
       "ready": false,
+      "rebuild_reasons": [
+        "semantic index has not been built; run `ok semantic index`"
+      ],
+      "rebuild_required": true,
       "stale": false,
       "stale_count": 0,
+      "stale_ratio": null,
       "state": "missing",
       "vector_count": 0
     },
