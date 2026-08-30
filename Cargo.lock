@@ -2744,6 +2744,7 @@ dependencies = [
  "chrono",
  "open-kioku-core",
  "open-kioku-errors",
+ "open-kioku-evidence",
  "open-kioku-search-regex",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",

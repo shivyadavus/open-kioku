@@ -60,6 +60,101 @@ impl GraphEdgeRelationshipProofExt for GraphEdge {
     }
 }
 
+/// How a relationship consumer treats resolutions that carry unresolved ambiguity.
+///
+/// Ambiguity here means the edge (or its proofs) records competing viable targets. Such an
+/// edge can never be consumed as proven structural truth; this behavior only decides whether
+/// it may still be *surfaced* as a possible relationship.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbiguityBehavior {
+    /// Keep ambiguous relationships visible as possible (never proven) results.
+    #[default]
+    Surface,
+    /// Drop ambiguous relationships entirely.
+    Exclude,
+}
+
+/// Consumption class assigned to an edge by [`RelationshipUsePolicy::classify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipUseClass {
+    /// The edge may be presented as structural truth.
+    Proven,
+    /// The edge may be presented only as a labeled possibility.
+    Possible,
+    /// The edge must not be presented at all under this policy.
+    Excluded,
+}
+
+/// Shared downstream policy for consuming relationship edges.
+///
+/// The epic invariant this encodes: retrieval may speculate, structural graph truth may not.
+/// Consumers (impact, test selection, planning, contracts, verification) use one policy type
+/// so a heuristic same-name edge is classified identically everywhere — as possible at best,
+/// never as proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipUsePolicy {
+    /// Minimum effective authority (recomputed from typed proofs) for a proven claim.
+    pub minimum_proven_authority: RelationshipAuthority,
+    /// Whether below-threshold edges may still be surfaced as possible relationships.
+    pub include_possible: bool,
+    /// How ambiguous resolutions are handled among possible relationships.
+    pub ambiguity: AmbiguityBehavior,
+}
+
+impl Default for RelationshipUsePolicy {
+    fn default() -> Self {
+        Self::proven_and_possible()
+    }
+}
+
+impl RelationshipUsePolicy {
+    /// Only authoritative edges survive; everything weaker is excluded.
+    pub fn proven_only() -> Self {
+        Self {
+            minimum_proven_authority: RelationshipAuthority::Authoritative,
+            include_possible: false,
+            ambiguity: AmbiguityBehavior::Exclude,
+        }
+    }
+
+    /// Authoritative edges are proven; weaker unambiguous or ambiguous edges stay visible as
+    /// possible relationships.
+    pub fn proven_and_possible() -> Self {
+        Self {
+            minimum_proven_authority: RelationshipAuthority::Authoritative,
+            include_possible: true,
+            ambiguity: AmbiguityBehavior::Surface,
+        }
+    }
+
+    /// Classify one edge. Authority is always recomputed from the edge's typed proofs via the
+    /// fail-closed core policy; serialized authority claims cannot self-promote an edge.
+    pub fn classify(&self, edge: &GraphEdge) -> RelationshipUseClass {
+        let authority = edge.relationship_authority();
+        if authority >= self.minimum_proven_authority {
+            return RelationshipUseClass::Proven;
+        }
+        if !self.include_possible {
+            return RelationshipUseClass::Excluded;
+        }
+        if edge_is_ambiguous(edge) && self.ambiguity == AmbiguityBehavior::Exclude {
+            return RelationshipUseClass::Excluded;
+        }
+        RelationshipUseClass::Possible
+    }
+}
+
+/// Whether an edge records unresolved ambiguity on itself or any of its typed proofs.
+pub fn edge_is_ambiguous(edge: &GraphEdge) -> bool {
+    !edge.ambiguity.is_empty()
+        || edge
+            .relationship_proofs()
+            .iter()
+            .any(|proof| !proof.ambiguity.is_empty() || proof.candidate_count > 1)
+}
+
 pub const DEFAULT_RELATIONSHIP_EDGE_QUERY_LIMIT: usize = 100;
 pub const HARD_RELATIONSHIP_EDGE_QUERY_LIMIT: usize = 500;
 pub const DEFAULT_RELATIONSHIP_EDGE_SCAN_LIMIT: usize = 10_000;
@@ -700,5 +795,66 @@ mod tests {
         assert!(result.edges.is_empty());
         assert_eq!(result.scanned_edges, 1);
         assert!(result.scan_truncated);
+    }
+
+    #[test]
+    fn use_policy_classifies_authoritative_edge_as_proven() {
+        let edge = reference_edge(
+            "edge:exact",
+            vec![proof(RelationshipProofKind::ExactReference, 1)],
+        );
+        assert_eq!(
+            RelationshipUsePolicy::proven_and_possible().classify(&edge),
+            RelationshipUseClass::Proven
+        );
+        assert_eq!(
+            RelationshipUsePolicy::proven_only().classify(&edge),
+            RelationshipUseClass::Proven
+        );
+    }
+
+    #[test]
+    fn use_policy_never_promotes_a_proofless_edge() {
+        let edge = legacy_reference_edge("edge:heuristic");
+        assert_eq!(
+            RelationshipUsePolicy::proven_and_possible().classify(&edge),
+            RelationshipUseClass::Possible
+        );
+        assert_eq!(
+            RelationshipUsePolicy::proven_only().classify(&edge),
+            RelationshipUseClass::Excluded
+        );
+    }
+
+    #[test]
+    fn use_policy_ambiguity_behavior_controls_possible_visibility() {
+        // Multiple viable candidates: never proven, ambiguous by definition.
+        let edge = reference_edge(
+            "edge:ambiguous",
+            vec![proof(RelationshipProofKind::QualifiedName, 3)],
+        );
+        assert!(edge_is_ambiguous(&edge));
+        assert_eq!(
+            RelationshipUsePolicy::proven_and_possible().classify(&edge),
+            RelationshipUseClass::Possible
+        );
+        let excluding = RelationshipUsePolicy {
+            ambiguity: AmbiguityBehavior::Exclude,
+            ..RelationshipUsePolicy::proven_and_possible()
+        };
+        assert_eq!(excluding.classify(&edge), RelationshipUseClass::Excluded);
+    }
+
+    #[test]
+    fn use_policy_serialized_authority_cannot_self_promote() {
+        // A weak proof kind claiming authoritative in serialized form is capped by the
+        // fail-closed core policy, so it still cannot become proven.
+        let mut inflated = proof(RelationshipProofKind::ModuleOrPackageBinding, 1);
+        inflated.authority = RelationshipAuthority::Authoritative;
+        let edge = reference_edge("edge:inflated", vec![inflated]);
+        assert_eq!(
+            RelationshipUsePolicy::proven_and_possible().classify(&edge),
+            RelationshipUseClass::Possible
+        );
     }
 }

@@ -2032,7 +2032,9 @@ pub enum GraphNodeType {
     ArchitectureComponent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum GraphEdgeType {
     Contains,
@@ -2619,6 +2621,30 @@ pub struct ValidationPlan {
     pub evidence: Vec<Evidence>,
 }
 
+/// One dependent reached through a typed relationship edge, labeled with the authority that
+/// justifies (or fails to justify) presenting it as structural truth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipImpact {
+    /// Repository-relative path of the impacted file.
+    pub path: PathBuf,
+    /// Qualified name of the impacted symbol, when the edge endpoint is a symbol node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// The changed symbol (or file) this impact was derived from.
+    pub source: String,
+    pub edge_type: GraphEdgeType,
+    /// Effective authority recomputed from the edge's typed proofs.
+    pub authority: RelationshipAuthority,
+    /// Proof kinds present on the edge, in stable sorted order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proof_kinds: Vec<RelationshipProofKind>,
+    /// Whether the edge or any proof records unresolved ambiguity.
+    #[serde(default)]
+    pub ambiguous: bool,
+    /// Human-readable derivation, e.g. "calls edge into `issue_token` (exact call site)".
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ImpactReport {
     pub target: String,
@@ -2630,6 +2656,14 @@ pub struct ImpactReport {
     pub architecture_policy: Option<PolicyCheckReport>,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
+    /// Dependents whose relationship to the target is structurally proven (authoritative typed
+    /// proofs). A heuristic edge can never appear here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proven_impact: Vec<RelationshipImpact>,
+    /// Dependents reached only through heuristic or corroborating relationships. Presented as
+    /// possibilities, never as structural facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub possible_impact: Vec<RelationshipImpact>,
 }
 
 impl ImpactReport {

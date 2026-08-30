@@ -14,6 +14,7 @@ categories.workspace = true
 chrono.workspace = true
 open-kioku-core = { version = "3.0.4", path = "../open-kioku-core" }
 open-kioku-errors = { version = "3.0.4", path = "../open-kioku-errors" }
+open-kioku-evidence = { version = "3.0.4", path = "../open-kioku-evidence" }
 open-kioku-search-regex = { version = "3.0.4", path = "../open-kioku-search-regex" }
 open-kioku-storage = { version = "3.0.4", path = "../open-kioku-storage" }
 [dev-dependencies]

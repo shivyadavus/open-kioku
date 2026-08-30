@@ -673,7 +673,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
             };
             let engine = ImpactEngine::new(&store)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
-                .with_history_store(Some(&store));
+                .with_history_store(Some(&store))
+                .with_graph_store(Some(&store));
             let architecture_policy = configured_architecture_policy_report(&repo, &store)?;
 
             if let Some(since) = args.since.as_deref() {

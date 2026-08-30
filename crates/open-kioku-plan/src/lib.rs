@@ -512,6 +512,8 @@ impl<'a> PlanEngine<'a> {
                 .cloned()
                 .collect::<Vec<_>>();
             return Ok(ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: impact_target
                     .map(|target| target.path.display().to_string())
                     .unwrap_or_else(|| task.into()),
@@ -532,9 +534,12 @@ impl<'a> PlanEngine<'a> {
             ImpactEngine::new(self.store as &dyn MetadataStore)
                 .with_search_index(self.search_index)
                 .with_history_store(self.history_store)
+                .with_graph_store(Some(self.store as &dyn open_kioku_storage::GraphStore))
                 .for_file(&target.path)
         } else {
             Ok(ImpactReport {
+                proven_impact: Vec::new(),
+                possible_impact: Vec::new(),
                 target: task.into(),
                 direct_impacts: Vec::new(),
                 indirect_impacts: Vec::new(),
@@ -2851,6 +2856,8 @@ mod tests {
             retrieval_diagnostics: Default::default(),
         };
         let impact = ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
             target: "tests/auth_flow.rs".into(),
             direct_impacts: Vec::new(),
             indirect_impacts: Vec::new(),
@@ -3113,6 +3120,8 @@ mod tests {
         let mut impact_result = test_search_result("src/lib.rs");
         impact_result.reconcile_score_breakdown();
         let impact = ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
             target: "src/auth.rs".into(),
             direct_impacts: vec![impact_result],
             indirect_impacts: Vec::new(),

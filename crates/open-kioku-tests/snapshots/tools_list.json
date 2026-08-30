@@ -32,7 +32,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, and the exact timestamp when the repository was last indexed. Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
+        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -1108,7 +1108,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a comprehensive validation plan including static checks (use recommend_validation_plan). This is read-only and analyzes the local index only.",
+        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a comprehensive validation plan including static checks (use recommend_validation_plan). This is read-only and analyzes the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
