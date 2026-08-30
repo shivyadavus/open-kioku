@@ -419,14 +419,14 @@ fn validate_query(query: &[f32], dimensions: usize) -> Result<()> {
 }
 
 fn matches_record_filters(id: VectorId, target_kind: &str, options: &VectorSearchOptions) -> bool {
-    !options
+    options
         .allowlist
         .as_ref()
-        .is_some_and(|allowlist| !allowlist.contains(&id))
-        && !options
+        .is_none_or(|allowlist| allowlist.contains(&id))
+        && options
             .target_kind
             .as_ref()
-            .is_some_and(|kind| kind != target_kind)
+            .is_none_or(|kind| kind == target_kind)
 }
 
 fn sort_and_truncate(hits: &mut Vec<VectorHit>, limit: usize) {
