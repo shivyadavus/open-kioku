@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "benchmark": "cc5-ann-fresh-generation-update",
+  "backend": "usearch-hnsw-f32",
+  "oracle": "exact-flat",
+  "distribution": "deterministic-clustered-synthetic-v1",
+  "lifecycle_policy": "fresh generation from authoritative live vectors; no in-place tombstone compaction",
+  "requested_sizes": [
+    1000000
+  ],
+  "requested_dimensions": [
+    768
+  ],
+  "mutation_basis_points": 100,
+  "measurements": [
+    {
+      "vector_count": 1000000,
+      "dimensions": 768,
+      "query_count": 64,
+      "mutation_count": 9870,
+      "mutation_ratio": 0.00987,
+      "baseline_build_ms": 1405806.655649,
+      "fresh_generation_build_ms": 1399960.430915,
+      "fresh_generation_vectors_per_second": 714.3059031649989,
+      "rebuild_to_baseline_ratio": 0.9958413735555255,
+      "quality": {
+        "recall_at_1": 0.328125,
+        "recall_at_5": 0.31875,
+        "recall_at_10": 0.31562500000000004,
+        "recall_at_20": 0.321875,
+        "mrr": 0.328125
+      }
+    }
+  ]
+}
