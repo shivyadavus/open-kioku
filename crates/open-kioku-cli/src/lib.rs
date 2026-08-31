@@ -176,7 +176,10 @@ mod tests {
             assert!(report.document_sections.is_some_and(|count| count >= 3));
             assert!(report.duration_ms.is_some());
 
-            let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+            let store = SqliteStore::open(
+                open_kioku_storage::generations::resolve_index_location(repo).sqlite_path(),
+            )
+            .unwrap();
             let section = store
                 .document_sections()
                 .unwrap()

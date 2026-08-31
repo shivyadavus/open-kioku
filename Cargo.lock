@@ -3025,6 +3025,9 @@ dependencies = [
  "chrono",
  "open-kioku-core",
  "open-kioku-errors",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

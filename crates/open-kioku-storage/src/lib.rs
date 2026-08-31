@@ -6,6 +6,8 @@ use open_kioku_core::{
     SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
+
+pub mod generations;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

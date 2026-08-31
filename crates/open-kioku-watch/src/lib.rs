@@ -107,7 +107,9 @@ pub fn reindex_repo_after_changes<'a>(
     let started = Instant::now();
     let config = OkConfig::load_from_repo(root)?;
     let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
-    let store = SqliteStore::open(root.join(".ok/index.sqlite"))?;
+    let store = SqliteStore::open(
+        open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
+    )?;
     let previous_manifest = store.manifest()?;
     let previous_files = store.list_files(usize::MAX, 0)?;
     let previous_documents = store.document_sections()?;
@@ -314,7 +316,9 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let started = Instant::now();
     let config = OkConfig::load_from_repo(root)?;
     let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
-    let store = SqliteStore::open(root.join(".ok/index.sqlite"))?;
+    let store = SqliteStore::open(
+        open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
+    )?;
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
     let graph = graph_from_snapshot(&snapshot);
@@ -665,5 +669,122 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn enable_ann_semantics(repo: &Path) {
+        let config_path = repo.join("ok.toml");
+        let text = fs::read_to_string(&config_path).unwrap();
+        let start = text
+            .find("[semantic]")
+            .expect("default ok.toml has [semantic]");
+        let section_end = text[start + 1..]
+            .find("\n[")
+            .map(|offset| start + 1 + offset + 1)
+            .unwrap_or(text.len());
+        let replacement = concat!(
+            "[semantic]\n",
+            "enabled = true\n",
+            "backend = \"usearch-hnsw-f32\"\n",
+            "provider = \"local\"\n",
+            "model = \"local-hash\"\n",
+            "dimensions = 64\n",
+            "distance = \"cosine\"\n",
+            "batch_size = 16\n",
+            "ann_min_rows = 1\n",
+            "index_symbols = true\n",
+            "index_chunks = true\n",
+            "index_docs = false\n",
+            "index_memory = false\n",
+            "external_provider_allowed = false\n\n",
+        );
+        let mut updated = String::with_capacity(text.len() + replacement.len());
+        updated.push_str(&text[..start]);
+        updated.push_str(replacement);
+        updated.push_str(&text[section_end..]);
+        fs::write(&config_path, updated).unwrap();
+    }
+
+    /// CC5.3: the watch maintenance path must never leak stale semantic vectors. Content
+    /// deleted or renamed on disk cannot keep surfacing from the persistent ANN generation
+    /// after the watch-triggered refresh.
+    #[test]
+    fn watch_semantic_refresh_never_leaks_deleted_or_renamed_vectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(
+            repo.join("src/alpha.rs"),
+            "pub fn alpha_secret_token() -> &'static str { \"alpha\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join("src/beta.rs"),
+            "pub fn beta_helper_routine() -> &'static str { \"beta\" }\n",
+        )
+        .unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        enable_ann_semantics(repo);
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "watch@example.com"]);
+        git(repo, &["config", "user.name", "Watch Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "initial source"]);
+
+        reindex_repo(repo).unwrap();
+
+        let config = OkConfig::load_from_repo(repo).unwrap();
+        {
+            let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+            let manager = SemanticIndexManager::new(repo, &store, &config.semantic);
+            let status = manager.status();
+            assert!(status.ready, "semantic index should be ready: {status:?}");
+            assert!(status.ann_active, "ANN backend should be active");
+            let hits = manager.search("alpha_secret_token", 5).unwrap();
+            assert!(
+                hits.iter().any(|hit| hit.path == Path::new("src/alpha.rs")),
+                "expected the live file to be retrievable before the mutation"
+            );
+        }
+
+        // Delete one file and rename the other, then refresh through the watch path.
+        fs::remove_file(repo.join("src/alpha.rs")).unwrap();
+        fs::rename(repo.join("src/beta.rs"), repo.join("src/gamma.rs")).unwrap();
+        let alpha = repo.join("src/alpha.rs");
+        let beta = repo.join("src/beta.rs");
+        let gamma = repo.join("src/gamma.rs");
+        reindex_repo_after_changes(repo, [alpha.as_path(), beta.as_path(), gamma.as_path()])
+            .unwrap();
+
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let manager = SemanticIndexManager::new(repo, &store, &config.semantic);
+        let status = manager.status();
+        assert!(
+            status.ready && status.ann_active,
+            "watch refresh must republish a ready ANN generation: {status:?}"
+        );
+        assert!(!status.rebuild_required, "{:?}", status.rebuild_reasons);
+
+        let deleted_hits = manager.search("alpha_secret_token", 10).unwrap();
+        assert!(
+            deleted_hits
+                .iter()
+                .all(|hit| hit.path != Path::new("src/alpha.rs")),
+            "deleted content must not resurface from a stale vector: {deleted_hits:?}"
+        );
+
+        let renamed_hits = manager.search("beta_helper_routine", 10).unwrap();
+        assert!(
+            renamed_hits
+                .iter()
+                .any(|hit| hit.path == Path::new("src/gamma.rs")),
+            "renamed content should be retrievable at its new path: {renamed_hits:?}"
+        );
+        assert!(
+            renamed_hits
+                .iter()
+                .all(|hit| hit.path != Path::new("src/beta.rs")),
+            "renamed content must not keep a stale identity at the old path: {renamed_hits:?}"
+        );
     }
 }

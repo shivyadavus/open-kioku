@@ -326,7 +326,8 @@ fn snapshot_metadata_path(repo: &Path) -> PathBuf {
 }
 
 fn index_sqlite_path(repo: &Path) -> PathBuf {
-    repo.join(".ok/index.sqlite")
+    // Resolves through the active index generation when one is published (RI3.6).
+    open_kioku_storage::generations::resolve_index_location(repo).sqlite_path()
 }
 
 fn workspace_graph_path(workspace: &Path) -> PathBuf {

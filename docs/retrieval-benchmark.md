@@ -92,6 +92,32 @@ Threshold changes are product changes and should be reviewed explicitly. Do not 
 
 The current no-gold rate leaves substantial room for improvement; that is expected and is a target for calibrated abstention work. The threshold protects against making it worse while preserving an honest baseline.
 
+## Activating calibrated abstention at runtime
+
+`ok retrieval-bench --write-abstention-activation .ok/abstention-policy.json` writes a
+runtime activation artifact, but only when the calibrated policy passes the fail-closed
+activation-readiness gate on untouched holdout cases (no positive holdout case may be
+suppressed; at least half of the no-gold holdout cases must be caught). On any blocker
+the command fails and nothing is written.
+
+When a valid artifact with `readiness_passed = true` exists in a repository's `.ok`
+directory, `ok context`/`plan` and the MCP `build_context_pack` path apply the calibrated
+policy after selection: packs that fail the calibrated evidence gates carry an explicit
+`calibrated_cc6_abstention` reason and caveat instead of presenting weakly supported
+context confidently. The decision code path is shared between the benchmark and the
+runtime (`open_kioku_core::abstention`), so measured behavior and deployed behavior
+cannot drift. Anything invalid, unready, or missing deactivates the feature; exact
+evidence and deterministic routing blockers always take precedence.
+
+`benchmarks/retrieval-dimension-thresholds.json` extends the contract to the measured
+per-language, per-task-family, and per-query-shape dimensions, so a regression confined to
+one language or task family cannot ship silently behind a healthy aggregate. It starts in
+`advisory` mode (violations surface as CI warnings via
+`scripts/check-retrieval-dimension-thresholds.py` without failing the run); flipping a
+dimension to `blocking` is a reviewed contract change, exactly like the holdout thresholds.
+The initial floors were derived from the frozen baseline with 10% relative slack and are
+themselves subject to review.
+
 ## Reproduce locally
 
 From the repository root:

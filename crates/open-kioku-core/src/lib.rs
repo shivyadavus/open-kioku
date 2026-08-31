@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod abstention;
 pub mod analysis_semantics;
 pub mod identity;
 pub mod relationship;
@@ -1078,6 +1079,44 @@ pub struct TestTarget {
     pub evidence_refs: Vec<String>,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
+    /// How strongly selection evidence justifies running this test. Heuristic name/path
+    /// similarity alone can never raise a test above [`TestSelectionTier::Optional`].
+    #[serde(default)]
+    pub selection_tier: TestSelectionTier,
+    /// The authority-grade or policy-accepted evidence behind a non-optional tier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_justification: Vec<String>,
+}
+
+/// Selection strength for a validation candidate.
+///
+/// Encodes the RI3.7 rule for test selection: required or strongly recommended tests must be
+/// justified by authoritative evidence (exact reference overlap, exact coverage or test
+/// mapping) or policy-accepted corroborating evidence (runtime, bounded git history). A fuzzy
+/// structural or lexical match alone cannot make a test required.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TestSelectionTier {
+    /// Heuristic-only justification; a suggestion, never a requirement.
+    #[default]
+    Optional,
+    /// Authority-grade or policy-accepted corroborating evidence supports running this test.
+    Recommended,
+    /// Strong evidence with a high blended score; treat as the validation baseline.
+    Required,
 }
 
 impl TestTarget {
@@ -2550,7 +2589,7 @@ pub struct CompressedContextPack {
     pub evidence: Vec<Evidence>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RiskReport {
     pub level: String,
     pub score: f32,
@@ -2613,7 +2652,7 @@ pub struct ChangeBoundary {
     pub signal_hooks: BoundarySignalHooks,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ValidationPlan {
     pub commands: Vec<String>,
     pub tests: Vec<TestTarget>,
@@ -2687,7 +2726,7 @@ impl ImpactReport {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ContextPack {
     pub task: String,
     pub intent: String,

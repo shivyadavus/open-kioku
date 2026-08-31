@@ -2,7 +2,7 @@ use open_kioku_vector::{
     AnnScalarKind, ExactFlatVectorIndex, UsearchHnswVectorIndex, VectorHit, VectorId, VectorRecord,
     VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -101,7 +101,7 @@ struct CycleMeasurement {
     ann_memory_bytes: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PolicyThresholds {
     min_recall_at_10: f64,
     min_mrr: f64,
@@ -165,19 +165,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DEFAULT_MUTATIONS_PER_CYCLE,
     )?;
     let query_count = parse_usize("OK_ANN_CHURN_QUERIES", DEFAULT_QUERIES)?;
+    // Version-controlled thresholds file first (CC5.3), then explicit env overrides so
+    // one-off experiments never silently rewrite the reviewed policy.
+    let file_thresholds = match std::env::var("OK_ANN_CHURN_THRESHOLDS_FILE") {
+        Ok(path) if !path.is_empty() => {
+            let text = fs::read_to_string(&path)
+                .map_err(|err| format!("cannot read churn thresholds file {path}: {err}"))?;
+            Some(
+                serde_json::from_str::<PolicyThresholds>(&text).map_err(|err| {
+                    format!("churn thresholds file {path} is not a valid policy: {err}")
+                })?,
+            )
+        }
+        _ => None,
+    };
+    let defaults = file_thresholds.unwrap_or(PolicyThresholds {
+        min_recall_at_10: DEFAULT_MIN_RECALL_AT_10,
+        min_mrr: DEFAULT_MIN_MRR,
+        min_ann_build_vectors_per_second: DEFAULT_MIN_BUILD_VECTORS_PER_SECOND,
+        max_ann_to_exact_p95_ratio: DEFAULT_MAX_ANN_TO_EXACT_P95_RATIO,
+        max_stale_or_deleted_ratio: 0.0,
+        required_stored_to_live_ratio: 1.0,
+    });
     let thresholds = PolicyThresholds {
-        min_recall_at_10: parse_f64("OK_ANN_CHURN_MIN_RECALL_AT_10", DEFAULT_MIN_RECALL_AT_10)?,
-        min_mrr: parse_f64("OK_ANN_CHURN_MIN_MRR", DEFAULT_MIN_MRR)?,
+        min_recall_at_10: parse_f64("OK_ANN_CHURN_MIN_RECALL_AT_10", defaults.min_recall_at_10)?,
+        min_mrr: parse_f64("OK_ANN_CHURN_MIN_MRR", defaults.min_mrr)?,
         min_ann_build_vectors_per_second: parse_f64(
             "OK_ANN_CHURN_MIN_BUILD_VECTORS_PER_SECOND",
-            DEFAULT_MIN_BUILD_VECTORS_PER_SECOND,
+            defaults.min_ann_build_vectors_per_second,
         )?,
         max_ann_to_exact_p95_ratio: parse_f64(
             "OK_ANN_CHURN_MAX_ANN_TO_EXACT_P95_RATIO",
-            DEFAULT_MAX_ANN_TO_EXACT_P95_RATIO,
+            defaults.max_ann_to_exact_p95_ratio,
         )?,
-        max_stale_or_deleted_ratio: 0.0,
-        required_stored_to_live_ratio: 1.0,
+        max_stale_or_deleted_ratio: defaults.max_stale_or_deleted_ratio,
+        required_stored_to_live_ratio: defaults.required_stored_to_live_ratio,
     };
 
     if initial_vectors == 0

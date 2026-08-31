@@ -6,6 +6,11 @@ const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
 const RETRIEVAL_K_VALUES: [usize; 4] = [1, 5, 10, 20];
 const RETRIEVAL_CC6_MAX_DEV_POSITIVE_ABSTENTION_RATE: f64 = 0.0;
 const RETRIEVAL_CC6_MIN_DEV_NO_GOLD_ABSTENTION_RECALL: f64 = 0.0;
+/// Activation criteria for `--write-abstention-activation`: suppressing any positive
+/// holdout case forbids activation, and the policy must catch at least half of the
+/// no-gold holdout cases to be worth deploying.
+const RETRIEVAL_CC6_ACTIVATION_MAX_HOLDOUT_POSITIVE_ABSTENTION_RATE: f64 = 0.0;
+const RETRIEVAL_CC6_ACTIVATION_MIN_HOLDOUT_NO_GOLD_RECALL: f64 = 0.5;
 
 #[derive(Args, Debug, Clone)]
 struct RetrievalBenchArgs {
@@ -56,6 +61,12 @@ struct RetrievalBenchArgs {
     /// Checked-in deterministic quality baseline used to calculate report deltas.
     #[arg(long, default_value = "benchmarks/retrieval-baseline.json")]
     baseline_file: PathBuf,
+
+    /// Write a runtime abstention activation artifact, but only when the calibrated
+    /// policy passes the fail-closed activation-readiness gate on untouched holdout
+    /// cases. On any blocker the command fails and nothing is written.
+    #[arg(long, value_name = "PATH")]
+    write_abstention_activation: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1136,38 +1147,90 @@ fn run_routed_contextpack_retrieval_case(
     Ok((report, abstention_case))
 }
 
+/// Write the runtime abstention activation artifact, fail-closed: any activation
+/// blocker aborts the command and nothing is written.
+fn write_abstention_activation_artifact(
+    report: &RetrievalBenchReport,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let calibration = report.abstention_calibration.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("abstention activation requires a calibration result in the report")
+    })?;
+    let readiness = crate::cc6_readiness::evaluate_abstention_activation_readiness(
+        calibration,
+        crate::cc6_readiness::AbstentionActivationCriteria {
+            max_holdout_positive_abstention_rate:
+                RETRIEVAL_CC6_ACTIVATION_MAX_HOLDOUT_POSITIVE_ABSTENTION_RATE,
+            min_holdout_no_gold_abstention_recall:
+                RETRIEVAL_CC6_ACTIVATION_MIN_HOLDOUT_NO_GOLD_RECALL,
+            max_additional_p95_latency_ms: None,
+            max_additional_steady_rss_mib: None,
+        },
+        crate::cc6_readiness::AbstentionActivationCost {
+            additional_p95_latency_ms: None,
+            additional_steady_rss_mib: None,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("abstention activation readiness evaluation failed: {error}"))?;
+    if !readiness.ready {
+        let blockers = readiness
+            .blockers
+            .iter()
+            .map(|blocker| blocker.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!(
+            "abstention activation blocked (nothing written): {blockers}"
+        );
+    }
+    let mut holdout_evidence = std::collections::BTreeMap::new();
+    holdout_evidence.insert(
+        "holdout_positive_abstention_rate".to_string(),
+        calibration.holdout.positive_abstention_rate,
+    );
+    holdout_evidence.insert(
+        "holdout_no_gold_recall".to_string(),
+        calibration.holdout.no_gold_recall,
+    );
+    holdout_evidence.insert(
+        "holdout_precision".to_string(),
+        calibration.holdout.precision,
+    );
+    let activation = open_kioku_core::abstention::AbstentionActivation {
+        schema_version: open_kioku_core::abstention::ABSTENTION_ACTIVATION_SCHEMA_VERSION,
+        corpus_id: report.corpus_id.clone(),
+        activated_at: chrono::Utc::now().to_rfc3339(),
+        readiness_passed: true,
+        policy: calibration.policy.as_runtime(),
+        holdout_evidence,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&activation)?)?;
+    println!(
+        "abstention activation written to {} (policy: {:?})",
+        path.display(),
+        activation.policy
+    );
+    Ok(())
+}
+
 fn routed_abstention_calibration_case(
     case: &RetrievalCase,
     pack: &open_kioku_core::ContextPack,
 ) -> anyhow::Result<cc6_calibration::AbstentionCalibrationCase> {
-    let traced = pack
-        .primary_files
-        .iter()
-        .map(|result| {
-            let unit = open_kioku_core::RetrievalUnitKey::from_result(result);
-            let trace = pack
-                .retrieval_diagnostics
-                .traces
-                .iter()
-                .find(|trace| trace.unit_key.as_ref() == Some(&unit))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "CC6 calibration requires exact trace provenance for selected unit {:?}",
-                        unit
-                    )
-                })?;
-            Ok((
-                trace.authority,
-                result.score as f64,
-                trace
-                    .contributions
-                    .iter()
-                    .map(|contribution| contribution.source)
-                    .collect::<BTreeSet<_>>()
-                    .len(),
-            ))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Delegate signal derivation to the shared runtime implementation so the calibrated
+    // decision inputs and the deployed decision inputs cannot drift. The benchmark stays
+    // stricter than runtime: missing trace provenance is an error here, not a no-op.
+    let signals = open_kioku_core::abstention::derive_abstention_signals(pack).ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "CC6 calibration requires exact trace provenance for every selected unit in case {}",
+                case.id
+            )
+        },
+    )?;
     Ok(cc6_calibration::AbstentionCalibrationCase {
         id: case.id.clone(),
         split: match case.split {
@@ -1175,31 +1238,11 @@ fn routed_abstention_calibration_case(
             RetrievalSplit::Holdout => cc6_calibration::CalibrationSplit::Holdout,
         },
         no_gold_expected: case.no_gold_expected,
-        exact_evidence_present: pack.retrieval_diagnostics.selection.exact_evidence_count > 0,
-        top_score_margin: same_authority_top_score_margin(&traced),
-        independent_stream_count: traced.first().map(|(_, _, streams)| *streams).unwrap_or(0),
-        ambiguity_unresolved_count: pack
-            .retrieval_diagnostics
-            .selection
-            .ambiguity_unresolved_count,
+        exact_evidence_present: signals.exact_evidence_present,
+        top_score_margin: signals.top_score_margin,
+        independent_stream_count: signals.independent_stream_count,
+        ambiguity_unresolved_count: signals.ambiguity_unresolved_count,
     })
-}
-
-fn same_authority_top_score_margin(
-    traced: &[(open_kioku_core::RetrievalAuthority, f64, usize)],
-) -> Option<f64> {
-    let (top_authority, top_score, _) = *traced.first()?;
-    if !top_score.is_finite() {
-        return None;
-    }
-    let second_score = traced
-        .iter()
-        .skip(1)
-        .find_map(|(authority, score, _)| {
-            (*authority == top_authority && score.is_finite()).then_some(*score)
-        })?;
-    let margin = top_score - second_score;
-    (margin >= 0.0).then_some(margin)
 }
 
 fn retrieval_candidate_pool(
@@ -2442,7 +2485,7 @@ mod retrieval_bench_tests {
     #[test]
     fn cc6_margin_uses_only_the_top_authority_tier() {
         use open_kioku_core::RetrievalAuthority;
-        let margin = same_authority_top_score_margin(&[
+        let margin = open_kioku_core::abstention::same_authority_top_score_margin(&[
             (RetrievalAuthority::Exact, 0.90, 2),
             (RetrievalAuthority::Heuristic, 0.89, 4),
             (RetrievalAuthority::Exact, 0.60, 1),
@@ -2455,14 +2498,14 @@ mod retrieval_bench_tests {
     fn cc6_margin_fails_closed_without_comparable_monotonic_evidence() {
         use open_kioku_core::RetrievalAuthority;
         assert_eq!(
-            same_authority_top_score_margin(&[
+            open_kioku_core::abstention::same_authority_top_score_margin(&[
                 (RetrievalAuthority::Exact, 0.9, 1),
                 (RetrievalAuthority::Heuristic, 0.1, 1),
             ]),
             None
         );
         assert_eq!(
-            same_authority_top_score_margin(&[
+            open_kioku_core::abstention::same_authority_top_score_margin(&[
                 (RetrievalAuthority::Heuristic, 0.2, 1),
                 (RetrievalAuthority::Heuristic, 0.3, 1),
             ]),
