@@ -18,11 +18,21 @@ impl<'a> SymbolEngine<'a> {
     }
 
     pub fn definition(&self, query: &str) -> Result<Symbol> {
+        // Indexed exact-name fast path first; the substring scan only runs when the query is a
+        // qualified-name fragment (or otherwise not an exact identity).
         let mut matches = self
-            .find(query, 250)?
+            .store
+            .symbols_named(query, 250)?
             .into_iter()
             .filter(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
             .collect::<Vec<_>>();
+        if matches.is_empty() {
+            matches = self
+                .find(query, 250)?
+                .into_iter()
+                .filter(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
+                .collect::<Vec<_>>();
+        }
         matches.sort_by_key(|symbol| definition_rank(symbol, query));
         matches
             .into_iter()

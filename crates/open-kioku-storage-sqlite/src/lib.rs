@@ -208,6 +208,8 @@ impl MetadataStore for SqliteStore {
               json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+            CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_symbols_qualified_name ON symbols(qualified_name);
             CREATE TABLE IF NOT EXISTS chunks (
               id TEXT PRIMARY KEY,
               file_id TEXT NOT NULL,
@@ -661,6 +663,24 @@ impl MetadataStore for SqliteStore {
             .query_map(params![pattern, limit as i64, offset as i64], |row| {
                 row.get::<_, String>(0)
             })
+            .map_err(storage_err)?;
+        collect_json(rows)
+    }
+
+    fn symbols_named(&self, name: &str, limit: usize) -> Result<Vec<Symbol>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        // Both branches are satisfied from dedicated indexes (name COLLATE NOCASE and
+        // qualified_name), so exact lookups never scan the symbols table.
+        let mut stmt = conn
+            .prepare(
+                "SELECT json FROM symbols WHERE name = ?1 COLLATE NOCASE OR qualified_name = ?1 ORDER BY qualified_name LIMIT ?2",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![name, limit as i64], |row| row.get::<_, String>(0))
             .map_err(storage_err)?;
         collect_json(rows)
     }

@@ -113,6 +113,17 @@ fn annotate_candidates_with_git_history(
         .into_iter()
         .map(|file| (normalize_path_fragment(&file.path.to_string_lossy()), file))
         .collect::<std::collections::HashMap<_, _>>();
+    // Group facts by file once; the per-result path used to rescan the full fact list.
+    let mut facts_by_file: std::collections::HashMap<
+        &open_kioku_core::FileId,
+        Vec<&open_kioku_core::AnalysisFact>,
+    > = std::collections::HashMap::new();
+    for fact in &facts {
+        let entry = facts_by_file.entry(&fact.file_id).or_default();
+        if entry.len() < 32 {
+            entry.push(fact);
+        }
+    }
     let mut existing_paths = results
         .iter()
         .map(|result| normalize_path_fragment(&result.path.to_string_lossy()))
@@ -124,11 +135,7 @@ fn annotate_candidates_with_git_history(
         else {
             continue;
         };
-        let matched = facts
-            .iter()
-            .filter(|fact| fact.file_id == file.id)
-            .take(32)
-            .collect::<Vec<_>>();
+        let matched = facts_by_file.get(&file.id).cloned().unwrap_or_default();
         if matched.is_empty() {
             continue;
         }

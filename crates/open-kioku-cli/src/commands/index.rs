@@ -91,10 +91,12 @@ fn index_repo_with_config(
             graph.edges.len()
         ),
     );
-    store.replace_graph(
-        &graph.nodes.values().cloned().collect::<Vec<_>>(),
-        &graph.edges,
-    )?;
+    // Move nodes out of the graph once; the previous per-call clones kept up to three copies of
+    // the node set alive at the memory peak.
+    let nodes = graph.nodes.into_values().collect::<Vec<_>>();
+    let edges = graph.edges;
+    store.replace_graph(&nodes, &edges)?;
+    drop(edges);
     report_index_stage(
         &reporter,
         "search",
@@ -108,7 +110,7 @@ fn index_repo_with_config(
         &snapshot.chunks,
         &snapshot.files,
         &snapshot.symbols,
-        &graph.nodes.values().cloned().collect::<Vec<_>>(),
+        &nodes,
     )?;
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
