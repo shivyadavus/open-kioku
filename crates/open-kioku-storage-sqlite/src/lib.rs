@@ -2324,43 +2324,45 @@ fn insert_document_sections(tx: &Transaction<'_>, sections: &[DocumentSection]) 
 }
 
 fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
-    for file in rows.files {
-        tx.execute(
-            "INSERT INTO files(id, path, json) VALUES(?1, ?2, ?3)",
-            params![
+    {
+        let mut stmt = tx
+            .prepare_cached("INSERT INTO files(id, path, json) VALUES(?1, ?2, ?3)")
+            .map_err(storage_err)?;
+        for file in rows.files {
+            stmt.execute(params![
                 &file.id.0,
                 file.path.to_string_lossy().as_ref(),
                 serde_json::to_string(file)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for symbol in rows.symbols {
-        tx.execute(
-            "INSERT INTO symbols(id, name, qualified_name, file_id, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO symbols(id, name, qualified_name, file_id, json) VALUES(?1, ?2, ?3, ?4, ?5)").map_err(storage_err)?;
+        for symbol in rows.symbols {
+            stmt.execute(params![
                 &symbol.id.0,
                 &symbol.name,
                 &symbol.qualified_name,
                 &symbol.file_id.0,
                 serde_json::to_string(symbol)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for chunk in rows.chunks {
-        tx.execute(
-            "INSERT INTO chunks(id, file_id, start_line, end_line, text, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO chunks(id, file_id, start_line, end_line, text, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)").map_err(storage_err)?;
+        for chunk in rows.chunks {
+            stmt.execute(params![
                 &chunk.id,
                 &chunk.file_id.0,
                 chunk.range.start,
                 chunk.range.end,
                 &chunk.text,
                 serde_json::to_string(chunk)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
     for test in rows.tests {
         tx.execute(
@@ -2369,10 +2371,14 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
         )
         .map_err(storage_err)?;
     }
-    for import in rows.imports {
-        tx.execute(
-            "INSERT INTO imports(id, file_id, imported, json) VALUES(?1, ?2, ?3, ?4)",
-            params![
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT INTO imports(id, file_id, imported, json) VALUES(?1, ?2, ?3, ?4)",
+            )
+            .map_err(storage_err)?;
+        for import in rows.imports {
+            stmt.execute(params![
                 occurrence_id(
                     &import.file_id.0,
                     &import.imported,
@@ -2382,14 +2388,14 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
                 &import.file_id.0,
                 &import.imported,
                 serde_json::to_string(import)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for occurrence in rows.occurrences {
-        tx.execute(
-            "INSERT INTO occurrences(id, symbol_id, file_id, is_definition, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO occurrences(id, symbol_id, file_id, is_definition, json) VALUES(?1, ?2, ?3, ?4, ?5)").map_err(storage_err)?;
+        for occurrence in rows.occurrences {
+            stmt.execute(params![
                 occurrence_id(
                     &occurrence.file_id.0,
                     &occurrence.symbol_id.0,
@@ -2400,54 +2406,54 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
                 &occurrence.file_id.0,
                 if occurrence.is_definition { 1 } else { 0 },
                 serde_json::to_string(occurrence)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for fact in rows.analysis_facts {
-        tx.execute(
-            "INSERT INTO analysis_facts(id, file_id, source_type, target, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO analysis_facts(id, file_id, source_type, target, json) VALUES(?1, ?2, ?3, ?4, ?5)").map_err(storage_err)?;
+        for fact in rows.analysis_facts {
+            stmt.execute(params![
                 &fact.id,
                 &fact.file_id.0,
                 source_type_name(&fact.source_type),
                 &fact.target,
                 serde_json::to_string(fact)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for scope in rows.scopes {
-        tx.execute(
-            "INSERT INTO scopes(id, file_id, parent_id, owner_symbol_id, kind, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO scopes(id, file_id, parent_id, owner_symbol_id, kind, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6)").map_err(storage_err)?;
+        for scope in rows.scopes {
+            stmt.execute(params![
                 &scope.id.0,
                 &scope.file_id.0,
                 scope.parent_id.as_ref().map(|id| &id.0),
                 scope.owner_symbol_id.as_ref().map(|id| &id.0),
                 format!("{:?}", scope.kind),
                 serde_json::to_string(scope)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for binding in rows.bindings {
-        tx.execute(
-            "INSERT INTO bindings(id, file_id, scope_id, name, json) VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO bindings(id, file_id, scope_id, name, json) VALUES(?1, ?2, ?3, ?4, ?5)").map_err(storage_err)?;
+        for binding in rows.bindings {
+            stmt.execute(params![
                 &binding.id.0,
                 &binding.file_id.0,
                 &binding.scope_id.0,
                 &binding.name,
                 serde_json::to_string(binding)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for call_site in rows.call_sites {
-        tx.execute(
-            "INSERT INTO call_sites(id, file_id, caller_symbol_id, callee_name, start_line, start_column, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO call_sites(id, file_id, caller_symbol_id, callee_name, start_line, start_column, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)").map_err(storage_err)?;
+        for call_site in rows.call_sites {
+            stmt.execute(params![
                 &call_site.id.0,
                 &call_site.file_id.0,
                 call_site.caller_symbol_id.as_ref().map(|id| &id.0),
@@ -2455,18 +2461,70 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
                 call_site.range.start_line,
                 call_site.range.start_column,
                 serde_json::to_string(call_site)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
     Ok(())
 }
 
+/// Secondary indexes over the graph tables. Bulk graph replacement drops and rebuilds them:
+/// a sorted post-load CREATE INDEX is dramatically cheaper than maintaining seven B-trees
+/// through millions of random-order inserts.
+const GRAPH_INDEXES: &[(&str, &str)] = &[
+    (
+        "idx_graph_nodes_type",
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
+    ),
+    (
+        "idx_graph_nodes_label",
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_label ON graph_nodes(label)",
+    ),
+    (
+        "idx_graph_nodes_file",
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_file ON graph_nodes(file_id)",
+    ),
+    (
+        "idx_graph_nodes_symbol",
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id)",
+    ),
+    (
+        "idx_graph_edges_from",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_id)",
+    ),
+    (
+        "idx_graph_edges_to",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_id)",
+    ),
+    (
+        "idx_graph_edges_type",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
+    ),
+    (
+        "idx_graph_edges_from_type",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type)",
+    ),
+    (
+        "idx_graph_edges_to_type",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type)",
+    ),
+    (
+        "idx_graph_edges_source_type",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type)",
+    ),
+];
+
 fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
-    for node in nodes {
-        tx.execute(
-            "INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
+    // Insert in primary-key order so the id B-tree fills mostly append-only instead of taking
+    // millions of random-page inserts (ids are content hashes, i.e. uniformly random).
+    let mut nodes = nodes.iter().collect::<Vec<_>>();
+    nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    let mut edges = edges.iter().collect::<Vec<_>>();
+    edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").map_err(storage_err)?;
+        for node in nodes {
+            stmt.execute(params![
                 &node.id.0,
                 &node.label,
                 format!("{:?}", node.node_type),
@@ -2475,15 +2533,17 @@ fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEd
                 false,
                 0,
                 serde_json::to_string(node)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
-    for edge in edges {
-        let freshness = edge.evidence.indexed_at.timestamp();
-        tx.execute(
+    {
+        let mut stmt = tx.prepare_cached(
             "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
+        ).map_err(storage_err)?;
+        for edge in edges {
+            let freshness = edge.evidence.indexed_at.timestamp();
+            stmt.execute(params![
                 &edge.id.0,
                 &edge.from.0,
                 &edge.to.0,
@@ -2494,9 +2554,9 @@ fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEd
                 true,
                 freshness,
                 serde_json::to_string(edge)?
-            ],
-        )
-        .map_err(storage_err)?;
+            ])
+            .map_err(storage_err)?;
+        }
     }
     Ok(())
 }
@@ -2539,14 +2599,31 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let tx = conn.transaction().map_err(storage_err)?;
-        tx.execute("DELETE FROM graph_edges", [])
-            .map_err(storage_err)?;
-        tx.execute("DELETE FROM graph_nodes", [])
-            .map_err(storage_err)?;
-        insert_graph_rows(&tx, nodes, edges)?;
-        tx.commit().map_err(storage_err)?;
-        Ok(())
+        // Bulk load: give SQLite a large page cache for the duration so random B-tree page
+        // touches stay in memory instead of thrashing a multi-gigabyte file.
+        let _ = conn.pragma_update(None, "cache_size", -524_288);
+        let result = (|| -> Result<()> {
+            let tx = conn.transaction().map_err(storage_err)?;
+            // Drop secondary indexes first: deleting and reinserting millions of rows through
+            // seven live B-trees dominated large-repository indexing time. CREATE INDEX after
+            // the load builds each index with a sort instead.
+            for (name, _) in GRAPH_INDEXES {
+                tx.execute(&format!("DROP INDEX IF EXISTS {name}"), [])
+                    .map_err(storage_err)?;
+            }
+            tx.execute("DELETE FROM graph_edges", [])
+                .map_err(storage_err)?;
+            tx.execute("DELETE FROM graph_nodes", [])
+                .map_err(storage_err)?;
+            insert_graph_rows(&tx, nodes, edges)?;
+            for (_, ddl) in GRAPH_INDEXES {
+                tx.execute(ddl, []).map_err(storage_err)?;
+            }
+            tx.commit().map_err(storage_err)?;
+            Ok(())
+        })();
+        let _ = conn.pragma_update(None, "cache_size", -2_000);
+        result
     }
 
     fn node_type_stats(
@@ -2963,47 +3040,10 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
         set_schema_meta_flag(conn, GRAPH_QUERY_COLUMNS_FLAG)?;
     }
 
-    // Add indexes (these are idempotent via IF NOT EXISTS)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(node_type)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_label ON graph_nodes(label)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_file ON graph_nodes(file_id)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_symbol ON graph_nodes(symbol_id)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type)",
-        [],
-    )
-    .map_err(storage_err)?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type)",
-        [],
-    )
-    .map_err(storage_err)?;
+    // Add indexes (idempotent via IF NOT EXISTS; shared with bulk replace_graph rebuilds)
+    for (_, ddl) in GRAPH_INDEXES {
+        conn.execute(ddl, []).map_err(storage_err)?;
+    }
 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
