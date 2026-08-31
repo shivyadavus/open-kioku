@@ -2891,60 +2891,77 @@ fn is_duplicate_column(err: &rusqlite::Error) -> bool {
     }
 }
 
-fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<()> {
+/// Returns whether the column was actually added, so callers can detect a genuinely
+/// pre-migration table shape.
+fn add_column_if_not_exists(conn: &mut Connection, stmt: &str) -> Result<bool> {
     match conn.execute(stmt, []) {
-        Ok(_) => Ok(()),
-        Err(err) if is_duplicate_column(&err) => Ok(()),
+        Ok(_) => Ok(true),
+        Err(err) if is_duplicate_column(&err) => Ok(false),
         Err(err) => Err(storage_err(err)),
     }
 }
 
+/// Marker recording that the graph query-column backfill has completed for this store, so
+/// store open never rescans the graph tables once they are migrated.
+const GRAPH_QUERY_COLUMNS_FLAG: &str = "graph_query_columns_v2";
+
+fn schema_meta_flag(conn: &Connection, key: &str) -> Result<bool> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(storage_err)?;
+    let found = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(storage_err)?;
+    Ok(found.is_some())
+}
+
+fn set_schema_meta_flag(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(storage_err)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, '1')",
+        params![key],
+    )
+    .map_err(storage_err)?;
+    Ok(())
+}
+
 fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
-    // Add columns to graph_nodes
-    add_column_if_not_exists(
-        conn,
+    // Add columns to graph_nodes and graph_edges. If any column was actually added, the tables
+    // were genuinely pre-migration and the backfill must run regardless of the marker.
+    let mut columns_added = false;
+    for stmt in [
         "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_nodes ADD COLUMN file_id TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_nodes ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_nodes ADD COLUMN freshness INTEGER DEFAULT 0",
-    )?;
-
-    // Add columns to graph_edges
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_edges ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
-    )?;
-    add_column_if_not_exists(
-        conn,
         "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0",
-    )?;
+    ] {
+        columns_added |= add_column_if_not_exists(conn, stmt)?;
+    }
 
-    backfill_graph_query_columns(conn)?;
+    // The backfill full-scans both graph tables, so it must run once per store, not on every
+    // open. Before the marker existed it also re-matched rows whose optional columns are
+    // legitimately empty (file nodes have no symbol_id), rewriting them on every open.
+    if columns_added || !schema_meta_flag(conn, GRAPH_QUERY_COLUMNS_FLAG)? {
+        backfill_graph_query_columns(conn)?;
+        set_schema_meta_flag(conn, GRAPH_QUERY_COLUMNS_FLAG)?;
+    }
 
     // Add indexes (these are idempotent via IF NOT EXISTS)
     conn.execute(
@@ -3003,10 +3020,10 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
     let node_rows = {
         let mut stmt = conn
             .prepare(
-                "SELECT id, json FROM graph_nodes
-                 WHERE COALESCE(node_type, '') = ''
-                    OR COALESCE(file_id, '') = ''
-                    OR COALESCE(symbol_id, '') = ''",
+                // node_type is populated by every writer and by the backfill itself, so it is
+                // the unmigrated-row discriminator. file_id/symbol_id are legitimately empty
+                // for many nodes and must not retrigger the backfill.
+                "SELECT id, json FROM graph_nodes WHERE COALESCE(node_type, '') = ''",
             )
             .map_err(storage_err)?;
         let rows = stmt
@@ -3053,11 +3070,9 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
     let edge_rows = {
         let mut stmt = conn
             .prepare(
-                "SELECT id, json FROM graph_edges
-                 WHERE COALESCE(edge_type, '') = ''
-                    OR COALESCE(confidence, '') = ''
-                    OR COALESCE(source_type, '') = ''
-                    OR COALESCE(source_file, '') = ''",
+                // edge_type is populated by every writer and by the backfill itself; the other
+                // columns can be legitimately empty and must not retrigger the backfill.
+                "SELECT id, json FROM graph_edges WHERE COALESCE(edge_type, '') = ''",
             )
             .map_err(storage_err)?;
         let rows = stmt
