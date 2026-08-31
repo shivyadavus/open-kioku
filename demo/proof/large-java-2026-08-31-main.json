@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "proof_kind": "anonymized-large-java-validation",
+  "recorded_at": "2026-08-31T06:08:00Z",
+  "release": {
+    "version": "unreleased",
+    "tag": "main",
+    "source_sha": "3959fdfb6ca27d0c279b635fca7fc1b7935d4889",
+    "release_url": "https://github.com/shivyadavus/open-kioku/commit/3959fdfb6ca27d0c279b635fca7fc1b7935d4889",
+    "note": "Pre-release validation of main after the 2026-08-31 performance work; this record will accompany the next tagged release."
+  },
+  "privacy": {
+    "repository_identity": "withheld",
+    "repository_revision": "withheld",
+    "source_paths_included": false,
+    "source_snippets_included": false,
+    "reason": "The repository name and revision are intentionally withheld; only aggregate workload and result measurements are published.",
+    "reproducibility_scope": "The artifact supports method review and scale comparison. It cannot reproduce the identical source workload without revealing the repository."
+  },
+  "host_profile": {
+    "operating_system": "macOS 13.7.6 (22H625)",
+    "architecture": "x86_64",
+    "cpu": "Intel Core i5-1038NG7 @ 2.00GHz",
+    "logical_cpu_count": 8,
+    "memory_bytes": 17179869184,
+    "storage_note": "Local APFS workspace; free-space and background-load conditions were not controlled. Identical host to the published 3.0.4 record, so cross-record comparisons are like-for-like."
+  },
+  "workload": {
+    "tracked_source_files": 16537,
+    "java_files": 12580,
+    "indexed_files": 13607,
+    "symbols": 247499,
+    "chunks": 248107,
+    "graph_nodes": 402844,
+    "graph_edges": 1522135,
+    "tests": 84504,
+    "imports": 181966,
+    "analysis_facts": 1105231,
+    "semantic_vectors": 495606
+  },
+  "method": {
+    "procedure": [
+      "Full cold structural index into an empty local store, timed with /usr/bin/time -lp including peak RSS.",
+      "Repeat full structural index over the existing store; file, symbol, chunk, test, and import totals compared for identity.",
+      "Fresh-process exact queries: two exact class definitions, exact symbol references, and a lexical search.",
+      "Four concurrent graph readers against the completed index.",
+      "Local semantic rebuild with semantic.backend = exact-flat, then with usearch-hnsw-f32, both at 384 dimensions with the deterministic local-hash provider."
+    ],
+    "query_note": "Query text and class identities are withheld because they would identify the repository."
+  },
+  "configuration": {
+    "scip_mode": "consume (no external SCIP index available)",
+    "semantic_provider": "local-hash",
+    "semantic_dimensions": 384,
+    "index_mode": "full"
+  },
+  "measurements": {
+    "cold_structural_index_seconds": 1168,
+    "cold_structural_index_peak_rss_bytes": 8026054656,
+    "repeat_full_structural_index_seconds": 1669,
+    "exact_class_lookup_fresh_process_seconds": 0.05,
+    "second_exact_class_lookup_fresh_process_seconds": 0.02,
+    "exact_references_query_fresh_process_seconds": 0.74,
+    "lexical_search_fresh_process_seconds": 0.24,
+    "exact_flat_semantic_build_seconds": 58.8,
+    "exact_flat_failed_vectors": 0,
+    "hnsw_semantic_build_seconds": 619.3,
+    "hnsw_failed_vectors": 0,
+    "total_disk_bytes_approx_after_all_phases": 16106127360,
+    "structural_sqlite_disk_bytes_approx": 11039539200,
+    "lexical_search_disk_bytes_approx": 641728512
+  },
+  "quality_checks": {
+    "repeat_structural_totals_identical": true,
+    "parallel_graph_reader_count": 4,
+    "parallel_graph_lock_failures": 0,
+    "exact_lookup_returns_correct_class": true,
+    "optional_scip_absence_reported": true
+  },
+  "improvements_vs_same_corpus_on_prior_build": {
+    "note": "Measured on this same corpus and host against the pre-optimization build (main @ c96f61a).",
+    "per_command_fixed_startup_seconds": {"before": 14, "after": 0.3},
+    "exact_class_lookup_seconds": {"before": 13.9, "after": 0.02, "before_result": "symbol not found (incorrect)", "after_result": "correct class"},
+    "lexical_search_seconds": {"before": 13.7, "after": 0.24},
+    "cold_structural_index_seconds": {"before": 2440, "after": 1168}
+  },
+  "limitations": [
+    "Single-workstation observations, not latency guarantees; hardware, filesystem state, and background load vary results.",
+    "Compiler-grade Java SCIP evidence was unavailable; structural indexing remained operational and the missing optional evidence is reported rather than inferred.",
+    "The 495,606-vector persistent HNSW build exceeds the ~300K-vector range where the project's own measured ANN scale evidence (benchmarks/cc5-ann-scale-evidence) shows recall degradation for the current production profile. The exact-flat oracle remains the correctness path at this scale until the scale-profile decision in issue #328 lands.",
+    "The repeat full structural index rebuilds into the existing multi-gigabyte store file (delete and reinsert without vacuum), so it is slower than the cold build on an empty store and grows the file; reclaiming that space is tracked with the indexing-architecture work.",
+    "Peak indexing memory (~8 GB RSS on this corpus) is concentrated in the resolution/analysis phase and is tracked in issue #329."
+  ]
+}
