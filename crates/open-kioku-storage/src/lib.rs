@@ -36,6 +36,19 @@ pub trait MetadataStore: Send + Sync {
     fn get_file_by_path(&self, path: &Path) -> Result<Option<File>>;
     fn list_symbols(&self, query: Option<&str>, limit: usize, offset: usize)
         -> Result<Vec<Symbol>>;
+    /// Indexed exact-name lookup: symbols whose short name (case-insensitive) or qualified name
+    /// equals `name`. Backends without a faster path fall back to the substring search, so this
+    /// is always at least as complete as `list_symbols` for equality queries.
+    fn symbols_named(&self, name: &str, limit: usize) -> Result<Vec<Symbol>> {
+        Ok(self
+            .list_symbols(Some(name), limit.saturating_mul(4), 0)?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.name.eq_ignore_ascii_case(name) || symbol.qualified_name == name
+            })
+            .take(limit)
+            .collect())
+    }
     fn symbol_by_id(&self, id: &SymbolId) -> Result<Option<Symbol>>;
     fn chunks_for_file(&self, file_id: &FileId) -> Result<Vec<CodeChunk>>;
     fn all_chunks(&self) -> Result<Vec<CodeChunk>>;

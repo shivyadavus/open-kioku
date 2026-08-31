@@ -506,48 +506,34 @@ impl Indexer {
                 Ok(parsed)
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut symbols = parsed
-            .iter()
-            .flat_map(|file| file.syntax.symbols.clone())
-            .collect::<Vec<_>>();
+        // Move parse output into the per-kind collections in one consuming pass, then release
+        // the parsed corpus immediately. Cloning field-by-field kept a duplicate of every chunk
+        // text, symbol, and occurrence alive for the rest of indexing, which dominated peak
+        // memory on large repositories.
+        let mut symbols = Vec::new();
+        let mut scopes = Vec::new();
+        let mut bindings = Vec::new();
+        let mut call_sites = Vec::new();
+        let mut import_sites = Vec::new();
+        let mut export_sites = Vec::new();
+        let mut inheritance_sites = Vec::new();
+        let mut chunks = Vec::new();
+        let mut tests = Vec::new();
+        let mut analysis_facts = Vec::new();
+        for file in parsed {
+            symbols.extend(file.syntax.symbols);
+            scopes.extend(file.syntax.scopes);
+            bindings.extend(file.syntax.bindings);
+            call_sites.extend(file.syntax.calls);
+            import_sites.extend(file.syntax.imports);
+            export_sites.extend(file.syntax.exports);
+            inheritance_sites.extend(file.syntax.inheritance);
+            chunks.extend(file.chunks);
+            tests.extend(file.tests);
+            analysis_facts.extend(file.analysis_facts);
+        }
         dedupe_symbols(&mut symbols);
-        let scopes = parsed
-            .iter()
-            .flat_map(|file| file.syntax.scopes.clone())
-            .collect::<Vec<_>>();
-        let bindings = parsed
-            .iter()
-            .flat_map(|file| file.syntax.bindings.clone())
-            .collect::<Vec<_>>();
-        let call_sites = parsed
-            .iter()
-            .flat_map(|file| file.syntax.calls.clone())
-            .collect::<Vec<_>>();
-        let import_sites = parsed
-            .iter()
-            .flat_map(|file| file.syntax.imports.clone())
-            .collect::<Vec<_>>();
-        let export_sites = parsed
-            .iter()
-            .flat_map(|file| file.syntax.exports.clone())
-            .collect::<Vec<_>>();
-        let inheritance_sites = parsed
-            .iter()
-            .flat_map(|file| file.syntax.inheritance.clone())
-            .collect::<Vec<_>>();
-        let chunks = parsed
-            .iter()
-            .flat_map(|file| file.chunks.clone())
-            .collect::<Vec<_>>();
-        let tests = parsed
-            .iter()
-            .flat_map(|file| file.tests.clone())
-            .collect::<Vec<_>>();
         let imports = extract_imports_from_syntax(&import_sites);
-        let mut analysis_facts = parsed
-            .iter()
-            .flat_map(|file| file.analysis_facts.clone())
-            .collect::<Vec<_>>();
         emit_progress(
             &on_progress,
             &mut phase_reports,
