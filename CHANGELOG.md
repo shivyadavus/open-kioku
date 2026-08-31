@@ -7,6 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- Stopped the graph query-column migration backfill from full-scanning (and partially rewriting) the graph tables on every store open. On a 16.5k-file Java corpus this removed ~14 seconds of fixed latency from every CLI command; existing stores migrate once and record completion.
+- Fixed exact symbol lookups returning `symbol not found` for symbols that exist: the substring scan ordered by qualified name could truncate the true exact match out of its candidate window. `ok symbol definition` now consults an indexed exact-name path first (13.9s → 0.02s on a 247k-symbol corpus, with the correct result).
+
+### Performance
+- Bulk graph replacement drops and rebuilds secondary indexes around a prepared-statement, primary-key-ordered insert under a scoped page cache. Cold structural indexing of a 16.5k-file Java repository improved from 40m40s to 19m28s (graph write 28m37s → 8m17s).
+- Ingest releases the parsed corpus in one consuming pass instead of cloning every extracted field, graph nodes are moved rather than cloned twice, and search git-history annotation groups facts by file instead of rescanning the full fact list per result.
+
+### Added
+- CC5.3: semantic lifecycle health is now explained by `ok status`, `ok doctor` (semantic-lifecycle check with concrete rebuild reasons), structured `rebuild_required`/`rebuild_reasons`/`last_rebuilt_at`/`stale_ratio` fields on semantic status, and a `semantic_lifecycle` block in MCP `repo_status`.
+- RI3.7: impact analysis classifies relationship-edge dependents into `proven_impact` and `possible_impact` through the shared fail-closed `RelationshipUsePolicy` — a heuristic same-name edge can never be presented as structural truth. Wired through the CLI, MCP `impact_analysis`, context compilation, planning, and patch verification.
+- `ok --version --json` machine-readable version output and copy-paste examples in `ok status/search/impact --help`.
+- CC5.2: measured 50K→1M ANN scale evidence recorded under `benchmarks/cc5-ann-scale-evidence` (recall collapses beyond ~300K vectors on the current HNSW profile; profile decision tracked in #328).
+
 ---
 
 ## [3.0.4] — 2026-08-23
