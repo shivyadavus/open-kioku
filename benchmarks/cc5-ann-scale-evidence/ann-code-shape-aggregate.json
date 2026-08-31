@@ -1,0 +1,91 @@
+{
+  "benchmark": "cc5-ann-code-shape-scale-aggregate",
+  "distribution": "deterministic-code-shaped-v1",
+  "groups": [
+    {
+      "best_recall_at_10": 0.8234374999999999,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 384,
+      "fastest_ann_p95_us": 203.114,
+      "fastest_expansion_search": 64,
+      "vector_count": 50000
+    },
+    {
+      "best_recall_at_10": 0.6828124999999999,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 384,
+      "fastest_ann_p95_us": 302.702,
+      "fastest_expansion_search": 64,
+      "vector_count": 100000
+    },
+    {
+      "best_recall_at_10": 0.39062500000000006,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 384,
+      "fastest_ann_p95_us": 348.823,
+      "fastest_expansion_search": 64,
+      "vector_count": 300000
+    },
+    {
+      "best_recall_at_10": 0.2359375,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 384,
+      "fastest_ann_p95_us": 463.127,
+      "fastest_expansion_search": 64,
+      "vector_count": 1000000
+    },
+    {
+      "best_recall_at_10": 0.8609375,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 768,
+      "fastest_ann_p95_us": 405.261,
+      "fastest_expansion_search": 64,
+      "vector_count": 50000
+    },
+    {
+      "best_recall_at_10": 0.646875,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 768,
+      "fastest_ann_p95_us": 401.221,
+      "fastest_expansion_search": 64,
+      "vector_count": 100000
+    },
+    {
+      "best_recall_at_10": 0.4062500000000001,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 768,
+      "fastest_ann_p95_us": 497.295,
+      "fastest_expansion_search": 64,
+      "vector_count": 300000
+    },
+    {
+      "best_recall_at_10": 0.2734375,
+      "best_recall_expansion_search": 1024,
+      "dimensions": 768,
+      "fastest_ann_p95_us": 519.302,
+      "fastest_expansion_search": 64,
+      "vector_count": 1000000
+    }
+  ],
+  "oracle": "exact-flat",
+  "requested_dimensions": [
+    384,
+    768
+  ],
+  "requested_search_expansions": [
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "requested_sizes": [
+    50000,
+    100000,
+    300000,
+    1000000
+  ],
+  "schema_version": 1,
+  "selection_policy": "measurement-only; no production ANN profile or threshold selected automatically",
+  "source_benchmark": "cc5-ann-code-shape-validation"
+}
