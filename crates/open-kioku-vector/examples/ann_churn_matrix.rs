@@ -171,9 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(path) if !path.is_empty() => {
             let text = fs::read_to_string(&path)
                 .map_err(|err| format!("cannot read churn thresholds file {path}: {err}"))?;
-            Some(serde_json::from_str::<PolicyThresholds>(&text).map_err(|err| {
-                format!("churn thresholds file {path} is not a valid policy: {err}")
-            })?)
+            Some(
+                serde_json::from_str::<PolicyThresholds>(&text).map_err(|err| {
+                    format!("churn thresholds file {path} is not a valid policy: {err}")
+                })?,
+            )
         }
         _ => None,
     };
