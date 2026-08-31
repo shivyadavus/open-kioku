@@ -1214,6 +1214,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                 let _ = reader.read_line(&mut result_buf);
             }
             let _ = child_proc.kill();
+            let _ = child_proc.wait();
 
             if result_buf.contains("\"name\":\"open-kioku\"") {
                 checks.push(DoctorCheck {
