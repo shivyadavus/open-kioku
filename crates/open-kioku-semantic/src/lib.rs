@@ -23,6 +23,11 @@ const SCHEMA_VERSION: u32 = 2;
 const CHUNKER_VERSION: &str = "open-kioku-chunks-v1";
 const EXACT_INDEX_VERSION: &str = "exact-flat-json-v1";
 const HNSW_INDEX_VERSION: &str = PRODUCTION_HNSW_PROFILE;
+/// Vector population beyond which the measured 50K-1M scale evidence
+/// (benchmarks/cc5-ann-scale-evidence) shows recall degradation for the current
+/// production HNSW profile. Queries served by ANN above this population carry an
+/// explicit caveat until the scale-profile decision (issue #328) lands.
+const ANN_MEASURED_RECALL_CEILING_VECTORS: usize = 300_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticManifest {
@@ -529,6 +534,18 @@ impl<'a> SemanticIndexManager<'a> {
                 options,
             )?
         };
+        // Keep our own backend honest: the measured 50K-1M scale evidence
+        // (benchmarks/cc5-ann-scale-evidence) shows recall degradation for the current
+        // production HNSW profile beyond this population. Until the scale-profile
+        // decision lands, an ANN answer at that scale carries the caveat instead of
+        // presenting itself as full-recall retrieval.
+        if backend_is_ann(&selected_backend)
+            && eligible_candidate_count > ANN_MEASURED_RECALL_CEILING_VECTORS
+        {
+            caveats.push(format!(
+                "persistent ANN is serving {eligible_candidate_count} candidates, above the ~{ANN_MEASURED_RECALL_CEILING_VECTORS}-vector range where measured scale evidence shows recall degradation for the current profile; treat results as best-effort recall (see benchmarks/cc5-ann-scale-evidence)"
+            ));
+        }
         let results = hydrate_hits(self.store, &targets, hits)?;
         Ok(SemanticSearchReport {
             results,
@@ -820,7 +837,7 @@ impl<'a> SemanticIndexManager<'a> {
     }
 
     fn vectors_dir(&self) -> PathBuf {
-        self.repo.join(".ok/vectors")
+        open_kioku_storage::generations::resolve_index_location(&self.repo).vectors_root()
     }
 
     fn previous_dir(&self) -> PathBuf {

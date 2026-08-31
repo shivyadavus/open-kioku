@@ -882,6 +882,8 @@ mod tests {
                 score_breakdown: vec![],
             },
             validation: vec![TestTarget {
+                selection_tier: open_kioku_core::TestSelectionTier::default(),
+                tier_justification: Vec::new(),
                 id: "unit-handler".into(),
                 name: "unit handler".into(),
                 file_id: FileId::new("tests/handler.rs"),

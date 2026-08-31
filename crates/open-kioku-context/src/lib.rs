@@ -459,6 +459,7 @@ pub struct ContextPackBuilder<'a> {
     store: &'a dyn OkStore,
     history_store: Option<&'a dyn HistoryStore>,
     ranking_options: RankingOptions,
+    abstention_policy: Option<open_kioku_core::abstention::RuntimeAbstentionPolicy>,
 }
 
 pub fn expanded_task_search_terms(task: &str) -> Vec<String> {
@@ -471,7 +472,19 @@ impl<'a> ContextPackBuilder<'a> {
             store,
             history_store: None,
             ranking_options: RankingOptions::default(),
+            abstention_policy: None,
         }
+    }
+
+    /// Activate a calibrated abstention policy (CC6). Callers must only pass a policy from
+    /// an activation artifact that passed the fail-closed readiness gate; without one the
+    /// feature stays off and packs are never suppressed.
+    pub fn with_abstention_policy(
+        mut self,
+        policy: Option<open_kioku_core::abstention::RuntimeAbstentionPolicy>,
+    ) -> Self {
+        self.abstention_policy = policy;
+        self
     }
 
     pub fn with_history_store(mut self, history_store: Option<&'a dyn HistoryStore>) -> Self {
@@ -761,7 +774,7 @@ impl<'a> ContextPackBuilder<'a> {
             &confidence_breakdown,
         );
         let confidence_summary = confidence_summary(&confidence_breakdown);
-        Ok(ContextPack {
+        let mut pack = ContextPack {
             task: task.into(),
             intent: classify_intent(task).into(),
             retrieval_diagnostics,
@@ -798,8 +811,52 @@ impl<'a> ContextPackBuilder<'a> {
             architecture_policy: None,
             confidence_summary,
             confidence_breakdown,
-        })
+        };
+        crate::apply_calibrated_abstention(self.abstention_policy.as_ref(), &mut pack);
+        Ok(pack)
     }
+}
+
+/// Apply an activated CC6 abstention policy to a completed pack.
+///
+/// Deterministic routing-contract blockers keep precedence; a pack whose selection
+/// already carries an abstention reason is left untouched. Signal derivation is
+/// fail-closed: when exact trace provenance is unavailable the policy does not run,
+/// because a decision it cannot justify is worse than no decision.
+pub fn apply_calibrated_abstention(
+    policy: Option<&open_kioku_core::abstention::RuntimeAbstentionPolicy>,
+    pack: &mut open_kioku_core::ContextPack,
+) {
+    use open_kioku_core::abstention::{
+        derive_abstention_signals, CALIBRATED_ABSTENTION_REASON_PREFIX,
+    };
+    let Some(policy) = policy else {
+        return;
+    };
+    if pack
+        .retrieval_diagnostics
+        .selection
+        .abstention_reason
+        .is_some()
+    {
+        return;
+    }
+    let Some(signals) = derive_abstention_signals(pack) else {
+        return;
+    };
+    if !policy.should_abstain(&signals) {
+        return;
+    }
+    let explain = policy.explain(&signals);
+    pack.retrieval_diagnostics.selection.abstention_reason =
+        Some(format!("{CALIBRATED_ABSTENTION_REASON_PREFIX}: {explain}"));
+    pack.retrieval_diagnostics.caveats.push(format!(
+        "calibrated abstention: the selected context did not meet the calibrated evidence gates ({explain}); treat this pack as insufficient evidence, not as an answer"
+    ));
+    pack.confidence_summary = format!(
+        "Calibrated abstention: {explain}. {}",
+        pack.confidence_summary
+    );
 }
 
 fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {
@@ -4028,5 +4085,63 @@ mod ri3_context_dependency_authority_tests {
         );
         import.set_relationship_proofs(vec![proof]).unwrap();
         assert!(is_trusted_context_dependency_edge(&import));
+    }
+
+    fn abstention_test_policy() -> open_kioku_core::abstention::RuntimeAbstentionPolicy {
+        open_kioku_core::abstention::RuntimeAbstentionPolicy {
+            min_top_score_margin: None,
+            min_independent_streams: Some(2),
+            max_ambiguity_unresolved: None,
+        }
+    }
+
+    #[test]
+    fn calibrated_abstention_marks_weakly_supported_packs() {
+        let mut pack = open_kioku_core::ContextPack {
+            confidence_summary: "baseline summary".into(),
+            ..Default::default()
+        };
+        crate::apply_calibrated_abstention(Some(&abstention_test_policy()), &mut pack);
+        let reason = pack
+            .retrieval_diagnostics
+            .selection
+            .abstention_reason
+            .expect("weakly supported pack should carry a calibrated abstention reason");
+        assert!(
+            reason.starts_with(open_kioku_core::abstention::CALIBRATED_ABSTENTION_REASON_PREFIX)
+        );
+        assert!(pack
+            .retrieval_diagnostics
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("insufficient evidence")));
+        assert!(pack.confidence_summary.starts_with("Calibrated abstention"));
+    }
+
+    #[test]
+    fn calibrated_abstention_never_overrides_routing_blockers_or_exact_evidence() {
+        // Routing-contract blockers keep precedence.
+        let mut blocked = open_kioku_core::ContextPack::default();
+        blocked.retrieval_diagnostics.selection.abstention_reason =
+            Some("no_candidate_fit_context_selection".into());
+        crate::apply_calibrated_abstention(Some(&abstention_test_policy()), &mut blocked);
+        assert_eq!(
+            blocked.retrieval_diagnostics.selection.abstention_reason,
+            Some("no_candidate_fit_context_selection".into())
+        );
+
+        // Exact evidence shields against weak margin/stream gates.
+        let mut exact = open_kioku_core::ContextPack::default();
+        exact.retrieval_diagnostics.selection.exact_evidence_count = 1;
+        crate::apply_calibrated_abstention(Some(&abstention_test_policy()), &mut exact);
+        assert_eq!(
+            exact.retrieval_diagnostics.selection.abstention_reason,
+            None
+        );
+
+        // No activated policy: never abstain.
+        let mut off = open_kioku_core::ContextPack::default();
+        crate::apply_calibrated_abstention(None, &mut off);
+        assert_eq!(off.retrieval_diagnostics.selection.abstention_reason, None);
     }
 }

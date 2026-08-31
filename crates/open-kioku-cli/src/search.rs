@@ -11,7 +11,8 @@ fn source_root_hash(repo: &Path) -> String {
 }
 
 fn open_store(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {
-    Ok(SqliteStore::open(repo.as_ref().join(".ok/index.sqlite"))?)
+    let location = open_kioku_storage::generations::resolve_index_location(repo.as_ref());
+    Ok(SqliteStore::open(location.sqlite_path())?)
 }
 
 fn search(

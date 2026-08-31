@@ -462,7 +462,16 @@ impl<'a> PlanEngine<'a> {
             context.runtime_signals.len(),
         );
         apply_evidence_quality_to_confidence(&mut confidence_breakdown, &evidence_quality);
-        let confidence_summary = confidence_summary(&confidence_breakdown);
+        let mut confidence_summary = confidence_summary(&confidence_breakdown);
+        // RI3.7: the plan states its relationship claims with their authority split rather
+        // than presenting heuristic dependents as certainty.
+        if !impact.proven_impact.is_empty() || !impact.possible_impact.is_empty() {
+            confidence_summary = format!(
+                "{confidence_summary} Relationship evidence: {} structurally proven dependent(s), {} possible (heuristic) dependent(s) retained without certainty.",
+                impact.proven_impact.len(),
+                impact.possible_impact.len()
+            );
+        }
         let evidence_by_section = evidence_by_section(
             &primary_context,
             &impact,
@@ -1369,9 +1378,29 @@ fn caution_file_rules(
             if evidence_refs.is_empty() {
                 evidence_refs = stable_refs(fallback_evidence_refs.iter().cloned());
             }
+            // RI3.7: caution wording distinguishes structurally proven dependents from
+            // possible (heuristic) ones instead of presenting both with equal certainty.
+            let proven = impact
+                .proven_impact
+                .iter()
+                .find(|entry| entry.path == *path);
+            let possible = impact
+                .possible_impact
+                .iter()
+                .find(|entry| entry.path == *path);
             BoundaryFileRule {
                 path: path.clone(),
-                reason: if impact_results.is_empty() {
+                reason: if let Some(proven) = proven {
+                    format!(
+                        "structurally proven dependent of the primary edit candidates ({})",
+                        proven.reason
+                    )
+                } else if let Some(possible) = possible {
+                    format!(
+                        "possible dependent (heuristic relationship, not presented as certainty: {})",
+                        possible.reason
+                    )
+                } else if impact_results.is_empty() {
                     fallback_reason.into()
                 } else {
                     "impact analysis linked this file to the primary edit candidates".into()
@@ -2718,6 +2747,8 @@ mod tests {
             visibility: open_kioku_core::Visibility::Unknown,
         };
         let login_test = TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: "login-test".into(),
             name: "login_returns_valid_token".into(),
             file_id: file_test.id.clone(),

@@ -61,7 +61,11 @@ fn build_context_pack(
     ranking_options.query = Some(task.into());
     let builder = ContextPackBuilder::new(store as &dyn OkStore)
         .with_history_store(Some(store))
-        .with_ranking_options(ranking_options);
+        .with_ranking_options(ranking_options)
+        .with_abstention_policy(
+            open_kioku_core::abstention::AbstentionActivation::load_for_repo(repo)
+                .map(|activation| activation.policy),
+        );
 
     let mut lexical_index_source = None;
     let mut lexical_failure_source = None;

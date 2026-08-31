@@ -721,6 +721,8 @@ mod tests {
 
     fn test_target(name: &str, file: &File) -> TestTarget {
         TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: format!("test:{name}"),
             name: name.into(),
             file_id: file.id.clone(),

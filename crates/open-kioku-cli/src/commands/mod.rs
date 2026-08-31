@@ -1033,6 +1033,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let min_fusion_recall_at_10 = args.min_fusion_recall_at_10;
             let min_fusion_mrr = args.min_fusion_mrr;
             let max_no_gold_false_positive_rate = args.max_no_gold_false_positive_rate;
+            let write_abstention_activation = args.write_abstention_activation.clone();
             let report = run_retrieval_bench(args)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1067,6 +1068,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     gate.no_gold_false_positive_rate,
                     max_no_gold_false_positive_rate
                 );
+            }
+            if let Some(path) = write_abstention_activation {
+                write_abstention_activation_artifact(&report, &path)?;
             }
         }
         Command::RelationshipBench(args) => {

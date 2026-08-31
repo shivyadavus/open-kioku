@@ -28,6 +28,18 @@ pub struct AbstentionCalibrationCase {
     pub ambiguity_unresolved_count: usize,
 }
 
+impl AbstentionCalibrationCase {
+    /// The runtime-facing signal subset of this calibration case.
+    pub fn signals(&self) -> open_kioku_core::abstention::AbstentionSignals {
+        open_kioku_core::abstention::AbstentionSignals {
+            exact_evidence_present: self.exact_evidence_present,
+            top_score_margin: self.top_score_margin,
+            independent_stream_count: self.independent_stream_count,
+            ambiguity_unresolved_count: self.ambiguity_unresolved_count,
+        }
+    }
+}
+
 /// Product safety constraints supplied by the caller. The calibration algorithm intentionally
 /// contains no hidden benchmark-specific acceptance threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -82,29 +94,20 @@ impl AbstentionPolicy {
         }
     }
 
-    /// Evaluate a case without upgrading or suppressing evidence authority.
-    ///
-    /// Exact evidence prevents weak score-margin or stream-agreement heuristics from erasing an
-    /// authoritative match. It does not override an explicit ambiguity/unresolved gate: exact
-    /// evidence can still be ambiguous, and that conflict must remain visible and actionable.
+    /// Evaluate a case by delegating to the shared runtime policy semantics in
+    /// `open_kioku_core::abstention`, so the behavior measured during calibration is the
+    /// exact code path applied in production.
     pub fn should_abstain(&self, case: &AbstentionCalibrationCase) -> bool {
-        let unresolved = self
-            .max_ambiguity_unresolved
-            .is_some_and(|maximum| case.ambiguity_unresolved_count > maximum);
-        if unresolved {
-            return true;
-        }
-        if case.exact_evidence_present {
-            return false;
-        }
+        self.as_runtime().should_abstain(&case.signals())
+    }
 
-        let weak_margin = self
-            .min_top_score_margin
-            .is_some_and(|minimum| case.top_score_margin.is_none_or(|margin| margin < minimum));
-        let weak_agreement = self
-            .min_independent_streams
-            .is_some_and(|minimum| case.independent_stream_count < minimum);
-        weak_margin || weak_agreement
+    /// The deployable form of this policy (identical gates, shared semantics).
+    pub fn as_runtime(&self) -> open_kioku_core::abstention::RuntimeAbstentionPolicy {
+        open_kioku_core::abstention::RuntimeAbstentionPolicy {
+            min_top_score_margin: self.min_top_score_margin,
+            min_independent_streams: self.min_independent_streams,
+            max_ambiguity_unresolved: self.max_ambiguity_unresolved,
+        }
     }
 
     fn complexity(&self) -> usize {
@@ -806,5 +809,81 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, CalibrationError::InvalidConstraint(_)));
+    }
+
+    #[test]
+    fn calibration_and_runtime_policies_decide_identically() {
+        // The calibrated decision path and the deployed decision path must be the same
+        // code; this locks the delegation so they can never drift.
+        let policy = AbstentionPolicy {
+            min_top_score_margin: Some(0.05),
+            min_independent_streams: Some(2),
+            max_ambiguity_unresolved: Some(1),
+        };
+        let runtime = policy.as_runtime();
+        for exact in [false, true] {
+            for margin in [None, Some(0.01), Some(0.2)] {
+                for streams in [0usize, 1, 3] {
+                    for ambiguity in [0usize, 2] {
+                        let case = AbstentionCalibrationCase {
+                            id: "parity".into(),
+                            split: CalibrationSplit::Development,
+                            no_gold_expected: false,
+                            exact_evidence_present: exact,
+                            top_score_margin: margin,
+                            independent_stream_count: streams,
+                            ambiguity_unresolved_count: ambiguity,
+                        };
+                        assert_eq!(
+                            policy.should_abstain(&case),
+                            runtime.should_abstain(&case.signals()),
+                            "parity broke for exact={exact} margin={margin:?} streams={streams} ambiguity={ambiguity}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn abstention_activation_artifact_loads_fail_closed() {
+        use open_kioku_core::abstention::{
+            AbstentionActivation, RuntimeAbstentionPolicy, ABSTENTION_ACTIVATION_SCHEMA_VERSION,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        std::fs::create_dir_all(repo.join(".ok")).unwrap();
+        let path = repo.join(".ok/abstention-policy.json");
+
+        // Missing file: feature off.
+        assert!(AbstentionActivation::load_for_repo(repo).is_none());
+
+        // Valid, readiness passed: loads.
+        let activation = AbstentionActivation {
+            schema_version: ABSTENTION_ACTIVATION_SCHEMA_VERSION,
+            corpus_id: "open-kioku-retrieval-v1".into(),
+            activated_at: "2026-08-31T00:00:00Z".into(),
+            readiness_passed: true,
+            policy: RuntimeAbstentionPolicy::never_abstain(),
+            holdout_evidence: Default::default(),
+        };
+        std::fs::write(&path, serde_json::to_string(&activation).unwrap()).unwrap();
+        assert!(AbstentionActivation::load_for_repo(repo).is_some());
+
+        // Readiness not passed: feature off, never a partial activation.
+        let mut unready = activation.clone();
+        unready.readiness_passed = false;
+        std::fs::write(&path, serde_json::to_string(&unready).unwrap()).unwrap();
+        assert!(AbstentionActivation::load_for_repo(repo).is_none());
+
+        // Wrong schema version: off.
+        let mut wrong = activation.clone();
+        wrong.schema_version = ABSTENTION_ACTIVATION_SCHEMA_VERSION + 1;
+        std::fs::write(&path, serde_json::to_string(&wrong).unwrap()).unwrap();
+        assert!(AbstentionActivation::load_for_repo(repo).is_none());
+
+        // Corrupt JSON: off.
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(AbstentionActivation::load_for_repo(repo).is_none());
     }
 }
