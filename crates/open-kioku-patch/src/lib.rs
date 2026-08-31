@@ -1027,6 +1027,8 @@ fn contract_validation_targets(contract: &ChangeContractV1) -> Vec<TestTarget> {
         .iter()
         .enumerate()
         .map(|(index, test)| TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: test.target.clone(),
             name: test.target.clone(),
             file_id: FileId::new(&test.target),
@@ -3892,6 +3894,8 @@ mod tests {
     fn plan_with_validation_command(command: &str) -> PlanReport {
         let mut plan = plan_with_boundary_evidence();
         plan.validation = vec![TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: "validation:handler".into(),
             name: "handler validation".into(),
             file_id: FileId::new("tests/handler_test.rs"),

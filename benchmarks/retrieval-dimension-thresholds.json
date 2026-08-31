@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0.0",
+  "corpus_id": "open-kioku-retrieval-v1",
+  "strategy": "fusion",
+  "mode": "advisory",
+  "note": "CC7 per-dimension regression floors, derived from the checked-in baseline with 10% relative slack. Advisory mode prints CI warnings without failing; flip mode to \"blocking\" only by review once the dimensions are stable.",
+  "dimensions": {
+    "by_language": {
+      "go": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.78
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 0.1
+        }
+      },
+      "java": {
+        "minimums": {
+          "recall_at_10": 0.75,
+          "mean_reciprocal_rank": 0.565714
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 1.0
+        }
+      },
+      "python": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.78
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 1.0
+        }
+      },
+      "rust": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.6
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 1.0
+        }
+      },
+      "typescript": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.81
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 1.0
+        }
+      }
+    },
+    "by_task_family": {
+      "code_to_test": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.745714
+        }
+      },
+      "comment_to_context": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.69
+        }
+      },
+      "edit_to_ripple": {
+        "minimums": {
+          "recall_at_10": 0.84,
+          "mean_reciprocal_rank": 0.63
+        }
+      },
+      "issue_to_code": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.66
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 0.9
+        }
+      },
+      "trace_to_code": {
+        "minimums": {
+          "recall_at_10": 0.81,
+          "mean_reciprocal_rank": 0.81
+        }
+      }
+    },
+    "by_query_shape": {
+      "api_resource": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.3
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 1.0
+        }
+      },
+      "conceptual": {
+        "minimums": {
+          "recall_at_10": 0.9,
+          "mean_reciprocal_rank": 0.7
+        },
+        "maximums": {
+          "no_gold_false_positive_rate": 0.85
+        }
+      },
+      "error_trace": {
+        "minimums": {
+          "recall_at_10": 0.825,
+          "mean_reciprocal_rank": 0.825
+        }
+      },
+      "mixed_structured_natural_language": {
+        "minimums": {
+          "recall_at_10": 0.875,
+          "mean_reciprocal_rank": 0.685714
+        }
+      }
+    }
+  }
+}

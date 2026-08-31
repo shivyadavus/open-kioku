@@ -360,6 +360,8 @@ mod tests {
             reason: "unit test".into(),
             evidence_refs: vec![],
             score_breakdown: vec![],
+            selection_tier: crate::TestSelectionTier::default(),
+            tier_justification: vec![],
         };
         assert_eq!(
             test_node_id(&test).0,

@@ -125,6 +125,110 @@ fn subcommand_help_includes_copyable_examples() {
     }
 }
 
+/// RI3.6 phase 1: a legacy `.ok` layout adopts the generation layout on the next
+/// `ok index` (a directory move under the write lock), the active pointer publishes
+/// atomically, and every read path resolves through it transparently.
+#[test]
+fn indexing_adopts_legacy_layout_into_generations_and_reads_still_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn generation_probe() -> u8 { 7 }\n",
+    )
+    .unwrap();
+
+    // Build a legacy-layout index first (init + index on a fresh repo produces the
+    // generation layout directly, so simulate legacy by moving components back out).
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let location = open_kioku_storage::generations::resolve_index_location(repo);
+    if let Some(generation) = location.generation_id() {
+        // Un-adopt: move components back to the legacy layout and drop the pointer.
+        let generation_dir = repo.join(".ok/generations").join(generation);
+        for name in ["index.sqlite", "search", "vectors"] {
+            let source = generation_dir.join(name);
+            if source.exists() {
+                fs::rename(&source, repo.join(".ok").join(name)).unwrap();
+            }
+        }
+        fs::remove_dir_all(repo.join(".ok/generations")).unwrap();
+    }
+    assert!(repo.join(".ok/index.sqlite").exists());
+    assert_eq!(
+        open_kioku_storage::generations::resolve_index_location(repo).generation_id(),
+        None,
+        "fixture should now be a legacy layout"
+    );
+
+    // Reads work on the legacy layout.
+    let legacy_lookup = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("symbol")
+            .arg("definition")
+            .arg("generation_probe");
+        command
+    });
+    assert!(legacy_lookup.contains("generation_probe"));
+
+    // The next index adopts the layout.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let adopted = open_kioku_storage::generations::resolve_index_location(repo);
+    assert!(
+        adopted.generation_id().is_some(),
+        "index should have adopted the generation layout"
+    );
+    assert!(repo.join(".ok/generations/active").exists());
+    assert!(!repo.join(".ok/index.sqlite").exists());
+
+    // Reads resolve through the generation transparently.
+    let generation_lookup = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("symbol")
+            .arg("definition")
+            .arg("generation_probe");
+        command
+    });
+    assert!(generation_lookup.contains("generation_probe"));
+
+    // Status reports the generation identity.
+    let status = run({
+        let mut command = ok();
+        command
+            .arg("status")
+            .arg(repo)
+            .arg("--markdown")
+            .arg("--write")
+            .arg(repo.join("status.md"));
+        command
+    });
+    drop(status);
+    let status_markdown = fs::read_to_string(repo.join("status.md")).unwrap();
+    assert!(status_markdown.contains("Index generation"));
+}
+
 #[test]
 fn agent_setup_is_safe_idempotent_and_verifies_local_mcp() {
     let temp = tempfile::tempdir().unwrap();

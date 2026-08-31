@@ -1158,6 +1158,8 @@ pub fn extract_tests(
                     .any(|line| line.contains("#[test]") || line.contains("@Test"))
         })
         .map(|symbol| TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: stable_id(&format!("test:{}:{}", file.path.display(), symbol.name)),
             name: symbol.name.clone(),
             file_id: file.id.clone(),

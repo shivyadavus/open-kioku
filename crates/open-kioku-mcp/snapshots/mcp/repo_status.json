@@ -41,6 +41,7 @@
     },
     "chunk_count": 1,
     "file_count": 2,
+    "generation_id": null,
     "index_mode": "full",
     "indexed_at": "<indexed_at>",
     "phase_reports": [],

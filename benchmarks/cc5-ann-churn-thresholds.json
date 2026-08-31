@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "benchmark": "cc5-ann-churn-matrix",
+  "note": "Version-controlled churn policy gates (CC5.3). The harness loads this file via OK_ANN_CHURN_THRESHOLDS_FILE; environment variables remain explicit overrides. Changing these values changes what CI accepts and requires review.",
+  "min_recall_at_10": 0.99,
+  "min_mrr": 0.99,
+  "min_ann_build_vectors_per_second": 2000.0,
+  "max_ann_to_exact_p95_ratio": 1.0,
+  "max_stale_or_deleted_ratio": 0.0,
+  "required_stored_to_live_ratio": 1.0
+}

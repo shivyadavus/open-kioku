@@ -84,7 +84,7 @@ fn dry_run_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSe
         mode: "dry_run".into(),
         applied: false,
         ready: false,
-        index_path: repo.join(".ok/index.sqlite"),
+        index_path: open_kioku_storage::generations::resolve_index_location(repo).sqlite_path(),
         config_path: layout.config_path,
         skill_path: layout.skill_path,
         backup_path: layout.backup_path,
@@ -190,7 +190,7 @@ fn apply_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
         mode: "apply".into(),
         applied: true,
         ready: true,
-        index_path: repo.join(".ok/index.sqlite"),
+        index_path: open_kioku_storage::generations::resolve_index_location(repo).sqlite_path(),
         config_path: layout.config_path,
         skill_path: layout.skill_path,
         backup_path,
@@ -209,7 +209,7 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
     let expected_server = expected_mcp_server(repo);
     let config_ready = managed_mcp_server_matches(&layout.config_path, &expected_server)?;
     let skill_ready = managed_skill_matches(&layout.skill_path)?;
-    let index_ready = repo.join(".ok/index.sqlite").is_file();
+    let index_ready = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path().is_file();
     let mcp_ready = if index_ready { mcp_server_reachable(repo)? } else { false };
     let ready = config_ready && skill_ready && index_ready && mcp_ready;
     Ok(AgentSetupReport {
@@ -218,7 +218,7 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
         mode: "check".into(),
         applied: false,
         ready,
-        index_path: repo.join(".ok/index.sqlite"),
+        index_path: open_kioku_storage::generations::resolve_index_location(repo).sqlite_path(),
         config_path: layout.config_path,
         skill_path: layout.skill_path,
         backup_path: layout.backup_path,
@@ -275,7 +275,7 @@ fn uninstall_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<Agent
         mode: "uninstall".into(),
         applied: false,
         ready: false,
-        index_path: repo.join(".ok/index.sqlite"),
+        index_path: open_kioku_storage::generations::resolve_index_location(repo).sqlite_path(),
         config_path: layout.config_path,
         skill_path: layout.skill_path,
         backup_path: layout.backup_path,

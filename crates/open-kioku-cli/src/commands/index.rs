@@ -22,6 +22,15 @@ fn index_repo_with_config(
 ) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
     let _lock = IndexWriteLock::acquire(repo, &reporter)?;
+    // RI3.6: migrate legacy layouts into the generation layout exactly once, under the
+    // write lock (a directory move, not a data copy). Readers resolve both layouts.
+    if let Some(generation) = open_kioku_storage::generations::adopt_legacy_layout(repo)? {
+        report_index_stage(
+            &reporter,
+            "generations",
+            format!("adopted legacy index layout as generation {generation}"),
+        );
+    }
     let index_reporter = Arc::clone(&reporter);
     let (snapshot, history) = Indexer::default().index_repo_with_history_mode_and_progress(
         repo,

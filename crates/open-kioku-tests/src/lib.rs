@@ -1,5 +1,6 @@
 use open_kioku_core::{
-    AnalysisFact, Confidence, EvidenceSourceType, File, FileId, ScoreComponent, TestTarget,
+    AnalysisFact, Confidence, EvidenceSourceType, File, FileId, ScoreComponent, TestSelectionTier,
+    TestTarget,
 };
 use open_kioku_errors::Result;
 use open_kioku_storage::MetadataStore;
@@ -121,14 +122,27 @@ impl<'a> TestSelector<'a> {
                     candidate.reason = format!("{}; same directory or package", candidate.reason);
                 }
             }
-            score += apply_runtime_test_signal(&mut candidate, &runtime_facts, test_path);
-            score += apply_git_history_test_signal(&mut candidate, &git_facts, test_path);
-            score += apply_validation_test_signal(
+            let mut strong_evidence = Vec::new();
+            let runtime_bump = apply_runtime_test_signal(&mut candidate, &runtime_facts, test_path);
+            if runtime_bump > 0.0 {
+                strong_evidence.push("runtime evidence under policy".to_string());
+            }
+            score += runtime_bump;
+            let git_bump = apply_git_history_test_signal(&mut candidate, &git_facts, test_path);
+            if git_bump > 0.0 {
+                strong_evidence.push("bounded git history co-change".to_string());
+            }
+            score += git_bump;
+            let (validation_bump, validation_facts_matched) = apply_validation_test_signal(
                 &mut candidate,
                 &validation_facts,
                 test_path,
                 changed_file_id.as_ref(),
             );
+            if validation_facts_matched {
+                strong_evidence.push("coverage/validation evidence".to_string());
+            }
+            score += validation_bump;
             candidate.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -136,6 +150,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            assign_selection_tier(&mut candidate, score, strong_evidence);
             set_test_score_breakdown(&mut candidate, score);
             scored.push((score, candidate));
         }
@@ -188,25 +203,39 @@ impl<'a> TestSelector<'a> {
                 score += 0.15;
                 test.reason = format!("{}; test metadata shares path token", test.reason);
             }
-            score += apply_runtime_test_signal_with_searchable(
+            let mut strong_evidence = Vec::new();
+            let runtime_bump = apply_runtime_test_signal_with_searchable(
                 &mut test,
                 &runtime_facts,
                 &searchable,
                 test_path,
             );
-            score += apply_git_history_test_signal_with_searchable(
+            if runtime_bump > 0.0 {
+                strong_evidence.push("runtime evidence under policy".to_string());
+            }
+            score += runtime_bump;
+            let git_bump = apply_git_history_test_signal_with_searchable(
                 &mut test,
                 &git_facts,
                 &searchable,
                 test_path,
             );
-            score += apply_validation_test_signal_with_searchable(
-                &mut test,
-                &validation_facts,
-                &searchable,
-                test_path,
-                changed_file_id.as_ref(),
-            );
+            if git_bump > 0.0 {
+                strong_evidence.push("bounded git history co-change".to_string());
+            }
+            score += git_bump;
+            let (validation_bump, validation_facts_matched) =
+                apply_validation_test_signal_with_searchable(
+                    &mut test,
+                    &validation_facts,
+                    &searchable,
+                    test_path,
+                    changed_file_id.as_ref(),
+                );
+            if validation_facts_matched {
+                strong_evidence.push("coverage/validation evidence".to_string());
+            }
+            score += validation_bump;
             test.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -214,6 +243,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            assign_selection_tier(&mut test, score, strong_evidence);
             set_test_score_breakdown(&mut test, score);
             scored.push((score, test));
         }
@@ -304,6 +334,7 @@ impl<'a> TestSelector<'a> {
                 test.reason
             )
             .to_ascii_lowercase();
+            let mut strong_evidence = Vec::new();
             let mut score = test.confidence.score();
             if overlap > 0 {
                 score += 0.5 + (overlap.min(5) as f32 * 0.05);
@@ -311,6 +342,9 @@ impl<'a> TestSelector<'a> {
                     "{}; exact symbol-reference overlap with changed file ({overlap})",
                     test.reason
                 );
+                strong_evidence.push(format!(
+                    "exact symbol-reference overlap with changed file ({overlap})"
+                ));
             }
             if !changed_stem.is_empty() && searchable.contains(&changed_stem) {
                 score += 0.2;
@@ -320,25 +354,38 @@ impl<'a> TestSelector<'a> {
                 score += 0.1;
                 test.reason = format!("{}; test metadata shares path token", test.reason);
             }
-            score += apply_runtime_test_signal_with_searchable(
+            let runtime_bump = apply_runtime_test_signal_with_searchable(
                 &mut test,
                 &runtime_facts,
                 &searchable,
                 test_path,
             );
-            score += apply_git_history_test_signal_with_searchable(
+            if runtime_bump > 0.0 {
+                strong_evidence.push("runtime evidence under policy".to_string());
+            }
+            score += runtime_bump;
+            let git_bump = apply_git_history_test_signal_with_searchable(
                 &mut test,
                 &git_facts,
                 &searchable,
                 test_path,
             );
-            score += apply_validation_test_signal_with_searchable(
-                &mut test,
-                &validation_facts,
-                &searchable,
-                test_path,
-                changed_file.as_ref().map(|file| &file.id),
-            );
+            if git_bump > 0.0 {
+                strong_evidence.push("bounded git history co-change".to_string());
+            }
+            score += git_bump;
+            let (validation_bump, validation_facts_matched) =
+                apply_validation_test_signal_with_searchable(
+                    &mut test,
+                    &validation_facts,
+                    &searchable,
+                    test_path,
+                    changed_file.as_ref().map(|file| &file.id),
+                );
+            if validation_facts_matched {
+                strong_evidence.push("coverage/validation evidence".to_string());
+            }
+            score += validation_bump;
             test.confidence = if score > 0.85 {
                 Confidence::High
             } else if score > 0.55 {
@@ -346,6 +393,7 @@ impl<'a> TestSelector<'a> {
             } else {
                 Confidence::Low
             };
+            assign_selection_tier(&mut test, score, strong_evidence);
             set_test_score_breakdown(&mut test, score);
             scored.push((score, test));
         }
@@ -406,6 +454,23 @@ impl<'a> TestSelector<'a> {
     fn validation_facts(&self) -> Result<Vec<AnalysisFact>> {
         self.store
             .analysis_facts(Some(EvidenceSourceType::ExternalIntegration), 2_000)
+    }
+}
+
+/// Apply the RI3.7 test-selection rule: only authority-grade or policy-accepted corroborating
+/// evidence (collected in `strong_evidence`) can lift a test above Optional. Heuristic
+/// name/path similarity contributes to ranking but never to requiredness.
+fn assign_selection_tier(test: &mut TestTarget, score: f32, strong_evidence: Vec<String>) {
+    if strong_evidence.is_empty() {
+        test.selection_tier = TestSelectionTier::Optional;
+        test.tier_justification.clear();
+    } else {
+        test.selection_tier = if score > 0.85 {
+            TestSelectionTier::Required
+        } else {
+            TestSelectionTier::Recommended
+        };
+        test.tier_justification = strong_evidence;
     }
 }
 
@@ -531,7 +596,7 @@ fn apply_validation_test_signal(
     validation_facts: &[AnalysisFact],
     test_path: Option<&Path>,
     changed_file_id: Option<&FileId>,
-) -> f32 {
+) -> (f32, bool) {
     let searchable = format!(
         "{} {} {} {}",
         test.id,
@@ -555,7 +620,7 @@ fn apply_validation_test_signal_with_searchable(
     searchable: &str,
     test_path: Option<&Path>,
     changed_file_id: Option<&FileId>,
-) -> f32 {
+) -> (f32, bool) {
     let test_path = test_path
         .map(|path| {
             path.to_string_lossy()
@@ -636,7 +701,9 @@ fn apply_validation_test_signal_with_searchable(
     } else if contribution > 0.0 {
         test.reason = format!("{}; runnable validation command available", test.reason);
     }
-    contribution
+    // The command-availability bump is a convenience score, not coverage evidence; only
+    // matched TestCovers/Validates facts count as strong justification (RI3.7).
+    (contribution, !evidence_ids.is_empty())
 }
 
 fn validation_fact_matches_test(fact: &AnalysisFact, searchable: &str, test_path: &str) -> bool {
@@ -1058,6 +1125,8 @@ mod tests {
     fn fast_selector_does_not_load_all_files() {
         let store = FastStore {
             tests: vec![TestTarget {
+                selection_tier: open_kioku_core::TestSelectionTier::default(),
+                tier_justification: Vec::new(),
                 id: "search-service-test".into(),
                 name: "SearchServiceTests".into(),
                 file_id: FileId::new("test-file"),
@@ -1126,6 +1195,47 @@ mod tests {
         assert!(selected[0]
             .reason
             .contains("exact symbol-reference overlap"));
+        assert_ne!(
+            selected[0].selection_tier,
+            open_kioku_core::TestSelectionTier::Optional
+        );
+        assert!(selected[0]
+            .tier_justification
+            .iter()
+            .any(|entry| entry.contains("exact symbol-reference overlap")));
+    }
+
+    #[test]
+    fn heuristic_only_matches_stay_optional_suggestions() {
+        // The test shares the changed file's stem and directory tokens but has no exact
+        // reference overlap, coverage, runtime, or history evidence. RI3.7: that similarity
+        // may rank it, but can never present it as required.
+        let source_file = file("source", "src/auth.rs");
+        let lookalike_test = file("lookalike-test", "tests/auth_lookalike.rs");
+        let store = EvidenceStore {
+            files: vec![source_file.clone(), lookalike_test.clone()],
+            tests: vec![test("auth_lookalike", &lookalike_test.id)],
+            analysis_facts: Vec::new(),
+            occurrences: vec![occurrence("issue_token", &source_file.id)],
+        };
+
+        let selected = TestSelector::new(&store)
+            .for_changed_path_with_evidence(Path::new("src/auth.rs"), 2)
+            .unwrap();
+
+        assert_eq!(selected[0].name, "auth_lookalike");
+        assert!(
+            selected[0].reason.contains("matches changed file stem")
+                || selected[0].reason.contains("shares path token"),
+            "expected a heuristic match reason, got: {}",
+            selected[0].reason
+        );
+        assert_eq!(
+            selected[0].selection_tier,
+            open_kioku_core::TestSelectionTier::Optional,
+            "heuristic-only similarity must never lift a test above Optional"
+        );
+        assert!(selected[0].tier_justification.is_empty());
     }
 
     #[test]
@@ -1192,6 +1302,14 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "command_availability"));
+        assert_ne!(
+            selected[0].selection_tier,
+            open_kioku_core::TestSelectionTier::Optional
+        );
+        assert!(selected[0]
+            .tier_justification
+            .iter()
+            .any(|entry| entry.contains("coverage/validation evidence")));
     }
 
     #[test]
@@ -1308,6 +1426,8 @@ mod tests {
 
     fn test(name: &str, file_id: &FileId) -> TestTarget {
         TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
             id: name.into(),
             name: name.into(),
             file_id: file_id.clone(),

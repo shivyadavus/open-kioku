@@ -98,7 +98,12 @@ fn build_context_for_task(
     limit: usize,
 ) -> anyhow::Result<open_kioku_core::ContextPack> {
     let search_dir = default_index_dir(repo);
-    let builder = ContextPackBuilder::new(store as &dyn OkStore).with_history_store(Some(store));
+    let builder = ContextPackBuilder::new(store as &dyn OkStore)
+        .with_history_store(Some(store))
+        .with_abstention_policy(
+            open_kioku_core::abstention::AbstentionActivation::load_for_repo(repo)
+                .map(|activation| activation.policy),
+        );
 
     let mut lexical_index_source = None;
     let mut lexical_failure_source = None;
@@ -155,7 +160,7 @@ struct JsonRpcResponse {
 }
 
 pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> {
-    let store_path = repo.join(".ok/index.sqlite");
+    let store_path = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     let mut store = SqliteStore::open(&store_path)?;
     let mut last_request = Instant::now();
     let stdin = BufReader::new(tokio::io::stdin());
@@ -335,6 +340,13 @@ async fn dispatch(
                 object.insert(
                     "analysis_semantics_status".into(),
                     serde_json::to_value(compatibility)?,
+                );
+                object.insert(
+                    "generation_id".into(),
+                    serde_json::to_value(
+                        open_kioku_storage::generations::resolve_index_location(repo)
+                            .generation_id(),
+                    )?,
                 );
                 let semantic = SemanticIndexManager::new(repo, store, &config.semantic).status();
                 object.insert(

@@ -82,6 +82,7 @@ jobs:
         OK_ANN_CHURN_CYCLES=3 \
         OK_ANN_CHURN_MUTATIONS_PER_CYCLE=100 \
         OK_ANN_CHURN_QUERIES=8 \
+        OK_ANN_CHURN_THRESHOLDS_FILE=benchmarks/cc5-ann-churn-thresholds.json \
           cargo run -p open-kioku-vector --example ann_churn_matrix --release \
           > artifacts/benchmarks/ann-churn-smoke.json
         python3 - <<'PY'
@@ -207,6 +208,9 @@ jobs:
                 )
         print('retrieval benchmark deterministic baseline and holdout thresholds passed')
         PY
+        python3 scripts/check-retrieval-dimension-thresholds.py \
+          /tmp/retrieval-baseline-first.json \
+          benchmarks/retrieval-dimension-thresholds.json
         python3 scripts/evaluate-fusion-calibration.py \
           artifacts/benchmarks/retrieval-report.json \
           --output artifacts/benchmarks/fusion-calibration-decision.json

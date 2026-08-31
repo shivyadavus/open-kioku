@@ -324,7 +324,9 @@ pub fn rebuild_disk_index_with_graph(
 }
 
 pub fn default_index_dir(repo: impl AsRef<Path>) -> PathBuf {
-    repo.as_ref().join(".ok/search/tantivy")
+    // Resolves through the active index generation when one is published (RI3.6);
+    // legacy layouts keep the historical path.
+    open_kioku_storage::generations::resolve_index_location(repo.as_ref()).tantivy_dir()
 }
 
 fn schema() -> Schema {
