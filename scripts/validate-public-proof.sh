@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-proof_path = Path("demo/proof/large-java-3.0.4.json")
+proof_path = Path("demo/proof/large-java-2026-08-31-main.json")
 proof = json.loads(proof_path.read_text(encoding="utf-8"))
 
 required_top_level = {
@@ -31,8 +31,8 @@ if missing:
     raise SystemExit(f"public proof is missing top-level fields: {missing}")
 
 release = proof["release"]
-if release["version"] != "3.0.4" or release["tag"] != "v3.0.4":
-    raise SystemExit("public proof does not identify release v3.0.4")
+if release["version"] != "3.1.0" or release["tag"] != "v3.1.0":
+    raise SystemExit("public proof does not identify release v3.1.0")
 if not re.fullmatch(r"[0-9a-f]{40}", release["source_sha"]):
     raise SystemExit("public proof source_sha must be a full Git commit")
 
@@ -71,8 +71,8 @@ if not proof["limitations"]:
 surfaces = {
     "README.md": Path("README.md").read_text(encoding="utf-8"),
     "demo/index.html": Path("demo/index.html").read_text(encoding="utf-8"),
-    "docs/large-java-validation-3.0.4.md": Path(
-        "docs/large-java-validation-3.0.4.md"
+    "docs/large-java-validation-2026-08-31.md": Path(
+        "docs/large-java-validation-2026-08-31.md"
     ).read_text(encoding="utf-8"),
 }
 expected = [
@@ -91,9 +91,9 @@ for name, content in surfaces.items():
 readme = surfaces["README.md"]
 site = surfaces["demo/index.html"]
 for content, name in ((readme, "README.md"), (site, "demo/index.html")):
-    if "large-java-3.0.4.json" not in content:
+    if "large-java-2026-08-31-main.json" not in content:
         raise SystemExit(f"{name} does not link the machine-readable proof")
-    if "large-java-validation-3.0.4" not in content:
+    if "large-java-validation-2026-08-31" not in content:
         raise SystemExit(f"{name} does not link the methodology")
 
 print("public proof contract passed")

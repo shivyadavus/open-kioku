@@ -7,8 +7,9 @@ work. The canonical machine-readable record is
 [`demo/proof/large-java-2026-08-31-main.json`](../demo/proof/large-java-2026-08-31-main.json).
 It follows the same protocol as the published
 [3.0.4 record](large-java-validation-3.0.4.md) on the **same host**, so the
-two records are directly comparable; it will accompany the next tagged
-release.
+two records are directly comparable; it accompanies the `v3.1.0` release
+(whose tag additionally includes the authority/abstention/generations changes
+of PR #330, covered by the release CI gates).
 
 ## Evidence boundary
 
@@ -19,7 +20,7 @@ revision: 16,537 tracked files, 12,580 Java files.
 
 ## Build identity
 
-- Open Kioku: `main` (pre-release)
+- Open Kioku: `3.1.0` release lineage
 - Source: `3959fdfb6ca27d0c279b635fca7fc1b7935d4889`
 
 ## Host profile
