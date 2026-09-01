@@ -7,6 +7,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [3.1.0] — 2026-08-31
+
 ### Fixed
 - Stopped the graph query-column migration backfill from full-scanning (and partially rewriting) the graph tables on every store open. On a 16.5k-file Java corpus this removed ~14 seconds of fixed latency from every CLI command; existing stores migrate once and record completion.
 - Fixed exact symbol lookups returning `symbol not found` for symbols that exist: the substring scan ordered by qualified name could truncate the true exact match out of its candidate window. `ok symbol definition` now consults an indexed exact-name path first (13.9s → 0.02s on a 247k-symbol corpus, with the correct result).
@@ -25,6 +29,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - RI3.7: impact analysis classifies relationship-edge dependents into `proven_impact` and `possible_impact` through the shared fail-closed `RelationshipUsePolicy` — a heuristic same-name edge can never be presented as structural truth. Wired through the CLI, MCP `impact_analysis`, context compilation, planning, and patch verification.
 - `ok --version --json` machine-readable version output and copy-paste examples in `ok status/search/impact --help`.
 - CC5.2: measured 50K→1M ANN scale evidence recorded under `benchmarks/cc5-ann-scale-evidence` (recall collapses beyond ~300K vectors on the current HNSW profile; profile decision tracked in #328).
+
+### Compatibility
+- Index layouts migrate one-way into atomic generations on the next `ok index`. 3.0.x binaries pointed at a migrated repository will report a missing index (and would rebuild at the legacy path); no data is lost, but downgrading means re-indexing. All CLI flags, MCP tools, and response shapes remain backward compatible; new fields are additive.
+- Existing stores gain the new symbol-lookup indexes and the one-time graph migration marker automatically on first open (a final full scan on large stores, then never again).
+
+### Validated
+- Anonymized large-Java validation on a 16.5k-file corpus, same host and protocol as the 3.0.4 record: cold structural index 19m28s, exact class lookup 0.02–0.05s in a fresh process (previously 13.9s with an incorrect symbol-not-found), lexical search 0.24s, repeat totals identical, four parallel readers with zero lock failures, 495,606 semantic vectors with zero failures across both backends. Record: `docs/large-java-validation-2026-08-31.md`.
+- Full 50K→1M ANN scale evidence recorded with the measured recall ceiling documented and caveated at runtime.
+
+### Artifacts
+- `ok-linux-x86_64`
+- `ok-linux-x86_64.sha256`
+- `ok-linux-arm64`
+- `ok-linux-arm64.sha256`
+- `ok-macos-arm64`
+- `ok-macos-arm64.sha256`
+- `ok-windows-x86_64.exe`
+- `ok-windows-x86_64.exe.sha256`
 
 ---
 
@@ -515,3 +537,4 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 [3.0.2]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.2
 [3.0.3]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.3
 [3.0.4]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.0.4
+[3.1.0]: https://github.com/shivyadavus/open-kioku/releases/tag/v3.1.0

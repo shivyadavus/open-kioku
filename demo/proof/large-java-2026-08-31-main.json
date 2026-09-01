@@ -3,11 +3,11 @@
   "proof_kind": "anonymized-large-java-validation",
   "recorded_at": "2026-08-31T06:08:00Z",
   "release": {
-    "version": "unreleased",
-    "tag": "main",
+    "version": "3.1.0",
+    "tag": "v3.1.0",
     "source_sha": "3959fdfb6ca27d0c279b635fca7fc1b7935d4889",
-    "release_url": "https://github.com/shivyadavus/open-kioku/commit/3959fdfb6ca27d0c279b635fca7fc1b7935d4889",
-    "note": "Pre-release validation of main after the 2026-08-31 performance work; this record will accompany the next tagged release."
+    "release_url": "https://github.com/shivyadavus/open-kioku/releases/tag/v3.1.0",
+    "note": "Validation of the 3.1.0 release lineage at source commit 3959fdf; the tagged release additionally includes the authority/abstention/generations changes merged in PR #330, whose behavior is covered by the release CI gates."
   },
   "privacy": {
     "repository_identity": "withheld",
@@ -79,10 +79,24 @@
   },
   "improvements_vs_same_corpus_on_prior_build": {
     "note": "Measured on this same corpus and host against the pre-optimization build (main @ c96f61a).",
-    "per_command_fixed_startup_seconds": {"before": 14, "after": 0.3},
-    "exact_class_lookup_seconds": {"before": 13.9, "after": 0.02, "before_result": "symbol not found (incorrect)", "after_result": "correct class"},
-    "lexical_search_seconds": {"before": 13.7, "after": 0.24},
-    "cold_structural_index_seconds": {"before": 2440, "after": 1168}
+    "per_command_fixed_startup_seconds": {
+      "before": 14,
+      "after": 0.3
+    },
+    "exact_class_lookup_seconds": {
+      "before": 13.9,
+      "after": 0.02,
+      "before_result": "symbol not found (incorrect)",
+      "after_result": "correct class"
+    },
+    "lexical_search_seconds": {
+      "before": 13.7,
+      "after": 0.24
+    },
+    "cold_structural_index_seconds": {
+      "before": 2440,
+      "after": 1168
+    }
   },
   "limitations": [
     "Single-workstation observations, not latency guarantees; hardware, filesystem state, and background load vary results.",

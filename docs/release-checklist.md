@@ -30,10 +30,10 @@ install audit evidence expected on every release.
 
 ## Version And Tag
 
-- Confirm `Cargo.toml` `[workspace.package]` version is `3.0.4`.
-- Confirm `release-metadata.json` uses tag `v3.0.4`.
-- Confirm the GitHub release tag is exactly `v3.0.4`.
-- Confirm `CHANGELOG.md` has a `3.0.4` section and a matching `[3.0.4]` release link.
+- Confirm `Cargo.toml` `[workspace.package]` version is `3.1.0`.
+- Confirm `release-metadata.json` uses tag `v3.1.0`.
+- Confirm the GitHub release tag is exactly `v3.1.0`.
+- Confirm `CHANGELOG.md` has a `3.1.0` section and a matching `[3.1.0]` release link.
 
 ## Crates.io Publication
 
