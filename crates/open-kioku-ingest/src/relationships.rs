@@ -363,7 +363,7 @@ fn complexity_fact(file_id: FileId, symbol: &Symbol, metrics: &ComplexityMetrics
         confidence: Confidence::Medium,
         source: "open-kioku-relationships:complexity".into(),
         source_type: EvidenceSourceType::StaticAnalysis,
-        message: format!(
+        message: crate::compact_message(format!(
             "complexity_risk={risk}; cyclomatic={}; cognitive={}; loop_count={}; max_loop_depth={}; transitive_loop_depth={}; recursive={}; linear_scan_in_loop={}; allocation_in_loop={}; recursion_in_loop={}; unguarded_recursion={}; parameter_count={}; max_access_depth={}; blocking_network_db_call_count={}{}",
             metrics.cyclomatic,
             metrics.cognitive,
@@ -379,7 +379,7 @@ fn complexity_fact(file_id: FileId, symbol: &Symbol, metrics: &ComplexityMetrics
             metrics.max_access_depth,
             metrics.blocking_network_db_call_count,
             caveat
-        ),
+        )),
     }
 }
 
@@ -414,9 +414,9 @@ fn similarity_facts(
                 confidence: Confidence::Low,
                 source: "open-kioku-relationships:structural-shingles".into(),
                 source_type: EvidenceSourceType::Heuristic,
-                message: format!(
+                message: crate::compact_message(format!(
                     "similarity score={score:.3}; method=normalized_ast_tokens+structural_shingles+jaccard; threshold={SIMILARITY_THRESHOLD:.2}; caveat=fuzzy evidence never outranks exact symbol, SCIP, test, history, runtime, or policy evidence"
-                ),
+                )),
             });
         }
     }
@@ -458,11 +458,11 @@ fn semantic_facts(
                 confidence: Confidence::Low,
                 source: "open-kioku-relationships:semantic-local".into(),
                 source_type: EvidenceSourceType::Semantic,
-                message: format!(
+                message: crate::compact_message(format!(
                     "semantic score={score:.3}; provider={}; model={}; version=relationship-pass-v1; local_only=true; threshold={SEMANTIC_THRESHOLD:.2}; caveat=fuzzy semantic evidence never outranks exact symbol, SCIP, test, history, runtime, or policy evidence",
                     semantic.provider,
                     semantic.model
-                ),
+                )),
             });
         }
     }
