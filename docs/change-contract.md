@@ -111,3 +111,5 @@ the same validation automatically.
 Persistence, plan adapters, builders, verification, and user-facing CLI/MCP
 commands live in the plan, patch, CLI, and MCP crates; the contract crate
 continues to own only the schema and validation primitives.
+
+Contract quality is measured, not asserted: see [`contract-benchmarks.md`](contract-benchmarks.md) for the corpus, the metrics, and the regression policy a contract change has to clear.

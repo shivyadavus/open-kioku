@@ -37,19 +37,21 @@ install audit evidence expected on every release.
 
 ## Crates.io Publication
 
-Keep crates.io credentials local. GitHub Actions does not publish the Rust
-workspace crates. From a clean checkout of the exact release commit, first run:
+Keep crates.io credentials local. Normally the release workflow's own
+`publish-crates` job publishes the workspace; the commands below are the local
+fallback. `EXPECTED_VERSION` is an independent guard against publishing the
+wrong version, so state it explicitly rather than deriving it from `Cargo.toml`. From a clean checkout of the exact release commit, first run:
 
 ```sh
-EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --dry-run
+EXPECTED_VERSION=<VERSION> scripts/publish-crates.sh --dry-run
 ```
 
-After the `v3.0.0` tag is final and the GitHub release gate has succeeded,
+After the `v<VERSION>` tag is final and the GitHub release gate has succeeded,
 publish locally using Cargo credentials from `cargo login` or
 `CARGO_REGISTRY_TOKEN`:
 
 ```sh
-EXPECTED_VERSION=3.0.0 scripts/publish-crates.sh --publish
+EXPECTED_VERSION=<VERSION> scripts/publish-crates.sh --publish
 ```
 
 Do not commit or upload the crates.io token.
