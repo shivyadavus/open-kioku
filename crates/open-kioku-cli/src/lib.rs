@@ -63,6 +63,8 @@ use std::time::{Duration, Instant};
 
 pub mod cc6_calibration;
 pub mod cc6_readiness;
+#[cfg(feature = "mem-profile")]
+pub mod mem_profile;
 
 include!("bench/retrieval.rs");
 include!("types.rs");

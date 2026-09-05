@@ -14,6 +14,13 @@ categories = ["command-line-utilities", "development-tools"]
 name = "ok"
 path = "src/main.rs"
 
+[features]
+default = []
+# Deterministic allocation accounting for memory work (see docs/memory-profiling.md).
+# Off by default: it adds two atomics to every allocation, so a binary built with
+# it must never be used to produce a timing number.
+mem-profile = []
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
