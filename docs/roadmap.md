@@ -14,7 +14,7 @@ Open Kioku wins by making AI coding agents stop guessing. Everything on the road
 
 ## Known blockers
 
-- [#329](https://github.com/shivyadavus/open-kioku/issues/329) — indexing peak memory is corpus-multiplied (~6.5 GB RSS on a 16,537-file Java repository), located in the resolution/analysis phase. Memory is treated as a product requirement, not an optimization: it decides whether large repositories can run Open Kioku at all. The structural fix is tracked as RI3.6 ([#242](https://github.com/shivyadavus/open-kioku/issues/242)).
+- [#329](https://github.com/shivyadavus/open-kioku/issues/329) — indexing peak memory is corpus-multiplied (peak ~8.0 GB RSS on a 16,537-file Java repository, per the [2026-08-31 validation record](large-java-validation-2026-08-31.md)), concentrated in the resolution/analysis phase. Memory is treated as a product requirement, not an optimization: it decides whether large repositories can run Open Kioku at all. The structural fix is tracked as RI3.6 ([#242](https://github.com/shivyadavus/open-kioku/issues/242)).
 
 ## What already shipped
 
