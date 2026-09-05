@@ -87,6 +87,8 @@ The semantic manifest records the resolved backend and an index-version identity
 
 Hybrid search combines lexical candidates with semantic vector candidates and fuses them through the same explainable ranking pipeline as normal search. Semantic-only evidence is labeled with `semantic_similarity`; exact symbol/reference evidence remains a separate stronger signal for identifier-like queries.
 
+Agents reach the same behavior through `semantic_status`, `semantic_search`, `hybrid_search`, and `explain_search_result`. Every semantic or hybrid response carries semantic index status metadata, so a stale, disabled, missing, or corrupt vector index is explicit rather than silently degrading into a weaker result.
+
 ## Privacy
 
 The default provider is local. Neural models are local and opt-in; their first download requires explicit consent. External providers fail unless `semantic.external_provider_allowed = true` is set in `ok.toml`. Semantic indexing respects indexed file metadata and skips vendor/generated/secret-like paths.
