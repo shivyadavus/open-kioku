@@ -119,6 +119,22 @@ ok --repo . history bench \
   --min-reviewer-accuracy 0.80
 ```
 
+## Measuring Memory
+
+Indexing peak memory is a product constraint, not an optimization (see
+[#329](https://github.com/shivyadavus/open-kioku/issues/329)). Peak RSS is too
+noisy to compare two builds — repeated runs of the same binary over the same
+corpus have differed by 438 MB. Use the counting allocator instead:
+
+```sh
+cargo build -p open-kioku-cli --features mem-profile
+./target/debug/ok index /path/to/repo
+```
+
+See [`memory-profiling.md`](memory-profiling.md) for what it does and does not
+measure, and for the A/B protocol. Never quote a timing from a `mem-profile`
+build.
+
 ## Adding A New Signal
 
 Signals must be persisted or traceable; LLM narration is not a source of truth.
