@@ -1,6 +1,11 @@
 # Vector Index
 
-Open Kioku's first local vector backend is `ExactFlatVectorIndex` in `open-kioku-vector`. It stores normalized `f32` vectors and performs deterministic exact cosine search. Exact-flat is intentionally simple: it is the correctness backend for local semantic search and future optimized local backends.
+`open-kioku-vector` provides two local backends:
+
+- `ExactFlatVectorIndex` stores normalized `f32` vectors and performs deterministic exact cosine search. It is intentionally simple: it is the correctness oracle that other backends are measured against.
+- `UsearchHnswVectorIndex` is a persistent approximate index for corpora too large for an exhaustive scan.
+
+Selection is controlled by `semantic.backend`, which accepts `exact-flat` (the default), `auto`, `usearch-hnsw-f32`, and `usearch-hnsw-bf16`. Under `auto`, the HNSW backend is chosen once the vector count reaches `semantic.ann_min_rows` and exact-flat is used below it, so small repositories keep exact results and large ones stay usable.
 
 ## Guarantees
 
