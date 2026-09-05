@@ -63,6 +63,10 @@ impl InMemoryGraph {
         resolved_relationships: &[ResolvedRelationship],
     ) -> Self {
         let mut buffer = GraphBuffer::new();
+        // One indexing run is one indexing time. Stamping every edge with its
+        // own wall-clock read made ~1.5M of them on a large corpus and recorded
+        // millisecond drift as if it were information.
+        let indexed_at = Utc::now();
         let files_by_id = files
             .iter()
             .map(|file| (file.id.0.as_str(), file))
@@ -117,7 +121,7 @@ impl InMemoryGraph {
                     symbol_id: Some(symbol.id.clone()),
                     confidence: symbol.confidence,
                     message: format!("{} defines {}", file.path.display(), symbol.name),
-                    indexed_at: Utc::now(),
+                    indexed_at,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -187,7 +191,7 @@ impl InMemoryGraph {
                     symbol_id: Some(symbol.id.clone()),
                     confidence: occurrence.confidence,
                     message: format!("{} references {}", file.path.display(), symbol.name),
-                    indexed_at: Utc::now(),
+                    indexed_at,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -258,7 +262,7 @@ impl InMemoryGraph {
                     symbol_id: None,
                     confidence: import.confidence,
                     message: format!("{} imports {}", file.path.display(), import.imported),
-                    indexed_at: Utc::now(),
+                    indexed_at,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -366,7 +370,7 @@ impl InMemoryGraph {
                         .unwrap_or_else(|| {
                             format!("resolved call from {} to {}", from_sym.name, to_sym.name)
                         }),
-                    indexed_at: Utc::now(),
+                    indexed_at,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -430,7 +434,7 @@ impl InMemoryGraph {
                     symbol_id: fact.symbol_id.clone(),
                     confidence: fact.confidence,
                     message: fact.message.clone(),
-                    indexed_at: Utc::now(),
+                    indexed_at,
                     ..Default::default()
                 },
                 ..Default::default()
