@@ -9,7 +9,69 @@ permissions:
   attestations: write
 
 jobs:
+  # Publishing credentials are verified before any build time is spent. The 3.1.0
+  # release burned four platform builds and then failed in publish-npm because the
+  # NPM_TOKEN secret had expired, and npm reports that as a 404 on PUT rather than
+  # a 401 — indistinguishable from a missing package. See #334.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate release metadata
+        shell: bash
+        run: scripts/validate-versions.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify npm credentials
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is not set for this repository."
+            echo "Fix: gh secret set NPM_TOKEN --repo ${{ github.repository }}"
+            exit 1
+          fi
+          if ! account="$(npm whoami 2>&1)"; then
+            echo "::error::npm authentication failed - the release would fail after the builds."
+            echo "npm said: ${account}"
+            echo ""
+            echo "The NPM_TOKEN secret is missing, expired, or revoked. npm granular access"
+            echo "tokens expire after roughly 90 days; classic automation tokens do not."
+            echo "A publish with a bad token reports 'E404 Not Found - PUT' for a package that"
+            echo "exists, which reads as a missing package but means unauthorized."
+            echo ""
+            echo "Create a token with read+write on the 'open-kioku' package AND on the"
+            echo "'@open-kioku' scope - without the scope the publish dies on the first"
+            echo "platform package - then:"
+            echo "  gh secret set NPM_TOKEN --repo ${{ github.repository }}"
+            exit 1
+          fi
+          echo "npm authenticated as ${account}"
+
+      - name: Report npm scope access
+        shell: bash
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -uo pipefail
+          # Advisory only. Scope-listing output is not stable enough across npm
+          # versions to gate a release on, but a missing scope is the second most
+          # common cause of a failed publish, so surface it while it is cheap.
+          if ! npm access list packages @open-kioku 2>&1; then
+            echo "::warning::Could not list @open-kioku scope packages. If the publish"
+            echo "fails on the first platform package, the token is missing scope grants."
+          fi
+
   build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
