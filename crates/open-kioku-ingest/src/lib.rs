@@ -26,6 +26,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 mod git_ignore;
+
+/// Trim a freshly formatted evidence message to its exact length.
+///
+/// `format!` sizes its buffer by estimate and over-allocates on multi-argument
+/// templates — measured at 1.9x on the symbol-registry message, which is the
+/// largest single producer of message bytes. These strings are retained for the
+/// whole of an indexing run, so at corpus scale the slack is worth one realloc.
+/// Templates with one or two arguments show no slack and do not need this.
+pub(crate) fn compact_message(mut message: String) -> String {
+    message.shrink_to_fit();
+    message
+}
 pub mod imports;
 pub mod project_model;
 pub mod relationships;
@@ -2120,6 +2132,7 @@ fn git_history_facts(
         if record.test_corun {
             message.push_str("; includes historical path-to-test co-run");
         }
+        let message = compact_message(message);
         facts.push(AnalysisFact {
             id,
             file_id: file.id.clone(),

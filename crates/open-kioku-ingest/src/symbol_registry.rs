@@ -415,6 +415,7 @@ fn fact_for_resolution(
         message.push_str("; ambiguity: ");
         message.push_str(reason);
     }
+    let message = crate::compact_message(message);
     Some(AnalysisFact {
         id: identity::stable_hash(&format!(
             "symbol-registry:{}:{}:{}:{}",
