@@ -799,16 +799,17 @@ fn extract_compose_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFac
             continue;
         }
         if let Some(captures) = service_re.captures(line) {
-            let service = captures.get(1).unwrap().as_str();
-            facts.push(analysis_fact(
-                file,
-                None,
-                GraphEdgeType::Defines,
-                GraphNodeType::Resource,
-                format!("compose:service:{service}"),
-                line_number,
-                ("open-kioku-static/compose", "Docker Compose service"),
-            ));
+            if let Some(service) = captures.get(1).map(|m| m.as_str()) {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::Defines,
+                    GraphNodeType::Resource,
+                    format!("compose:service:{service}"),
+                    line_number,
+                    ("open-kioku-static/compose", "Docker Compose service"),
+                ));
+            }
             in_environment = false;
             in_depends = false;
             continue;
@@ -818,25 +819,29 @@ fn extract_compose_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFac
             trimmed == "environment:" || (in_environment && line.starts_with("      "));
         in_depends = trimmed == "depends_on:" || (in_depends && line.starts_with("      "));
         if let Some(captures) = port_re.captures(line) {
-            let port = captures.get(1).unwrap().as_str();
-            facts.push(analysis_fact(
-                file,
-                None,
-                GraphEdgeType::ExposesEndpoint,
-                GraphNodeType::Endpoint,
-                format!("TCP :{port}"),
-                line_number,
-                ("open-kioku-static/compose", "Docker Compose published port"),
-            ));
+            if let Some(port) = captures.get(1).map(|m| m.as_str()) {
+                facts.push(analysis_fact(
+                    file,
+                    None,
+                    GraphEdgeType::ExposesEndpoint,
+                    GraphNodeType::Endpoint,
+                    format!("TCP :{port}"),
+                    line_number,
+                    ("open-kioku-static/compose", "Docker Compose published port"),
+                ));
+            }
         }
         if in_environment {
-            if let Some(captures) = env_re.captures(line) {
+            if let Some(key) = env_re
+                .captures(line)
+                .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+            {
                 facts.push(analysis_fact(
                     file,
                     None,
                     GraphEdgeType::WritesConfig,
                     GraphNodeType::ConfigKey,
-                    captures.get(1).unwrap().as_str().to_string(),
+                    key,
                     line_number,
                     (
                         "open-kioku-static/compose",
@@ -846,13 +851,16 @@ fn extract_compose_facts(file: &File, content: &str, facts: &mut Vec<AnalysisFac
             }
         }
         if in_depends {
-            if let Some(captures) = dep_re.captures(line) {
+            if let Some(dependency) = dep_re
+                .captures(line)
+                .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+            {
                 facts.push(analysis_fact(
                     file,
                     None,
                     GraphEdgeType::DependsOn,
                     GraphNodeType::Resource,
-                    format!("compose:service:{}", captures.get(1).unwrap().as_str()),
+                    format!("compose:service:{dependency}"),
                     line_number,
                     (
                         "open-kioku-static/compose",
@@ -914,9 +922,10 @@ fn extract_terraform_facts(file: &File, content: &str, facts: &mut Vec<AnalysisF
         Regex::new(r#"variable\s+"([^"]+)""#).expect("valid Terraform variable regex");
     for (idx, line) in content.lines().enumerate() {
         let line_number = (idx + 1) as u32;
-        if let Some(captures) = resource_re.captures(line) {
-            let kind = captures.get(1).unwrap().as_str();
-            let name = captures.get(2).unwrap().as_str();
+        if let Some((kind, name)) = resource_re
+            .captures(line)
+            .and_then(|captures| Some((captures.get(1)?.as_str(), captures.get(2)?.as_str())))
+        {
             let (target_kind, edge_type, target) = if kind.contains("sqs") || kind.contains("queue")
             {
                 (
@@ -947,13 +956,16 @@ fn extract_terraform_facts(file: &File, content: &str, facts: &mut Vec<AnalysisF
                 ("open-kioku-static/terraform", "Terraform resource"),
             ));
         }
-        if let Some(captures) = variable_re.captures(line) {
+        if let Some(variable) = variable_re
+            .captures(line)
+            .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        {
             facts.push(analysis_fact(
                 file,
                 None,
                 GraphEdgeType::ReadsConfig,
                 GraphNodeType::ConfigKey,
-                captures.get(1).unwrap().as_str().to_string(),
+                variable,
                 line_number,
                 ("open-kioku-static/terraform", "Terraform variable"),
             ));
@@ -966,13 +978,16 @@ fn extract_url_binding_facts(file: &File, content: &str, facts: &mut Vec<Analysi
         Regex::new(r#"["']?(?:url|endpoint|base_url)["']?\s*[:=]\s*["'](https?://[^"']+)["']"#)
             .expect("valid URL binding regex");
     for (idx, line) in content.lines().enumerate() {
-        for captures in url_re.captures_iter(line) {
+        for url in url_re
+            .captures_iter(line)
+            .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        {
             facts.push(analysis_fact(
                 file,
                 None,
                 GraphEdgeType::CallsEndpoint,
                 GraphNodeType::Endpoint,
-                format!("HTTP {}", captures.get(1).unwrap().as_str()),
+                format!("HTTP {url}"),
                 (idx + 1) as u32,
                 ("open-kioku-static/config", "configuration URL binding"),
             ));
