@@ -1,62 +1,23 @@
 # Roadmap
 
-Open Kioku should win by making AI coding agents stop guessing. The roadmap is ordered by the path from first install to trusted daily use.
+Open Kioku wins by making AI coding agents stop guessing. Everything on the roadmap either sharpens that — proof-carrying context, honest uncertainty, a closed plan-to-verify loop — or gets cut.
 
-## 1. Onboarding and Distribution
+**The live roadmap is the GitHub issue tracker.** Epics carry the current sequencing; this page is the index, so there is one place to keep current instead of two.
 
-- Done: Ship the binary as `ok`.
-- Done: Provide `ok doctor` for local health checks.
-- Done: Provide `ok mcp install <client>` to print copy-paste MCP config for all supported clients.
-- Done: Publish release binaries and SHA-256 checksums for macOS, Linux, and Windows.
-- Done: Add `cargo binstall`, npm, crates.io, and GitHub release installation paths.
-- Done: Publish GitHub build-provenance attestations for each release binary, alongside checksums, SBOM, and release metadata. See [`docs/release-trust.md`](release-trust.md).
+## Current epics
 
-## 2. Trust and Regression Coverage
+| Epic | Focus | Open work |
+|---|---|---|
+| [#204](https://github.com/shivyadavus/open-kioku/issues/204) — Context Compiler V2 | Measured hybrid retrieval for coding agents | [#328](https://github.com/shivyadavus/open-kioku/issues/328) ANN scale profile · [#235](https://github.com/shivyadavus/open-kioku/issues/235) ANN lifecycle under churn · [#210](https://github.com/shivyadavus/open-kioku/issues/210) reranking and calibrated abstention · [#211](https://github.com/shivyadavus/open-kioku/issues/211) retrieval-quality telemetry |
+| [#236](https://github.com/shivyadavus/open-kioku/issues/236) — Repository Intelligence V3 | Proof-carrying relationships and coherent index generations | [#242](https://github.com/shivyadavus/open-kioku/issues/242) atomic index generations · [#243](https://github.com/shivyadavus/open-kioku/issues/243) relationship authority enforcement · [#244](https://github.com/shivyadavus/open-kioku/issues/244) bounded exploration envelope |
+| [#94](https://github.com/shivyadavus/open-kioku/issues/94) — Evidence graph and trust layer | Long-running integration hardening | see issue |
 
-- Done: Add smoke tests for `ok init`, `ok index`, `ok search`, `ok status`, and MCP tool listing.
-- Done: Add fixture repos for Rust, TypeScript, Python, and Go.
-- Done: Add golden snapshots for important MCP responses.
-- Done: Keep CI running format, clippy, tests, audit, and deny on Linux and macOS.
-- Done: Add `ok prove` for shareable local usefulness reports without source snippets.
-- Done: Add release-readiness smoke coverage for demo setup, status, setup audit, TOON planning, proof generation, and MCP installer output.
-- Done: Keep golden MCP snapshots for representative status, schema, graph-query, ranked-search, pagination, malformed-input, and tool-error calls.
+## Known blockers
 
-## 3. Core Intelligence Quality
+- [#329](https://github.com/shivyadavus/open-kioku/issues/329) — indexing peak memory is corpus-multiplied (~6.5 GB RSS on a 16,537-file Java repository), located in the resolution/analysis phase. Memory is treated as a product requirement, not an optimization: it decides whether large repositories can run Open Kioku at all. The structural fix is tracked as RI3.6 ([#242](https://github.com/shivyadavus/open-kioku/issues/242)).
 
-- Done: Improve ranked snippets for `search_code`.
-- Done: Strengthen symbol definition/reference accuracy using tree-sitter plus SCIP when available.
-- Done: Return consistent evidence, confidence, and match reasons from every result.
-- Done: Add quality benchmarks for precision on fixture repos and real local repos.
-- Done: Add language-specific static facts and optional runtime facts to the graph so plans can reason about routes, config keys, tables, inheritance, and implementations.
-- Done: Add a documented, fixture-backed Java SCIP proof path that generates the standard `index.scip`, requires a successful import, and surfaces the exact-reference count.
+## What already shipped
 
-## 4. Tool Surface Maturity
+Onboarding and distribution, trust and regression coverage, core intelligence quality, tool-surface maturity, the daily watch/demo/context workflow, and optional SCIP, LSP, semantic, and runtime integrations are in place across the 3.x line.
 
-- Done: Split tools into stable and experimental groups.
-- Done: Hide or clearly label unsupported integrations so agents do not treat stubs as authoritative.
-- Done: Remove the nonfunctional `apply_patch` MCP surface; source edits stay in the user's editor and are verified against the evidence-backed plan.
-- Done: Keep the stable default tool set small, sharp, and reliable.
-- Done: Cover representative history, ownership, and reviewer MCP responses with deterministic fixtures and golden protocol snapshots.
-- Done: Cover disabled semantic status, explicit semantic-search unavailability, and hybrid lexical fallback with golden MCP snapshots.
-- Done: Cover the disabled-by-default responses for runtime stack-trace and error lookup tools with golden MCP snapshots.
-- Done: Cover representative explanatory, structural-candidate, implementation-candidate, and architecture-flow MCP responses with golden snapshots.
-- Done: Make experimental caller and callee lookups directional and cover both paths with golden MCP snapshots.
-- Done: Return persisted IMPLEMENTS evidence, rather than lexical candidates, from the experimental implementation lookup tool.
-- Done: Retrieve implementation evidence by indexed target so results are not lost behind unrelated analysis facts.
-- Done: Graduate `explain_flow` to stable with deterministic endpoint-to-directed-call evidence and a golden MCP snapshot.
-- Done: Back architecture summary, boundary, and violation responses with configured policy components and evaluated edge evidence when policy exists.
-- Done: Cover every remaining experimental MCP tool with deterministic fixture-backed snapshots before considering graduation to stable.
-
-## 5. Daily Workflow
-
-- Done: Make watch mode keep `.ok/` current while editing with debounced local reindexing.
-- Done: Keep `ok demo` useful as the fastest way to evaluate search, symbols, impact, context packs, planning, and MCP setup.
-- Done: Add context-pack export formats for JSON, Markdown, and compact prompt text.
-- Done: Add benchmark output for index time, files per second, and search latency.
-- Done: Add launch kit drafts and directory submission copy grounded in tested commands.
-
-## 6. Advanced Integrations
-
-- Done: Harden LSP and SCIP import paths.
-- Done: Add runtime error mapping guardrails for Sentry only after local code intelligence is dependable.
-- Done: Add optional semantic search providers without making cloud calls part of the default path.
+[`CHANGELOG.md`](../CHANGELOG.md) is the authoritative record of what landed and when. Measured results live in [`demo/proof/`](../demo/proof) with methodology in this directory — see [`retrieval-benchmark.md`](retrieval-benchmark.md), [`workflow-benchmarks.md`](workflow-benchmarks.md), and [`relationship-benchmark.md`](relationship-benchmark.md) for the standards a change has to clear.
