@@ -278,7 +278,7 @@ fn syntax_file_range(
     range: &open_kioku_core::SourceRange,
 ) -> Option<FileRange> {
     Some(FileRange {
-        path: ctx.file_path.to_path_buf(),
+        path: ctx.file_path.into(),
         line_range: Some(LineRange {
             start: range.start_line,
             end: range.end_line,
