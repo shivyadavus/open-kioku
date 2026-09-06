@@ -149,7 +149,15 @@ mod tests {
         let ptr = unsafe { alloc.alloc(layout) };
         assert!(!ptr.is_null());
         assert_eq!(live_bytes(), live_before + 4096);
-        assert!(peak_live_bytes() >= peak_before + 4096);
+        // `peak_live_bytes` is a global high-water mark over the whole process,
+        // so it only advances when this allocation exceeds every previous peak,
+        // which depends on what other tests already ran. Assert the invariants
+        // that always hold instead: peak covers live, and peak never decreases.
+        assert!(
+            peak_live_bytes() >= live_bytes(),
+            "peak must cover current live bytes"
+        );
+        assert!(peak_live_bytes() >= peak_before, "peak must never decrease");
 
         unsafe { alloc.dealloc(ptr, layout) };
         assert_eq!(live_bytes(), live_before, "dealloc must return to baseline");
