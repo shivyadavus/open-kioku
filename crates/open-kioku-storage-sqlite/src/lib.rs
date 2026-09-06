@@ -2550,7 +2550,7 @@ fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEd
                 format!("{:?}", edge.edge_type),
                 format!("{:?}", edge.evidence.confidence),
                 format!("{:?}", edge.evidence.source_type),
-                &edge.evidence.source,
+                edge.evidence.source.as_str(),
                 true,
                 freshness,
                 serde_json::to_string(edge)?

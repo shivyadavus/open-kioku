@@ -2146,7 +2146,7 @@ fn git_history_facts(
             edge_type: GraphEdgeType::ChangedBy,
             range: None,
             confidence: Confidence::from_score((0.45 + record.recency_weight / 4.0).min(0.90)),
-            source: format!("git-history:{}", record.commits.join(",")),
+            source: format!("git-history:{}", record.commits.join(",")).into(),
             source_type: EvidenceSourceType::GitHistory,
             message: message.into(),
         });
@@ -2776,7 +2776,7 @@ fn collect_architecture_facts(
                     edge_type: GraphEdgeType::BelongsTo,
                     range: None,
                     confidence: Confidence::Exact,
-                    source: format!("glob:{}", comp_match.matched_glob),
+                    source: format!("glob:{}", comp_match.matched_glob).into(),
                     source_type: EvidenceSourceType::Heuristic,
                     message: "file mapped to architecture component via policy".into(),
                 });
@@ -2821,7 +2821,7 @@ fn collect_architecture_facts(
                         edge_type: GraphEdgeType::BelongsTo,
                         range: symbol.range.clone(),
                         confidence: Confidence::Exact,
-                        source: format!("glob:{}", comp_match.matched_glob),
+                        source: format!("glob:{}", comp_match.matched_glob).into(),
                         source_type: EvidenceSourceType::Heuristic,
                         message: "symbol mapped to architecture component via policy".into(),
                     });
