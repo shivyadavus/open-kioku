@@ -297,7 +297,7 @@ fn analysis_fact_for_resolution(
         edge_type,
         range: resolution.import.range.clone(),
         confidence: resolution.confidence,
-        source: format!("open-kioku-import-resolver/{}", resolution.strategy),
+        source: format!("open-kioku-import-resolver/{}", resolution.strategy).into(),
         source_type: EvidenceSourceType::StaticAnalysis,
         message: message.into(),
     })

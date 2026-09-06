@@ -502,7 +502,7 @@ fn coverage_facts(context: &ValidationContext<'_>, record: &CoverageRecord) -> V
             } else {
                 Confidence::Medium
             },
-            source: record.source.clone(),
+            source: record.source.clone().into(),
             source_type: EvidenceSourceType::ExternalIntegration,
             message: format!(
                 "{} coverage maps {} covered line(s) to validation target `{}`{}",
@@ -546,7 +546,7 @@ fn junit_facts(record: &JunitRecord) -> Vec<AnalysisFact> {
         } else {
             Confidence::High
         },
-        source: record.source.clone(),
+        source: record.source.clone().into(),
         source_type: EvidenceSourceType::ExternalIntegration,
         message: message.into(),
     }]

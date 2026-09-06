@@ -533,7 +533,7 @@ fn runtime_fact(
         edge_type,
         range: record.line.map(LineRange::single),
         confidence,
-        source: format!("open-kioku-runtime:{}", record.artifact.display()),
+        source: format!("open-kioku-runtime:{}", record.artifact.display()).into(),
         source_type: EvidenceSourceType::Runtime,
         message: message.into(),
     }

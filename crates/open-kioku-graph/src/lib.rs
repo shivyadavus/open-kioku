@@ -2,7 +2,8 @@ use chrono::Utc;
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,
     FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    RelationshipProof, RelationshipProofKind, ResolvedRelationship, Symbol, SymbolOccurrence,
+    RelationshipProof, RelationshipProofKind, ResolvedRelationship, SharedStr, Symbol,
+    SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -67,6 +68,12 @@ impl InMemoryGraph {
         // own wall-clock read made ~1.5M of them on a large corpus and recorded
         // millisecond drift as if it were information.
         let indexed_at = Utc::now();
+        // These source labels are fixed for the whole build. Interned once here
+        // so each of the ~156k edges shares one allocation instead of turning a
+        // string literal into a fresh one.
+        let src_graph = SharedStr::from("open-kioku-graph");
+        let src_imports = SharedStr::from("open-kioku-static/imports");
+        let src_resolution = SharedStr::from("open-kioku-resolution");
         let files_by_id = files
             .iter()
             .map(|file| (file.id.0.as_str(), file))
@@ -112,7 +119,7 @@ impl InMemoryGraph {
                         file.path.display(),
                         symbol.name
                     ))),
-                    source: "open-kioku-graph".into(),
+                    source: src_graph.clone(),
                     source_type: symbol.provenance.clone(),
                     file_range: Some(FileRange {
                         path: file.path.clone(),
@@ -182,7 +189,7 @@ impl InMemoryGraph {
                 properties,
                 evidence: Evidence {
                     id: evidence_id.clone(),
-                    source: "open-kioku-graph".into(),
+                    source: src_graph.clone(),
                     source_type: occurrence.provenance.clone(),
                     file_range: Some(FileRange {
                         path: file.path.clone(),
@@ -256,7 +263,7 @@ impl InMemoryGraph {
                 edge_type: GraphEdgeType::Imports,
                 evidence: Evidence {
                     id: evidence_id.clone(),
-                    source: "open-kioku-static/imports".into(),
+                    source: src_imports.clone(),
                     source_type: EvidenceSourceType::StaticAnalysis,
                     file_range: Some(file_range.clone()),
                     symbol_id: None,
@@ -354,7 +361,7 @@ impl InMemoryGraph {
                 ambiguity: Vec::new(),
                 evidence: Evidence {
                     id: EvidenceId::new(stable_id(&format!("resolved-rel-evidence:{}", edge_id.0))),
-                    source: "open-kioku-resolution".into(),
+                    source: src_resolution.clone(),
                     source_type: rel
                         .evidence
                         .first()
@@ -401,7 +408,7 @@ impl InMemoryGraph {
                 file_id: None,
                 symbol_id: None,
                 properties: analysis_node_properties(fact),
-                source_pass: Some(fact.source.clone()),
+                source_pass: Some(fact.source.to_string()),
                 ambiguity: analysis_fact_ambiguity(fact),
                 ..Default::default()
             };
@@ -422,7 +429,7 @@ impl InMemoryGraph {
                 to: target_node.id,
                 edge_type: fact.edge_type.clone(),
                 properties: analysis_edge_properties(fact),
-                source_pass: Some(fact.source.clone()),
+                source_pass: Some(fact.source.to_string()),
                 ambiguity: analysis_fact_ambiguity(fact),
                 evidence: Evidence {
                     id: evidence_id.clone(),
