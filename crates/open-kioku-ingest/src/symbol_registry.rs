@@ -1,6 +1,6 @@
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
-    GraphNodeType, ImportResolution, MessageInterner, ResolutionStatus, Symbol, SymbolId,
+    GraphNodeType, ImportResolution, ResolutionStatus, StringInterner, Symbol, SymbolId,
     SymbolKind,
 };
 use rayon::prelude::*;
@@ -293,7 +293,7 @@ pub fn resolve_symbol_edges(
     let unresolved_count = AtomicUsize::new(0);
     // Scoped to this run: dropped with the report, so nothing accumulates in a
     // long-lived process. Shared across the rayon workers below.
-    let interner = MessageInterner::new();
+    let interner = StringInterner::new();
 
     let per_chunk_results: Vec<_> = chunks
         .par_iter()
@@ -399,7 +399,7 @@ fn fact_for_resolution(
     token_use: &TokenUse,
     resolution: &Resolution,
     scip_available: bool,
-    interner: &MessageInterner,
+    interner: &StringInterner,
 ) -> Option<AnalysisFact> {
     let symbol = resolution.symbol.as_ref()?;
     let edge_type = if token_use.is_call {
@@ -441,7 +441,10 @@ fn fact_for_resolution(
                 .saturating_sub(1),
         )),
         confidence: resolution.confidence,
-        source: format!("open-kioku-symbol-registry/{}", resolution.strategy),
+        source: interner.intern(format!(
+            "open-kioku-symbol-registry/{}",
+            resolution.strategy
+        )),
         source_type: EvidenceSourceType::StaticAnalysis,
         message,
     })

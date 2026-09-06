@@ -570,7 +570,7 @@ pub enum EvidenceSourceType {
     Heuristic,
 }
 
-/// Narration attached to a piece of evidence.
+/// An immutable shared string used by evidence fields.
 ///
 /// Backed by `Arc<str>` rather than `String` for two reasons that only matter at
 /// corpus scale. It is 16 bytes inline instead of 24; and, more importantly,
@@ -581,9 +581,9 @@ pub enum EvidenceSourceType {
 /// Serializes and deserializes exactly as a JSON string, so the wire format,
 /// the stored `graph_edges.json`, and the golden MCP snapshots are unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct EvidenceMessage(std::sync::Arc<str>);
+pub struct SharedStr(std::sync::Arc<str>);
 
-impl EvidenceMessage {
+impl SharedStr {
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -593,38 +593,38 @@ impl EvidenceMessage {
     }
 }
 
-impl Default for EvidenceMessage {
+impl Default for SharedStr {
     fn default() -> Self {
         Self(std::sync::Arc::from(""))
     }
 }
 
-impl std::ops::Deref for EvidenceMessage {
+impl std::ops::Deref for SharedStr {
     type Target = str;
     fn deref(&self) -> &str {
         &self.0
     }
 }
 
-impl AsRef<str> for EvidenceMessage {
+impl AsRef<str> for SharedStr {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
-impl std::borrow::Borrow<str> for EvidenceMessage {
+impl std::borrow::Borrow<str> for SharedStr {
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
-impl std::fmt::Display for EvidenceMessage {
+impl std::fmt::Display for SharedStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl From<String> for EvidenceMessage {
+impl From<String> for SharedStr {
     fn from(value: String) -> Self {
         // `Arc::from(String)` copies into an exactly sized allocation, which also
         // drops any spare capacity `format!` left behind.
@@ -632,43 +632,43 @@ impl From<String> for EvidenceMessage {
     }
 }
 
-impl From<&str> for EvidenceMessage {
+impl From<&str> for SharedStr {
     fn from(value: &str) -> Self {
         Self(std::sync::Arc::from(value))
     }
 }
 
-impl From<EvidenceMessage> for String {
-    fn from(value: EvidenceMessage) -> Self {
+impl From<SharedStr> for String {
+    fn from(value: SharedStr) -> Self {
         value.0.to_string()
     }
 }
 
-impl PartialEq<str> for EvidenceMessage {
+impl PartialEq<str> for SharedStr {
     fn eq(&self, other: &str) -> bool {
         &*self.0 == other
     }
 }
 
-impl PartialEq<&str> for EvidenceMessage {
+impl PartialEq<&str> for SharedStr {
     fn eq(&self, other: &&str) -> bool {
         &*self.0 == *other
     }
 }
 
-impl Serialize for EvidenceMessage {
+impl Serialize for SharedStr {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
     }
 }
 
-impl<'de> Deserialize<'de> for EvidenceMessage {
+impl<'de> Deserialize<'de> for SharedStr {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer).map(Self::from)
     }
 }
 
-impl JsonSchema for EvidenceMessage {
+impl JsonSchema for SharedStr {
     fn schema_name() -> String {
         String::schema_name()
     }
@@ -682,21 +682,21 @@ impl JsonSchema for EvidenceMessage {
     }
 }
 
-/// Deduplicates evidence messages produced during one indexing run.
+/// Deduplicates repeated strings produced during one indexing run.
 ///
 /// Evidence narration is highly repetitive: on a 1,751-file Java corpus the
 /// symbol registry emitted 82,444 messages drawn from only 10,246 distinct
 /// strings. Interning collapses those to one allocation each, and because
-/// [`EvidenceMessage`] is `Arc`-backed the facts then share rather than copy.
+/// [`SharedStr`] is `Arc`-backed the facts then share rather than copy.
 ///
 /// Sharded because the largest producer runs under `rayon`. The interner is
 /// created per indexing run and dropped with it, so nothing accumulates across
 /// runs in a long-lived process such as the MCP server.
-pub struct MessageInterner {
-    shards: Vec<std::sync::Mutex<std::collections::HashSet<EvidenceMessage>>>,
+pub struct StringInterner {
+    shards: Vec<std::sync::Mutex<std::collections::HashSet<SharedStr>>>,
 }
 
-impl MessageInterner {
+impl StringInterner {
     const SHARDS: usize = 16;
 
     pub fn new() -> Self {
@@ -708,7 +708,7 @@ impl MessageInterner {
     }
 
     /// Return a shared handle for `text`, allocating only on first sight.
-    pub fn intern(&self, text: String) -> EvidenceMessage {
+    pub fn intern(&self, text: String) -> SharedStr {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.as_str().hash(&mut hasher);
@@ -720,7 +720,7 @@ impl MessageInterner {
         if let Some(existing) = set.get(text.as_str()) {
             return existing.clone();
         }
-        let message = EvidenceMessage::from(text);
+        let message = SharedStr::from(text);
         set.insert(message.clone());
         message
     }
@@ -738,7 +738,7 @@ impl MessageInterner {
     }
 }
 
-impl Default for MessageInterner {
+impl Default for StringInterner {
     fn default() -> Self {
         Self::new()
     }
@@ -747,12 +747,12 @@ impl Default for MessageInterner {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence {
     pub id: EvidenceId,
-    pub source: String,
+    pub source: SharedStr,
     pub source_type: EvidenceSourceType,
     pub file_range: Option<FileRange>,
     pub symbol_id: Option<SymbolId>,
     pub confidence: Confidence,
-    pub message: EvidenceMessage,
+    pub message: SharedStr,
     pub indexed_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_score: Option<f32>,
@@ -766,12 +766,12 @@ impl Default for Evidence {
     fn default() -> Self {
         Self {
             id: EvidenceId::new(""),
-            source: String::new(),
+            source: SharedStr::default(),
             source_type: EvidenceSourceType::Lexical,
             file_range: None,
             symbol_id: None,
             confidence: Confidence::Low,
-            message: EvidenceMessage::default(),
+            message: SharedStr::default(),
             indexed_at: Utc::now(),
             confidence_score: None,
             confidence_reason: None,
@@ -1218,9 +1218,9 @@ pub struct AnalysisFact {
     pub edge_type: GraphEdgeType,
     pub range: Option<LineRange>,
     pub confidence: Confidence,
-    pub source: String,
+    pub source: SharedStr,
     pub source_type: EvidenceSourceType,
-    pub message: EvidenceMessage,
+    pub message: SharedStr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -3007,18 +3007,18 @@ mod tests {
 
     use super::{
         count_resolution_notes, reconcile_score_breakdown, score_component_total, Confidence,
-        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceMessage,
-        EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
-        GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId,
-        HistorySnapshot, HistorySummary, IndexQuality, LineRange, MessageInterner, NodeId, Owner,
-        ScopeId, ScoreComponent, SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
+        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
+        FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
+        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
+        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId, ScoreComponent, SharedStr,
+        SourceRange, StringInterner, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
 
     #[test]
     fn interner_returns_one_allocation_for_repeated_messages() {
-        let interner = MessageInterner::new();
+        let interner = StringInterner::new();
         let text = "symbol registry resolved `X` to `Y` via unique-project-name";
         let first = interner.intern(text.to_string());
         let second = interner.intern(text.to_string());
@@ -3035,7 +3035,7 @@ mod tests {
 
     #[test]
     fn interner_keeps_distinct_messages_apart() {
-        let interner = MessageInterner::new();
+        let interner = StringInterner::new();
         let a = interner.intern("first".to_string());
         let b = interner.intern("second".to_string());
         assert_eq!(a.as_str(), "first");
@@ -3046,7 +3046,7 @@ mod tests {
     #[test]
     fn interner_is_consistent_under_concurrent_use() {
         use std::sync::Arc as StdArc;
-        let interner = StdArc::new(MessageInterner::new());
+        let interner = StdArc::new(StringInterner::new());
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let interner = StdArc::clone(&interner);
@@ -3072,7 +3072,7 @@ mod tests {
     fn evidence_message_serializes_exactly_as_a_json_string() {
         let text = "symbol registry resolved `RiskReport` to `crates::core::RiskReport` via unique-project-name; candidates=1";
         let as_string = serde_json::to_string(&text.to_string()).unwrap();
-        let as_message = serde_json::to_string(&EvidenceMessage::from(text.to_string())).unwrap();
+        let as_message = serde_json::to_string(&SharedStr::from(text.to_string())).unwrap();
         assert_eq!(
             as_string, as_message,
             "the wire format must be indistinguishable from String"
@@ -3088,9 +3088,9 @@ mod tests {
             "multi\nline",
             "unicode \u{1f600}",
         ] {
-            let original = EvidenceMessage::from(text);
+            let original = SharedStr::from(text);
             let json = serde_json::to_string(&original).unwrap();
-            let restored: EvidenceMessage = serde_json::from_str(&json).unwrap();
+            let restored: SharedStr = serde_json::from_str(&json).unwrap();
             assert_eq!(original, restored, "round trip changed {text:?}");
             assert_eq!(restored.as_str(), text);
         }
@@ -3111,7 +3111,7 @@ mod tests {
 
     #[test]
     fn cloning_an_evidence_message_shares_one_allocation() {
-        let original = EvidenceMessage::from("shared".to_string());
+        let original = SharedStr::from("shared".to_string());
         let copy = original.clone();
         assert!(
             std::ptr::eq(original.as_str().as_ptr(), copy.as_str().as_ptr()),
