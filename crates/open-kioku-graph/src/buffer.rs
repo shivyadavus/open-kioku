@@ -297,12 +297,12 @@ impl GraphBuffer {
                 || (new_rank == existing_rank && edge.evidence.id.0 < existing.evidence.id.0)
             {
                 let merged_msg = merge_messages(&edge.evidence.message, &existing.evidence.message);
-                edge.evidence.message = merged_msg;
+                edge.evidence.message = merged_msg.into();
                 merge_edge_metadata(&mut edge, existing.clone());
                 self.edges[index] = edge.clone();
             } else {
                 existing.evidence.message =
-                    merge_messages(&existing.evidence.message, &edge.evidence.message);
+                    merge_messages(&existing.evidence.message, &edge.evidence.message).into();
                 merge_edge_metadata(existing, edge);
             }
             self.edges[index].id.clone()

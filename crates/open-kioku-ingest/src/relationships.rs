@@ -379,7 +379,7 @@ fn complexity_fact(file_id: FileId, symbol: &Symbol, metrics: &ComplexityMetrics
             metrics.max_access_depth,
             metrics.blocking_network_db_call_count,
             caveat
-        )),
+        )).into(),
     }
 }
 
@@ -416,7 +416,7 @@ fn similarity_facts(
                 source_type: EvidenceSourceType::Heuristic,
                 message: crate::compact_message(format!(
                     "similarity score={score:.3}; method=normalized_ast_tokens+structural_shingles+jaccard; threshold={SIMILARITY_THRESHOLD:.2}; caveat=fuzzy evidence never outranks exact symbol, SCIP, test, history, runtime, or policy evidence"
-                )),
+                )).into(),
             });
         }
     }
@@ -462,7 +462,7 @@ fn semantic_facts(
                     "semantic score={score:.3}; provider={}; model={}; version=relationship-pass-v1; local_only=true; threshold={SEMANTIC_THRESHOLD:.2}; caveat=fuzzy semantic evidence never outranks exact symbol, SCIP, test, history, runtime, or policy evidence",
                     semantic.provider,
                     semantic.model
-                )),
+                )).into(),
             });
         }
     }
@@ -795,7 +795,7 @@ mod tests {
                 confidence: Confidence::Medium,
                 source: "test".into(),
                 source_type: EvidenceSourceType::StaticAnalysis,
-                message: String::new(),
+                message: String::new().into(),
             },
             AnalysisFact {
                 id: "b-calls-a".into(),
@@ -808,7 +808,7 @@ mod tests {
                 confidence: Confidence::Medium,
                 source: "test".into(),
                 source_type: EvidenceSourceType::StaticAnalysis,
-                message: String::new(),
+                message: String::new().into(),
             },
         ];
 
@@ -856,7 +856,7 @@ mod tests {
             confidence: Confidence::Medium,
             source: "test".into(),
             source_type: EvidenceSourceType::StaticAnalysis,
-            message: String::new(),
+            message: String::new().into(),
         }];
 
         let facts = collect_relationship_analysis_facts(

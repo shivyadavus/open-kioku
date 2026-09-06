@@ -677,7 +677,7 @@ fn edge_evidence(
         source_path,
         target_path,
         confidence: edge.evidence.confidence,
-        message: edge.evidence.message.clone(),
+        message: edge.evidence.message.to_string(),
     }))
 }
 
@@ -913,7 +913,7 @@ mod tests {
                 id: open_kioku_core::EvidenceId::new(format!("evidence-{id}")),
                 source: "test".into(),
                 confidence: Confidence::High,
-                message: format!("{id} evidence"),
+                message: format!("{id} evidence").into(),
                 ..Evidence::default()
             },
             ..GraphEdge::default()

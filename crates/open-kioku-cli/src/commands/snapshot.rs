@@ -700,7 +700,7 @@ fn link_boundary_edges(
                     message: format!(
                         "{} links {} to {} via {}",
                         source_project.name, target_label, target_project.name, strategy
-                    ),
+                    ).into(),
                     indexed_at: chrono::Utc::now(),
                     confidence_score: None,
                     confidence_reason: Some(if ambiguity.is_empty() {
