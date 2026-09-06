@@ -548,9 +548,167 @@ pub struct DocumentSection {
     pub document_type: DocumentType,
 }
 
+/// An immutable shared filesystem path.
+///
+/// Evidence is dominated by repeated paths: across 156,515 graph edges on a
+/// 1,751-file Java corpus, `file_range.path` totalled 15,225,615 bytes drawn
+/// from 2,388 distinct paths. Sharing the allocation turns each edge's copy
+/// into a refcount bump.
+///
+/// Serializes exactly as `PathBuf` does — a plain JSON string — so the wire
+/// format, stored rows, and golden snapshots are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SharedPath(std::sync::Arc<std::path::Path>);
+
+impl SharedPath {
+    pub fn as_path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    pub fn display(&self) -> std::path::Display<'_> {
+        self.0.display()
+    }
+}
+
+impl Default for SharedPath {
+    fn default() -> Self {
+        Self(std::sync::Arc::from(std::path::Path::new("")))
+    }
+}
+
+impl std::ops::Deref for SharedPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for SharedPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<std::path::Path> for SharedPath {
+    fn borrow(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl From<PathBuf> for SharedPath {
+    fn from(value: PathBuf) -> Self {
+        Self(std::sync::Arc::from(value.as_path()))
+    }
+}
+
+impl From<&std::path::Path> for SharedPath {
+    fn from(value: &std::path::Path) -> Self {
+        Self(std::sync::Arc::from(value))
+    }
+}
+
+impl From<&str> for SharedPath {
+    fn from(value: &str) -> Self {
+        Self(std::sync::Arc::from(std::path::Path::new(value)))
+    }
+}
+
+impl From<String> for SharedPath {
+    fn from(value: String) -> Self {
+        Self(std::sync::Arc::from(std::path::Path::new(&value)))
+    }
+}
+
+impl From<SharedPath> for PathBuf {
+    fn from(value: SharedPath) -> Self {
+        value.0.to_path_buf()
+    }
+}
+
+impl Serialize for SharedPath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Mirrors `PathBuf`'s own impl, which refuses non-UTF-8 rather than
+        // silently emitting something a reader cannot round-trip.
+        match self.0.to_str() {
+            Some(text) => serializer.serialize_str(text),
+            None => Err(serde::ser::Error::custom(
+                "path contains invalid UTF-8 characters",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedPath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        PathBuf::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl JsonSchema for SharedPath {
+    fn schema_name() -> String {
+        PathBuf::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        PathBuf::json_schema(generator)
+    }
+
+    fn is_referenceable() -> bool {
+        PathBuf::is_referenceable()
+    }
+}
+
+/// Deduplicates repeated paths produced during one indexing run.
+pub struct PathInterner {
+    shards: Vec<std::sync::Mutex<std::collections::HashSet<SharedPath>>>,
+}
+
+impl PathInterner {
+    const SHARDS: usize = 16;
+
+    pub fn new() -> Self {
+        Self {
+            shards: (0..Self::SHARDS)
+                .map(|_| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .collect(),
+        }
+    }
+
+    pub fn intern(&self, path: &std::path::Path) -> SharedPath {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hasher);
+        let shard = &self.shards[(hasher.finish() as usize) % Self::SHARDS];
+        let mut set = shard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = set.get(path) {
+            return existing.clone();
+        }
+        let shared = SharedPath::from(path);
+        set.insert(shared.clone());
+        shared
+    }
+
+    pub fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for PathInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileRange {
-    pub path: PathBuf,
+    pub path: SharedPath,
     pub line_range: Option<LineRange>,
 }
 
@@ -3010,11 +3168,50 @@ mod tests {
         ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
         FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
         GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
-        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId, ScoreComponent, SharedStr,
-        SourceRange, StringInterner, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
+        HistorySummary, IndexQuality, LineRange, NodeId, Owner, PathInterner, ScopeId,
+        ScoreComponent, SharedPath, SharedStr, SourceRange, StringInterner, Symbol, SymbolId,
+        Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn shared_path_serializes_exactly_as_a_pathbuf() {
+        let raw = "modules/lang-expression/src/main/java/org/elasticsearch/Script.java";
+        let as_pathbuf = serde_json::to_string(&std::path::PathBuf::from(raw)).unwrap();
+        let as_shared = serde_json::to_string(&SharedPath::from(raw)).unwrap();
+        assert_eq!(
+            as_pathbuf, as_shared,
+            "the wire format must be indistinguishable from PathBuf"
+        );
+    }
+
+    #[test]
+    fn shared_path_round_trips_and_matches_stored_rows() {
+        let range: FileRange =
+            serde_json::from_str(r#"{"path":"src/auth.rs","line_range":{"start":18,"end":18}}"#)
+                .expect("a row written when the field was a PathBuf must still load");
+        assert_eq!(range.path.as_path(), std::path::Path::new("src/auth.rs"));
+        let json = serde_json::to_string(&range).unwrap();
+        assert_eq!(
+            json,
+            r#"{"path":"src/auth.rs","line_range":{"start":18,"end":18}}"#
+        );
+    }
+
+    #[test]
+    fn path_interner_shares_one_allocation_per_distinct_path() {
+        let interner = PathInterner::new();
+        let a = interner.intern(std::path::Path::new("src/auth.rs"));
+        let b = interner.intern(std::path::Path::new("src/auth.rs"));
+        let c = interner.intern(std::path::Path::new("src/other.rs"));
+        assert!(
+            std::ptr::eq(a.as_path(), b.as_path()),
+            "a repeated path must share one allocation"
+        );
+        assert_eq!(c.as_path(), std::path::Path::new("src/other.rs"));
+        assert_eq!(interner.len(), 2);
+    }
 
     #[test]
     fn interner_returns_one_allocation_for_repeated_messages() {
