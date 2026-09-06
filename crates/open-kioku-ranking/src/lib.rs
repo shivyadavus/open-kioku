@@ -99,75 +99,37 @@ struct SignalSpec<'a> {
 impl RankingFeatures {
     pub fn from_result(result: &SearchResult, query: Option<&str>) -> Self {
         let path = result.path.to_string_lossy().to_ascii_lowercase();
-        let evidence = result.evidence.join(" ").to_ascii_lowercase();
         let reason = result.match_reason.to_ascii_lowercase();
-        let exact_reference = if reason.contains("exact symbol reference")
-            || evidence.contains("exact reference")
-            || evidence.contains("scip")
-        {
-            0.35
-        } else {
-            0.0
-        };
-        let graph_proximity = if evidence.contains("graph")
-            || evidence.contains("dependency")
-            || evidence.contains("direct impact")
-        {
-            0.12
-        } else {
-            0.0
-        };
+        // Every signal below reads a persisted `ScoreComponent` emitted by the
+        // producer that actually holds the evidence. It must never be inferred
+        // from evidence prose.
+        //
+        // These used to be substring probes over `evidence`. Tantivy writes the
+        // user's own query into that prose -- `query variant `{variant}` matched
+        // local index` -- so a search for the word "trace" scored itself
+        // `runtime_corroboration`, on repositories with no runtime facts at all,
+        // and attached the rationale "runtime traces or incidents near the
+        // result". The same leak armed graph, memory, exact-reference and
+        // co-change scoring for any query containing those ordinary words.
+        // Absence was being rendered as presence, which is the one thing this
+        // ranker must not do.
+        let exact_reference = component_signal_value(result, &["exact_reference"])
+            .or_else(|| reason.contains("exact symbol reference").then_some(0.35))
+            .unwrap_or(0.0);
+        let graph_proximity = component_signal_value(result, &["graph_proximity"]).unwrap_or(0.0);
         let boundary_fit = boundary_fit_score(result, &path, query);
-        let runtime_corroboration = if evidence.contains("runtime")
-            || evidence.contains("trace")
-            || evidence.contains("incident")
-        {
-            0.18
-        } else {
-            0.0
-        };
-        let git_cochange = if evidence.contains("co-change")
-            || evidence.contains("cochange")
-            || evidence.contains("git history")
-        {
-            0.12
-        } else {
-            0.0
-        };
-        let history_churn = component_signal_value(result, &["history_churn"])
-            .or_else(|| {
-                (evidence.contains("history churn")
-                    || evidence.contains("history hotspot")
-                    || evidence.contains("hotspot"))
-                .then_some(0.08)
-            })
-            .unwrap_or(0.0);
-        let ownership_risk = component_signal_value(result, &["ownership_risk"])
-            .or_else(|| {
-                (evidence.contains("ownership risk") || evidence.contains("historical author"))
-                    .then_some(0.06)
-            })
-            .unwrap_or(0.0);
-        let similar_change_overlap = component_signal_value(result, &["similar_change_overlap"])
-            .or_else(|| {
-                (evidence.contains("similar change")
-                    || evidence.contains("co-change")
-                    || evidence.contains("cochange"))
-                .then_some(0.12)
-            })
-            .unwrap_or(0.0);
-        let reviewer_affinity = component_signal_value(result, &["reviewer_affinity"])
-            .or_else(|| {
-                (evidence.contains("reviewer affinity") || evidence.contains("reviewer"))
-                    .then_some(0.06)
-            })
-            .unwrap_or(0.0);
+        let runtime_corroboration =
+            component_signal_value(result, &["runtime_corroboration"]).unwrap_or(0.0);
+        let git_cochange =
+            component_signal_value(result, &["git_cochange", "cochange"]).unwrap_or(0.0);
+        let history_churn = component_signal_value(result, &["history_churn"]).unwrap_or(0.0);
+        let ownership_risk = component_signal_value(result, &["ownership_risk"]).unwrap_or(0.0);
+        let similar_change_overlap =
+            component_signal_value(result, &["similar_change_overlap"]).unwrap_or(0.0);
+        let reviewer_affinity =
+            component_signal_value(result, &["reviewer_affinity"]).unwrap_or(0.0);
         let validation_proximity = if is_test_path(&path) { 0.05 } else { 0.0 };
-        let memory_signal = if evidence.contains("memory") || reason.contains("memory") {
-            0.08
-        } else {
-            0.0
-        };
+        let memory_signal = component_signal_value(result, &["memory_signal"]).unwrap_or(0.0);
         let semantic_similarity = result
             .score_breakdown
             .iter()
@@ -176,13 +138,6 @@ impl RankingFeatures {
                     || component.signal == "local_semantic_similarity"
             })
             .map(|component| component.raw_value)
-            .or_else(|| {
-                if reason.contains("semantic") || evidence.contains("semantic vector") {
-                    Some(result.score.clamp(0.0, 1.0))
-                } else {
-                    None
-                }
-            })
             .unwrap_or(0.0);
         let semantic_only = semantic_similarity > 0.0
             && exact_reference <= 0.0
@@ -627,6 +582,82 @@ fn normalize_identifier(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::RankingFeatures;
+
+    // Regression: Tantivy embeds the user's query into its evidence prose
+    // ("query variant `X` matched local index"). Scoring must never read that
+    // back as evidence of anything.
+    fn probe_result(evidence: &str, reason: &str) -> SearchResult {
+        SearchResult {
+            path: std::path::PathBuf::from("src/cache/store.rs"),
+            line_range: None,
+            snippet: String::new(),
+            symbol: None,
+            score: 14.5,
+            match_reason: reason.to_string(),
+            evidence: vec![evidence.to_string()],
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_query_containing_trace_does_not_manufacture_runtime_evidence() {
+        let result = probe_result(
+            "query variant `rust trace cache miss` matched local index",
+            "lexical match",
+        );
+        let features = RankingFeatures::from_result(&result, Some("rust trace cache miss"));
+        assert_eq!(
+            features.runtime_corroboration, 0.0,
+            "runtime corroboration must come from persisted runtime evidence, \
+             never from the word `trace` appearing in the user's own query"
+        );
+    }
+
+    #[test]
+    fn ordinary_words_in_a_query_do_not_manufacture_graph_or_memory_evidence() {
+        let result = probe_result(
+            "query variant `where is the dependency graph built in memory` matched local index",
+            "lexical match",
+        );
+        let features = RankingFeatures::from_result(&result, None);
+        assert_eq!(
+            features.graph_proximity, 0.0,
+            "graph signal must be persisted"
+        );
+        assert_eq!(
+            features.memory_signal, 0.0,
+            "memory signal must be persisted"
+        );
+        assert_eq!(
+            features.git_cochange, 0.0,
+            "co-change signal must be persisted"
+        );
+    }
+
+    #[test]
+    fn a_persisted_runtime_component_is_still_honoured() {
+        let mut result = probe_result(
+            "BM25 lexical match from local Tantivy index",
+            "lexical match",
+        );
+        result.score_breakdown = vec![ScoreComponent {
+            signal: "runtime_corroboration".into(),
+            raw_value: 0.42,
+            normalized_value: 0.42,
+            weight: 0.30,
+            contribution: 0.126,
+            evidence_ids: vec!["runtime:1".into()],
+            rationale: "persisted runtime evidence".into(),
+        }];
+        let features = RankingFeatures::from_result(&result, None);
+        assert_eq!(
+            features.runtime_corroboration, 0.42,
+            "a real persisted signal must still be read"
+        );
+    }
     use super::{
         rerank, rerank_baseline, rerank_with_options, rerank_without_signal, top_score_signals,
         RankingOptions, RankingSignal, RankingWeights,
