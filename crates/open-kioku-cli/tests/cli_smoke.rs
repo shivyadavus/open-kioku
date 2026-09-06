@@ -705,7 +705,7 @@ reason = "domain code must use the api facade"
             command.arg("mcp").arg("serve").arg("--repo").arg(repo);
             command
         },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"domain","limit":5}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"domain","limit":5,"format":"json"}}}"#,
     );
     let response: serde_json::Value = serde_json::from_str(mcp_plan.trim()).unwrap();
     assert_eq!(

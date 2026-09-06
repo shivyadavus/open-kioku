@@ -7,6 +7,20 @@ disable-model-invocation: true
 
 Open Kioku gives you a persistent, evidence-backed memory of the indexed repository. All tools are read-only by default and operate entirely locally — no network calls, no cloud API.
 
+## Output format
+
+`build_context_pack` and `plan_change` return Markdown by default. Markdown is the
+rendering you want: it is the same evidence with the same coverage, written to be read,
+and it costs a small fraction of the JSON rendering of the same result.
+
+- Do not pass `format`. The default is correct for reading.
+- Pass `format: "json"` only when the result is going to be parsed rather than read —
+  saving a plan for `verify_change`, or supplying `plan_json` to
+  `create_change_contract`. A plan you intend to verify against must be JSON.
+- Pass `format: "toon"` when the result goes straight into another model's prompt.
+- Use `limit` to widen coverage when the pack missed a file you expected, not to control
+  cost. It changes how many context items are gathered, not how they are rendered.
+
 ## When to use each tool
 
 ### Orientation (start here on an unfamiliar codebase)
@@ -34,7 +48,7 @@ Open Kioku gives you a persistent, evidence-backed memory of the indexed reposit
 - `dependency_path` — find how two files or symbols are connected
 
 ### Refactoring and patch planning
-- `build_context_pack` — assemble a full context bundle (files + symbols + tests + patch boundaries) for a complex task; pass the task in natural language
+- `build_context_pack` — assemble a context bundle (files + symbols + tests + patch boundaries) for a complex task; pass the task in natural language. Returns Markdown; raise `limit` if it missed something
 - `propose_patch` — generate a patch plan without writing any files
 - `verify_change` / `verify_change_contract` — verify a completed source edit against an evidence-backed plan or contract
 

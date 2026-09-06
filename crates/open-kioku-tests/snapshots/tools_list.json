@@ -1447,12 +1447,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Assemble a ranked, token-efficient context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns results in JSON, Markdown, or TOON format. Use before planning or editing to assemble a ranked bundle of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task description. Returns results in the specified format (JSON, Markdown, or TOON). Do NOT use when prompt token budget is tight (use build_compressed_context with retrievable handles instead) or when only test recommendations are needed (use find_tests_for_change). This is read-only and queries the local index and git history only.",
+        "description": "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window. Use before planning or editing to assemble a ranked bundle of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task description. Returns results in the specified format (JSON, Markdown, or TOON). Use build_compressed_context instead when you want short handles you can expand on demand rather than inline snippets or when only test recommendations are needed (use find_tests_for_change). This is read-only and queries the local index and git history only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "format": {
-              "description": "Output format. 'json' returns structured objects, 'markdown' returns human-readable text, 'toon' returns token-optimized notation. Defaults to 'json' when omitted.",
+              "description": "Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation.",
               "enum": [
                 "json",
                 "markdown",
@@ -1461,7 +1461,7 @@
               "type": "string"
             },
             "limit": {
-              "description": "Maximum number of context items to include in the pack. Defaults to 20. Higher values increase completeness but also token cost.",
+              "description": "Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost.",
               "type": "integer"
             },
             "task": {
@@ -1594,7 +1594,7 @@
         "inputSchema": {
           "properties": {
             "format": {
-              "description": "The format of the plan.",
+              "description": "Output format. Defaults to 'markdown', which is what an agent should read. Ask for 'json' when the plan will be saved and passed to verify_change, or supplied as plan_json to create_change_contract.",
               "enum": [
                 "json",
                 "markdown",

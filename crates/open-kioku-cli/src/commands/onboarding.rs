@@ -469,8 +469,12 @@ a replacement for reading the relevant source.\n\n\
 3. **Edit** only within the returned scope unless new evidence justifies an\n\
    expansion.\n\
 4. **Verify** the changed files and selected tests before finishing. For\n\
-   boundary verification, save a detailed `plan_change` result and pass it to\n\
-   `verify_change`.\n\n\
+   boundary verification, save a `plan_change` result with `format: \"json\"`\n\
+   and pass it to `verify_change`.\n\
+5. **Read cheaply.** `plan_change` and `build_context_pack` return Markdown by\n\
+   default, which carries the same evidence at a fraction of the context cost.\n\
+   Ask for `format: \"json\"` only when the result will be parsed. If a result\n\
+   missed something, raise `limit` rather than narrowing the request.\n\n\
 Report caveats from Open Kioku exactly. Do not describe a guided MCP workflow as\n\
 enforced behavior.\n"
         ),
@@ -487,7 +491,10 @@ Before a multi-file edit, rename, deletion, or public API change, run\n\
 `preflight_change` and read its caveats. Keep edits within its returned scope\n\
 unless new evidence supports expansion. Before finishing, run the selected tests\n\
 and verify the changed files. When boundary verification is needed, save a\n\
-detailed `plan_change` result and pass it to `verify_change`.\n\n\
+`plan_change` result with `format: \"json\"` and pass it to `verify_change`.\n\
+Otherwise call `plan_change` and `build_context_pack` without `format`: the\n\
+Markdown default carries the same evidence at a fraction of the context cost.\n\
+Raise `limit` when a result missed something.\n\n\
 Treat Open Kioku caveats as uncertainty. This rule guides tool selection; it\n\
 does not enforce a tool call.\n"
         ),
