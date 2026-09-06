@@ -63,6 +63,36 @@ A change can reduce requested bytes without moving the OS-visible ceiling, becau
 
 Repeats are still worth running, but three are enough rather than the five to seven a peak-RSS A/B needs. If two runs of the same build disagree by more than ~1%, something in the protocol moved.
 
+## Worked example
+
+The first A/B run with this harness, measuring the `format!` slack change (#337).
+
+Both arms were release builds with `--features mem-profile`, differing only by a
+`git revert` of the change under test. Corpus: `modules/` from a public
+Elasticsearch checkout at `f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1` — 1,751
+Java files. Fresh `.ok` per run, arms alternated across three rounds.
+
+| arm | `peak_live_bytes` (median) | spread across 3 runs |
+|---|---:|---:|
+| before | 1,165,834,698 | 908 B |
+| after | 1,156,539,051 | 1,449 B |
+
+Delta **9,295,647 B (8.87 MiB, 0.797% of peak)**, against a largest within-arm
+spread of 1,449 B — a signal-to-noise ratio of about 6,400x. Peak RSS varies by
+roughly 1.7% on this workload, more than twice the size of the effect, so the
+same comparison could not have been made with it.
+
+Two things that run illustrates about interpreting a result here:
+
+- The corpus was extracted with `git archive`, so it has no `.git`. The git
+  co-change producer contributed nothing, and a corpus with history would show a
+  larger saving. Know which producers your corpus actually exercises.
+- Scaling to the large-Java corpus (7.18x the Java files, 6.9x the peak) projects
+  roughly 60-65 MiB. That is well below the ~200 MB estimated beforehand from the
+  measured over-allocation ratio, because the estimate assumed the ratio held
+  across all retained bytes. **Projections from a ratio are not measurements**;
+  where they disagree, the measurement wins.
+
 ## Scope
 
 `peak_live_bytes` is process-wide, not phase-attributed. Attributing it to indexing phases is a natural extension — `IndexProgressReporter::emit_progress` already observes every phase transition — but is not implemented.
