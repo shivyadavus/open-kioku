@@ -505,7 +505,7 @@ fn aggregate_fact(aggregate: &RuntimeAggregate) -> AnalysisFact {
         confidence: aggregate.confidence,
         source: "open-kioku-runtime:aggregate".into(),
         source_type: EvidenceSourceType::Runtime,
-        message: aggregate_message(aggregate),
+        message: aggregate_message(aggregate).into(),
     }
 }
 

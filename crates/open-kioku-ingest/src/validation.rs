@@ -512,7 +512,8 @@ fn coverage_facts(context: &ValidationContext<'_>, record: &CoverageRecord) -> V
                 symbol
                     .map(|symbol| format!(" for symbol `{}`", symbol.qualified_name))
                     .unwrap_or_default()
-            ),
+            )
+            .into(),
         });
     }
     facts
@@ -547,7 +548,7 @@ fn junit_facts(record: &JunitRecord) -> Vec<AnalysisFact> {
         },
         source: record.source.clone(),
         source_type: EvidenceSourceType::ExternalIntegration,
-        message,
+        message: message.into(),
     }]
 }
 

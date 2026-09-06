@@ -2148,7 +2148,7 @@ fn git_history_facts(
             confidence: Confidence::from_score((0.45 + record.recency_weight / 4.0).min(0.90)),
             source: format!("git-history:{}", record.commits.join(",")),
             source_type: EvidenceSourceType::GitHistory,
-            message,
+            message: message.into(),
         });
         if facts.len() >= 5000 {
             break;

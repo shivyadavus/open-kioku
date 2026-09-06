@@ -120,7 +120,7 @@ impl InMemoryGraph {
                     }),
                     symbol_id: Some(symbol.id.clone()),
                     confidence: symbol.confidence,
-                    message: format!("{} defines {}", file.path.display(), symbol.name),
+                    message: format!("{} defines {}", file.path.display(), symbol.name).into(),
                     indexed_at,
                     ..Default::default()
                 },
@@ -190,7 +190,7 @@ impl InMemoryGraph {
                     }),
                     symbol_id: Some(symbol.id.clone()),
                     confidence: occurrence.confidence,
-                    message: format!("{} references {}", file.path.display(), symbol.name),
+                    message: format!("{} references {}", file.path.display(), symbol.name).into(),
                     indexed_at,
                     ..Default::default()
                 },
@@ -261,7 +261,7 @@ impl InMemoryGraph {
                     file_range: Some(file_range.clone()),
                     symbol_id: None,
                     confidence: import.confidence,
-                    message: format!("{} imports {}", file.path.display(), import.imported),
+                    message: format!("{} imports {}", file.path.display(), import.imported).into(),
                     indexed_at,
                     ..Default::default()
                 },
@@ -369,7 +369,8 @@ impl InMemoryGraph {
                         .map(|e| e.message.clone())
                         .unwrap_or_else(|| {
                             format!("resolved call from {} to {}", from_sym.name, to_sym.name)
-                        }),
+                        })
+                        .into(),
                     indexed_at,
                     ..Default::default()
                 },
