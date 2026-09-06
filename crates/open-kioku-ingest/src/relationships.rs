@@ -620,7 +620,14 @@ fn loop_segments(text: &str) -> Vec<String> {
         let mut offset = 0;
         while let Some(index) = lower[offset..].find(marker) {
             let start = offset + index;
-            let end = (start + 500).min(lower.len());
+            // The window is a byte count, so it can land inside a multi-byte
+            // character. Walk back to the nearest boundary: slicing there
+            // panics, and a panic here aborts the index of the whole
+            // repository over one emoji in one docstring.
+            let mut end = (start + 500).min(lower.len());
+            while end > start && !lower.is_char_boundary(end) {
+                end -= 1;
+            }
             segments.push(lower[start..end].to_string());
             offset = start + marker.len();
         }
@@ -694,6 +701,33 @@ fn dedupe_analysis_facts(mut facts: Vec<AnalysisFact>) -> Vec<AnalysisFact> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn loop_segments_survives_multibyte_characters_at_the_window_edge() {
+        // The 500-byte window can land inside a multi-byte character. Slicing
+        // there panics, and a panic in relationship extraction aborts the index
+        // of the entire repository - one emoji in one docstring used to take
+        // down all of FastAPI.
+        for pad in 0..8usize {
+            let mut text = String::from("for ");
+            text.push_str(&"a".repeat(494 + pad));
+            text.push('\u{2705}'); // 3 bytes
+            text.push_str(&"b".repeat(64));
+            let segments = super::loop_segments(&text);
+            assert!(
+                !segments.is_empty(),
+                "pad {pad}: expected a segment, got none"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_segments_handles_a_multibyte_character_immediately_after_the_marker() {
+        let text = "for \u{1f600}\u{1f600}\u{1f600} in items:";
+        let segments = super::loop_segments(text);
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].starts_with("for "));
+    }
     use super::*;
     use open_kioku_core::{Language, RepositoryId};
     use std::path::PathBuf;
