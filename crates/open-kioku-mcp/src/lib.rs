@@ -1060,6 +1060,13 @@ fn call_tool<'a>(
                 let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
                 let structured_content = match value {
                     Value::Object(_) => value,
+                    // A string output is the same payload as `content`, so it
+                    // carries the truncated text rather than the original. It
+                    // previously carried the untruncated value, which meant the
+                    // two halves of a response disagreed and the uncapped half
+                    // was the larger one - a client reading `structuredContent`
+                    // got bytes the cap was supposed to have removed.
+                    Value::String(_) => json!({ "value": text.clone() }),
                     other => json!({ "value": other }),
                 };
                 let mut response = json!({
@@ -2865,6 +2872,35 @@ fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyh
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_truncated_string_payload_is_truncated_in_both_halves() {
+        // `content` is capped at MAX_TOOL_TEXT_BYTES. `structuredContent` used to
+        // carry the original, so the two halves of one response disagreed and the
+        // uncapped half was the bigger one.
+        let oversized = "x".repeat(MAX_TOOL_TEXT_BYTES + 5_000);
+        let value = json!(oversized);
+
+        let mut text = value.as_str().unwrap().to_string();
+        let truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
+        assert!(truncated, "the fixture must actually exceed the cap");
+        let structured = match value {
+            Value::Object(_) => unreachable!(),
+            Value::String(_) => json!({ "value": text.clone() }),
+            other => json!({ "value": other }),
+        };
+
+        let carried = structured["value"].as_str().unwrap();
+        assert_eq!(
+            carried.len(),
+            text.len(),
+            "structuredContent must carry the same bytes as content"
+        );
+        assert!(
+            carried.len() <= MAX_TOOL_TEXT_BYTES + 32,
+            "structuredContent must respect the cap, not exceed it by 5KB"
+        );
+    }
     use super::*;
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
