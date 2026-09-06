@@ -49,7 +49,7 @@ One command indexes the repository, installs repository-scoped MCP configuration
 ## Why Open Kioku
 
 - **Facts outrank guesses.** Exact definitions, references, and dependency paths stay authoritative; heuristic matches can help retrieval but never overwrite repository truth.
-- **Uncertainty stays visible.** Missing evidence lowers confidence and is reported as a caveat — never papered over. Passing tests don't manufacture certainty the evidence doesn't support.
+- **Uncertainty stays visible.** Missing evidence lowers confidence and is reported as a caveat. Passing tests don't manufacture certainty the evidence doesn't support. Calibrated abstention is built and gated on held-out performance but is not yet enabled by default — on the frozen corpus, a task with no correct answer still returns results 80% of the time, and that number is published in [`benchmarks/retrieval-baseline.json`](benchmarks/retrieval-baseline.json).
 - **The loop closes.** Plans define edit boundaries; verification compares the actual changed files against them. A green exit code is not proof the right files changed.
 - **Local by design.** Everything lives under the repository's `.ok/` directory. Network denial is supported and fails closed.
 
@@ -66,7 +66,7 @@ One command indexes the repository, installs repository-scoped MCP configuration
 | **Architecture & contracts** | Boundaries, policies, public API/dependency constraints, change contracts |
 | **Local semantics** | Optional local embeddings, hybrid retrieval, exact-flat and persistent ANN backends |
 
-Each task is routed through these streams as independent candidates, fused with authority awareness, and compiled into a bounded `ContextPack` with provenance, omissions, and quality signals. Retrieval quality is benchmarked through the real routed path, not isolated search functions.
+Each task is routed through these streams as independent candidates, fused with authority awareness, and compiled into a bounded `ContextPack` with provenance, omissions, and quality signals. Retrieval quality is benchmarked against a frozen corpus with a held-out split and CI-enforced thresholds; the current gated benchmark measures the lexical retrieval path, and extending it to the full routed path is tracked in [#204](https://github.com/shivyadavus/open-kioku/issues/204).
 
 ## What Your Agent Gets
 
