@@ -723,7 +723,7 @@ impl<'a> ContextPackBuilder<'a> {
                         }),
                     symbol_id: result.symbol.as_ref().map(|s| s.id.clone()),
                     confidence: Confidence::Medium,
-                    message: msg.clone(),
+                    message: msg.clone().into(),
                     indexed_at: Utc::now(),
                     ..Default::default()
                 })
@@ -1681,7 +1681,7 @@ fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
         file_range: signal.file_range.clone(),
         symbol_id: None,
         confidence: signal.confidence,
-        message: signal.message.clone(),
+        message: signal.message.clone().into(),
         indexed_at: Utc::now(),
         ..Default::default()
     }
@@ -1831,7 +1831,7 @@ fn git_history_evidence_for_results(
             }),
             symbol_id: None,
             confidence: fact.confidence,
-            message: format!("{}: {}", fact.message, fact.target),
+            message: format!("{}: {}", fact.message, fact.target).into(),
             indexed_at: Utc::now(),
             ..Default::default()
         });

@@ -436,7 +436,7 @@ fn fact_for_resolution(
         confidence: resolution.confidence,
         source: format!("open-kioku-symbol-registry/{}", resolution.strategy),
         source_type: EvidenceSourceType::StaticAnalysis,
-        message,
+        message: message.into(),
     })
 }
 

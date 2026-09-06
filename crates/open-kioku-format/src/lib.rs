@@ -535,7 +535,7 @@ fn push_evidence(out: &mut String, evidence: &[Evidence]) {
                 item.id.0.clone(),
                 item.source.clone(),
                 format!("{:?}", item.confidence),
-                item.message.clone(),
+                item.message.to_string(),
             ],
         );
     }

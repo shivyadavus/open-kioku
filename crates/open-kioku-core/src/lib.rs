@@ -570,6 +570,118 @@ pub enum EvidenceSourceType {
     Heuristic,
 }
 
+/// Narration attached to a piece of evidence.
+///
+/// Backed by `Arc<str>` rather than `String` for two reasons that only matter at
+/// corpus scale. It is 16 bytes inline instead of 24; and, more importantly,
+/// cloning is a refcount bump, so the graph builder no longer duplicates every
+/// `AnalysisFact` message into the `Evidence` on its edge while the fact itself
+/// is still resident.
+///
+/// Serializes and deserializes exactly as a JSON string, so the wire format,
+/// the stored `graph_edges.json`, and the golden MCP snapshots are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EvidenceMessage(std::sync::Arc<str>);
+
+impl EvidenceMessage {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Default for EvidenceMessage {
+    fn default() -> Self {
+        Self(std::sync::Arc::from(""))
+    }
+}
+
+impl std::ops::Deref for EvidenceMessage {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for EvidenceMessage {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for EvidenceMessage {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for EvidenceMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for EvidenceMessage {
+    fn from(value: String) -> Self {
+        // `Arc::from(String)` copies into an exactly sized allocation, which also
+        // drops any spare capacity `format!` left behind.
+        Self(std::sync::Arc::from(value))
+    }
+}
+
+impl From<&str> for EvidenceMessage {
+    fn from(value: &str) -> Self {
+        Self(std::sync::Arc::from(value))
+    }
+}
+
+impl From<EvidenceMessage> for String {
+    fn from(value: EvidenceMessage) -> Self {
+        value.0.to_string()
+    }
+}
+
+impl PartialEq<str> for EvidenceMessage {
+    fn eq(&self, other: &str) -> bool {
+        &*self.0 == other
+    }
+}
+
+impl PartialEq<&str> for EvidenceMessage {
+    fn eq(&self, other: &&str) -> bool {
+        &*self.0 == *other
+    }
+}
+
+impl Serialize for EvidenceMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl JsonSchema for EvidenceMessage {
+    fn schema_name() -> String {
+        String::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        String::json_schema(generator)
+    }
+
+    fn is_referenceable() -> bool {
+        String::is_referenceable()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence {
     pub id: EvidenceId,
@@ -578,7 +690,7 @@ pub struct Evidence {
     pub file_range: Option<FileRange>,
     pub symbol_id: Option<SymbolId>,
     pub confidence: Confidence,
-    pub message: String,
+    pub message: EvidenceMessage,
     pub indexed_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_score: Option<f32>,
@@ -597,7 +709,7 @@ impl Default for Evidence {
             file_range: None,
             symbol_id: None,
             confidence: Confidence::Low,
-            message: String::new(),
+            message: EvidenceMessage::default(),
             indexed_at: Utc::now(),
             confidence_score: None,
             confidence_reason: None,
@@ -1046,7 +1158,7 @@ pub struct AnalysisFact {
     pub confidence: Confidence,
     pub source: String,
     pub source_type: EvidenceSourceType,
-    pub message: String,
+    pub message: EvidenceMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2830,16 +2942,68 @@ pub struct PatchPlan {
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         count_resolution_notes, reconcile_score_breakdown, score_component_total, Confidence,
-        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
-        FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
-        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
-        HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId, ScoreComponent,
-        SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
+        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceMessage,
+        EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
+        GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId,
+        HistorySnapshot, HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId,
+        ScoreComponent, SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn evidence_message_serializes_exactly_as_a_json_string() {
+        let text = "symbol registry resolved `RiskReport` to `crates::core::RiskReport` via unique-project-name; candidates=1";
+        let as_string = serde_json::to_string(&text.to_string()).unwrap();
+        let as_message = serde_json::to_string(&EvidenceMessage::from(text.to_string())).unwrap();
+        assert_eq!(
+            as_string, as_message,
+            "the wire format must be indistinguishable from String"
+        );
+    }
+
+    #[test]
+    fn evidence_message_round_trips_through_json() {
+        for text in [
+            "",
+            "plain",
+            "with \"quotes\" and \\backslash",
+            "multi\nline",
+            "unicode \u{1f600}",
+        ] {
+            let original = EvidenceMessage::from(text);
+            let json = serde_json::to_string(&original).unwrap();
+            let restored: EvidenceMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(original, restored, "round trip changed {text:?}");
+            assert_eq!(restored.as_str(), text);
+        }
+    }
+
+    #[test]
+    fn evidence_message_deserializes_from_a_plain_string_field() {
+        // Existing rows in graph_edges.json were written when the field was a
+        // String; they must still load.
+        let evidence: Evidence = serde_json::from_str(
+            r#"{"id":"e1","source":"s","source_type":"lexical","file_range":null,
+                "symbol_id":null,"confidence":"high","message":"stored as a plain string",
+                "indexed_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("legacy row must deserialize");
+        assert_eq!(evidence.message.as_str(), "stored as a plain string");
+    }
+
+    #[test]
+    fn cloning_an_evidence_message_shares_one_allocation() {
+        let original = EvidenceMessage::from("shared".to_string());
+        let copy = original.clone();
+        assert!(
+            std::ptr::eq(original.as_str().as_ptr(), copy.as_str().as_ptr()),
+            "clone must be a refcount bump, not a copy - this is the whole point"
+        );
+    }
 
     #[test]
     fn quality_counts_only_import_resolver_notes() {

@@ -527,7 +527,7 @@ fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
             summary.stats.last_30d,
             summary.stats.last_90d,
             summary.confidence
-        ),
+        ).into(),
         indexed_at: summary.generated_at,
         ..Default::default()
     }
@@ -555,7 +555,7 @@ fn history_signal_evidence(summary: &HistorySignalSummary, path: &Path) -> Vec<E
             message: if summary.reasons.is_empty() {
                 "bounded history signal evidence".into()
             } else {
-                summary.reasons.join("; ")
+                summary.reasons.join("; ").into()
             },
             indexed_at: summary.generated_at,
             ..Default::default()
@@ -760,7 +760,7 @@ fn service_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         }),
         symbol_id: fact.symbol_id.clone(),
         confidence: fact.confidence,
-        message: format!("{}: {}", fact.message, fact.target),
+        message: format!("{}: {}", fact.message, fact.target).into(),
         indexed_at: Utc::now(),
         ..Default::default()
     }
@@ -777,7 +777,7 @@ fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         }),
         symbol_id: fact.symbol_id.clone(),
         confidence: fact.confidence,
-        message: format!("{}: {}", fact.message, fact.target),
+        message: format!("{}: {}", fact.message, fact.target).into(),
         indexed_at: Utc::now(),
         ..Default::default()
     }
@@ -811,7 +811,7 @@ fn git_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         }),
         symbol_id: None,
         confidence: fact.confidence,
-        message: format!("{}: {}", fact.message, fact.target),
+        message: format!("{}: {}", fact.message, fact.target).into(),
         indexed_at: Utc::now(),
         ..Default::default()
     }
