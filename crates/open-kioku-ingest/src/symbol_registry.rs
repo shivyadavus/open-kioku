@@ -1,6 +1,7 @@
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
-    GraphNodeType, ImportResolution, ResolutionStatus, Symbol, SymbolId, SymbolKind,
+    GraphNodeType, ImportResolution, MessageInterner, ResolutionStatus, Symbol, SymbolId,
+    SymbolKind,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -290,6 +291,9 @@ pub fn resolve_symbol_edges(
 ) -> RegistryReport {
     let registry = SymbolRegistry::new(symbols, import_resolutions);
     let unresolved_count = AtomicUsize::new(0);
+    // Scoped to this run: dropped with the report, so nothing accumulates in a
+    // long-lived process. Shared across the rayon workers below.
+    let interner = MessageInterner::new();
 
     let per_chunk_results: Vec<_> = chunks
         .par_iter()
@@ -329,7 +333,7 @@ pub fn resolve_symbol_edges(
                     notes.push(note);
                 }
                 if let Some(fact) =
-                    fact_for_resolution(chunk, &token_use, &resolution, scip_available)
+                    fact_for_resolution(chunk, &token_use, &resolution, scip_available, &interner)
                 {
                     facts.push(fact);
                 } else if unresolved_count.load(Ordering::Relaxed) < MAX_UNRESOLVED_NOTES {
@@ -395,6 +399,7 @@ fn fact_for_resolution(
     token_use: &TokenUse,
     resolution: &Resolution,
     scip_available: bool,
+    interner: &MessageInterner,
 ) -> Option<AnalysisFact> {
     let symbol = resolution.symbol.as_ref()?;
     let edge_type = if token_use.is_call {
@@ -415,7 +420,9 @@ fn fact_for_resolution(
         message.push_str("; ambiguity: ");
         message.push_str(reason);
     }
-    let message = crate::compact_message(message);
+    // Interning supersedes compact_message here: `Arc::from(String)` already
+    // right-sizes the buffer, and repeated messages collapse to one allocation.
+    let message = interner.intern(message);
     Some(AnalysisFact {
         id: identity::stable_hash(&format!(
             "symbol-registry:{}:{}:{}:{}",
@@ -436,7 +443,7 @@ fn fact_for_resolution(
         confidence: resolution.confidence,
         source: format!("open-kioku-symbol-registry/{}", resolution.strategy),
         source_type: EvidenceSourceType::StaticAnalysis,
-        message: message.into(),
+        message,
     })
 }
 

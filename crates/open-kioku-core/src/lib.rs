@@ -682,6 +682,68 @@ impl JsonSchema for EvidenceMessage {
     }
 }
 
+/// Deduplicates evidence messages produced during one indexing run.
+///
+/// Evidence narration is highly repetitive: on a 1,751-file Java corpus the
+/// symbol registry emitted 82,444 messages drawn from only 10,246 distinct
+/// strings. Interning collapses those to one allocation each, and because
+/// [`EvidenceMessage`] is `Arc`-backed the facts then share rather than copy.
+///
+/// Sharded because the largest producer runs under `rayon`. The interner is
+/// created per indexing run and dropped with it, so nothing accumulates across
+/// runs in a long-lived process such as the MCP server.
+pub struct MessageInterner {
+    shards: Vec<std::sync::Mutex<std::collections::HashSet<EvidenceMessage>>>,
+}
+
+impl MessageInterner {
+    const SHARDS: usize = 16;
+
+    pub fn new() -> Self {
+        Self {
+            shards: (0..Self::SHARDS)
+                .map(|_| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .collect(),
+        }
+    }
+
+    /// Return a shared handle for `text`, allocating only on first sight.
+    pub fn intern(&self, text: String) -> EvidenceMessage {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.as_str().hash(&mut hasher);
+        let shard = &self.shards[(hasher.finish() as usize) % Self::SHARDS];
+
+        // A poisoned shard still holds valid entries; recovering keeps a panic in
+        // one producer from turning every later message into a fresh allocation.
+        let mut set = shard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = set.get(text.as_str()) {
+            return existing.clone();
+        }
+        let message = EvidenceMessage::from(text);
+        set.insert(message.clone());
+        message
+    }
+
+    /// Number of distinct messages held. Intended for diagnostics and tests.
+    pub fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for MessageInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence {
     pub id: EvidenceId,
@@ -2948,11 +3010,63 @@ mod tests {
         ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceMessage,
         EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch,
         GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId,
-        HistorySnapshot, HistorySummary, IndexQuality, LineRange, NodeId, Owner, ScopeId,
-        ScoreComponent, SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
+        HistorySnapshot, HistorySummary, IndexQuality, LineRange, MessageInterner, NodeId, Owner,
+        ScopeId, ScoreComponent, SourceRange, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn interner_returns_one_allocation_for_repeated_messages() {
+        let interner = MessageInterner::new();
+        let text = "symbol registry resolved `X` to `Y` via unique-project-name";
+        let first = interner.intern(text.to_string());
+        let second = interner.intern(text.to_string());
+        assert!(
+            std::ptr::eq(first.as_str().as_ptr(), second.as_str().as_ptr()),
+            "repeated messages must share one allocation"
+        );
+        assert_eq!(
+            interner.len(),
+            1,
+            "identical text must not add a second entry"
+        );
+    }
+
+    #[test]
+    fn interner_keeps_distinct_messages_apart() {
+        let interner = MessageInterner::new();
+        let a = interner.intern("first".to_string());
+        let b = interner.intern("second".to_string());
+        assert_eq!(a.as_str(), "first");
+        assert_eq!(b.as_str(), "second");
+        assert_eq!(interner.len(), 2);
+    }
+
+    #[test]
+    fn interner_is_consistent_under_concurrent_use() {
+        use std::sync::Arc as StdArc;
+        let interner = StdArc::new(MessageInterner::new());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let interner = StdArc::clone(&interner);
+                std::thread::spawn(move || {
+                    for i in 0..200 {
+                        let m = interner.intern(format!("message {}", i % 25));
+                        assert_eq!(m.as_str(), format!("message {}", i % 25));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        assert_eq!(
+            interner.len(),
+            25,
+            "concurrent interning must not create duplicate entries"
+        );
+    }
 
     #[test]
     fn evidence_message_serializes_exactly_as_a_json_string() {
