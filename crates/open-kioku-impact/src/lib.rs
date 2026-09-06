@@ -269,7 +269,7 @@ impl<'a> ImpactEngine<'a> {
                 EvidenceSourceType::Lexical
             },
             file_range: Some(FileRange {
-                path: path.to_path_buf(),
+                path: path.into(),
                 line_range: None,
             }),
             symbol_id: None,
@@ -515,7 +515,7 @@ fn churn_summary_evidence(summary: &ChurnSummary, path: &Path) -> Evidence {
         source: "open-kioku-history-churn".into(),
         source_type: EvidenceSourceType::GitHistory,
         file_range: Some(FileRange {
-            path: path.to_path_buf(),
+            path: path.into(),
             line_range: None,
         }),
         symbol_id: summary.symbol_id.clone(),
@@ -543,7 +543,7 @@ fn history_signal_evidence(summary: &HistorySignalSummary, path: &Path) -> Vec<E
             source: "open-kioku-history-signals".into(),
             source_type: EvidenceSourceType::GitHistory,
             file_range: Some(FileRange {
-                path: path.to_path_buf(),
+                path: path.into(),
                 line_range: None,
             }),
             symbol_id: None,
@@ -755,7 +755,7 @@ fn service_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         source: fact.source.clone(),
         source_type: EvidenceSourceType::StaticAnalysis,
         file_range: Some(FileRange {
-            path: path.to_path_buf(),
+            path: path.into(),
             line_range: fact.range.clone(),
         }),
         symbol_id: fact.symbol_id.clone(),
@@ -772,7 +772,7 @@ fn runtime_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         source: fact.source.clone(),
         source_type: EvidenceSourceType::Runtime,
         file_range: Some(FileRange {
-            path: path.to_path_buf(),
+            path: path.into(),
             line_range: fact.range.clone(),
         }),
         symbol_id: fact.symbol_id.clone(),
@@ -789,7 +789,7 @@ fn complexity_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         source: fact.source.clone(),
         source_type: EvidenceSourceType::StaticAnalysis,
         file_range: Some(FileRange {
-            path: path.to_path_buf(),
+            path: path.into(),
             line_range: fact.range.clone(),
         }),
         symbol_id: fact.symbol_id.clone(),
@@ -806,7 +806,7 @@ fn git_fact_evidence(fact: &AnalysisFact, path: &Path) -> Evidence {
         source: fact.source.clone(),
         source_type: EvidenceSourceType::GitHistory,
         file_range: Some(FileRange {
-            path: path.to_path_buf(),
+            path: path.into(),
             line_range: None,
         }),
         symbol_id: None,

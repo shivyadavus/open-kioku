@@ -718,7 +718,7 @@ impl<'a> ContextPackBuilder<'a> {
                         .line_range
                         .clone()
                         .map(|lr| open_kioku_core::FileRange {
-                            path: result.path.clone(),
+                            path: result.path.as_path().into(),
                             line_range: Some(lr),
                         }),
                     symbol_id: result.symbol.as_ref().map(|s| s.id.clone()),
@@ -1665,7 +1665,7 @@ fn runtime_signal_from_fact(fact: &AnalysisFact, file: &File) -> RuntimeSignal {
         kind: runtime_kind(fact),
         message: format!("{}: {}", fact.message, fact.target),
         file_range: Some(FileRange {
-            path: file.path.clone(),
+            path: file.path.as_path().into(),
             line_range: fact.range.clone(),
         }),
         occurred_at: None,
@@ -1826,7 +1826,7 @@ fn git_history_evidence_for_results(
             source: fact.source.clone(),
             source_type: EvidenceSourceType::GitHistory,
             file_range: Some(FileRange {
-                path: path.clone(),
+                path: path.as_path().into(),
                 line_range: None,
             }),
             symbol_id: None,

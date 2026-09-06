@@ -231,7 +231,7 @@ impl ContextHandleStore {
             line_suffix(&result.line_range)
         );
         let file_range = result.line_range.clone().map(|line_range| FileRange {
-            path: result.path.clone(),
+            path: result.path.clone().into(),
             line_range: Some(line_range),
         });
         self.store_original(kind, &title, file_range, &result.snippet)

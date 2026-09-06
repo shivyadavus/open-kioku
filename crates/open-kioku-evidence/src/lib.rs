@@ -600,7 +600,7 @@ mod tests {
         left.evidence_ids = vec![EvidenceId::new("z"), EvidenceId::new("a")];
         left.ambiguity = vec!["z".into(), "a".into()];
         left.source_range = Some(FileRange {
-            path: PathBuf::from("src/lib.rs"),
+            path: PathBuf::from("src/lib.rs").into(),
             line_range: Some(LineRange { start: 7, end: 7 }),
         });
         let right = proof(RelationshipProofKind::ImportBinding, 1);

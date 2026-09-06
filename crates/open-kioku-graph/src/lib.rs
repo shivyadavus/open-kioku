@@ -2,8 +2,8 @@ use chrono::Utc;
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,
     FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    RelationshipProof, RelationshipProofKind, ResolvedRelationship, SharedStr, Symbol,
-    SymbolOccurrence,
+    PathInterner, RelationshipProof, RelationshipProofKind, ResolvedRelationship, SharedPath,
+    SharedStr, Symbol, SymbolOccurrence,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -71,6 +71,9 @@ impl InMemoryGraph {
         // These source labels are fixed for the whole build. Interned once here
         // so each of the ~156k edges shares one allocation instead of turning a
         // string literal into a fresh one.
+        // 156k edges drew their paths from ~2.4k distinct files on the measured
+        // corpus; interning turns each edge's copy into a refcount bump.
+        let paths = PathInterner::new();
         let src_graph = SharedStr::from("open-kioku-graph");
         let src_imports = SharedStr::from("open-kioku-static/imports");
         let src_resolution = SharedStr::from("open-kioku-resolution");
@@ -122,7 +125,7 @@ impl InMemoryGraph {
                     source: src_graph.clone(),
                     source_type: symbol.provenance.clone(),
                     file_range: Some(FileRange {
-                        path: file.path.clone(),
+                        path: paths.intern(&file.path),
                         line_range: symbol.range.clone(),
                     }),
                     symbol_id: Some(symbol.id.clone()),
@@ -192,7 +195,7 @@ impl InMemoryGraph {
                     source: src_graph.clone(),
                     source_type: occurrence.provenance.clone(),
                     file_range: Some(FileRange {
-                        path: file.path.clone(),
+                        path: paths.intern(&file.path),
                         line_range: occurrence.range.clone(),
                     }),
                     symbol_id: Some(symbol.id.clone()),
@@ -213,7 +216,7 @@ impl InMemoryGraph {
                         1,
                     );
                     proof.source_range = Some(FileRange {
-                        path: file.path.clone(),
+                        path: paths.intern(&file.path),
                         line_range: occurrence.range.clone(),
                     });
                     proof.target_symbol_id = Some(symbol.id.clone());
@@ -253,7 +256,7 @@ impl InMemoryGraph {
             let edge_id = identity::edge_id(GraphEdgeType::Imports, &from, &target_node.id, None);
             let evidence_id = EvidenceId::new(stable_id(&format!("import-evidence:{}", edge_id.0)));
             let file_range = FileRange {
-                path: file.path.clone(),
+                path: paths.intern(&file.path),
                 line_range: import.range.clone(),
             };
             let mut edge = GraphEdge {
@@ -303,7 +306,7 @@ impl InMemoryGraph {
                 .or_else(|| {
                     files_by_id
                         .get(from_sym.file_id.0.as_str())
-                        .map(|file| file.path.clone())
+                        .map(|file| SharedPath::from(file.path.as_path()))
                 })
                 .unwrap_or_default();
             let file_range = rel.call_site.as_ref().map(|sr| FileRange {
@@ -436,7 +439,7 @@ impl InMemoryGraph {
                     source: fact.source.clone(),
                     source_type: fact.source_type.clone(),
                     file_range: fact.range.as_ref().map(|range| FileRange {
-                        path: file.path.clone(),
+                        path: paths.intern(&file.path),
                         line_range: Some(range.clone()),
                     }),
                     symbol_id: fact.symbol_id.clone(),
@@ -458,7 +461,7 @@ impl InMemoryGraph {
                     1,
                 );
                 proof.source_range = fact.range.as_ref().map(|range| FileRange {
-                    path: file.path.clone(),
+                    path: paths.intern(&file.path),
                     line_range: Some(range.clone()),
                 });
                 proof.evidence_ids.push(evidence_id.clone());
@@ -479,7 +482,7 @@ impl InMemoryGraph {
                     1,
                 );
                 proof.source_range = fact.range.as_ref().map(|range| FileRange {
-                    path: file.path.clone(),
+                    path: paths.intern(&file.path),
                     line_range: Some(range.clone()),
                 });
                 proof.evidence_ids.push(evidence_id);
@@ -910,7 +913,7 @@ mod tests {
         start_line: u32,
     ) -> Vec<RelationshipProof> {
         let range = Some(FileRange {
-            path: PathBuf::from("src/service.rs"),
+            path: PathBuf::from("src/service.rs").into(),
             line_range: Some(LineRange {
                 start: start_line,
                 end: start_line,

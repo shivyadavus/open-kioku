@@ -283,7 +283,7 @@ fn normalize_symbol_ids(ids: &mut Vec<SymbolId>) {
 
 fn call_file_range(call: &CallSite, ctx: &ResolutionContext<'_>) -> Option<FileRange> {
     Some(FileRange {
-        path: ctx.file_path.to_path_buf(),
+        path: ctx.file_path.into(),
         line_range: Some(LineRange {
             start: call.range.start_line,
             end: call.range.end_line,
