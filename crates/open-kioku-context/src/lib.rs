@@ -11,7 +11,7 @@ use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
 use open_kioku_ranking::{rerank_with_options, RankingOptions};
 use open_kioku_search_regex::search_chunks;
-use open_kioku_storage::{HistoryStore, OkStore};
+use open_kioku_storage::{HistoryStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 
 pub mod candidates;
@@ -458,6 +458,9 @@ fn write_markdown_confidence_breakdown(out: &mut String, breakdown: &ConfidenceB
 pub struct ContextPackBuilder<'a> {
     store: &'a dyn OkStore,
     history_store: Option<&'a dyn HistoryStore>,
+    /// Lexical index for impact expansion. Without it the impact engine scans every chunk in
+    /// the store in memory, which is the dominant cost of a context pack on large repositories.
+    search_index: Option<&'a dyn SearchIndex>,
     ranking_options: RankingOptions,
     abstention_policy: Option<open_kioku_core::abstention::RuntimeAbstentionPolicy>,
 }
@@ -471,9 +474,15 @@ impl<'a> ContextPackBuilder<'a> {
         Self {
             store,
             history_store: None,
+            search_index: None,
             ranking_options: RankingOptions::default(),
             abstention_policy: None,
         }
+    }
+
+    pub fn with_search_index(mut self, search_index: Option<&'a dyn SearchIndex>) -> Self {
+        self.search_index = search_index;
+        self
     }
 
     /// Activate a calibrated abstention policy (CC6). Callers must only pass a policy from
@@ -633,6 +642,7 @@ impl<'a> ContextPackBuilder<'a> {
         let impact = if expand_impact {
             if let Some(first) = primary_files.first() {
                 ImpactEngine::new(self.store as &dyn open_kioku_storage::MetadataStore)
+                    .with_search_index(self.search_index)
                     .with_history_store(self.history_store)
                     .with_graph_store(Some(self.store as &dyn open_kioku_storage::GraphStore))
                     .for_file(&first.path)?
@@ -1993,17 +2003,12 @@ fn docs_or_tests_only(results: &[SearchResult]) -> bool {
 }
 
 fn is_docs_or_test_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    path.starts_with("docs/")
-        || path.starts_with("test/")
-        || path.starts_with("tests/")
-        || path.contains("/docs/")
-        || path.ends_with(".md")
-        || path.ends_with(".mdx")
-        || path.contains("/test/")
-        || path.contains("/tests/")
-        || path.contains("_test.")
-        || path.contains("test_")
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || lower.ends_with(".md")
+        || lower.ends_with(".mdx")
+        || open_kioku_core::is_test_path(path)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2013,6 +2018,9 @@ struct TaskSearchIntent {
     ticket_anchors: Vec<String>,
     path_anchors: Vec<String>,
     lexical_anchors: Vec<String>,
+    /// The task is about tests, so test files are legitimate primary context rather than
+    /// lower-tier support material.
+    wants_tests: bool,
     documentation_target: bool,
 }
 
@@ -2020,6 +2028,7 @@ impl TaskSearchIntent {
     fn parse(task: &str) -> Self {
         let mut intent = Self {
             documentation_target: task_targets_documentation(task),
+            wants_tests: open_kioku_core::query_wants_tests(task),
             ..Self::default()
         };
         let lower = task.to_ascii_lowercase();
@@ -2223,8 +2232,9 @@ fn rerank_fused_for_task_with_options(
                     .cmp(&retrieval_authority_for_result(diagnostics, a))
             })
             .then_with(|| {
-                context_quality_tier(&b.path, ranking_options)
-                    .cmp(&context_quality_tier(&a.path, ranking_options))
+                context_quality_tier(&b.path, ranking_options, intent.wants_tests).cmp(
+                    &context_quality_tier(&a.path, ranking_options, intent.wants_tests),
+                )
             })
             .then_with(|| {
                 b.score
@@ -2236,8 +2246,15 @@ fn rerank_fused_for_task_with_options(
     results
 }
 
-fn context_quality_tier(path: &std::path::Path, options: &RankingOptions) -> u8 {
-    let normalized = normalize_path(path).to_ascii_lowercase();
+/// Post-fusion quality tier: 2 for source, 1 for docs and (unless the task asks for them) tests,
+/// 0 for generated or vendored code. Tests are demoted rather than dropped: on a large Java
+/// repository they outnumber source files and match the same vocabulary, so without this tier
+/// an ordinary "geoip processor" task returns twenty test files and no processor.
+fn context_quality_tier(path: &std::path::Path, options: &RankingOptions, wants_tests: bool) -> u8 {
+    // Test detection needs the original case: `internalClusterTest` and `GeoIpDownloaderIT`
+    // are recognised at a CamelCase boundary that lowercasing erases.
+    let original = normalize_path(path);
+    let normalized = original.to_ascii_lowercase();
     let boundary_fit_enabled = ranking_signal_enabled(
         options,
         open_kioku_ranking::RankingSignal::BoundaryFit,
@@ -2252,8 +2269,11 @@ fn context_quality_tier(path: &std::path::Path, options: &RankingOptions) -> u8 
     if path_quality_enabled && is_generated_or_vendor_path(&normalized) {
         return 0;
     }
-    if boundary_fit_enabled && is_docs_or_test_path(&normalized) {
-        return 1;
+    if boundary_fit_enabled {
+        let is_test = open_kioku_core::is_test_path(&original);
+        if (is_test && !wants_tests) || (!is_test && is_docs_or_test_path(&normalized)) {
+            return 1;
+        }
     }
     2
 }
@@ -3452,23 +3472,105 @@ mod tests {
         assert!(!prompt.contains("fused_score"));
     }
 
+    fn tier_probe(path: &str, score: f32) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange { start: 1, end: 10 }),
+            snippet: "class GeoIpProcessor implements Processor".into(),
+            symbol: None,
+            score,
+            match_reason: "probe".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn source_outranks_equally_authoritative_tests_unless_the_task_wants_tests() {
+        let source = "modules/ip-location/src/main/java/org/es/GeoIpProcessor.java";
+        let unit_test = "modules/ip-location/src/test/java/org/es/GeoIpProcessorTests.java";
+        let cluster_test =
+            "modules/ip-location/src/internalClusterTest/java/org/es/GeoIpDownloaderIT.java";
+        // The tests carry the higher fused score: on a real repository they were voted for by
+        // both the lexical and the validation stream while the processor had one vote.
+        let candidates = || {
+            vec![
+                tier_probe(cluster_test, 0.9),
+                tier_probe(unit_test, 0.8),
+                tier_probe(source, 0.3),
+            ]
+        };
+
+        let ordered = rerank_fused_for_task(
+            candidates(),
+            &TaskSearchIntent::parse("geoip processor"),
+            &RetrievalDiagnostics::default(),
+        );
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|r| r.path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                source.to_string(),
+                cluster_test.to_string(),
+                unit_test.to_string()
+            ]
+        );
+
+        let ordered = rerank_fused_for_task(
+            candidates(),
+            &TaskSearchIntent::parse("tests for the geoip processor"),
+            &RetrievalDiagnostics::default(),
+        );
+        assert_eq!(
+            ordered
+                .first()
+                .map(|r| r.path.to_string_lossy().to_string()),
+            Some(cluster_test.to_string()),
+            "a task about tests lets the best-scoring test lead"
+        );
+    }
+
     #[test]
     fn post_fusion_quality_tier_preserves_boundary_and_path_quality_policy() {
         let options = RankingOptions::default();
         assert_eq!(
-            context_quality_tier(Path::new("src/service.rs"), &options),
+            context_quality_tier(Path::new("src/service.rs"), &options, false),
             2
         );
         assert_eq!(
-            context_quality_tier(Path::new("tests/service_test.rs"), &options),
+            context_quality_tier(Path::new("tests/service_test.rs"), &options, false),
             1
         );
         assert_eq!(
-            context_quality_tier(Path::new("src/generated/service.rs"), &options),
+            context_quality_tier(
+                Path::new(
+                    "modules/ip-location/src/internalClusterTest/java/GeoIpDownloaderIT.java"
+                ),
+                &options,
+                false
+            ),
+            1
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("tests/service_test.rs"), &options, true),
+            2,
+            "a task about tests keeps test files in the source tier"
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("docs/guide.md"), &options, true),
+            1,
+            "wanting tests does not promote docs"
+        );
+        assert_eq!(
+            context_quality_tier(Path::new("src/generated/service.rs"), &options, false),
             0
         );
         assert_eq!(
-            context_quality_tier(Path::new("vendor/service.rs"), &options),
+            context_quality_tier(Path::new("vendor/service.rs"), &options, false),
             0
         );
 
@@ -3477,7 +3579,7 @@ mod tests {
             ..RankingOptions::default()
         };
         assert_eq!(
-            context_quality_tier(Path::new("src/generated/service.rs"), &baseline),
+            context_quality_tier(Path::new("src/generated/service.rs"), &baseline, false),
             2
         );
 
@@ -3488,7 +3590,11 @@ mod tests {
             ..RankingOptions::default()
         };
         assert_eq!(
-            context_quality_tier(Path::new("src/generated/service.rs"), &without_path_quality,),
+            context_quality_tier(
+                Path::new("src/generated/service.rs"),
+                &without_path_quality,
+                false
+            ),
             2
         );
     }

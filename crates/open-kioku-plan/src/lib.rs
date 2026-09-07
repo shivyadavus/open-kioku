@@ -1129,17 +1129,12 @@ fn docs_or_tests_only(results: &[SearchResult]) -> bool {
 }
 
 fn is_docs_or_test_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    path.starts_with("docs/")
-        || path.starts_with("test/")
-        || path.starts_with("tests/")
-        || path.contains("/docs/")
-        || path.ends_with(".md")
-        || path.ends_with(".mdx")
-        || path.contains("/test/")
-        || path.contains("/tests/")
-        || path.contains("_test.")
-        || path.contains("test_")
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || lower.ends_with(".md")
+        || lower.ends_with(".mdx")
+        || open_kioku_core::is_test_path(path)
 }
 
 fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
@@ -1652,13 +1647,7 @@ fn result_has_runtime_corroboration(result: &SearchResult) -> bool {
 }
 
 fn is_test_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .contains("test")
-    })
+    open_kioku_core::is_test_path(&path.to_string_lossy())
 }
 
 fn is_doc_path(path: &Path) -> bool {
