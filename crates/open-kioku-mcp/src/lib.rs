@@ -118,6 +118,11 @@ fn build_context_for_task(
             }
         }
     }
+    let builder = builder.with_search_index(
+        lexical_index_source
+            .as_ref()
+            .map(|source| source.index() as &dyn open_kioku_storage::SearchIndex),
+    );
     let semantic_source = config
         .semantic
         .enabled
@@ -533,7 +538,16 @@ async fn dispatch(
         "impact_analysis" => {
             require_authoritative_relationships(store)?;
             let path = required_str(&params, "path")?;
+            let search_dir = default_index_dir(repo);
+            let search_index = TantivySearchIndex::exists(&search_dir)
+                .then(|| TantivySearchIndex::open_or_create(&search_dir))
+                .transpose()?;
             let mut report = ImpactEngine::new(store)
+                .with_search_index(
+                    search_index
+                        .as_ref()
+                        .map(|index| index as &dyn open_kioku_storage::SearchIndex),
+                )
                 .with_history_store(Some(store))
                 .with_graph_store(Some(store))
                 .for_file(Path::new(path))?;

@@ -87,6 +87,12 @@ fn build_context_pack(
         }
     }
 
+    let builder = builder.with_search_index(
+        lexical_index_source
+            .as_ref()
+            .map(|source| source.index() as &dyn open_kioku_storage::SearchIndex),
+    );
+
     let semantic_source = config.semantic.enabled.then(|| SemanticContextCandidateSource {
         manager: SemanticIndexManager::new(repo, store as &dyn MetadataStore, &config.semantic),
     });
