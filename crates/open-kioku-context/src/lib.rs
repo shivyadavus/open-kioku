@@ -857,6 +857,29 @@ pub fn apply_calibrated_abstention(
         "Calibrated abstention: {explain}. {}",
         pack.confidence_summary
     );
+
+    // Abstaining means returning nothing, not returning everything with a
+    // disclaimer attached. This previously set the reason and the caveat above
+    // and then handed over every selected file unchanged - a pack whose own
+    // caveat read "not as an answer" while carrying the answer.
+    //
+    // The shape below is the contract the deterministic no-match path already
+    // satisfies and that `cc6_abstention_smoke` already asserts: no primary or
+    // supporting context, no derived edges, signals, tests, boundary or
+    // validation plan. Diagnostics, caveats, evidence and negative evidence are
+    // deliberately kept - they are the explanation for the abstention, and
+    // discarding them would leave a caller unable to tell an abstention from an
+    // empty repository.
+    pack.primary_files.clear();
+    pack.primary_symbols.clear();
+    pack.supporting_files.clear();
+    pack.dependency_edges.clear();
+    pack.runtime_signals.clear();
+    pack.test_candidates.clear();
+    pack.validation_plan.tests.clear();
+    pack.recommended_change_boundary.allowed_files.clear();
+    pack.recommended_change_boundary.caution_files.clear();
+    pack.recommended_change_boundary.forbidden_files.clear();
 }
 
 fn bounded_primary_results(primary: Vec<SearchResult>, limit: usize) -> Vec<SearchResult> {
