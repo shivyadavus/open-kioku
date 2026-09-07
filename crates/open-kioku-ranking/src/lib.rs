@@ -446,8 +446,17 @@ fn is_test_path(path: &str) -> bool {
 /// costs to be audible. Rescaling here without normalizing text_relevance just
 /// silences the signal. Tracked separately.
 fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) -> f32 {
-    // Docs are still not edit targets. Tests are.
+    // Docs are never edit targets.
     if is_docs_path(path) {
+        return 0.0;
+    }
+    // Tests are edit targets only when the task is about tests. Barring them
+    // unconditionally broke `code_to_test` queries, where the gold answer *is*
+    // a test file. Admitting them unconditionally - which is what I did first -
+    // broke ordinary queries on real repositories: "geoip processor" returned
+    // four test helpers before the processor, because a large Java project has
+    // far more test files than source files and they match the same terms.
+    if is_test_path(path) && !query.map(query_wants_tests).unwrap_or(false) {
         return 0.0;
     }
     if query
@@ -484,6 +493,29 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     } else {
         0.63
     }
+}
+
+/// Whether the task is asking about tests rather than about source.
+///
+/// Deliberately narrow: the cost of a false positive is promoting test files
+/// over source for an ordinary query, which is the regression this guards.
+fn query_wants_tests(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    query
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            matches!(
+                word,
+                "test"
+                    | "tests"
+                    | "testing"
+                    | "spec"
+                    | "specs"
+                    | "covering"
+                    | "coverage"
+                    | "fixture"
+            )
+        })
 }
 
 fn is_docs_path(path: &str) -> bool {
