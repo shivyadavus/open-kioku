@@ -126,6 +126,16 @@ pub struct SqliteStore {
     /// `data_version` so writes from other connections invalidate it. The manifest is several
     /// megabytes of JSON on a large repository and was re-parsed on every relationship query.
     semantics_verdict: Mutex<Option<(i64, std::result::Result<(), String>)>>,
+    /// Co-change edges and file hotspots for similar-change scoring, keyed by `data_version`.
+    /// `similar_changes` runs once per primary result while a context pack is annotated (about
+    /// twenty times per pack) and each call re-read and re-parsed both tables; on a 10k-file
+    /// repository with history that was ~5 s of a 10 s pack.
+    similarity_statics: Mutex<Option<(i64, std::sync::Arc<SimilarityStatics>)>>,
+}
+
+struct SimilarityStatics {
+    cochange_edges: Vec<GitCochangeEdge>,
+    hotspots: BTreeMap<String, ChurnSummary>,
 }
 
 impl SqliteStore {
@@ -148,6 +158,7 @@ impl SqliteStore {
             path,
             connection: Mutex::new(connection),
             semantics_verdict: Mutex::new(None),
+            similarity_statics: Mutex::new(None),
         };
         store.initialize()?;
         Ok(store)
@@ -172,6 +183,34 @@ impl SqliteStore {
         if let Ok(mut verdict) = self.semantics_verdict.lock() {
             *verdict = None;
         }
+    }
+
+    fn invalidate_similarity_statics(&self) {
+        if let Ok(mut statics) = self.similarity_statics.lock() {
+            *statics = None;
+        }
+    }
+
+    /// The caller already holds the connection lock; `data_version` is read through it.
+    fn similarity_statics(&self, conn: &Connection) -> Result<std::sync::Arc<SimilarityStatics>> {
+        let version: i64 = conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(storage_err)?;
+        let mut cache = self
+            .similarity_statics
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        if let Some((cached_version, statics)) = cache.as_ref() {
+            if *cached_version == version {
+                return Ok(statics.clone());
+            }
+        }
+        let statics = std::sync::Arc::new(SimilarityStatics {
+            cochange_edges: load_similarity_cochange_edges(conn)?,
+            hotspots: load_similarity_file_hotspots(conn)?,
+        });
+        *cache = Some((version, statics.clone()));
+        Ok(statics)
     }
 
     fn churn_by_kind_and_key<F>(
@@ -1178,6 +1217,7 @@ impl HistoryStore for SqliteStore {
         }
 
         tx.commit().map_err(storage_err)?;
+        self.invalidate_similarity_statics();
         Ok(())
     }
 
@@ -1645,8 +1685,8 @@ impl HistoryStore for SqliteStore {
         }
         let file_touches = load_similarity_file_touches(&conn, scan_limit)?;
         let symbol_touches = load_similarity_symbol_touches(&conn, scan_limit)?;
-        let cochange_edges = load_similarity_cochange_edges(&conn)?;
-        let hotspots = load_similarity_file_hotspots(&conn)?;
+        let statics = self.similarity_statics(&conn)?;
+        let hotspots: &BTreeMap<String, ChurnSummary> = &statics.hotspots;
 
         let mut file_touches_by_commit: BTreeMap<String, Vec<GitFileTouch>> = BTreeMap::new();
         for touch in file_touches {
@@ -1666,7 +1706,7 @@ impl HistoryStore for SqliteStore {
 
         let mut query_neighbors: BTreeMap<String, Vec<GitCochangeEdge>> = BTreeMap::new();
         let mut sample_edges_by_commit: BTreeMap<String, Vec<GitCochangeEdge>> = BTreeMap::new();
-        for edge in cochange_edges {
+        for edge in statics.cochange_edges.iter().cloned() {
             let path = history_path(&edge.path)?;
             let cochanged_path = history_path(&edge.cochanged_path)?;
             let touches_query_path =
@@ -1718,7 +1758,7 @@ impl HistoryStore for SqliteStore {
                 &query_neighbors,
                 &query_related_paths,
                 &sample_edges_by_commit,
-                &hotspots,
+                hotspots,
                 &commit,
                 file_touches,
                 symbol_touches,
