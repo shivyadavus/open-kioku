@@ -12,7 +12,7 @@
 10. Import configured SCIP indexes when present, merging SCIP symbols and occurrences with extracted facts.
 11. Store files, symbols, chunks, tests, imports, occurrences, and the index manifest in SQLite.
 12. Build and persist graph nodes and edges in SQLite.
-13. Rebuild the Tantivy BM25 index from indexed chunks and symbols.
+13. Rebuild the Tantivy BM25 index from indexed chunks and symbols. Identifiers are indexed whole and as their CamelCase/snake_case parts (`FieldMapper` -> `fieldmapper`, `field`, `mapper`); parts live in a separate field queried at half weight so a whole-word match always outranks a part match. Indexes built before this keep working until the next `ok index`.
 14. Build search results from Tantivy, falling back to SQLite-backed in-memory lexical search if a legacy index is missing.
 15. Produce context, impact, test, and architecture answers from indexed facts.
 
