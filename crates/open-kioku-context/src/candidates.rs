@@ -56,6 +56,12 @@ impl<T: SearchIndex> SearchIndexCandidateSource<T> {
     pub fn new(index: T) -> Self {
         Self { index }
     }
+
+    /// The wrapped index, so callers can also hand it to the impact engine instead of letting
+    /// impact expansion fall back to scanning the whole store in memory.
+    pub fn index(&self) -> &T {
+        &self.index
+    }
 }
 
 impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
