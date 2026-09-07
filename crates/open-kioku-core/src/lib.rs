@@ -458,22 +458,26 @@ fn has_camel_test_suffix(value: &str) -> bool {
 /// Deliberately narrow: the cost of a false positive is promoting test files
 /// over source for an ordinary query, which is the regression this guards.
 pub fn query_wants_tests(query: &str) -> bool {
-    query
-        .to_ascii_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| {
-            matches!(
-                word,
-                "test"
-                    | "tests"
-                    | "testing"
-                    | "spec"
-                    | "specs"
-                    | "covering"
-                    | "coverage"
-                    | "fixture"
-            )
-        })
+    // Whole words and CamelCase parts: "Add BenchmarkHashString" is about a benchmark, which in
+    // Go and Rust lives in the test files; "LatestFoo" splits to latest/foo and stays clear.
+    let mut tokens = std::collections::HashSet::new();
+    collect_identifier_tokens(query, &mut tokens);
+    tokens.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "test"
+                | "tests"
+                | "testing"
+                | "spec"
+                | "specs"
+                | "covering"
+                | "coverage"
+                | "fixture"
+                | "benchmark"
+                | "benchmarks"
+                | "bench"
+        )
+    })
 }
 
 /// Split text into lowercase word tokens, breaking camelCase and snake_case so
@@ -4099,6 +4103,7 @@ mod test_path_tests {
     fn query_wants_tests_is_narrow() {
         assert!(query_wants_tests("add tests for the geoip processor"));
         assert!(query_wants_tests("which spec covers routing"));
+        assert!(query_wants_tests("identity: Add BenchmarkHashString"));
         assert!(!query_wants_tests("geoip processor"));
         assert!(!query_wants_tests("latest cluster state publication"));
     }
