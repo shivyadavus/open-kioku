@@ -13,6 +13,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value,
 };
+use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 use tantivy::{doc, Index};
 
 pub struct TantivySearchIndex {
@@ -38,6 +39,11 @@ impl TantivySearchIndex {
             Ok(index) => index,
             Err(_) => Index::create_in_dir(path, schema.clone()).map_err(search_err)?,
         };
+        // Tokenizers are not persisted with the index; every open must register ours before
+        // the schema (old or new) can resolve it by name.
+        index
+            .tokenizers()
+            .register(CODE_TOKENIZER, CodeIdentifierTokenizer);
         let fields = fields(index.schema())?;
         Ok(Self { index, fields })
     }
@@ -337,14 +343,130 @@ fn schema() -> Schema {
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         )
         .set_stored();
+    // Code text is indexed whole and as identifier parts. The path field deliberately is not:
+    // measured on the 490-case commit-derived corpus, parts in content lifted MRR from 0.235 to
+    // 0.393 (dev) / 0.202 to 0.337 (holdout), while also splitting paths lowered both again
+    // (0.381 / 0.330) by letting a short file name that shares a part outrank a whole-word
+    // match in content.
+    let code_text = TextOptions::default()
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer(CODE_TOKENIZER)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+        .set_stored();
     let stored_text = TextOptions::default().set_stored();
     let mut builder = Schema::builder();
-    builder.add_text_field("path", text.clone());
-    builder.add_text_field("content", text.clone());
+    builder.add_text_field("path", text);
+    builder.add_text_field("content", code_text.clone());
     builder.add_text_field("chunk_json", stored_text.clone());
     builder.add_text_field("file_json", stored_text.clone());
-    builder.add_text_field("symbol_json", text.clone());
+    builder.add_text_field("symbol_json", code_text);
     builder.build()
+}
+
+/// Name of the identifier-aware tokenizer used by code text fields.
+///
+/// Indexes built before it existed carry `default` in their on-disk schema and keep working
+/// unchanged; the next `ok index` rebuild switches them over.
+const CODE_TOKENIZER: &str = "code_identifiers";
+const MAX_TOKEN_LEN: usize = 40;
+
+/// Tokenizer that indexes each identifier both whole and as its CamelCase / snake_case parts,
+/// emitted at the same position so phrase queries still line up.
+///
+/// `FieldMapper` becomes `fieldmapper`, `field`, `mapper`; `max_new_tokens` becomes `max`,
+/// `new`, `tokens`. Without this a prose task like "batch mappings" cannot reach
+/// `FieldMapper.java` at all: the default tokenizer only knows the whole word, and query-side
+/// splitting (which we already do) cannot recover parts the index never stored. On the
+/// identifier-heavy Java corpus this is the single largest lexical lever measured in the
+/// literature (+28% NDCG@10 for Java, +82% for Go, ~0 for Python, which snake_case already
+/// splits).
+#[derive(Clone, Default)]
+struct CodeIdentifierTokenizer;
+
+struct CodeIdentifierTokenStream {
+    tokens: Vec<Token>,
+    index: usize,
+}
+
+impl Tokenizer for CodeIdentifierTokenizer {
+    type TokenStream<'a> = CodeIdentifierTokenStream;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        CodeIdentifierTokenStream {
+            tokens: code_identifier_tokens(text),
+            index: usize::MAX,
+        }
+    }
+}
+
+impl TokenStream for CodeIdentifierTokenStream {
+    fn advance(&mut self) -> bool {
+        self.index = self.index.wrapping_add(1);
+        self.index < self.tokens.len()
+    }
+
+    fn token(&self) -> &Token {
+        &self.tokens[self.index]
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.tokens[self.index]
+    }
+}
+
+fn code_identifier_tokens(text: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut position = 0usize;
+    let mut start: Option<usize> = None;
+    let emit = |start: usize, end: usize, position: usize, tokens: &mut Vec<Token>| {
+        let word = &text[start..end];
+        // Same cap as tantivy's default analyzer: minified blobs and hashes are not words.
+        if word.len() > MAX_TOKEN_LEN {
+            return;
+        }
+        let whole = word.to_lowercase();
+        tokens.push(Token {
+            offset_from: start,
+            offset_to: end,
+            position,
+            text: whole.clone(),
+            position_length: 1,
+        });
+        let parts = if word.is_ascii() {
+            split_identifier(word)
+        } else {
+            Vec::new()
+        };
+        if parts.len() > 1 {
+            for part in parts {
+                if part != whole {
+                    tokens.push(Token {
+                        offset_from: start,
+                        offset_to: end,
+                        position,
+                        text: part,
+                        position_length: 1,
+                    });
+                }
+            }
+        }
+    };
+    for (offset, ch) in text.char_indices() {
+        if ch.is_alphanumeric() {
+            if start.is_none() {
+                start = Some(offset);
+            }
+        } else if let Some(begin) = start.take() {
+            emit(begin, offset, position, &mut tokens);
+            position += 1;
+        }
+    }
+    if let Some(begin) = start {
+        emit(begin, text.len(), position, &mut tokens);
+    }
+    tokens
 }
 
 fn query_variants(query: &str) -> Vec<String> {
@@ -544,6 +666,63 @@ fn snippet(text: &str, query: &str) -> String {
 
 fn search_err(err: tantivy::TantivyError) -> OkError {
     OkError::Search(err.to_string())
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::code_identifier_tokens;
+
+    fn texts(input: &str) -> Vec<(String, usize)> {
+        code_identifier_tokens(input)
+            .into_iter()
+            .map(|token| (token.text, token.position))
+            .collect()
+    }
+
+    #[test]
+    fn identifiers_are_indexed_whole_and_as_parts_at_one_position() {
+        assert_eq!(
+            texts("FieldMapper max_new_tokens"),
+            vec![
+                ("fieldmapper".into(), 0),
+                ("field".into(), 0),
+                ("mapper".into(), 0),
+                ("max".into(), 1),
+                ("new".into(), 2),
+                ("tokens".into(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_words_acronyms_and_paths_behave_like_the_default_tokenizer() {
+        assert_eq!(
+            texts("modules/ip-location/GeoIpProcessor.java"),
+            vec![
+                ("modules".into(), 0),
+                ("ip".into(), 1),
+                ("location".into(), 2),
+                ("geoipprocessor".into(), 3),
+                ("geo".into(), 3),
+                ("ip".into(), 3),
+                ("processor".into(), 3),
+                ("java".into(), 4),
+            ]
+        );
+        assert_eq!(texts("HTTP"), vec![("http".into(), 0)]);
+        assert_eq!(
+            texts("Ünïcode wörd"),
+            vec![("ünïcode".into(), 0), ("wörd".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn overlong_blobs_are_dropped() {
+        let blob = "a".repeat(41);
+        assert!(texts(&format!("{blob} ok"))
+            .iter()
+            .all(|(text, _)| text == "ok"));
+    }
 }
 
 #[cfg(test)]
