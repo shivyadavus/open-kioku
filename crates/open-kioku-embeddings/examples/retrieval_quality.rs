@@ -104,6 +104,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let neural_profiles = [
         (
+            "gte-modernbert-base-768",
+            LocalNeuralModel::GteModernBertBase,
+            768usize,
+        ),
+        (
             "qwen3-embedding-0.6b-768",
             LocalNeuralModel::Qwen3Embedding06B,
             768usize,
@@ -142,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if providers.is_empty() {
         return Err(format!(
-            "OK_CC5_BENCH_ONLY={only:?} selected no provider; use all, local-hash-384, qwen3-embedding-0.6b-768, or jina-embeddings-v2-base-code-768"
+            "OK_CC5_BENCH_ONLY={only:?} selected no provider; use all, local-hash-384, gte-modernbert-base-768, qwen3-embedding-0.6b-768, or jina-embeddings-v2-base-code-768"
         )
         .into());
     }

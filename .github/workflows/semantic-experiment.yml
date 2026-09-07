@@ -21,8 +21,8 @@ on:
       after:
         default: "1500"
       model:
-        description: fastembed model name (jina-embeddings-v2-base-code, or another supported by open-kioku-embeddings)
-        default: jina-embeddings-v2-base-code
+        description: local neural model name (gte-modernbert-base, jina-embeddings-v2-base-code, qwen3-embedding-0.6b)
+        default: gte-modernbert-base
       dimensions:
         default: "768"
       split:
