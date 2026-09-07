@@ -122,6 +122,10 @@ CREATE INDEX IF NOT EXISTS idx_history_hotspots_symbol
 pub struct SqliteStore {
     path: PathBuf,
     connection: Mutex<Connection>,
+    /// Cached verdict of `require_authoritative_relationship_semantics`, keyed by SQLite's
+    /// `data_version` so writes from other connections invalidate it. The manifest is several
+    /// megabytes of JSON on a large repository and was re-parsed on every relationship query.
+    semantics_verdict: Mutex<Option<(i64, std::result::Result<(), String>)>>,
 }
 
 impl SqliteStore {
@@ -143,6 +147,7 @@ impl SqliteStore {
         let store = Self {
             path,
             connection: Mutex::new(connection),
+            semantics_verdict: Mutex::new(None),
         };
         store.initialize()?;
         Ok(store)
@@ -150,6 +155,23 @@ impl SqliteStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// SQLite's `PRAGMA data_version`: changes when another connection commits. Our own
+    /// writes do not move it, so manifest writers call `invalidate_semantics_verdict`.
+    fn data_version(&self) -> Result<i64> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(storage_err)
+    }
+
+    fn invalidate_semantics_verdict(&self) {
+        if let Ok(mut verdict) = self.semantics_verdict.lock() {
+            *verdict = None;
+        }
     }
 
     fn churn_by_kind_and_key<F>(
@@ -377,6 +399,7 @@ impl MetadataStore for SqliteStore {
             params![json],
         )
         .map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
         Ok(())
     }
 
@@ -405,6 +428,7 @@ impl MetadataStore for SqliteStore {
         tx.execute("DELETE FROM document_sections", [])
             .map_err(storage_err)?;
         tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
         Ok(())
     }
 
@@ -607,6 +631,7 @@ impl MetadataStore for SqliteStore {
         )?;
         insert_graph_rows(&tx, update.graph_nodes, update.graph_edges)?;
         tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
         Ok(())
     }
 
@@ -848,6 +873,44 @@ impl MetadataStore for SqliteStore {
                 .map_err(storage_err)?;
             let rows = stmt
                 .query_map(params![limit], |row| row.get::<_, String>(0))
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        };
+        Ok(rows)
+    }
+
+    fn analysis_facts_for_file(
+        &self,
+        file_id: &FileId,
+        source_type: Option<EvidenceSourceType>,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let limit = limit.min(i64::MAX as usize) as i64;
+        let rows = if let Some(source_type) = source_type {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM analysis_facts WHERE file_id = ?1 AND source_type = ?2 ORDER BY target LIMIT ?3",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(
+                    params![&file_id.0, source_type_name(&source_type), limit],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(storage_err)?;
+            collect_json(rows)?
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT json FROM analysis_facts WHERE file_id = ?1 ORDER BY target LIMIT ?2",
+                )
+                .map_err(storage_err)?;
+            let rows = stmt
+                .query_map(params![&file_id.0, limit], |row| row.get::<_, String>(0))
                 .map_err(storage_err)?;
             collect_json(rows)?
         };
@@ -2570,7 +2633,28 @@ fn clamp_limit(limit: usize) -> usize {
 }
 
 fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<()> {
-    let manifest = MetadataStore::manifest(store)?;
+    let data_version = store.data_version()?;
+    if let Some((cached_version, verdict)) = store
+        .semantics_verdict
+        .lock()
+        .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?
+        .as_ref()
+    {
+        if *cached_version == data_version {
+            return verdict.clone().map_err(OkError::Index);
+        }
+    }
+    let verdict = compute_relationship_semantics_verdict(store);
+    *store
+        .semantics_verdict
+        .lock()
+        .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))? =
+        Some((data_version, verdict.clone()));
+    verdict.map_err(OkError::Index)
+}
+
+fn compute_relationship_semantics_verdict(store: &SqliteStore) -> std::result::Result<(), String> {
+    let manifest = MetadataStore::manifest(store).map_err(|err| err.to_string())?;
     let compatibility = open_kioku_core::classify_analysis_semantics(
         manifest
             .as_ref()
@@ -2580,7 +2664,7 @@ fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<(
     if compatibility.status.allows_authoritative_relationships() {
         return Ok(());
     }
-    Err(OkError::Index(format!(
+    Err(format!(
         "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; {}",
         compatibility.status,
         compatibility.reasons.join("; "),
@@ -2590,7 +2674,7 @@ fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<(
             .unwrap_or("missing"),
         compatibility.current_fingerprint,
         compatibility.recommended_action
-    )))
+    ))
 }
 
 impl GraphStore for SqliteStore {

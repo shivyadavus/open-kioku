@@ -81,6 +81,22 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<Vec<AnalysisFact>> {
         Ok(Vec::new())
     }
+    /// Facts attached to one file. Stores with an index on `file_id` should override this: the
+    /// default scans every fact of the source type, which on a large repository is a sort of
+    /// hundreds of thousands of rows per call.
+    fn analysis_facts_for_file(
+        &self,
+        file_id: &FileId,
+        source_type: Option<EvidenceSourceType>,
+        limit: usize,
+    ) -> Result<Vec<AnalysisFact>> {
+        Ok(self
+            .analysis_facts(source_type, usize::MAX)?
+            .into_iter()
+            .filter(|fact| &fact.file_id == file_id)
+            .take(limit)
+            .collect())
+    }
     fn implementation_facts_for_target(
         &self,
         target: &str,

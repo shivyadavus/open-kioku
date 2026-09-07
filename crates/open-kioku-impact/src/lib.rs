@@ -415,24 +415,14 @@ fn runtime_facts_for_file(
     store: &dyn MetadataStore,
     file_id: &FileId,
 ) -> Result<Vec<AnalysisFact>> {
-    Ok(store
-        .analysis_facts(Some(EvidenceSourceType::Runtime), 500)?
-        .into_iter()
-        .filter(|fact| &fact.file_id == file_id)
-        .take(12)
-        .collect())
+    store.analysis_facts_for_file(file_id, Some(EvidenceSourceType::Runtime), 12)
 }
 
 fn git_history_facts_for_file(
     store: &dyn MetadataStore,
     file_id: &FileId,
 ) -> Result<Vec<AnalysisFact>> {
-    Ok(store
-        .analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?
-        .into_iter()
-        .filter(|fact| &fact.file_id == file_id)
-        .take(12)
-        .collect())
+    store.analysis_facts_for_file(file_id, Some(EvidenceSourceType::GitHistory), 12)
 }
 
 fn service_boundary_facts_for_file(
@@ -440,9 +430,13 @@ fn service_boundary_facts_for_file(
     file_id: &FileId,
 ) -> Result<Vec<AnalysisFact>> {
     Ok(store
-        .analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?
+        .analysis_facts_for_file(
+            file_id,
+            Some(EvidenceSourceType::StaticAnalysis),
+            usize::MAX,
+        )?
         .into_iter()
-        .filter(|fact| &fact.file_id == file_id && is_service_boundary_fact(fact))
+        .filter(is_service_boundary_fact)
         .take(24)
         .collect())
 }
@@ -452,9 +446,13 @@ fn complexity_facts_for_file(
     file_id: &FileId,
 ) -> Result<Vec<AnalysisFact>> {
     Ok(store
-        .analysis_facts(Some(EvidenceSourceType::StaticAnalysis), 10_000)?
+        .analysis_facts_for_file(
+            file_id,
+            Some(EvidenceSourceType::StaticAnalysis),
+            usize::MAX,
+        )?
         .into_iter()
-        .filter(|fact| &fact.file_id == file_id && is_complexity_fact(fact))
+        .filter(is_complexity_fact)
         .take(24)
         .collect())
 }
