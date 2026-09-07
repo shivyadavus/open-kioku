@@ -51,6 +51,8 @@ Positive cases report macro-averaged:
 
 No-gold cases are **not** folded into positive recall or MRR. They report a separate no-gold false-positive rate. This is deliberate: natural no-gold behavior is a distinct product problem and must not be hidden inside an aggregate retrieval score.
 
+A no-gold case counts as a false positive when the strategy returned results **and stood behind them**: for the fusion strategy that means the context pack's overall confidence is above `Low` (`returned_confident` in the case report). Lexical search finds some word overlap for almost any prose, so "returned anything" is not the product's abstention signal; a pack that reports `Low` confidence has already told the caller not to trust it. Strategies that build no context pack have no confidence and fall back to "returned anything". Both `returned_any` and `returned_confident` are recorded per case.
+
 Reports also include per-language, per-task-family, development/holdout, and observational p50/p95 retrieval latency.
 
 ### File-level definitions
@@ -90,7 +92,7 @@ The complete JSON/Markdown report records observed retrieval latency. Latency is
 
 Threshold changes are product changes and should be reviewed explicitly. Do not lower a threshold merely to make CI green. If an intentional tradeoff is valuable, document the measured benefit and update the contract in the same PR.
 
-The current no-gold rate leaves substantial room for improvement; that is expected and is a target for calibrated abstention work. The threshold protects against making it worse while preserving an honest baseline.
+The thresholds were re-frozen on 2026-09-07 together with the identifier-aware Tantivy tokenizer, the edit-anchor fix, and the confidence-based no-gold definition above. Holdout MRR moved from 0.917 to 0.806 — one of the eighteen holdout cases (`ts-trace-invoice-created`) now ranks its gold third instead of first because a sibling file shares the identifier parts — while on a 490-case commit-derived benchmark over a 10k-file Java repository the same changes lifted lexical MRR from 0.235 to 0.393 (dev) and 0.202 to 0.337 (holdout), and the production context-pack path from R@20 0.42 / MRR 0.22 to 0.73 / 0.44 on the same 60 cases. The no-gold maximum tightened from 0.75 to 0.25 because the product's confidence signal now catches all five no-gold cases. A 39-file fixture cannot arbitrate a change measured at that scale; it exists to catch determinism and gross regressions, and `scripts/commit-derived-cases.py` is how larger corpora are derived.
 
 ## Activating calibrated abstention at runtime
 
