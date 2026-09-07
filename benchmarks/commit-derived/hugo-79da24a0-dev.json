@@ -1,0 +1,53 @@
+{
+ "corpus": "hugo-79da24a0",
+ "split": "dev",
+ "provenance": {
+  "repo": "https://github.com/gohugoio/hugo",
+  "base": "79da24a0ebc0a33be89052188040caeec93c741e",
+  "after": 1500,
+  "ext": [
+   ".go"
+  ],
+  "path_prefixes": [],
+  "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
+  "frozen_on": "2026-09-07",
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
+ },
+ "cases": 336,
+ "label": "dev",
+ "median_secs": 0.3077266216278076,
+ "metrics": {
+  "R@1": 0.1339,
+  "R@5": 0.3095,
+  "R@10": 0.3661,
+  "R@20": 0.4256,
+  "MRR": 0.2107,
+  "gold_recall@20": 0.3146
+ },
+ "ci": {
+  "R@1": [
+   0.0952,
+   0.1696
+  ],
+  "R@5": [
+   0.2619,
+   0.3571
+  ],
+  "R@10": [
+   0.3155,
+   0.4196
+  ],
+  "R@20": [
+   0.375,
+   0.4792
+  ],
+  "MRR": [
+   0.1735,
+   0.2474
+  ],
+  "gold_recall@20": [
+   0.2715,
+   0.3595
+  ]
+ }
+}

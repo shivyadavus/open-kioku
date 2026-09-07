@@ -1,53 +1,57 @@
 {
-  "corpus": "elasticsearch-1e6d7960",
-  "split": "holdout",
-  "provenance": {
-    "repo": "https://github.com/elastic/elasticsearch",
-    "base_sha": "1e6d79605440aa871287acacb604564d54ca7555",
-    "path_prefixes": [
-      "libs/",
-      "modules/",
-      "server/"
-    ],
-    "after": 3800,
-    "chronological_split": "first 70% dev, last 30% holdout",
-    "frozen": "2026-09-07",
-    "frozen_from": "open-kioku main after PR #361 (identifier tokenizer, anchor fix), macOS 13 x86_64 release build"
-  },
-  "cases": 119,
-  "median_secs": 4.46,
-  "metrics": {
-    "R@1": 0.4118,
-    "R@5": 0.5378,
-    "R@10": 0.605,
-    "R@20": 0.6639,
-    "MRR": 0.4744,
-    "gold_recall@20": 0.5214
-  },
-  "ci": {
-    "R@1": [
-      0.3193,
-      0.5042
-    ],
-    "R@5": [
-      0.4538,
-      0.6303
-    ],
-    "R@10": [
-      0.521,
-      0.6975
-    ],
-    "R@20": [
-      0.5798,
-      0.7479
-    ],
-    "MRR": [
-      0.3942,
-      0.5614
-    ],
-    "gold_recall@20": [
-      0.4455,
-      0.6
-    ]
-  }
+ "corpus": "elasticsearch-1e6d7960",
+ "split": "holdout",
+ "provenance": {
+  "repo": "https://github.com/elastic/elasticsearch",
+  "base": "1e6d79605440aa871287acacb604564d54ca7555",
+  "after": 3800,
+  "ext": [
+   ".java"
+  ],
+  "path_prefixes": [
+   "libs/",
+   "modules/",
+   "server/"
+  ],
+  "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
+  "frozen_on": "2026-09-07",
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
+ },
+ "cases": 117,
+ "label": "holdout",
+ "median_secs": 2.833024024963379,
+ "metrics": {
+  "R@1": 0.4103,
+  "R@5": 0.5299,
+  "R@10": 0.5897,
+  "R@20": 0.6581,
+  "MRR": 0.4641,
+  "gold_recall@20": 0.5094
+ },
+ "ci": {
+  "R@1": [
+   0.3162,
+   0.4957
+  ],
+  "R@5": [
+   0.4359,
+   0.6239
+  ],
+  "R@10": [
+   0.4957,
+   0.6838
+  ],
+  "R@20": [
+   0.5726,
+   0.735
+  ],
+  "MRR": [
+   0.3824,
+   0.5483
+  ],
+  "gold_recall@20": [
+   0.4332,
+   0.5868
+  ]
+ }
 }

@@ -1,0 +1,53 @@
+{
+ "corpus": "deno_std-d93aa7c9",
+ "split": "holdout",
+ "provenance": {
+  "repo": "https://github.com/denoland/std",
+  "base": "d93aa7c94e640aa7b206e1a08e094eb705c1e1fa",
+  "after": 1500,
+  "ext": [
+   ".ts"
+  ],
+  "path_prefixes": [],
+  "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
+  "frozen_on": "2026-09-07",
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
+ },
+ "cases": 168,
+ "label": "holdout",
+ "median_secs": 0.26204466819763184,
+ "metrics": {
+  "R@1": 0.4167,
+  "R@5": 0.625,
+  "R@10": 0.7024,
+  "R@20": 0.7143,
+  "MRR": 0.5103,
+  "gold_recall@20": 0.6059
+ },
+ "ci": {
+  "R@1": [
+   0.3452,
+   0.494
+  ],
+  "R@5": [
+   0.5536,
+   0.7024
+  ],
+  "R@10": [
+   0.631,
+   0.7738
+  ],
+  "R@20": [
+   0.6429,
+   0.7798
+  ],
+  "MRR": [
+   0.4432,
+   0.5791
+  ],
+  "gold_recall@20": [
+   0.5378,
+   0.6693
+  ]
+ }
+}
