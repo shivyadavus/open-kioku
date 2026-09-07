@@ -75,16 +75,21 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
         } else {
             request.search_terms.iter().map(String::as_str).collect()
         };
+        // Terms arrive strongest first: the whole task, then ticket/path/identifier anchors,
+        // then single prose words and word pairs. A rank from a one-word sub-query is not
+        // comparable to a rank from the whole task, so ranks continue across terms instead of
+        // being merged by minimum. Merging by minimum let whichever file happened to be #1 for
+        // "case" or "fields" tie with the #1 hit for the task itself; on a 10k-file corpus that
+        // put the pack's lexical stream at less than half the recall of plain `ok search`.
         let mut by_path = BTreeMap::<String, (usize, SearchResult)>::new();
+        let mut next_rank = 1usize;
         for term in terms {
-            for (index, mut result) in self
+            for mut result in self
                 .index
                 .search(term, request.limit)?
                 .into_iter()
                 .filter(|result| !is_document_candidate_path(&result.path.to_string_lossy()))
-                .enumerate()
             {
-                let rank = index + 1;
                 if term != request.task {
                     let evidence = format!("expanded task query `{term}` matched indexed search");
                     if !result.evidence.contains(&evidence) {
@@ -93,32 +98,17 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                 }
                 let key = normalize_candidate_path(&result.path.to_string_lossy());
                 match by_path.get_mut(&key) {
-                    Some((best_rank, existing)) => {
+                    Some((_, existing)) => {
                         for evidence in &result.evidence {
                             if !existing.evidence.contains(evidence) {
                                 existing.evidence.push(evidence.clone());
                             }
                         }
                         merge_evidence_refs(&mut existing.evidence_refs, &result.evidence_refs);
-                        if rank < *best_rank
-                            || (rank == *best_rank
-                                && result
-                                    .score
-                                    .partial_cmp(&existing.score)
-                                    .unwrap_or(Ordering::Equal)
-                                    .is_gt())
-                        {
-                            let mut replacement = result;
-                            merge_evidence_refs(
-                                &mut replacement.evidence_refs,
-                                &existing.evidence_refs,
-                            );
-                            *existing = replacement;
-                            *best_rank = rank;
-                        }
                     }
                     None => {
-                        by_path.insert(key, (rank, result));
+                        by_path.insert(key, (next_rank, result));
+                        next_rank += 1;
                     }
                 }
             }
@@ -1105,6 +1095,79 @@ mod tests {
         fn search(&self, _query: &str, _limit: usize) -> Result<Vec<SearchResult>> {
             Ok(self.results.clone())
         }
+    }
+
+    /// Answers each query with its own fixed result list, so term-by-term behaviour is visible.
+    #[derive(Clone)]
+    struct TermAwareIndex {
+        by_term: std::collections::BTreeMap<String, Vec<SearchResult>>,
+    }
+
+    impl open_kioku_storage::SearchIndex for TermAwareIndex {
+        fn rebuild(
+            &mut self,
+            _chunks: &[open_kioku_core::CodeChunk],
+            _files: &[open_kioku_core::File],
+            _symbols: &[Symbol],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn search(&self, query: &str, _limit: usize) -> Result<Vec<SearchResult>> {
+            Ok(self.by_term.get(query).cloned().unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn expansion_term_hits_rank_after_whole_task_hits() {
+        let task = "fix edge case in terms enum for ip fields";
+        let index = TermAwareIndex {
+            by_term: std::collections::BTreeMap::from([
+                (
+                    task.to_string(),
+                    vec![
+                        result("src/ip_prefix.rs", 3.0, Some("IpPrefix")),
+                        result("src/terms_enum.rs", 2.0, Some("TermsEnum")),
+                    ],
+                ),
+                (
+                    "case".to_string(),
+                    vec![
+                        result("src/unrelated_case.rs", 9.0, None),
+                        result("src/ip_prefix.rs", 8.0, Some("IpPrefix")),
+                    ],
+                ),
+                (
+                    "fields".to_string(),
+                    vec![result("src/field_mapper.rs", 9.0, None)],
+                ),
+            ]),
+        };
+        let source = SearchIndexCandidateSource::new(index);
+        let request =
+            CandidateRequest::new(task, vec![task.into(), "case".into(), "fields".into()], 10);
+        let stream = source.retrieve(&request).unwrap();
+        let paths = stream
+            .candidates
+            .iter()
+            .map(|candidate| candidate.result.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        // Whole-task hits first in their own order; a file that is #1 for the single word
+        // "case" cannot leapfrog them, and a file seen twice keeps its first (best) rank.
+        assert_eq!(
+            paths,
+            vec![
+                "src/ip_prefix.rs",
+                "src/terms_enum.rs",
+                "src/unrelated_case.rs",
+                "src/field_mapper.rs",
+            ]
+        );
+        assert!(stream.candidates[0]
+            .result
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("expanded task query `case`")));
     }
 
     #[test]
