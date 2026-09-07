@@ -128,7 +128,13 @@ impl RankingFeatures {
             component_signal_value(result, &["similar_change_overlap"]).unwrap_or(0.0);
         let reviewer_affinity =
             component_signal_value(result, &["reviewer_affinity"]).unwrap_or(0.0);
-        let validation_proximity = if is_test_path(&path) { 0.05 } else { 0.0 };
+        // Test detection reads the original case: `internalClusterTest` and `FooIT.java` are
+        // recognised at a CamelCase boundary that the lowercased `path` above has erased.
+        let validation_proximity = if is_test_path(&result.path.to_string_lossy()) {
+            0.05
+        } else {
+            0.0
+        };
         let memory_signal = component_signal_value(result, &["memory_signal"]).unwrap_or(0.0);
         let semantic_similarity = result
             .score_breakdown
@@ -426,7 +432,7 @@ fn component_signal_value(result: &SearchResult, names: &[&str]) -> Option<f32> 
 }
 
 fn is_test_path(path: &str) -> bool {
-    path.contains("test") || path.contains("/spec/") || path.ends_with("_test.rs")
+    open_kioku_core::is_test_path(path)
 }
 
 /// How plausible this result is as an edit target for the query.
@@ -456,7 +462,9 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     // broke ordinary queries on real repositories: "geoip processor" returned
     // four test helpers before the processor, because a large Java project has
     // far more test files than source files and they match the same terms.
-    if is_test_path(path) && !query.map(query_wants_tests).unwrap_or(false) {
+    if is_test_path(&result.path.to_string_lossy())
+        && !query.map(query_wants_tests).unwrap_or(false)
+    {
         return 0.0;
     }
     if query
@@ -495,27 +503,8 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     }
 }
 
-/// Whether the task is asking about tests rather than about source.
-///
-/// Deliberately narrow: the cost of a false positive is promoting test files
-/// over source for an ordinary query, which is the regression this guards.
 fn query_wants_tests(query: &str) -> bool {
-    let query = query.to_ascii_lowercase();
-    query
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| {
-            matches!(
-                word,
-                "test"
-                    | "tests"
-                    | "testing"
-                    | "spec"
-                    | "specs"
-                    | "covering"
-                    | "coverage"
-                    | "fixture"
-            )
-        })
+    open_kioku_core::query_wants_tests(query)
 }
 
 fn is_docs_path(path: &str) -> bool {
