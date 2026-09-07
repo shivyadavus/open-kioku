@@ -694,7 +694,7 @@
               "search:src/main.rs:5-7:1"
             ],
             "normalized_value": 0.0,
-            "rationale": "source rank 1 with Heuristic authority: fusion_profile=rrf_unweighted; production lexical index ranked this file",
+            "rationale": "source rank 1 with Heuristic authority: fusion_profile=rrf_measured_v1; production lexical index ranked this file",
             "raw_value": 0.0,
             "signal": "retrieval_rrf:lexical",
             "weight": 0.0
@@ -792,7 +792,7 @@
               "search:src/routes.rs:4-6:1"
             ],
             "normalized_value": 0.0,
-            "rationale": "source rank 2 with Heuristic authority: fusion_profile=rrf_unweighted; production lexical index ranked this file",
+            "rationale": "source rank 2 with Heuristic authority: fusion_profile=rrf_measured_v1; production lexical index ranked this file",
             "raw_value": 0.0,
             "signal": "retrieval_rrf:lexical",
             "weight": 0.0
