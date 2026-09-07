@@ -1,5 +1,5 @@
 const RETRIEVAL_BENCH_SCHEMA_VERSION: &str = "1.0.0";
-const RETRIEVAL_REPORT_VERSION: &str = "1.7.0";
+const RETRIEVAL_REPORT_VERSION: &str = "1.8.0";
 const RETRIEVAL_QUERY_SHAPE_LABEL_SCHEMA_VERSION: &str = "1.0.0";
 const RETRIEVAL_BASELINE_DIMENSIONS_VERSION: &str = "2.0.0";
 const RETRIEVAL_TOKEN_ESTIMATOR: &str = "unicode_chars_div_4_plus_metadata_v1";
@@ -349,6 +349,15 @@ struct RetrievalCaseReport {
     token_budget_gold_yield: BTreeMap<usize, f64>,
     token_budget_used: BTreeMap<usize, usize>,
     returned_any: bool,
+    /// Overall confidence the strategy attached to its result, when it builds a context pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confidence: Option<open_kioku_core::Confidence>,
+    /// Returned results *and* stood behind them: `returned_any` with confidence above Low.
+    /// This is the product's abstention signal. Lexical search will find some word overlap for
+    /// almost any prose, so "returned anything" is not a false positive; a pack that says
+    /// Low confidence has already told the caller not to trust it. Strategies that build no
+    /// pack apply the pack's own weak-relevance rule to what they returned.
+    returned_confident: bool,
     latency_ms: f64,
 }
 
@@ -1106,11 +1115,13 @@ fn run_routed_contextpack_retrieval_case(
     let compatibility_pack = builder.build(&case.query, limit)?;
     let latency_ms = duration_ms(started.elapsed());
     let abstention_case = routed_abstention_calibration_case(case, &compatibility_pack)?;
-    let mut report = score_retrieval_case(
+    let confidence = compatibility_pack.confidence_breakdown.overall_enum;
+    let mut report = score_retrieval_case_with_confidence(
         case,
         token_budgets,
         compatibility_pack.primary_files,
         latency_ms,
+        Some(confidence),
     );
     let gold = case
         .gold_files
@@ -1287,6 +1298,16 @@ fn score_retrieval_case(
     ranked: Vec<SearchResult>,
     latency_ms: f64,
 ) -> RetrievalCaseReport {
+    score_retrieval_case_with_confidence(case, token_budgets, ranked, latency_ms, None)
+}
+
+fn score_retrieval_case_with_confidence(
+    case: &RetrievalCase,
+    token_budgets: &[usize],
+    ranked: Vec<SearchResult>,
+    latency_ms: f64,
+    confidence: Option<open_kioku_core::Confidence>,
+) -> RetrievalCaseReport {
     let gold = case
         .gold_files
         .iter()
@@ -1368,6 +1389,18 @@ fn score_retrieval_case(
         token_budget_gold_yield,
         token_budget_used,
         returned_any: !ranked.is_empty(),
+        confidence,
+        returned_confident: !ranked.is_empty()
+            && match confidence {
+                Some(confidence) => confidence != open_kioku_core::Confidence::Low,
+                // Strategies that build no pack use the same rule the pack's confidence
+                // applies: fewer than WEAK_TASK_RELEVANCE of the task's terms in the
+                // returned context is an abstention, not a confident answer.
+                None => {
+                    open_kioku_core::task_relevance_score(&case.query, &ranked)
+                        >= open_kioku_core::WEAK_TASK_RELEVANCE
+                }
+            },
         latency_ms,
     }
 }
@@ -1501,15 +1534,16 @@ fn summarize_retrieval_cases(cases: &[RetrievalCaseReport]) -> RetrievalMetricSu
     let no_gold_false_positive_rate = if no_gold.is_empty() {
         0.0
     } else {
-        no_gold.iter().filter(|case| case.returned_any).count() as f64 / no_gold.len() as f64
+        no_gold.iter().filter(|case| case.returned_confident).count() as f64
+            / no_gold.len() as f64
     };
     let correct_no_gold_abstentions = no_gold
         .iter()
-        .filter(|case| !case.returned_any)
+        .filter(|case| !case.returned_confident)
         .count();
     let incorrect_positive_abstentions = positives
         .iter()
-        .filter(|case| !case.returned_any)
+        .filter(|case| !case.returned_confident)
         .count();
     let abstained_cases = correct_no_gold_abstentions + incorrect_positive_abstentions;
     let abstention = RetrievalAbstentionMetrics {
@@ -2389,6 +2423,8 @@ mod retrieval_bench_tests {
             token_budget_gold_yield: BTreeMap::from([(2_000, if no_gold { 0.0 } else { 1.0 })]),
             token_budget_used: BTreeMap::from([(2_000, 100)]),
             returned_any: no_gold,
+            confidence: None,
+            returned_confident: no_gold,
             latency_ms: 10.0,
         }
     }
@@ -2517,12 +2553,16 @@ mod retrieval_bench_tests {
     fn abstention_quality_reports_precision_and_recall_without_tuning_holdout() {
         let mut positive_returned = report("positive-returned", false, &[Some(1)]);
         positive_returned.returned_any = true;
+        positive_returned.returned_confident = true;
         let mut positive_abstained = report("positive-abstained", false, &[None]);
         positive_abstained.returned_any = false;
+        positive_abstained.returned_confident = false;
         let mut no_gold_abstained = report("no-gold-abstained", true, &[]);
         no_gold_abstained.returned_any = false;
+        no_gold_abstained.returned_confident = false;
         let mut no_gold_returned = report("no-gold-returned", true, &[]);
         no_gold_returned.returned_any = true;
+        no_gold_returned.returned_confident = true;
 
         let summary = summarize_retrieval_cases(&[
             positive_returned,
@@ -2543,8 +2583,10 @@ mod retrieval_bench_tests {
     fn abstention_quality_is_serialized_for_breakdown_slices() {
         let mut positive = report("positive", false, &[Some(1)]);
         positive.returned_any = true;
+        positive.returned_confident = true;
         let mut no_gold = report("no-gold", true, &[]);
         no_gold.returned_any = false;
+        no_gold.returned_confident = false;
         let strategy = build_retrieval_strategy_report(
             RetrievalStrategy::Fusion,
             vec![positive, no_gold],

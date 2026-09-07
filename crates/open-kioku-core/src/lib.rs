@@ -349,6 +349,11 @@ pub struct ConfidenceSignalInput {
 /// model; it is a floor. A task whose every word is absent from every selected
 /// file is one the repository cannot answer, and no amount of structural
 /// completeness should make that look confident.
+/// Below this share of task terms present in the selected context, a pack is capped at Low
+/// confidence and a retrieval strategy is treated as having abstained. Shared with the
+/// retrieval benchmark so the measured and the deployed abstention rule cannot drift.
+pub const WEAK_TASK_RELEVANCE: f32 = 0.34;
+
 pub fn task_relevance_score(task: &str, selected: &[SearchResult]) -> f32 {
     let terms = task_content_terms(task);
     if terms.is_empty() {
@@ -680,9 +685,13 @@ impl ConfidenceBreakdown {
         if input.task_relevance <= 0.0 {
             blockers.push("no task term appears in the selected context".into());
             overall_score = overall_score.min(0.30);
-        } else if input.task_relevance < 0.34 {
+        } else if input.task_relevance < WEAK_TASK_RELEVANCE {
+            // Strictly below the Medium threshold: a pack whose selected context contains
+            // fewer than a third of the task's terms must not present itself as Medium.
+            // At 0.55 the cap sat exactly on that threshold and a nonsense query with one
+            // incidental word match reported Medium.
             caveats.push("most task terms are absent from the selected context".into());
-            overall_score = overall_score.min(0.55);
+            overall_score = overall_score.min(0.50);
         }
         if input.negative_evidence_count > 0 {
             overall_score = overall_score.min(0.60);
