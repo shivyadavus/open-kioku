@@ -2675,6 +2675,7 @@ version = "3.1.0"
 dependencies = [
  "candle-core",
  "fastembed",
+ "hf-hub",
  "open-kioku-errors",
  "serde",
  "serde_json",

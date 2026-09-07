@@ -1,5 +1,8 @@
 use candle_core::{DType, Device};
-use fastembed::{EmbeddingModel, Qwen3TextEmbedding, TextEmbedding, TextInitOptions};
+use fastembed::{
+    EmbeddingModel, InitOptionsUserDefined, Pooling, Qwen3TextEmbedding, TextEmbedding,
+    TextInitOptions, TokenizerFiles, UserDefinedEmbeddingModel,
+};
 use open_kioku_errors::{OkError, Result};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -95,7 +98,16 @@ pub enum LocalNeuralModel {
     Qwen3Embedding4B,
     Qwen3Embedding8B,
     JinaEmbeddingsV2BaseCode,
+    /// Alibaba-NLP/gte-modernbert-base: 149M parameters, Apache-2.0, CoIR 79.3 — the same size
+    /// class as the Jina code model with code-retrieval quality in the range of 2B-7B models.
+    /// Loaded as a user-defined ONNX model (int8 export, CLS pooling) because fastembed has no
+    /// built-in entry for it.
+    GteModernBertBase,
 }
+
+const GTE_MODERNBERT_REPO: &str = "Alibaba-NLP/gte-modernbert-base";
+const GTE_MODERNBERT_ONNX: &str = "onnx/model_int8.onnx";
+const GTE_MODERNBERT_MAX_LENGTH: usize = 8_192;
 
 impl LocalNeuralModel {
     pub fn parse(value: &str) -> Result<Self> {
@@ -107,8 +119,11 @@ impl LocalNeuralModel {
             "qwen3-embedding-8b" | "Qwen/Qwen3-Embedding-8B" => Ok(Self::Qwen3Embedding8B),
             "jina-embeddings-v2-base-code" | "jina-v2-base-code"
             | "jinaai/jina-embeddings-v2-base-code" => Ok(Self::JinaEmbeddingsV2BaseCode),
+            "gte-modernbert-base" | "Alibaba-NLP/gte-modernbert-base" => {
+                Ok(Self::GteModernBertBase)
+            }
             other => Err(OkError::Unsupported(format!(
-                "local neural embedding model `{other}` is unsupported; supported models: Qwen/Qwen3-Embedding-0.6B, Qwen/Qwen3-Embedding-4B, Qwen/Qwen3-Embedding-8B, jinaai/jina-embeddings-v2-base-code"
+                "local neural embedding model `{other}` is unsupported; supported models: Qwen/Qwen3-Embedding-0.6B, Qwen/Qwen3-Embedding-4B, Qwen/Qwen3-Embedding-8B, jinaai/jina-embeddings-v2-base-code, Alibaba-NLP/gte-modernbert-base"
             ))),
         }
     }
@@ -119,6 +134,7 @@ impl LocalNeuralModel {
             Self::Qwen3Embedding4B => "Qwen/Qwen3-Embedding-4B",
             Self::Qwen3Embedding8B => "Qwen/Qwen3-Embedding-8B",
             Self::JinaEmbeddingsV2BaseCode => "jinaai/jina-embeddings-v2-base-code",
+            Self::GteModernBertBase => GTE_MODERNBERT_REPO,
         }
     }
 
@@ -128,11 +144,12 @@ impl LocalNeuralModel {
             Self::Qwen3Embedding4B => 2_560,
             Self::Qwen3Embedding8B => 4_096,
             Self::JinaEmbeddingsV2BaseCode => 768,
+            Self::GteModernBertBase => 768,
         }
     }
 
     pub fn supports_matryoshka(self) -> bool {
-        !matches!(self, Self::JinaEmbeddingsV2BaseCode)
+        self.is_qwen3()
     }
 
     fn validate_output_dimensions(self, dimensions: usize) -> Result<()> {
@@ -154,13 +171,17 @@ impl LocalNeuralModel {
     }
 
     fn is_qwen3(self) -> bool {
-        !matches!(self, Self::JinaEmbeddingsV2BaseCode)
+        matches!(
+            self,
+            Self::Qwen3Embedding06B | Self::Qwen3Embedding4B | Self::Qwen3Embedding8B
+        )
     }
 }
 
 enum NeuralBackend {
     Qwen3(Mutex<Qwen3TextEmbedding>),
-    JinaCode(Mutex<TextEmbedding>),
+    /// fastembed ONNX text models: the built-in Jina code model and user-defined exports.
+    Onnx(Mutex<TextEmbedding>),
 }
 
 pub struct FastEmbedEmbeddingProvider {
@@ -201,6 +222,9 @@ impl FastEmbedEmbeddingProvider {
                 })
             })?;
             NeuralBackend::Qwen3(Mutex::new(inner))
+        } else if model == LocalNeuralModel::GteModernBertBase {
+            let inner = load_gte_modernbert(cache_dir)?;
+            NeuralBackend::Onnx(Mutex::new(inner))
         } else {
             let options = TextInitOptions::new(EmbeddingModel::JinaEmbeddingsV2BaseCode)
                 .with_cache_dir(cache_dir.to_path_buf())
@@ -211,7 +235,7 @@ impl FastEmbedEmbeddingProvider {
                     model.canonical_name()
                 ))
             })?;
-            NeuralBackend::JinaCode(Mutex::new(inner))
+            NeuralBackend::Onnx(Mutex::new(inner))
         };
         Ok(Self {
             model,
@@ -241,14 +265,14 @@ impl FastEmbedEmbeddingProvider {
                     vectors
                 }
             }
-            NeuralBackend::JinaCode(inner) => {
+            NeuralBackend::Onnx(inner) => {
                 let mut model = inner.lock().map_err(|_| {
-                    OkError::Unsupported("Jina code embedding model lock poisoned".into())
+                    OkError::Unsupported("ONNX embedding model lock poisoned".into())
                 })?;
                 model
                     .embed(inputs, Some(batch_size.max(1)))
                     .map_err(|err| {
-                        OkError::Unsupported(format!("Jina code embedding inference failed: {err}"))
+                        OkError::Unsupported(format!("ONNX embedding inference failed: {err}"))
                     })?
             }
         };
@@ -292,7 +316,12 @@ impl EmbeddingProvider for FastEmbedEmbeddingProvider {
             implementation: if self.model.is_qwen3() {
                 format!("{FASTEMBED_PROVIDER_VERSION}:qwen3-candle:maxlen-{QWEN3_MAX_LENGTH}")
             } else {
-                format!("{FASTEMBED_PROVIDER_VERSION}:onnx")
+                match self.model {
+                    LocalNeuralModel::GteModernBertBase => {
+                        format!("{FASTEMBED_PROVIDER_VERSION}:onnx-int8-cls")
+                    }
+                    _ => format!("{FASTEMBED_PROVIDER_VERSION}:onnx"),
+                }
             },
         }
     }
@@ -318,8 +347,60 @@ impl EmbeddingProvider for DisabledEmbeddingProvider {
     }
 }
 
+/// Fetches (or reuses from `cache_dir`) the int8 ONNX export and tokenizer files of
+/// gte-modernbert-base and builds a fastembed user-defined model with CLS pooling, which is the
+/// pooling the upstream `1_Pooling/config.json` declares.
+fn load_gte_modernbert(cache_dir: &Path) -> Result<TextEmbedding> {
+    let api = hf_hub::api::sync::ApiBuilder::new()
+        .with_cache_dir(cache_dir.to_path_buf())
+        .with_progress(false)
+        .build()
+        .map_err(|err| OkError::Unsupported(format!("Hugging Face hub client: {err}")))?;
+    let repo = api.model(GTE_MODERNBERT_REPO.to_string());
+    let fetch = |name: &str| -> Result<Vec<u8>> {
+        let path = repo.get(name).map_err(|err| {
+            OkError::Unsupported(format!(
+                "failed to fetch {GTE_MODERNBERT_REPO}/{name}: {err}"
+            ))
+        })?;
+        std::fs::read(&path).map_err(|err| {
+            OkError::Unsupported(format!("failed to read {}: {err}", path.display()))
+        })
+    };
+    let model = UserDefinedEmbeddingModel::new(
+        fetch(GTE_MODERNBERT_ONNX)?,
+        TokenizerFiles {
+            tokenizer_file: fetch("tokenizer.json")?,
+            config_file: fetch("config.json")?,
+            special_tokens_map_file: fetch("special_tokens_map.json")?,
+            tokenizer_config_file: fetch("tokenizer_config.json")?,
+        },
+    )
+    .with_pooling(Pooling::Cls);
+    let mut options = InitOptionsUserDefined::default();
+    options.max_length = GTE_MODERNBERT_MAX_LENGTH;
+    TextEmbedding::try_new_from_user_defined(model, options).map_err(|err| {
+        OkError::Unsupported(format!(
+            "failed to initialize local embedding model {GTE_MODERNBERT_REPO}: {err}"
+        ))
+    })
+}
+
+/// Where a model's files live once downloaded, which is what the ready marker fingerprints.
+///
+/// ONNX models are fetched into Open Kioku's own `<root>/<org>--<name>` directory. The Qwen3
+/// models are loaded by fastembed's candle path, whose `hf_hub::ApiBuilder::new()` uses
+/// `Cache::default()` — a hardcoded `~/.cache/huggingface/hub` that ignores `HF_HOME` — so
+/// their directory is the Hugging Face hub cache entry for the repo. Reporting that location
+/// instead of an empty `<root>` directory is what makes the ready marker (and the consent
+/// gate around it) work for those models.
 pub fn neural_model_cache_dir(root: impl AsRef<Path>, model: LocalNeuralModel) -> PathBuf {
     let safe = model.canonical_name().replace('/', "--");
+    if model.is_qwen3() {
+        return hf_hub::Cache::default()
+            .path()
+            .join(format!("models--{safe}"));
+    }
     root.as_ref().join(safe)
 }
 
@@ -404,6 +485,12 @@ mod tests {
         assert!(small.supports_matryoshka());
         assert!(!code.supports_matryoshka());
         assert!(LocalNeuralModel::parse("bge-small-en-v1.5").is_err());
+        assert_eq!(
+            LocalNeuralModel::parse("gte-modernbert-base").unwrap(),
+            LocalNeuralModel::GteModernBertBase
+        );
+        assert_eq!(LocalNeuralModel::GteModernBertBase.native_dimensions(), 768);
+        assert!(!LocalNeuralModel::GteModernBertBase.supports_matryoshka());
     }
 
     #[test]
