@@ -4,10 +4,10 @@
   "strategy": "fusion",
   "split": "holdout",
   "minimums": {
-    "recall_at_5": 0.611111111111111,
-    "recall_at_10": 0.9444444444444443,
-    "mean_reciprocal_rank": 0.8333333333333334,
-    "file_f1_at_10": 0.4358974358974359,
+    "recall_at_5": 0.7222222222222222,
+    "recall_at_10": 1.0,
+    "mean_reciprocal_rank": 0.9166666666666666,
+    "file_f1_at_10": 0.4615384615384615,
     "token_budget_gold_yield_2000": 1.0
   },
   "maximums": {
