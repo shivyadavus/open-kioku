@@ -145,8 +145,16 @@ const GTE_MODERNBERT_MAX_LENGTH: usize = 1_024;
 const GTE_MODERNBERT_MAX_BATCH: usize = 8;
 
 impl LocalNeuralModel {
+    /// The neural profile a configuration gets when it names none. Chosen on commit-derived
+    /// corpora (2026-09-07, hosted 4-core runners): gte-modernbert-base beat jina-v2-code on
+    /// every metric on hugo and deno_std (holdout MRR +0.025/+0.027 vs +0.007/+0.005) at a
+    /// third of the peak memory, and Qwen3-0.6B on CPU could not index an 18k-chunk repository
+    /// inside three hours where gte took 25 minutes. Apache-2.0, pinned by revision and digest.
+    pub const DEFAULT: Self = Self::GteModernBertBase;
+
     pub fn parse(value: &str) -> Result<Self> {
-        match value {
+        match value.trim() {
+            "" | "default" => Ok(Self::DEFAULT),
             "qwen3-embedding-0.6b" | "Qwen/Qwen3-Embedding-0.6B" => {
                 Ok(Self::Qwen3Embedding06B)
             }
@@ -158,7 +166,7 @@ impl LocalNeuralModel {
                 Ok(Self::GteModernBertBase)
             }
             other => Err(OkError::Unsupported(format!(
-                "local neural embedding model `{other}` is unsupported; supported models: Qwen/Qwen3-Embedding-0.6B, Qwen/Qwen3-Embedding-4B, Qwen/Qwen3-Embedding-8B, jinaai/jina-embeddings-v2-base-code, Alibaba-NLP/gte-modernbert-base"
+                "local neural embedding model `{other}` is unsupported; supported models: Alibaba-NLP/gte-modernbert-base (default), jinaai/jina-embeddings-v2-base-code, Qwen/Qwen3-Embedding-0.6B, Qwen/Qwen3-Embedding-4B, Qwen/Qwen3-Embedding-8B"
             ))),
         }
     }
@@ -613,6 +621,14 @@ mod tests {
             LocalNeuralModel::GteModernBertBase
         );
         assert_eq!(LocalNeuralModel::GteModernBertBase.native_dimensions(), 768);
+        assert_eq!(
+            LocalNeuralModel::parse("").unwrap(),
+            LocalNeuralModel::DEFAULT
+        );
+        assert_eq!(
+            LocalNeuralModel::parse("default").unwrap(),
+            LocalNeuralModel::GteModernBertBase
+        );
         assert!(!LocalNeuralModel::GteModernBertBase.supports_matryoshka());
     }
 

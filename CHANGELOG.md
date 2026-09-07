@@ -7,6 +7,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- `gte-modernbert-base` (Apache-2.0, 149M parameters, int8 ONNX) as a local neural embedding profile and the default when `[semantic] provider = "fastembed"` names no model. It is pinned to a Hugging Face revision with a SHA-256 check on every file, so upstream cannot change or remove it silently. Chosen on commit-derived corpora against jina-v2-code and Qwen3-0.6B (`docs/embedding-providers.md`). ONNX and Qwen3 embedding now run one length-sorted batch at a time with bounded sequence lengths; the previous parallel, 8k-token batches were killed for memory on a 16 GB machine.
+
 ### Fixed
 - Context packs on test-heavy repositories no longer fill their primary files with tests: the validation candidate stream declared corroborating authority for any test whose name shared a word with the task, and fusion orders by authority before score. Test paths are now recognised by directory segment and file name (`src/internalClusterTest`, `*IT.java`, `foo.spec.ts`), never by substring, and a task that asks for tests keeps them in the source tier. On an 11k-file Java checkout, "geoip processor" went from 0 of 5 source files in the top five to 5 of 5.
 - The first capitalised word of a commit-style task ("Fix", "Enable", "Assert") was treated as the primary edit anchor and boosted every file containing that substring above the real lexical hits; identifiers now need an inner case change, a separator, or digits beside capitals. The lexical candidate stream also merged per-term results by minimum rank, letting the top hit for a single expansion word tie with the top hit for the whole task. Production-path R@20 on the same 60 commit-derived cases: 0.42 → 0.73, MRR 0.22 → 0.44.
