@@ -1,0 +1,53 @@
+{
+ "corpus": "transformers-7cd9b985",
+ "split": "dev",
+ "provenance": {
+  "repo": "https://github.com/huggingface/transformers",
+  "base": "7cd9b985e0698d4f625a18be0125231b6b930390",
+  "after": 1500,
+  "ext": [
+   ".py"
+  ],
+  "path_prefixes": [],
+  "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
+  "frozen_on": "2026-09-07",
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
+ },
+ "cases": 463,
+ "label": "dev",
+ "median_secs": 1.0218448638916016,
+ "metrics": {
+  "R@1": 0.4255,
+  "R@5": 0.5983,
+  "R@10": 0.6717,
+  "R@20": 0.7322,
+  "MRR": 0.5085,
+  "gold_recall@20": 0.5752
+ },
+ "ci": {
+  "R@1": [
+   0.3823,
+   0.4708
+  ],
+  "R@5": [
+   0.5508,
+   0.6436
+  ],
+  "R@10": [
+   0.6285,
+   0.7149
+  ],
+  "R@20": [
+   0.6911,
+   0.7711
+  ],
+  "MRR": [
+   0.4681,
+   0.5493
+  ],
+  "gold_recall@20": [
+   0.5363,
+   0.6125
+  ]
+ }
+}
