@@ -142,7 +142,7 @@ const GTE_MODERNBERT_FILES: &[(&str, &str)] = &[
 /// the model's 8k context is not a usable embedding length: at 8192 tokens x batch 64 the
 /// attention scores alone asked ORT for 55 GB. Chunks are far shorter than 1024 tokens.
 const GTE_MODERNBERT_MAX_LENGTH: usize = 1_024;
-const GTE_MODERNBERT_MAX_BATCH: usize = 16;
+const GTE_MODERNBERT_MAX_BATCH: usize = 8;
 
 impl LocalNeuralModel {
     pub fn parse(value: &str) -> Result<Self> {
@@ -323,9 +323,32 @@ impl FastEmbedEmbeddingProvider {
                 } else {
                     batch_size.max(1)
                 };
-                model.embed(inputs, Some(batch)).map_err(|err| {
-                    OkError::Unsupported(format!("ONNX embedding inference failed: {err}"))
-                })?
+                // One batch at a time, longest texts first. fastembed would otherwise run every
+                // batch of the whole input in parallel across cores, multiplying peak activation
+                // memory by the core count, and ONNX Runtime's arena never shrinks: the padded
+                // shape of each batch is cached, so descending length makes the first batch the
+                // high-water mark instead of letting the arena grow for an hour and then die.
+                let order = length_sorted_order(inputs);
+                let mut vectors: Vec<Option<Vec<f32>>> = vec![None; inputs.len()];
+                for group in order.chunks(batch) {
+                    let texts: Vec<&str> = group.iter().map(|&i| inputs[i].as_str()).collect();
+                    let embedded = model.embed(texts, Some(batch)).map_err(|err| {
+                        OkError::Unsupported(format!("ONNX embedding inference failed: {err}"))
+                    })?;
+                    for (&index, vector) in group.iter().zip(embedded) {
+                        vectors[index] = Some(vector);
+                    }
+                }
+                vectors
+                    .into_iter()
+                    .map(|vector| {
+                        vector.ok_or_else(|| {
+                            OkError::Unsupported(
+                                "ONNX embedding returned fewer vectors than inputs".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
             }
         };
         vectors
