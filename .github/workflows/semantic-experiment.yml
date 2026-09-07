@@ -28,6 +28,9 @@ on:
       split:
         description: which split to score (dev or holdout)
         default: holdout
+      batch_size:
+        description: embedding batch size written to the corpus ok.toml (the shipped default of 64 exceeds a 16 GB runner for ONNX models run in parallel batches)
+        default: "8"
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,10 +81,16 @@ jobs:
           s = re.sub(r'\[semantic\]\nenabled = false\nbackend = "[^"]*"\nprovider = "[^"]*"\nmodel = "[^"]*"\ndimensions = \d+',
                      '[semantic]\nenabled = true\nbackend = "auto"\nprovider = "fastembed"\nmodel = "${{ github.event.inputs.model }}"\ndimensions = ${{ github.event.inputs.dimensions }}', s)
           s = s.replace("deny_network = true", "deny_network = false")
+          s = re.sub(r'(?m)^batch_size = \d+$', 'batch_size = ${{ github.event.inputs.batch_size }}', s)
           open(p, "w").write(s)
           PY
+          grep -E '^(model|dimensions|batch_size) = ' corpus/ok.toml
+          free -m | head -2
+          # Peak RSS of the indexing process, so an OOM kill (exit 143) can be diagnosed from the log.
+          ( while sleep 60; do free -m | awk 'NR==2 {printf "[mem] used %d MiB, available %d MiB\n", $3, $7}'; done ) & SAMPLER=$!
           set -o pipefail
-          ./target/release/ok --repo corpus semantic index --allow-model-download 2>&1 | tail -5
+          /usr/bin/time -v ./target/release/ok --repo corpus semantic index --allow-model-download 2>&1 | grep -vE '^\s*(Page size|Swaps|Socket|Signals|File system|Average|Voluntary|Involuntary|Minor|Major|Exit status|Percent)' | tail -12
+          kill $SAMPLER 2>/dev/null || true
           ./target/release/ok --repo corpus --json semantic status | python3 -c "
           import json, sys
           d = json.load(sys.stdin)
