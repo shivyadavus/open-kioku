@@ -417,10 +417,6 @@ fn is_test_dir_segment(segment: &str) -> bool {
             | "cypress"
             | "qa"
     ) || lower.starts_with("test")
-        || lower.ends_with("-test")
-        || lower.ends_with("_test")
-        || lower.ends_with("-tests")
-        || lower.ends_with("_tests")
         || lower.ends_with("-spec")
         || lower.ends_with("_spec")
         || has_camel_test_suffix(segment)
@@ -4062,6 +4058,7 @@ mod test_path_tests {
             "crates/core/tests/api.rs",
             "crates/core/src/tests.rs",
             "pkg/store/store_test.go",
+            "crates/open-kioku-tests/tests/integration.rs",
             "pkg/store/testdata/fixture.json",
             "src/components/__tests__/Button.tsx",
             "src/components/Button.test.tsx",
@@ -4086,6 +4083,11 @@ mod test_path_tests {
             "src/main/java/org/es/UNIT.java",
             "src/main/java/org/es/Test.java",
             "docs/testing-guide.md",
+            // A crate or package *named* after tests is product code: this one is the test
+            // selector. Directory suffixes `-tests`/`_tests` are therefore not a test rule;
+            // test files inside such a directory still qualify by their own names.
+            "crates/open-kioku-tests/src/lib.rs",
+            "packages/e2e-tests-runner/src/index.ts",
             "src/greatest.rs",
             "",
         ] {
