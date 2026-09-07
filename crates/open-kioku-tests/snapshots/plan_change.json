@@ -8,7 +8,8 @@
   "structuredContent": {
     "confidence_breakdown": {
       "blockers": [
-        "4 negative evidence signal(s) lowered confidence"
+        "4 negative evidence signal(s) lowered confidence",
+        "no task term appears in the selected context"
       ],
       "caveats": [
         "exact symbol/reference evidence is absent",
@@ -70,6 +71,15 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
+          "rationale": "share of the task's terms that appear in the selected context",
+          "raw_value": 0.0,
+          "signal": "task_relevance",
+          "weight": 0.0
+        },
+        {
+          "contribution": 0.0,
+          "evidence_ids": [],
+          "normalized_value": 0.0,
           "rationale": "selected tests with runnable commands",
           "raw_value": 0.0,
           "signal": "test_coverage",
@@ -88,7 +98,7 @@
       "overall_enum": "low",
       "overall_score": 0.0
     },
-    "confidence_summary": "overall Low (0.48) from evidence density, references, validation, boundaries, runtime, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
+    "confidence_summary": "overall Low (0.30) from evidence density, references, validation, boundaries, runtime, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
     "evidence": [
       {
         "confidence": "medium",
