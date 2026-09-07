@@ -7,6 +7,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- Context packs on test-heavy repositories no longer fill their primary files with tests: the validation candidate stream declared corroborating authority for any test whose name shared a word with the task, and fusion orders by authority before score. Test paths are now recognised by directory segment and file name (`src/internalClusterTest`, `*IT.java`, `foo.spec.ts`), never by substring, and a task that asks for tests keeps them in the source tier. On an 11k-file Java checkout, "geoip processor" went from 0 of 5 source files in the top five to 5 of 5.
+- The first capitalised word of a commit-style task ("Fix", "Enable", "Assert") was treated as the primary edit anchor and boosted every file containing that substring above the real lexical hits; identifiers now need an inner case change, a separator, or digits beside capitals. The lexical candidate stream also merged per-term results by minimum rank, letting the top hit for a single expansion word tie with the top hit for the whole task. Production-path R@20 on the same 60 commit-derived cases: 0.42 → 0.73, MRR 0.22 → 0.44.
+- A pack whose selected context contains fewer than a third of the task's terms is capped strictly below Medium confidence; previously the cap sat exactly on the Medium threshold and a nonsense query with one incidental word match reported Medium.
+
+### Performance
+- `ok context`, `ok plan`, and MCP `build_context_pack` on a 10k-file Java index: 78 s → ~5 s per query. Impact expansion now uses the Tantivy index instead of regex-scanning every chunk once per term; per-file fact lookups use the existing `file_id` index instead of scanning and sorting every fact of a source type; the relationship-semantics verdict is cached per store (keyed by SQLite `data_version`) instead of re-parsing a multi-megabyte manifest on every relationship query.
+
+### Changed
+- The Tantivy index tokenizes code text and symbols identifier-aware: `FieldMapper` is indexed as `fieldmapper`, `field`, and `mapper`. Lexical MRR on a 490-case commit-derived Elasticsearch benchmark: 0.235 → 0.393 (dev), 0.202 → 0.337 (holdout). Existing indexes keep working; run `ok index` to rebuild with the new tokenizer.
+- Retrieval benchmark no-gold false positives count only results presented with confidence above Low (the product's abstention signal), for pack-less strategies via the same shared weak-relevance rule. Baseline and thresholds re-frozen; rationale in `docs/retrieval-benchmark.md`.
+
+### Added
+- `scripts/commit-derived-cases.py` and `scripts/score-context-cases.py`: derive leakage-safe retrieval cases from a repository's own history (index at a base commit, gold = files a later commit modified that already existed at base) and score the production `ok context` path against them with bootstrap confidence intervals.
+
 ---
 
 ## [3.1.0] — 2026-08-31
