@@ -677,18 +677,8 @@ impl<'a> ContextPackBuilder<'a> {
             runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
         annotate_results_with_runtime(&mut primary_files, &runtime_signals);
         annotate_results_with_runtime(&mut supporting_files, &runtime_signals);
-        annotate_results_with_git_history(
-            self.store,
-            self.history_store,
-            task,
-            &mut primary_files,
-        )?;
-        annotate_results_with_git_history(
-            self.store,
-            self.history_store,
-            task,
-            &mut supporting_files,
-        )?;
+        annotate_results_with_git_history(self.store, self.history_store, &mut primary_files)?;
+        annotate_results_with_git_history(self.store, self.history_store, &mut supporting_files)?;
 
         let selector = TestSelector::new(self.store as &dyn open_kioku_storage::MetadataStore);
         let mut tests_by_id = std::collections::BTreeMap::new();
@@ -1746,7 +1736,6 @@ fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
 fn annotate_results_with_git_history(
     store: &dyn OkStore,
     history_store: Option<&dyn HistoryStore>,
-    task: &str,
     results: &mut [SearchResult],
 ) -> Result<()> {
     if results.is_empty() {
@@ -1759,10 +1748,14 @@ fn annotate_results_with_git_history(
                 .as_ref()
                 .map(|symbol| vec![symbol.qualified_name.clone(), symbol.name.clone()])
                 .unwrap_or_default();
+            // Per-file history evidence: churn, co-change neighbours, reviewers of *this* file.
+            // The task text is deliberately not part of the query; commit-message similarity to
+            // task prose measured as noise for ranking (see the history candidate stream) and it
+            // made this annotation a full similar-change scan per primary result.
             let summary = history_store.history_score_components(
                 &HistorySignalQuery {
                     path: result.path.clone(),
-                    task: Some(task.to_string()),
+                    task: None,
                     symbols,
                 },
                 8,
@@ -1793,24 +1786,14 @@ fn annotate_results_with_git_history(
         }
     }
 
-    let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
-    if facts.is_empty() {
-        return Ok(());
-    }
-    let files = store.list_files(usize::MAX, 0)?;
-    let files_by_path = files
-        .into_iter()
-        .map(|file| (normalize_path(&file.path), file))
-        .collect::<std::collections::HashMap<_, _>>();
+    // Indexed per-file lookups: this used to load up to 10k git-history facts and every file
+    // row on each call, then filter in memory per result.
     for result in results {
-        let Some(file) = files_by_path.get(&normalize_path(&result.path)) else {
+        let Some(file) = store.get_file_by_path(&result.path)? else {
             continue;
         };
-        let matched = facts
-            .iter()
-            .filter(|fact| fact.file_id == file.id)
-            .take(3)
-            .collect::<Vec<_>>();
+        let matched =
+            store.analysis_facts_for_file(&file.id, Some(EvidenceSourceType::GitHistory), 3)?;
         if matched.is_empty() {
             continue;
         }
