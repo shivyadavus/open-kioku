@@ -452,16 +452,16 @@ impl<'a> PlanEngine<'a> {
             history_components.len(),
         );
         let score_breakdown = plan_score_breakdown(&risk, &history_components);
-        let mut confidence_breakdown = confidence_for_plan(
-            &primary_context,
-            &impact,
-            &validation,
-            &risk,
-            &recommended_change_boundary,
-            &evidence,
-            context.runtime_signals.len(),
+        let mut confidence_breakdown = confidence_for_plan(PlanConfidenceInputs {
             task,
-        );
+            primary_context: &primary_context,
+            impact: &impact,
+            validation: &validation,
+            risk: &risk,
+            boundary: &recommended_change_boundary,
+            evidence: &evidence,
+            context_runtime_signal_count: context.runtime_signals.len(),
+        });
         apply_evidence_quality_to_confidence(&mut confidence_breakdown, &evidence_quality);
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
         // RI3.7: the plan states its relationship claims with their authority split rather
@@ -772,16 +772,31 @@ fn plan_score_breakdown(
     components
 }
 
-fn confidence_for_plan(
-    primary_context: &[SearchResult],
-    impact: &ImpactReport,
-    validation: &[TestTarget],
-    risk: &RiskReport,
-    boundary: &ChangeBoundary,
-    evidence: &[open_kioku_core::Evidence],
+/// Inputs to the plan confidence calculation, grouped rather than passed
+/// positionally - adding `task` took the list past the point where argument
+/// order is memorable, and these are all facets of one plan.
+struct PlanConfidenceInputs<'a> {
+    task: &'a str,
+    primary_context: &'a [SearchResult],
+    impact: &'a ImpactReport,
+    validation: &'a [TestTarget],
+    risk: &'a RiskReport,
+    boundary: &'a ChangeBoundary,
+    evidence: &'a [open_kioku_core::Evidence],
     context_runtime_signal_count: usize,
-    task: &str,
-) -> ConfidenceBreakdown {
+}
+
+fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown {
+    let PlanConfidenceInputs {
+        task,
+        primary_context,
+        impact,
+        validation,
+        risk,
+        boundary,
+        evidence,
+        context_runtime_signal_count,
+    } = inputs;
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
         task_relevance: open_kioku_core::task_relevance_score(task, primary_context),
         primary_file_count: primary_context.len(),

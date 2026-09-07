@@ -737,16 +737,16 @@ impl<'a> ContextPackBuilder<'a> {
             .take(8)
             .map(|result| result.path.clone())
             .collect::<Vec<_>>();
-        let mut confidence_breakdown = confidence_for_context(
+        let mut confidence_breakdown = confidence_for_context(ContextConfidenceInputs {
             task,
-            &primary_files,
-            &supporting_files,
-            &tests,
-            &impact.risk_report,
-            allowed_files.len(),
-            evidence.len(),
-            runtime_signals.len(),
-        );
+            primary_files: &primary_files,
+            supporting_files: &supporting_files,
+            tests: &tests,
+            risk: &impact.risk_report,
+            allowed_file_count: allowed_files.len(),
+            evidence_count: evidence.len(),
+            runtime_signal_count_value: runtime_signals.len(),
+        });
         if let Some(missing) = retrieval_diagnostics
             .selection
             .abstention_reason
@@ -1394,16 +1394,33 @@ fn negative_evidence_for_context(
     items
 }
 
-fn confidence_for_context(
-    task: &str,
-    primary_files: &[SearchResult],
-    supporting_files: &[SearchResult],
-    tests: &[open_kioku_core::TestTarget],
-    risk: &RiskReport,
+/// Inputs to the context confidence calculation.
+///
+/// Grouped rather than passed positionally: adding `task` took the argument
+/// list past the point where the order is memorable, and these are all facets
+/// of one pack.
+struct ContextConfidenceInputs<'a> {
+    task: &'a str,
+    primary_files: &'a [SearchResult],
+    supporting_files: &'a [SearchResult],
+    tests: &'a [open_kioku_core::TestTarget],
+    risk: &'a RiskReport,
     allowed_file_count: usize,
     evidence_count: usize,
     runtime_signal_count_value: usize,
-) -> ConfidenceBreakdown {
+}
+
+fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBreakdown {
+    let ContextConfidenceInputs {
+        task,
+        primary_files,
+        supporting_files,
+        tests,
+        risk,
+        allowed_file_count,
+        evidence_count,
+        runtime_signal_count_value,
+    } = inputs;
     // Relevance is measured over what the caller will actually be handed.
     let mut selected = primary_files.to_vec();
     selected.extend_from_slice(supporting_files);
