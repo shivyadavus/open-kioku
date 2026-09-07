@@ -502,12 +502,18 @@ impl<'a> BuiltinCandidateContext<'a> {
                 }
                 let file = files_by_id.get(&test.file_id).copied()?;
                 let result = result_for_test(file, &test, overlap as f32);
+                // A test whose name shares a word with the task is a lexical hint, not
+                // corroboration. Fusion orders candidates by authority before score, so when
+                // this stream declared itself Corroborating every `*ProcessorTests` in a large
+                // Java repository outranked the processor itself for "geoip processor": the
+                // first 20 primary files were all tests. Corroboration has to come from a
+                // second, independent source, and it is derived at fusion time.
                 Some((
                     overlap,
                     StreamCandidate::from_result(
                         result,
-                        RetrievalAuthority::Corroborating,
-                        "validation/test target overlaps the task vocabulary",
+                        RetrievalAuthority::Heuristic,
+                        "validation/test target name overlaps the task vocabulary",
                     ),
                 ))
             })

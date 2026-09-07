@@ -377,6 +377,104 @@ pub fn task_relevance_score(task: &str, selected: &[SearchResult]) -> f32 {
     matched as f32 / terms.len() as f32
 }
 
+/// Whether a repository-relative path is test code, judged by its directory
+/// segments and file name rather than by substring.
+///
+/// The `contains("test")` rule this replaces matched `latest`, `attest`, and
+/// `contest`, and missed the Gradle/Maven source-set layout that large Java
+/// repositories use (`src/internalClusterTest/java`, `src/javaRestTest`,
+/// `src/testFixtures`, `qa/`), so integration tests passed as source there.
+pub fn is_test_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let Some((file, dirs)) = segments.split_last() else {
+        return false;
+    };
+    dirs.iter().any(|dir| is_test_dir_segment(dir)) || is_test_file_name(file)
+}
+
+fn is_test_dir_segment(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "test"
+            | "tests"
+            | "testing"
+            | "spec"
+            | "specs"
+            | "__tests__"
+            | "__test__"
+            | "testdata"
+            | "e2e"
+            | "cypress"
+            | "qa"
+    ) || lower.starts_with("test")
+        || lower.ends_with("-test")
+        || lower.ends_with("_test")
+        || lower.ends_with("-tests")
+        || lower.ends_with("_tests")
+        || lower.ends_with("-spec")
+        || lower.ends_with("_spec")
+        || has_camel_test_suffix(segment)
+}
+
+fn is_test_file_name(name: &str) -> bool {
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let lower = stem.to_ascii_lowercase();
+    // `tests.rs` is a test module; `Test.java` is a class that happens to be named Test.
+    matches!(stem, "test" | "tests" | "conftest")
+        || lower.starts_with("test_")
+        || lower.ends_with("_test")
+        || lower.ends_with("_tests")
+        || lower.ends_with("_spec")
+        || lower.ends_with("-test")
+        || lower.ends_with("-spec")
+        || lower.ends_with(".test")
+        || lower.ends_with(".spec")
+        || lower.ends_with(".e2e")
+        || has_camel_test_suffix(stem)
+}
+
+/// `GeoIpProcessorTests`, `GeoIpReindexedIT`, `internalClusterTest`: a test
+/// suffix in CamelCase, recognised only at a case boundary so `UNIT` and a
+/// bare `Test` do not count.
+fn has_camel_test_suffix(value: &str) -> bool {
+    ["TestCase", "Tests", "Test", "Spec", "IT"]
+        .iter()
+        .any(|suffix| {
+            value
+                .strip_suffix(suffix)
+                .and_then(|prefix| prefix.chars().last())
+                .is_some_and(|last| last.is_ascii_lowercase() || last.is_ascii_digit())
+        })
+}
+
+/// Whether the task is asking about tests rather than about source.
+///
+/// Deliberately narrow: the cost of a false positive is promoting test files
+/// over source for an ordinary query, which is the regression this guards.
+pub fn query_wants_tests(query: &str) -> bool {
+    query
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            matches!(
+                word,
+                "test"
+                    | "tests"
+                    | "testing"
+                    | "spec"
+                    | "specs"
+                    | "covering"
+                    | "coverage"
+                    | "fixture"
+            )
+        })
+}
+
 /// Split text into lowercase word tokens, breaking camelCase and snake_case so
 /// `issueToken` contributes both `issue` and `token`.
 fn collect_identifier_tokens(text: &str, out: &mut std::collections::HashSet<String>) {
@@ -3935,5 +4033,62 @@ mod ri3_resolution_quality_core_tests {
 
         let decoded: IndexQuality = serde_json::from_str(&first).unwrap();
         assert_eq!(decoded.resolution_quality, Some(report));
+    }
+}
+
+#[cfg(test)]
+mod test_path_tests {
+    use super::{is_test_path, query_wants_tests};
+
+    #[test]
+    fn gradle_source_sets_and_java_suffixes_are_tests() {
+        for path in [
+            "modules/ip-location/src/internalClusterTest/java/org/es/GeoIpDownloaderIT.java",
+            "modules/ip-location/src/yamlRestTest/java/org/es/GeoIpDatabaseTestHelper.java",
+            "modules/ip-location/src/test/java/org/es/GeoIpProcessorTests.java",
+            "modules/ip-location/qa/geoip-reindexed/src/javaRestTest/java/GeoIpReindexedIT.java",
+            "server/src/testFixtures/java/org/es/ESTestCase.java",
+            "src/main/java/org/es/AbstractStringProcessorTestCase.java",
+            "src/main/java/org/es/RoutingSpec.java",
+            "crates/core/tests/api.rs",
+            "crates/core/src/tests.rs",
+            "pkg/store/store_test.go",
+            "pkg/store/testdata/fixture.json",
+            "src/components/__tests__/Button.tsx",
+            "src/components/Button.test.tsx",
+            "src/components/Button.spec.ts",
+            "e2e/login.e2e.ts",
+            "tests/test_auth.py",
+            "app/conftest.py",
+            "spec/models/user_spec.rb",
+        ] {
+            assert!(is_test_path(path), "{path} should be a test path");
+        }
+    }
+
+    #[test]
+    fn substring_lookalikes_and_source_are_not_tests() {
+        for path in [
+            "modules/ip-location/src/main/java/org/es/GeoIpProcessor.java",
+            "server/src/main/java/org/es/cluster/ClusterState.java",
+            "src/latest_news.rs",
+            "src/attestation/verify.rs",
+            "src/contest/scoring.py",
+            "src/main/java/org/es/UNIT.java",
+            "src/main/java/org/es/Test.java",
+            "docs/testing-guide.md",
+            "src/greatest.rs",
+            "",
+        ] {
+            assert!(!is_test_path(path), "{path} should not be a test path");
+        }
+    }
+
+    #[test]
+    fn query_wants_tests_is_narrow() {
+        assert!(query_wants_tests("add tests for the geoip processor"));
+        assert!(query_wants_tests("which spec covers routing"));
+        assert!(!query_wants_tests("geoip processor"));
+        assert!(!query_wants_tests("latest cluster state publication"));
     }
 }
