@@ -602,9 +602,27 @@ impl<'a> BuiltinCandidateContext<'a> {
                 "git-history candidate stream is not configured",
             );
         };
+        // History corroborates an identified anchor; it does not retrieve from prose. Scoring
+        // commits by task-text overlap voted for every file each loosely matching commit
+        // touched, and on a 10k-file repository with 500 ingested commits that was pure noise:
+        // 60 commit-derived dev cases went MRR 0.375 -> 0.450 (R@20 0.68 -> 0.75) with those
+        // votes removed, monotonically across weights 1.0 / 0.5 / 0.25 / 0, and the scan cost
+        // ~5 s per query. Symbol and path anchors are what co-change history can actually
+        // speak to.
+        if anchor_symbols.is_empty() && request.scope.path_prefixes.is_empty() {
+            return CandidateStream::unavailable(
+                RetrievalSourceKind::GitHistory,
+                "git-history candidates need an exact symbol or path anchor; commit-message similarity alone is not a retrieval signal",
+            );
+        }
         let query = open_kioku_core::SimilarChangeQuery {
-            task: Some(request.task.clone()),
-            paths: Vec::new(),
+            task: None,
+            paths: request
+                .scope
+                .path_prefixes
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
             symbols: anchor_symbols
                 .iter()
                 .map(|symbol| symbol.id.0.clone())
