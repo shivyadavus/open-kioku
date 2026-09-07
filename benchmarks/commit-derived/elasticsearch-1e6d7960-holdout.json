@@ -9,7 +9,7 @@
       "modules/",
       "server/"
     ],
-    "after": 4000,
+    "after": 3800,
     "chronological_split": "first 70% dev, last 30% holdout",
     "frozen": "2026-09-07",
     "frozen_from": "open-kioku main after PR #361 (identifier tokenizer, anchor fix), macOS 13 x86_64 release build"

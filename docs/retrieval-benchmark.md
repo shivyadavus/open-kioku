@@ -143,7 +143,7 @@ repository's own history, after the Agent Retrieval Bench methodology:
 3. Split chronologically — older cases are the development set, newer ones the holdout.
 
 ```sh
-scripts/commit-derived-cases.py ~/src/elasticsearch --base 1e6d7960 --after 4000 \
+scripts/commit-derived-cases.py ~/src/elasticsearch --base 1e6d7960 --after 3800 \
     --path-prefix libs/ --path-prefix modules/ --path-prefix server/ --out cases.tsv
 scripts/score-context-cases.py --ok target/release/ok --repo ./es-at-base \
     --cases cases-holdout.tsv --label holdout --out holdout.json
