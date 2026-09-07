@@ -1,0 +1,106 @@
+name: commit-derived-bench
+
+# Scores the production `ok context` path on a leakage-safe benchmark derived from a real
+# repository's history (docs/retrieval-benchmark.md, "Commit-derived corpora"). The 39-file
+# fixture in `ci.yml` catches determinism and gross regressions; this job is what catches a
+# ranking change that only shows on ten thousand files. It is scheduled because indexing the
+# corpus and scoring ~400 queries takes about 45 minutes.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: Repository to derive the corpus from
+        default: https://github.com/elastic/elasticsearch
+      base_sha:
+        description: Base commit; the repository is indexed here
+        default: 1e6d79605440aa871287acacb604564d54ca7555
+      path_prefixes:
+        description: Space-separated subtrees that are extracted and indexed
+        default: libs/ modules/ server/
+      after:
+        description: Commits after base to scan for cases
+        default: "4000"
+      corpus_name:
+        description: Baseline name under benchmarks/commit-derived/
+        default: elasticsearch-1e6d7960
+
+env:
+  CARGO_TERM_COLOR: always
+  REPO_URL: ${{ github.event.inputs.repo_url || 'https://github.com/elastic/elasticsearch' }}
+  BASE_SHA: ${{ github.event.inputs.base_sha || '1e6d79605440aa871287acacb604564d54ca7555' }}
+  PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || 'libs/ modules/ server/' }}
+  AFTER: ${{ github.event.inputs.after || '4000' }}
+  CORPUS_NAME: ${{ github.event.inputs.corpus_name || 'elasticsearch-1e6d7960' }}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build ok
+        run: cargo build --release -p open-kioku-cli
+
+      - name: Clone source repository (history only, blobs on demand)
+        run: |
+          git clone --filter=blob:none --no-checkout "$REPO_URL" source
+          git -C source fetch --quiet origin "$BASE_SHA" || true
+
+      - name: Extract the indexed subtree at the base commit
+        run: |
+          mkdir -p corpus
+          # shellcheck disable=SC2086
+          git -C source archive "$BASE_SHA" $PATH_PREFIXES | tar -x -C corpus
+          echo "$BASE_SHA" > corpus/.base-sha
+          find corpus -type f | wc -l
+
+      - name: Derive cases
+        run: |
+          args=""
+          for p in $PATH_PREFIXES; do args="$args --path-prefix $p"; done
+          # shellcheck disable=SC2086
+          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" --after "$AFTER" $args --out cases.tsv
+          python3 - <<'PY'
+          rows = open("cases.tsv").readlines()
+          cut = int(len(rows) * 0.7)
+          open("cases-dev.tsv", "w").writelines(rows[:cut])
+          open("cases-holdout.tsv", "w").writelines(rows[cut:])
+          print(f"{len(rows)} cases: {cut} dev, {len(rows) - cut} holdout (chronological split)")
+          PY
+
+      - name: Index the corpus
+        run: |
+          ./target/release/ok init corpus
+          ./target/release/ok index corpus 2>&1 | tail -5
+
+      - name: Score the production context path
+        run: |
+          mkdir -p artifacts
+          python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
+            --cases cases-holdout.tsv --label holdout --workers 3 --out artifacts/holdout.json
+          python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
+            --cases cases-dev.tsv --label dev --workers 3 --out artifacts/dev.json
+
+      - name: Compare against the frozen baseline
+        run: |
+          python3 scripts/compare-commit-derived-report.py artifacts/holdout.json \
+            "benchmarks/commit-derived/${CORPUS_NAME}-holdout.json"
+          python3 scripts/compare-commit-derived-report.py artifacts/dev.json \
+            "benchmarks/commit-derived/${CORPUS_NAME}-dev.json"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: commit-derived-${{ env.CORPUS_NAME }}
+          path: |
+            artifacts/
+            cases.tsv
+          if-no-files-found: error
