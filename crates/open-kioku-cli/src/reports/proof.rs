@@ -344,7 +344,16 @@ fn score_proof_task(
         .count();
     let impact_count = plan.impact.direct_impacts.len() + plan.impact.indirect_impacts.len();
 
+    // Every other check below asks whether the plan is structurally complete.
+    // None of them asked whether it has anything to do with the task, so a plan
+    // full of real, existing, impacted, tested files scored 100/100 for a query
+    // the repository could not answer - in the one artifact this project offers
+    // as shareable proof.
+    let task_relevance =
+        open_kioku_core::task_relevance_score(task, &plan.primary_context);
+
     let mut checks = BTreeMap::new();
+    checks.insert("task_relevance", task_relevance > 0.0);
     checks.insert("primary_context", !plan.primary_context.is_empty());
     checks.insert(
         "paths_exist",
@@ -358,17 +367,24 @@ fn score_proof_task(
 
     let mut score = 0;
     for (name, weight) in [
-        ("primary_context", 25),
-        ("paths_exist", 15),
-        ("source_context", 15),
-        ("impact_candidates", 15),
-        ("validation_candidates", 15),
-        ("agent_tool_calls", 10),
+        ("task_relevance", 30),
+        ("primary_context", 20),
+        ("paths_exist", 10),
+        ("source_context", 10),
+        ("impact_candidates", 10),
+        ("validation_candidates", 10),
+        ("agent_tool_calls", 5),
         ("known_risk", 5),
     ] {
         if checks.get(name).copied().unwrap_or(false) {
             score += weight;
         }
+    }
+    // Relevance is a gate, not a bonus. A plan whose task terms appear nowhere
+    // in its own primary context cannot be proof of anything, however complete
+    // it looks, and must land well below the 70 pass mark.
+    if task_relevance <= 0.0 {
+        score = score.min(20);
     }
 
     ProofTaskReport {
