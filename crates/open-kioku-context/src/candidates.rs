@@ -10,7 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod builtins;
 
-pub const DEFAULT_RRF_K: f32 = 60.0;
+pub const MEASURED_VALIDATION_PRIOR: f32 = 0.5;
+/// Reciprocal-rank-fusion constant. The literature default of 60 assumes comparable rankers;
+/// here one stream is full-text BM25 over the whole task and the others are name-overlap
+/// hints, and at k=60 lexical rank 2 (1/62) is indistinguishable from rank 13 (1/73), so any
+/// file with two weak votes outranked a single strong one. k=10 lets top lexical ranks count.
+/// Measured on the 490-case commit-derived corpus: dev R@5 0.487 -> 0.481, R@20 0.665 ->
+/// 0.659, MRR 0.386 -> 0.384; holdout R@5/R@20 identical, MRR 0.345 -> 0.348 (all within
+/// noise); on this repository's workflow benchmark it restores `test-selector` (20/20).
+pub const DEFAULT_RRF_K: f32 = 10.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CandidateScope {
@@ -244,6 +252,20 @@ impl FusionConfig {
         }
     }
 
+    /// The product default, from frozen-corpus data. Every source votes at 1.0 except validation
+    /// at 0.5: a test whose *name* overlaps the task is weaker evidence than a full-text BM25
+    /// match on the task, yet at 1.0 two such votes outranked a lexical #2 hit. On the 490-case
+    /// commit-derived Elasticsearch benchmark the prior is neutral (R@5/R@20 identical, MRR
+    /// +0.001 on both splits); on this repository's workflow benchmark it restores the
+    /// `test-selector` case. Re-measure before changing any weight here.
+    pub fn measured() -> Self {
+        let mut config = Self::unweighted();
+        config
+            .source_weights
+            .insert(RetrievalSourceKind::Validation, MEASURED_VALIDATION_PRIOR);
+        config
+    }
+
     /// A predeclared evidence-prior profile retained for benchmark comparison. These weights are
     /// not calibration results and must not become the product default without frozen-corpus data.
     pub fn evidence_prior_weighted() -> Self {
@@ -267,7 +289,11 @@ impl FusionConfig {
     /// This keeps ContextPack JSON backward-compatible while making the applied fusion profile
     /// observable in every selected candidate's existing contribution rationale.
     pub fn profile_identity(&self) -> &'static str {
-        if self.rrf_k == DEFAULT_RRF_K && self.source_weights == Self::unweighted().source_weights {
+        if self.rrf_k == DEFAULT_RRF_K && self.source_weights == Self::measured().source_weights {
+            "rrf_measured_v1"
+        } else if self.rrf_k == DEFAULT_RRF_K
+            && self.source_weights == Self::unweighted().source_weights
+        {
             "rrf_unweighted"
         } else if self.rrf_k == DEFAULT_RRF_K
             && self.source_weights == Self::evidence_prior_weighted().source_weights
@@ -281,11 +307,12 @@ impl FusionConfig {
 
 impl FusionConfig {
     /// Preserve repository ranking customization without re-applying the legacy score fusion.
-    /// Default ranking weights normalize to 1.0, so the measured product default remains plain
-    /// RRF. User overrides become relative per-source priors.
+    /// Default ranking weights normalize to 1.0 and scale the measured profile, so a repository
+    /// that changes nothing gets exactly the product default. User overrides become relative
+    /// per-source priors on top of it.
     pub fn from_ranking_options(options: &RankingOptions) -> Self {
         let defaults = RankingWeights::default();
-        let mut config = Self::unweighted();
+        let mut config = Self::measured();
         if options.mode == RankingMode::Baseline {
             for weight in config.source_weights.values_mut() {
                 *weight = 0.0;
@@ -338,9 +365,10 @@ impl FusionConfig {
                 defaults.runtime_corroboration,
             ),
         ] {
+            let base = config.source_weights.get(&source).copied().unwrap_or(1.0);
             config
                 .source_weights
-                .insert(source, relative_source_weight(configured, baseline));
+                .insert(source, base * relative_source_weight(configured, baseline));
         }
 
         if let RankingMode::WithoutSignal(signal) = options.mode {
@@ -381,7 +409,7 @@ fn source_for_ranking_signal(signal: RankingSignal) -> Option<RetrievalSourceKin
 
 impl Default for FusionConfig {
     fn default() -> Self {
-        Self::unweighted()
+        Self::measured()
     }
 }
 
@@ -812,8 +840,23 @@ mod tests {
     }
 
     #[test]
-    fn default_fusion_is_unweighted_until_calibration_is_benchmarked() {
+    fn default_fusion_is_the_measured_profile() {
         let config = FusionConfig::default();
+        assert_eq!(config.profile_identity(), "rrf_measured_v1");
+        assert_eq!(
+            config.source_weights[&RetrievalSourceKind::Validation],
+            MEASURED_VALIDATION_PRIOR
+        );
+        assert!(config
+            .source_weights
+            .iter()
+            .filter(|(source, _)| **source != RetrievalSourceKind::Validation)
+            .all(|(_, weight)| (*weight - 1.0).abs() < f32::EPSILON));
+    }
+
+    #[test]
+    fn unweighted_profile_is_still_available_for_ablation() {
+        let config = FusionConfig::unweighted();
         assert!(config
             .source_weights
             .values()
@@ -858,12 +901,13 @@ mod tests {
     }
 
     #[test]
-    fn default_ranking_options_preserve_unweighted_rrf() {
+    fn default_ranking_options_preserve_the_measured_profile() {
         let config = FusionConfig::from_ranking_options(&RankingOptions::default());
-        assert!(config
-            .source_weights
-            .values()
-            .all(|weight| (*weight - 1.0).abs() < f32::EPSILON));
+        assert_eq!(config.profile_identity(), "rrf_measured_v1");
+        assert_eq!(
+            config.source_weights,
+            FusionConfig::measured().source_weights
+        );
     }
 
     #[test]
@@ -878,6 +922,11 @@ mod tests {
         );
         assert_eq!(config.source_weights[&RetrievalSourceKind::Graph], 0.5);
         assert_eq!(config.source_weights[&RetrievalSourceKind::Lexical], 1.0);
+        // Overrides scale the measured prior rather than replacing it.
+        let mut options = RankingOptions::default();
+        options.weights.validation_proximity *= 2.0;
+        let config = FusionConfig::from_ranking_options(&options);
+        assert_eq!(config.source_weights[&RetrievalSourceKind::Validation], 1.0);
     }
 
     #[test]
