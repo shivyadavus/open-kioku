@@ -738,6 +738,7 @@ impl<'a> ContextPackBuilder<'a> {
             .map(|result| result.path.clone())
             .collect::<Vec<_>>();
         let mut confidence_breakdown = confidence_for_context(
+            task,
             &primary_files,
             &supporting_files,
             &tests,
@@ -1394,6 +1395,7 @@ fn negative_evidence_for_context(
 }
 
 fn confidence_for_context(
+    task: &str,
     primary_files: &[SearchResult],
     supporting_files: &[SearchResult],
     tests: &[open_kioku_core::TestTarget],
@@ -1402,7 +1404,11 @@ fn confidence_for_context(
     evidence_count: usize,
     runtime_signal_count_value: usize,
 ) -> ConfidenceBreakdown {
+    // Relevance is measured over what the caller will actually be handed.
+    let mut selected = primary_files.to_vec();
+    selected.extend_from_slice(supporting_files);
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+        task_relevance: open_kioku_core::task_relevance_score(task, &selected),
         primary_file_count: primary_files.len(),
         evidence_count,
         exact_reference_count: exact_reference_count(primary_files, supporting_files),
