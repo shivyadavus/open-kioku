@@ -1,0 +1,53 @@
+{
+  "corpus": "elasticsearch-1e6d7960",
+  "split": "holdout",
+  "provenance": {
+    "repo": "https://github.com/elastic/elasticsearch",
+    "base_sha": "1e6d79605440aa871287acacb604564d54ca7555",
+    "path_prefixes": [
+      "libs/",
+      "modules/",
+      "server/"
+    ],
+    "after": 4000,
+    "chronological_split": "first 70% dev, last 30% holdout",
+    "frozen": "2026-09-07",
+    "frozen_from": "open-kioku main after PR #361 (identifier tokenizer, anchor fix), macOS 13 x86_64 release build"
+  },
+  "cases": 119,
+  "median_secs": 4.46,
+  "metrics": {
+    "R@1": 0.4118,
+    "R@5": 0.5378,
+    "R@10": 0.605,
+    "R@20": 0.6639,
+    "MRR": 0.4744,
+    "gold_recall@20": 0.5214
+  },
+  "ci": {
+    "R@1": [
+      0.3193,
+      0.5042
+    ],
+    "R@5": [
+      0.4538,
+      0.6303
+    ],
+    "R@10": [
+      0.521,
+      0.6975
+    ],
+    "R@20": [
+      0.5798,
+      0.7479
+    ],
+    "MRR": [
+      0.3942,
+      0.5614
+    ],
+    "gold_recall@20": [
+      0.4455,
+      0.6
+    ]
+  }
+}

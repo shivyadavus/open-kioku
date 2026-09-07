@@ -127,6 +127,38 @@ dimension to `blocking` is a reviewed contract change, exactly like the holdout 
 The initial floors were derived from the frozen baseline with 10% relative slack and are
 themselves subject to review.
 
+## Commit-derived corpora
+
+The fixture above is 39 files. Three of the defects fixed in September 2026 — tests
+displacing source in primary context, sentence-initial capitals acting as edit anchors,
+and single-word expansions outranking the whole task — passed it bit-identically and only
+showed on a ten-thousand-file repository. Larger corpora are derived from a real
+repository's own history, after the Agent Retrieval Bench methodology:
+
+1. Pick a base commit `B` and index the repository (or a subtree) **at `B`**.
+2. Every case is a later commit: the query is its subject with PR numbers and paths
+   stripped; the gold set is the source files it modified that already existed at `B`.
+   The change lives in the future, never in the index, so a query cannot retrieve its
+   own diff.
+3. Split chronologically — older cases are the development set, newer ones the holdout.
+
+```sh
+scripts/commit-derived-cases.py ~/src/elasticsearch --base 1e6d7960 --after 4000 \
+    --path-prefix libs/ --path-prefix modules/ --path-prefix server/ --out cases.tsv
+scripts/score-context-cases.py --ok target/release/ok --repo ./es-at-base \
+    --cases cases-holdout.tsv --label holdout --out holdout.json
+scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/elasticsearch-1e6d7960-holdout.json
+```
+
+`score-context-cases.py` drives `ok context --json`, the same builder `ok plan` and the MCP
+`build_context_pack` tool use, and ranks files in the order the pack presents them. It
+reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live under
+`benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives the
+Elasticsearch corpus nightly and fails when a watched metric falls more than 0.03 below its
+baseline. Queries are commit subjects, so absolute numbers are not comparable with
+published benchmarks that use issue text; compare a change against the frozen baseline,
+not against the literature.
+
 ## Reproduce locally
 
 From the repository root:
