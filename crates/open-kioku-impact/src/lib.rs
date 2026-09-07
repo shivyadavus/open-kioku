@@ -109,18 +109,35 @@ impl<'a> ImpactEngine<'a> {
             None
         };
 
+        // Without a configured lexical index every search below scans the store in memory.
+        // Load that scan corpus once: it used to be reloaded per search term, which on a
+        // 10k-file repository meant thirteen full-table loads and ~70 s per context pack.
+        let fallback_index = match (self.search_index, &file) {
+            (None, Some(_)) => Some(ChunkScanIndex::load(self.store)?),
+            _ => None,
+        };
+        let search_index: Option<&dyn SearchIndex> = self.search_index.or(fallback_index
+            .as_ref()
+            .map(|index| index as &dyn SearchIndex));
+        let search = |term: &str, limit: usize| -> Result<Vec<open_kioku_core::SearchResult>> {
+            match search_index {
+                Some(index) => index.search(term, limit),
+                None => Ok(Vec::new()),
+            }
+        };
+
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
             direct.extend(git_cochange_impacts(self.store, file, &git_facts)?);
             direct.extend(runtime_impacts(
                 self.store,
-                self.search_index,
+                search_index,
                 file,
                 &runtime_facts,
             )?);
             direct.extend(service_boundary_impacts(
                 self.store,
-                self.search_index,
+                search_index,
                 file,
                 &service_facts,
             )?);
@@ -128,14 +145,7 @@ impl<'a> ImpactEngine<'a> {
                 .into_iter()
                 .take(8)
             {
-                let results = if let Some(index) = self.search_index {
-                    index.search(&term, 25)?
-                } else {
-                    let files = self.store.list_files(usize::MAX, 0)?;
-                    let chunks = self.store.all_chunks()?;
-                    let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
-                    search_chunks(&chunks, &files, &symbols, &term, 25)?
-                };
+                let results = search(&term, 25)?;
                 direct.extend(
                     results
                         .into_iter()
@@ -168,14 +178,7 @@ impl<'a> ImpactEngine<'a> {
             if indirect_stem.is_empty() || indirect_stem.len() < 3 {
                 continue;
             }
-            let second = if let Some(index) = self.search_index {
-                index.search(indirect_stem, 10)?
-            } else {
-                let files = self.store.list_files(usize::MAX, 0)?;
-                let chunks = self.store.all_chunks()?;
-                let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
-                search_chunks(&chunks, &files, &symbols, indirect_stem, 10)?
-            };
+            let second = search(indirect_stem, 10)?;
             for result in second {
                 if result.path != path && !direct_paths.contains(&result.path) {
                     indirect.push(result);
@@ -631,6 +634,38 @@ fn git_cochange_impacts(
         });
     }
     Ok(dedupe_results(results))
+}
+
+/// In-memory stand-in for the lexical index when none is configured. Answers with the same
+/// `search_chunks` scan the per-term fallback used, so results are unchanged; only the number
+/// of times the store is read changes.
+struct ChunkScanIndex {
+    files: Vec<File>,
+    chunks: Vec<CodeChunk>,
+    symbols: Vec<Symbol>,
+}
+
+impl ChunkScanIndex {
+    fn load(store: &dyn MetadataStore) -> Result<Self> {
+        Ok(Self {
+            files: store.list_files(usize::MAX, 0)?,
+            chunks: store.all_chunks()?,
+            symbols: store.list_symbols(None, usize::MAX, 0)?,
+        })
+    }
+}
+
+impl SearchIndex for ChunkScanIndex {
+    fn rebuild(&mut self, chunks: &[CodeChunk], files: &[File], symbols: &[Symbol]) -> Result<()> {
+        self.chunks = chunks.to_vec();
+        self.files = files.to_vec();
+        self.symbols = symbols.to_vec();
+        Ok(())
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<open_kioku_core::SearchResult>> {
+        search_chunks(&self.chunks, &self.files, &self.symbols, query, limit)
+    }
 }
 
 fn service_boundary_impacts(
