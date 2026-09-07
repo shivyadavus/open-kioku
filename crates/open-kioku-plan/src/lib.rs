@@ -460,6 +460,7 @@ impl<'a> PlanEngine<'a> {
             &recommended_change_boundary,
             &evidence,
             context.runtime_signals.len(),
+            task,
         );
         apply_evidence_quality_to_confidence(&mut confidence_breakdown, &evidence_quality);
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
@@ -779,8 +780,10 @@ fn confidence_for_plan(
     boundary: &ChangeBoundary,
     evidence: &[open_kioku_core::Evidence],
     context_runtime_signal_count: usize,
+    task: &str,
 ) -> ConfidenceBreakdown {
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+        task_relevance: open_kioku_core::task_relevance_score(task, primary_context),
         primary_file_count: primary_context.len(),
         evidence_count: evidence.len(),
         exact_reference_count: exact_reference_count(primary_context, impact),
