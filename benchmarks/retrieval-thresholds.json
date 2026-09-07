@@ -6,11 +6,11 @@
   "minimums": {
     "recall_at_5": 0.7222222222222222,
     "recall_at_10": 1.0,
-    "mean_reciprocal_rank": 0.9166666666666666,
+    "mean_reciprocal_rank": 0.8055555555555555,
     "file_f1_at_10": 0.4615384615384615,
     "token_budget_gold_yield_2000": 1.0
   },
   "maximums": {
-    "no_gold_false_positive_rate": 0.75
+    "no_gold_false_positive_rate": 0.25
   }
 }
