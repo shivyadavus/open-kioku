@@ -1205,7 +1205,9 @@ fn expected_embedding_implementation(config: &SemanticConfig) -> String {
     if matches!(config.provider.as_str(), "fastembed" | "local-neural") {
         let suffix = match LocalNeuralModel::parse(&config.model) {
             Ok(LocalNeuralModel::JinaEmbeddingsV2BaseCode) => "onnx".to_string(),
-            Ok(LocalNeuralModel::GteModernBertBase) => "onnx-int8-cls".to_string(),
+            Ok(LocalNeuralModel::GteModernBertBase) => {
+                open_kioku_embeddings::gte_modernbert_implementation()
+            }
             Ok(_) => format!("qwen3-candle:maxlen-{QWEN3_MAX_LENGTH}"),
             Err(_) => "unknown".to_string(),
         };

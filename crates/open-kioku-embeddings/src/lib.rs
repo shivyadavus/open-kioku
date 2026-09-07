@@ -112,6 +112,32 @@ pub enum LocalNeuralModel {
 
 const GTE_MODERNBERT_REPO: &str = "Alibaba-NLP/gte-modernbert-base";
 const GTE_MODERNBERT_ONNX: &str = "onnx/model_int8.onnx";
+/// Pinned Hugging Face revision. Upstream `main` can be re-exported or deleted; a pinned commit
+/// plus per-file digests means the model either loads bit-identically or fails loudly.
+const GTE_MODERNBERT_REVISION: &str = "e7f32e3c00f91d699e8c43b53106206bcc72bb22";
+/// SHA-256 of every file fetched at that revision (name, digest).
+const GTE_MODERNBERT_FILES: &[(&str, &str)] = &[
+    (
+        GTE_MODERNBERT_ONNX,
+        "bae96b276d342bf86eeee07c1bdbc0c75bb82bf4033941aab7fabc1e33ee3b44",
+    ),
+    (
+        "tokenizer.json",
+        "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+    ),
+    (
+        "config.json",
+        "8ba54dc3d35d7194f5178a4194b649f146753e02dabd22bdca5c5cbac15069ed",
+    ),
+    (
+        "special_tokens_map.json",
+        "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+    ),
+    (
+        "tokenizer_config.json",
+        "9654072f7c873161814043cf08cb5ed72f71d0b935abcd4e267935cb34352c21",
+    ),
+];
 /// ModernBERT's ONNX export runs full O(n^2) attention with no memory-efficient kernel, so
 /// the model's 8k context is not a usable embedding length: at 8192 tokens x batch 64 the
 /// attention scores alone asked ORT for 55 GB. Chunks are far shorter than 1024 tokens.
@@ -344,7 +370,10 @@ impl EmbeddingProvider for FastEmbedEmbeddingProvider {
             } else {
                 match self.model {
                     LocalNeuralModel::GteModernBertBase => {
-                        format!("{FASTEMBED_PROVIDER_VERSION}:onnx-int8-cls")
+                        format!(
+                            "{FASTEMBED_PROVIDER_VERSION}:{}",
+                            gte_modernbert_implementation()
+                        )
                     }
                     _ => format!("{FASTEMBED_PROVIDER_VERSION}:onnx"),
                 }
@@ -382,16 +411,22 @@ fn load_gte_modernbert(cache_dir: &Path) -> Result<TextEmbedding> {
         .with_progress(false)
         .build()
         .map_err(|err| OkError::Unsupported(format!("Hugging Face hub client: {err}")))?;
-    let repo = api.model(GTE_MODERNBERT_REPO.to_string());
+    let repo = api.repo(hf_hub::Repo::with_revision(
+        GTE_MODERNBERT_REPO.to_string(),
+        hf_hub::RepoType::Model,
+        GTE_MODERNBERT_REVISION.to_string(),
+    ));
     let fetch = |name: &str| -> Result<Vec<u8>> {
         let path = repo.get(name).map_err(|err| {
             OkError::Unsupported(format!(
-                "failed to fetch {GTE_MODERNBERT_REPO}/{name}: {err}"
+                "failed to fetch {GTE_MODERNBERT_REPO}@{GTE_MODERNBERT_REVISION}/{name}: {err}"
             ))
         })?;
-        std::fs::read(&path).map_err(|err| {
+        let bytes = std::fs::read(&path).map_err(|err| {
             OkError::Unsupported(format!("failed to read {}: {err}", path.display()))
-        })
+        })?;
+        verify_pinned_digest(name, &bytes)?;
+        Ok(bytes)
     };
     let model = UserDefinedEmbeddingModel::new(
         fetch(GTE_MODERNBERT_ONNX)?,
@@ -410,6 +445,31 @@ fn load_gte_modernbert(cache_dir: &Path) -> Result<TextEmbedding> {
             "failed to initialize local embedding model {GTE_MODERNBERT_REPO}: {err}"
         ))
     })
+}
+
+/// Implementation tag for gte-modernbert indexes: pooling, quantization, and the pinned
+/// revision, so a re-pin invalidates existing vectors instead of mixing two models.
+pub fn gte_modernbert_implementation() -> String {
+    format!("onnx-int8-cls@{}", &GTE_MODERNBERT_REVISION[..12])
+}
+
+/// Refuses a model file whose SHA-256 differs from the pinned digest, so a re-exported or
+/// tampered upstream file cannot silently change every ranking that depends on it.
+fn verify_pinned_digest(name: &str, bytes: &[u8]) -> Result<()> {
+    use sha2::Digest as _;
+    let expected = GTE_MODERNBERT_FILES
+        .iter()
+        .find(|(file, _)| *file == name)
+        .map(|(_, digest)| *digest)
+        .ok_or_else(|| OkError::Unsupported(format!("no pinned digest for model file {name}")))?;
+    let actual = format!("{:x}", sha2::Sha256::digest(bytes));
+    if actual != expected {
+        return Err(OkError::Unsupported(format!(
+            "model file {GTE_MODERNBERT_REPO}/{name} does not match its pinned digest \
+             (expected {expected}, got {actual}); the download is corrupt or upstream changed"
+        )));
+    }
+    Ok(())
 }
 
 /// Where a model's files live once downloaded, which is what the ready marker fingerprints.
@@ -493,6 +553,13 @@ fn stable_hash(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_digest_rejects_a_changed_file() {
+        let err = super::verify_pinned_digest("config.json", b"{}").unwrap_err();
+        assert!(err.to_string().contains("pinned digest"), "{err}");
+        assert!(super::verify_pinned_digest("nope.bin", b"").is_err());
+    }
+
     use super::*;
 
     #[test]
