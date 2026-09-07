@@ -333,6 +333,72 @@ pub struct ConfidenceSignalInput {
     pub negative_evidence_count: usize,
     pub allowed_file_count: usize,
     pub runtime_signal_count: usize,
+    /// Fraction of the task's content terms that appear anywhere in the selected
+    /// context, in 0..=1. See [`task_relevance_score`].
+    ///
+    /// Every other input counts how *complete* the pack is. None of them asks
+    /// whether it has anything to do with the question, which is why a pack of
+    /// twenty unrelated files scored maximum confidence.
+    pub task_relevance: f32,
+}
+
+/// Fraction of a task's content terms that appear anywhere in the selected
+/// context - path, snippet, or symbol name.
+///
+/// This is deliberately lexical and deliberately crude. It is not a relevance
+/// model; it is a floor. A task whose every word is absent from every selected
+/// file is one the repository cannot answer, and no amount of structural
+/// completeness should make that look confident.
+pub fn task_relevance_score(task: &str, selected: &[SearchResult]) -> f32 {
+    let terms = task_content_terms(task);
+    if terms.is_empty() {
+        // Nothing to disprove. Do not manufacture doubt from an empty query.
+        return 1.0;
+    }
+    if selected.is_empty() {
+        return 0.0;
+    }
+    let haystack = selected
+        .iter()
+        .map(|result| {
+            let mut text = result.path.to_string_lossy().to_ascii_lowercase();
+            text.push(' ');
+            text.push_str(&result.snippet.to_ascii_lowercase());
+            if let Some(symbol) = &result.symbol {
+                text.push(' ');
+                text.push_str(&symbol.name.to_ascii_lowercase());
+                text.push(' ');
+                text.push_str(&symbol.qualified_name.to_ascii_lowercase());
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let matched = terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count();
+    matched as f32 / terms.len() as f32
+}
+
+fn task_content_terms(task: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "the", "and", "for", "with", "that", "this", "from", "into", "when", "should", "must",
+        "add", "use", "using", "make", "run", "get", "set", "new", "all", "any", "not", "but",
+        "are", "was", "were", "has", "have", "had", "its", "our", "out", "how", "why", "who",
+        "can", "may", "will", "would", "could", "then", "than", "them", "they", "there", "these",
+        "those", "some", "such", "only", "also", "each", "more", "most", "other", "over", "after",
+        "before", "between", "under", "while", "where", "which", "what",
+    ];
+    let mut terms: Vec<String> = task
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.len() >= 3)
+        .map(|word| word.to_ascii_lowercase())
+        .filter(|word| !STOPWORDS.contains(&word.as_str()))
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 impl ConfidenceBreakdown {
@@ -417,9 +483,15 @@ impl ConfidenceBreakdown {
 
         let mut components = vec![
             confidence_component(
+                "task_relevance",
+                input.task_relevance.clamp(0.0, 1.0),
+                0.20,
+                "share of the task's terms that appear in the selected context",
+            ),
+            confidence_component(
                 "evidence_density",
                 evidence_density,
-                0.20,
+                0.10,
                 "amount of independent indexed evidence near the selected context",
             ),
             confidence_component(
@@ -468,6 +540,22 @@ impl ConfidenceBreakdown {
             && input.validation_count == 0
             && input.runtime_signal_count == 0
         {
+            overall_score = overall_score.min(0.55);
+        }
+        // Exact evidence absent is on its own a reason not to be *highly*
+        // confident. The cap above is an `&&`, so synthesizing a single
+        // validation target was enough to escape it while claiming High.
+        if input.exact_reference_count == 0 {
+            overall_score = overall_score.min(0.74);
+        }
+        // A task whose terms appear nowhere in the selected context is one the
+        // repository cannot answer. No amount of structural completeness should
+        // outvote that.
+        if input.task_relevance <= 0.0 {
+            blockers.push("no task term appears in the selected context".into());
+            overall_score = overall_score.min(0.30);
+        } else if input.task_relevance < 0.34 {
+            caveats.push("most task terms are absent from the selected context".into());
             overall_score = overall_score.min(0.55);
         }
         if input.negative_evidence_count > 0 {
@@ -3163,14 +3251,98 @@ pub struct PatchPlan {
 #[cfg(test)]
 mod tests {
 
+    fn relevance_probe(path: &str, snippet: &str) -> SearchResult {
+        SearchResult {
+            path: std::path::PathBuf::from(path),
+            line_range: None,
+            snippet: snippet.into(),
+            symbol: None,
+            score: 12.0,
+            match_reason: "lexical match".into(),
+            evidence: vec!["BM25 lexical match from local Tantivy index".into()],
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_task_with_no_terms_in_the_context_scores_zero_relevance() {
+        let selected = vec![
+            relevance_probe("java/auth/AuthService.java", "public Token issueToken()"),
+            relevance_probe("go/shipping/service.go", "func Quote(order Order) Price"),
+        ];
+        assert_eq!(
+            task_relevance_score("calibrate the nightly seismograph ledger", &selected),
+            0.0,
+            "no task term appears in the selected context"
+        );
+        assert!(
+            task_relevance_score("issueToken for AuthService", &selected) > 0.5,
+            "a task about the selected code must score relevant"
+        );
+    }
+
+    #[test]
+    fn a_structurally_complete_pack_about_nothing_cannot_be_confident() {
+        // Every completeness signal maxed, as a pack full of irrelevant files
+        // produces: validation targets, a tight boundary, dense evidence. Only
+        // relevance dissents. Before this, that scored High (0.81).
+        let irrelevant = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 8,
+            evidence_count: 40,
+            exact_reference_count: 0,
+            validation_count: 6,
+            validation_with_command_count: 6,
+            negative_evidence_count: 0,
+            allowed_file_count: 3,
+            runtime_signal_count: 4,
+            task_relevance: 0.0,
+        });
+        assert_eq!(
+            irrelevant.overall_enum,
+            Confidence::Low,
+            "a pack whose task terms appear nowhere in it must not be confident, got {:?} ({})",
+            irrelevant.overall_enum,
+            irrelevant.overall_score
+        );
+        assert!(irrelevant
+            .blockers
+            .iter()
+            .any(|b| b.contains("no task term")));
+    }
+
+    #[test]
+    fn absent_exact_evidence_caps_confidence_below_high() {
+        // The previous cap required exact, validation and runtime to *all* be
+        // zero, so synthesizing one validation target bought back High.
+        let no_exact = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 5,
+            evidence_count: 30,
+            exact_reference_count: 0,
+            validation_count: 4,
+            validation_with_command_count: 4,
+            negative_evidence_count: 0,
+            allowed_file_count: 2,
+            runtime_signal_count: 2,
+            task_relevance: 1.0,
+        });
+        assert!(
+            no_exact.overall_score <= 0.74,
+            "without exact evidence confidence must stay below High, got {}",
+            no_exact.overall_score
+        );
+        assert_ne!(no_exact.overall_enum, Confidence::High);
+    }
+
     use super::{
-        count_resolution_notes, reconcile_score_breakdown, score_component_total, Confidence,
-        ConfidenceBreakdown, ConfidenceSignalInput, EdgeId, Evidence, EvidenceSourceType,
-        FileRange, GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch,
-        GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot,
-        HistorySummary, IndexQuality, LineRange, NodeId, Owner, PathInterner, ScopeId,
-        ScoreComponent, SharedPath, SharedStr, SourceRange, StringInterner, Symbol, SymbolId,
-        Visibility, HISTORY_SCHEMA_VERSION,
+        count_resolution_notes, reconcile_score_breakdown, score_component_total,
+        task_relevance_score, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
+        Evidence, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord,
+        GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
+        HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange, NodeId, Owner,
+        PathInterner, ScopeId, ScoreComponent, SearchResult, SharedPath, SharedStr, SourceRange,
+        StringInterner, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -3388,6 +3560,7 @@ mod tests {
             negative_evidence_count: 0,
             allowed_file_count: 2,
             runtime_signal_count: 1,
+            task_relevance: 1.0,
         };
 
         let first = ConfidenceBreakdown::from_signals(input);
@@ -3411,6 +3584,7 @@ mod tests {
             negative_evidence_count: 0,
             allowed_file_count: 1,
             runtime_signal_count: 1,
+            task_relevance: 1.0,
         });
         let thin = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
             primary_file_count: 1,
@@ -3421,6 +3595,7 @@ mod tests {
             negative_evidence_count: 0,
             allowed_file_count: 1,
             runtime_signal_count: 0,
+            task_relevance: 1.0,
         });
 
         assert!(thin.overall_score < grounded.overall_score);
@@ -3450,6 +3625,7 @@ mod tests {
             negative_evidence_count: 1,
             allowed_file_count: 3,
             runtime_signal_count: 1,
+            task_relevance: 1.0,
         });
 
         assert!(breakdown.overall_score <= 0.60);
