@@ -976,9 +976,9 @@ fn is_explicit_symbol_anchor(value: &str) -> bool {
     if !is_symbol_expression(value) {
         return false;
     }
-    let has_lower = value.chars().any(|ch| ch.is_ascii_lowercase());
-    let has_upper = value.chars().any(|ch| ch.is_ascii_uppercase());
-    (has_lower && has_upper)
+    // A capital first letter alone is prose ("Index the shards"), not a symbol reference;
+    // on a repository with a class named `Index` it would claim exact authority for it.
+    crate::has_inner_case_change(value)
         || value.contains('_')
         || value.contains("::")
         || (value.contains('.') && !looks_like_source_path(value))
