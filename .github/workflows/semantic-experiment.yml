@@ -1,0 +1,93 @@
+name: semantic-experiment
+
+# Measures the neural semantic stream on a commit-derived corpus: the same production
+# `ok context` path scored with semantic search disabled (control) and enabled with a local
+# ONNX model (treatment), on identical cases. Dispatch-only; nothing here changes defaults.
+# Runs on Linux because the `ort` crate needs an ONNX Runtime the macOS-Intel prebuilts do not
+# provide; on Linux it downloads its own runtime.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        default: https://github.com/gohugoio/hugo
+      base_sha:
+        default: 79da24a0ebc0a33be89052188040caeec93c741e
+      ext:
+        default: .go
+      after:
+        default: "1500"
+      model:
+        description: fastembed model name (jina-embeddings-v2-base-code, or another supported by open-kioku-embeddings)
+        default: jina-embeddings-v2-base-code
+      dimensions:
+        default: "768"
+      split:
+        description: which split to score (dev or holdout)
+        default: holdout
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build ok
+        run: cargo build --release -p open-kioku-cli
+
+      - name: Derive the corpus at the base commit
+        run: |
+          git clone --filter=blob:none --no-checkout "${{ github.event.inputs.repo_url }}" source
+          git -C source fetch --quiet origin "${{ github.event.inputs.base_sha }}" || true
+          mkdir -p corpus && git -C source archive "${{ github.event.inputs.base_sha }}" | tar -x -C corpus
+          python3 scripts/commit-derived-cases.py source --base "${{ github.event.inputs.base_sha }}" \
+            --after "${{ github.event.inputs.after }}" --ext "${{ github.event.inputs.ext }}" --out cases.tsv
+          python3 - <<'PY'
+          rows = open("cases.tsv").readlines(); cut = int(len(rows) * 0.7)
+          open("cases-dev.tsv", "w").writelines(rows[:cut]); open("cases-holdout.tsv", "w").writelines(rows[cut:])
+          print(f"{len(rows)} cases: {cut} dev, {len(rows) - cut} holdout")
+          PY
+          ./target/release/ok init corpus
+          ./target/release/ok index corpus 2>&1 | tail -2
+
+      - name: Control — semantic disabled
+        run: |
+          mkdir -p artifacts
+          python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
+            --cases "cases-${{ github.event.inputs.split }}.tsv" --label control --workers 3 --out artifacts/control.json
+
+      - name: Enable the neural semantic provider and build its index
+        run: |
+          python3 - <<'PY'
+          import re
+          p = "corpus/ok.toml"; s = open(p).read()
+          s = re.sub(r'\[semantic\]\nenabled = false\nbackend = "[^"]*"\nprovider = "[^"]*"\nmodel = "[^"]*"\ndimensions = \d+',
+                     '[semantic]\nenabled = true\nbackend = "auto"\nprovider = "fastembed"\nmodel = "${{ github.event.inputs.model }}"\ndimensions = ${{ github.event.inputs.dimensions }}', s)
+          s = s.replace("deny_network = true", "deny_network = false")
+          open(p, "w").write(s)
+          PY
+          ./target/release/ok --repo corpus semantic index --allow-model-download 2>&1 | tail -3
+          ./target/release/ok --repo corpus --json semantic status | python3 -c "import json,sys; d=json.load(sys.stdin); print({k:d.get(k) for k in ('state','ready','provider','model','backend','ann_active','vector_count','dimensions')})"
+
+      - name: Treatment — semantic enabled
+        run: |
+          python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
+            --cases "cases-${{ github.event.inputs.split }}.tsv" --label treatment --workers 3 --out artifacts/treatment.json
+
+      - name: Compare
+        run: python3 scripts/compare-commit-derived-report.py artifacts/treatment.json artifacts/control.json --slack 0.0 || true
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-experiment-${{ github.event.inputs.model }}
+          path: artifacts/
+          if-no-files-found: error
