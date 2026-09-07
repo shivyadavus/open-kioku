@@ -2016,6 +2016,9 @@ struct TaskSearchIntent {
     reference_anchors: Vec<String>,
     ticket_anchors: Vec<String>,
     path_anchors: Vec<String>,
+    /// Tokens of a commit-style scope prefix — `docs(fs): …`, `tpl/tplimpl: …`, `[Whisper] …` —
+    /// which name the package or directory the change lives in.
+    scope_anchors: Vec<String>,
     lexical_anchors: Vec<String>,
     /// The task is about tests, so test files are legitimate primary context rather than
     /// lower-tier support material.
@@ -2066,6 +2069,7 @@ impl TaskSearchIntent {
             }
         }
 
+        intent.scope_anchors = commit_scope_tokens(task);
         intent.lexical_anchors = task_lexical_terms(task);
         intent
     }
@@ -2219,6 +2223,20 @@ fn rerank_fused_for_task_with_options(
                 ));
             }
         }
+        if path_matches_scope(&normalize_path(&result.path), &intent.scope_anchors) {
+            let scope = intent.scope_anchors.join("/");
+            result.score += 0.35;
+            result.confidence = result.confidence.max(0.75);
+            result
+                .evidence
+                .push(format!("commit scope `{scope}` names this path"));
+            result.add_score_component(ScoreComponent::adjustment(
+                "commit_scope_path_boost",
+                0.35,
+                result.derived_evidence_ids(),
+                format!("commit scope `{scope}` matched a path segment"),
+            ));
+        }
         result.reconcile_score_breakdown();
     }
     // Quality tier first: docs and tests are support material for a task that is not about
@@ -2360,6 +2378,7 @@ fn task_relevance_tier(
         .iter()
         .chain(intent.path_anchors.iter())
         .any(|anchor| contains_anchor(haystack, anchor))
+        || path_matches_scope(&normalize_path(path), &intent.scope_anchors)
         || (intent.documentation_target && is_documentation_path(&normalize_path(path)))
     {
         3
@@ -2378,6 +2397,67 @@ fn task_relevance_tier(
     } else {
         0
     }
+}
+
+/// Tokens of the scope a commit-style subject carries: `docs(fs): …` and `feat(path/posix): …`
+/// (conventional commits), `tpl/tplimpl: …` and `commands: …` (Go style, where the prefix is
+/// the package), and `[Whisper] …` (bracketed area). The scope names where the change lives,
+/// which the subject body usually does not repeat. Empty when the subject has no such prefix.
+fn commit_scope_tokens(task: &str) -> Vec<String> {
+    const TYPES: &[&str] = &[
+        "feat", "fix", "docs", "doc", "chore", "refactor", "test", "tests", "ci", "build", "perf",
+        "style", "revert", "deps", "release", "wip", "misc", "cleanup",
+    ];
+    let first_line = task.lines().next().unwrap_or_default().trim();
+    let scope: Option<&str> = if let Some(rest) = first_line.strip_prefix('[') {
+        rest.split_once(']').map(|(scope, _)| scope)
+    } else if let Some((prefix, _)) = first_line.split_once(':') {
+        let prefix = prefix.trim().trim_end_matches('!');
+        if prefix.is_empty() || prefix.len() > 64 || prefix.contains(char::is_whitespace) {
+            None
+        } else if let Some((_, scoped)) = prefix.split_once('(') {
+            scoped.strip_suffix(')')
+        } else if TYPES.contains(&prefix.to_ascii_lowercase().as_str())
+            || prefix.chars().any(|ch| ch.is_ascii_uppercase())
+        {
+            // A capitalised word before a colon ("Note:", "Followup:") is prose; package
+            // prefixes in Go-style subjects are lowercase paths.
+            None
+        } else {
+            Some(prefix)
+        }
+    } else {
+        None
+    };
+    let mut tokens: Vec<String> = scope
+        .unwrap_or_default()
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| token.len() >= 2)
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    tokens.dedup();
+    tokens
+}
+
+/// Every scope token names a path segment (a directory, or a file stem without its extension).
+fn path_matches_scope(path: &str, scope_tokens: &[String]) -> bool {
+    if scope_tokens.is_empty() {
+        return false;
+    }
+    let segments: Vec<String> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            segment
+                .split_once('.')
+                .map(|(stem, _)| stem)
+                .unwrap_or(segment)
+                .to_ascii_lowercase()
+        })
+        .collect();
+    scope_tokens
+        .iter()
+        .all(|token| segments.iter().any(|segment| segment == token))
 }
 
 fn task_targets_documentation(task: &str) -> bool {
@@ -2962,6 +3042,63 @@ mod tests {
         assert!(intent.documentation_target);
         let ranked = rerank_fused_for_task(vec![code, docs], &intent, &diagnostics);
         assert_eq!(ranked[0].path, Path::new("docs/guides/agent-workflows.md"));
+    }
+
+    #[test]
+    fn commit_scope_prefixes_yield_path_tokens() {
+        assert_eq!(
+            commit_scope_tokens("docs(fs): fix walk examples"),
+            vec!["fs"]
+        );
+        assert_eq!(
+            commit_scope_tokens("feat(path/posix)!: add join"),
+            vec!["path", "posix"]
+        );
+        assert_eq!(
+            commit_scope_tokens("tpl/tplimpl: Fix template lookup"),
+            vec!["tpl", "tplimpl"]
+        );
+        assert_eq!(
+            commit_scope_tokens("[Whisper] fix generation config"),
+            vec!["whisper"]
+        );
+        assert!(commit_scope_tokens("docs: fix typo").is_empty());
+        assert!(commit_scope_tokens("Fix geoip processor timeout").is_empty());
+        assert!(commit_scope_tokens("Note: this is prose with a colon").is_empty());
+    }
+
+    #[test]
+    fn scope_tokens_match_path_segments_and_stems() {
+        let fs = vec!["fs".to_string()];
+        assert!(path_matches_scope("fs/walk.ts", &fs));
+        assert!(path_matches_scope("src/fs.rs", &fs));
+        assert!(!path_matches_scope("fsync/mod.ts", &fs));
+        let posix = vec!["path".to_string(), "posix".to_string()];
+        assert!(path_matches_scope("path/posix/join.ts", &posix));
+        assert!(!path_matches_scope("path/windows/join.ts", &posix));
+        assert!(!path_matches_scope("anything", &[]));
+        let intent = TaskSearchIntent::parse("docs(expect): correct minor typo");
+        assert_eq!(intent.scope_anchors, vec!["expect"]);
+        assert_eq!(
+            task_relevance_tier(
+                std::path::Path::new("expect/expect.ts"),
+                &SearchResult {
+                    path: "expect/expect.ts".into(),
+                    line_range: None,
+                    snippet: String::new(),
+                    symbol: None,
+                    score: 1.0,
+                    match_reason: String::new(),
+                    evidence: Vec::new(),
+                    evidence_refs: Vec::new(),
+                    confidence: 0.5,
+                    score_breakdown: Vec::new(),
+                },
+                "expect/expect.ts",
+                &intent
+            ),
+            3
+        );
     }
 
     #[test]
