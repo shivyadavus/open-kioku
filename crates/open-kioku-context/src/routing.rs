@@ -291,10 +291,14 @@ fn decision(
 fn policy_for(family: TaskFamily, query_shape: QueryShape) -> RetrievalPolicy {
     use RetrievalSourceKind as S;
     let mut policy = match family {
+        // Lexical stays on: in many repositories the documentation *is* doc comments inside
+        // source files (`docs(expect): fix typo on objectContaining example` in deno_std targets
+        // `expect/expect.ts`), and a documentation task that can only see Markdown sections
+        // returned one release-notes file for 14 of 76 holdout misses on that corpus.
         TaskFamily::Documentation => RetrievalPolicy {
-            enabled_sources: vec![S::Document, S::ExactSemantic],
+            enabled_sources: vec![S::Document, S::ExactSemantic, S::Lexical],
             required_evidence: vec![S::Document],
-            candidate_factors: vec![(S::Document, 6), (S::ExactSemantic, 2)],
+            candidate_factors: vec![(S::Document, 6), (S::ExactSemantic, 2), (S::Lexical, 2)],
             preferred_context_shape: "document_sections_with_exact_code_anchors",
             fusion_profile: "existing_repository_rrf",
             missing_required_evidence_is_blocker: true,
@@ -795,8 +799,22 @@ fn natural_language_token_count(query: &str) -> usize {
         .count()
 }
 
+/// Plain-word needles match whole words (with a plural), so "docshelper" is not "docs" and
+/// "prefix" is not "fix"; phrases and extensions (`stack trace`, `.rs`) still match as text.
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+    needles.iter().any(|needle| {
+        if needle.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+            haystack
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|word| {
+                    word == *needle
+                        || word.strip_suffix('s') == Some(needle)
+                        || word.strip_suffix("es") == Some(needle)
+                })
+        } else {
+            haystack.contains(needle)
+        }
+    })
 }
 
 fn all_sources() -> [RetrievalSourceKind; 8] {
@@ -858,11 +876,16 @@ mod tests {
     }
 
     #[test]
-    fn documentation_only_reserves_document_stream_while_mixed_keeps_both_domains() {
+    fn documentation_requires_document_evidence_and_keeps_lexical_while_mixed_keeps_both_domains() {
         let docs = classify_task("change documentation in the contributor guide");
         assert_eq!(docs.family, TaskFamily::Documentation);
         assert!(docs.policy.allows(RetrievalSourceKind::Document));
-        assert!(!docs.policy.allows(RetrievalSourceKind::Lexical));
+        // Lexical stays enabled for documentation tasks: doc comments live in source files.
+        assert!(docs.policy.allows(RetrievalSourceKind::Lexical));
+        assert!(docs
+            .policy
+            .required_evidence
+            .contains(&RetrievalSourceKind::Document));
         assert!(
             docs.policy.candidate_cap(RetrievalSourceKind::Document, 10)
                 > docs
