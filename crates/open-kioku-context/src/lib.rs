@@ -907,7 +907,22 @@ fn apply_required_evidence_policy(
         })
         .collect::<Vec<_>>();
 
-    for required in &missing {
+    // A required source that could not run at all (no runtime traces ingested, history not
+    // configured) is a repository-level absence: it is reported and lowers confidence, but it
+    // cannot be a blocker, or a task that merely says "panic" returns nothing on a repository
+    // that has never ingested a trace while lexical evidence sits at rank 3. Only a source that
+    // ran and stayed silent blocks.
+    let (silent, absent): (Vec<_>, Vec<_>) = missing
+        .iter()
+        .copied()
+        .partition(|required| diagnostics.sources_succeeded.contains(required));
+    for required in &absent {
+        diagnostics.caveats.push(format!(
+            "task-family required evidence: {} is unavailable in this repository",
+            retrieval_source_label(*required)
+        ));
+    }
+    for required in &silent {
         let requirement = if policy.missing_required_evidence_is_blocker {
             "blocking requirement"
         } else {
@@ -918,6 +933,7 @@ fn apply_required_evidence_policy(
             retrieval_source_label(*required)
         ));
     }
+    let missing = silent;
 
     if !policy.missing_required_evidence_is_blocker || missing.is_empty() {
         return false;
@@ -2205,19 +2221,32 @@ fn rerank_fused_for_task_with_options(
         }
         result.reconcile_score_breakdown();
     }
+    // Quality tier first: docs and tests are support material for a task that is not about
+    // them, however strongly they mention its anchors; then anchor relevance, authority, score.
     results.sort_by(|a, b| {
         let a_haystack = searchable_result_text(a);
         let b_haystack = searchable_result_text(b);
-        task_relevance_tier(&b.path, &b_haystack, intent)
-            .cmp(&task_relevance_tier(&a.path, &a_haystack, intent))
+        let quality = |result: &SearchResult| {
+            context_quality_tier(
+                &result.path,
+                ranking_options,
+                intent.wants_tests,
+                intent.documentation_target,
+            )
+        };
+        quality(b)
+            .cmp(&quality(a))
+            .then_with(|| {
+                task_relevance_tier(&b.path, b, &b_haystack, intent).cmp(&task_relevance_tier(
+                    &a.path,
+                    a,
+                    &a_haystack,
+                    intent,
+                ))
+            })
             .then_with(|| {
                 retrieval_authority_for_result(diagnostics, b)
                     .cmp(&retrieval_authority_for_result(diagnostics, a))
-            })
-            .then_with(|| {
-                context_quality_tier(&b.path, ranking_options, intent.wants_tests).cmp(
-                    &context_quality_tier(&a.path, ranking_options, intent.wants_tests),
-                )
             })
             .then_with(|| {
                 b.score
@@ -2233,7 +2262,12 @@ fn rerank_fused_for_task_with_options(
 /// 0 for generated or vendored code. Tests are demoted rather than dropped: on a large Java
 /// repository they outnumber source files and match the same vocabulary, so without this tier
 /// an ordinary "geoip processor" task returns twenty test files and no processor.
-fn context_quality_tier(path: &std::path::Path, options: &RankingOptions, wants_tests: bool) -> u8 {
+fn context_quality_tier(
+    path: &std::path::Path,
+    options: &RankingOptions,
+    wants_tests: bool,
+    wants_docs: bool,
+) -> u8 {
     // Test detection needs the original case: `internalClusterTest` and `GeoIpDownloaderIT`
     // are recognised at a CamelCase boundary that lowercasing erases.
     let original = normalize_path(path);
@@ -2254,7 +2288,8 @@ fn context_quality_tier(path: &std::path::Path, options: &RankingOptions, wants_
     }
     if boundary_fit_enabled {
         let is_test = open_kioku_core::is_test_path(&original);
-        if (is_test && !wants_tests) || (!is_test && is_docs_or_test_path(&normalized)) {
+        let is_doc = !is_test && is_docs_or_test_path(&normalized);
+        if (is_test && !wants_tests) || (is_doc && !wants_docs) {
             return 1;
         }
     }
@@ -2285,19 +2320,53 @@ fn is_generated_or_vendor_path(path: &str) -> bool {
         || path.contains("schema.json")
 }
 
-fn task_relevance_tier(path: &std::path::Path, haystack: &str, intent: &TaskSearchIntent) -> u8 {
+/// 4: a primary anchor names the file or one of its symbols (definition-like); 3: an explicit
+/// ticket or path anchor, or a documentation target for a documentation task; 2: a primary
+/// anchor merely mentioned in the snippet; 1: a reference anchor; 0: none.
+///
+/// Snippet mentions used to share the top tier with definitions. On a Go repository, where
+/// commit subjects routinely name an identifier that dozens of small files reference, every
+/// mention outranked the best full-task lexical hit. A file that *names* the anchor is the
+/// edit target; one that mentions it is a reference and competes on score with the rest.
+fn task_relevance_tier(
+    path: &std::path::Path,
+    result: &SearchResult,
+    haystack: &str,
+    intent: &TaskSearchIntent,
+) -> u8 {
+    let identity = format!(
+        "{} {} {}",
+        result.path.display(),
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .unwrap_or_default(),
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.name.as_str())
+            .unwrap_or_default()
+    )
+    .to_ascii_lowercase();
     if intent
         .primary_anchors
         .iter()
-        .any(|anchor| contains_anchor(haystack, anchor))
+        .any(|anchor| contains_anchor(&identity, anchor))
     {
-        3
+        4
     } else if intent
         .ticket_anchors
         .iter()
         .chain(intent.path_anchors.iter())
         .any(|anchor| contains_anchor(haystack, anchor))
         || (intent.documentation_target && is_documentation_path(&normalize_path(path)))
+    {
+        3
+    } else if intent
+        .primary_anchors
+        .iter()
+        .any(|anchor| contains_anchor(haystack, anchor))
     {
         2
     } else if intent
@@ -3381,6 +3450,8 @@ mod tests {
         assert_eq!(routing.family, open_kioku_core::TaskFamily::TraceToCode);
         let mut diagnostics = RetrievalDiagnostics::default();
         diagnostics.routing = routing.diagnostics();
+        // The runtime stream ran (traces are ingested) and found nothing for this task.
+        diagnostics.sources_succeeded = vec![RetrievalSourceKind::Runtime];
         let budget = ContextBudget::from_file_limit(10);
 
         assert!(apply_required_evidence_policy(
@@ -3412,6 +3483,10 @@ mod tests {
         assert_eq!(routing.family, open_kioku_core::TaskFamily::EditToRipple);
         let mut diagnostics = RetrievalDiagnostics::default();
         diagnostics.routing = routing.diagnostics();
+        diagnostics.sources_succeeded = vec![
+            RetrievalSourceKind::ExactSemantic,
+            RetrievalSourceKind::Graph,
+        ];
         let budget = ContextBudget::from_file_limit(10);
 
         assert!(apply_required_evidence_policy(
@@ -3423,6 +3498,30 @@ mod tests {
             diagnostics.selection.abstention_reason.as_deref(),
             Some("missing_required_evidence:exact_semantic,graph")
         );
+    }
+
+    #[test]
+    fn required_source_absent_from_the_repository_is_a_caveat_not_a_blocker() {
+        // "panic" routes to trace_to_code; on a repository that has never ingested a runtime
+        // trace the runtime stream is unavailable, which must not blank the pack.
+        let routing = routing::classify_task("Fix missing method NameNormalized panic");
+        assert_eq!(routing.family, open_kioku_core::TaskFamily::TraceToCode);
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.routing = routing.diagnostics();
+        diagnostics.sources_attempted = vec![RetrievalSourceKind::Runtime];
+        diagnostics.sources_succeeded = Vec::new();
+        let budget = ContextBudget::from_file_limit(10);
+
+        assert!(!apply_required_evidence_policy(
+            &routing.policy,
+            &budget,
+            &mut diagnostics
+        ));
+        assert!(diagnostics.selection.abstention_reason.is_none());
+        assert!(diagnostics
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("runtime") && caveat.contains("unavailable")));
     }
 
     #[test]
@@ -3571,11 +3670,11 @@ mod tests {
     fn post_fusion_quality_tier_preserves_boundary_and_path_quality_policy() {
         let options = RankingOptions::default();
         assert_eq!(
-            context_quality_tier(Path::new("src/service.rs"), &options, false),
+            context_quality_tier(Path::new("src/service.rs"), &options, false, false),
             2
         );
         assert_eq!(
-            context_quality_tier(Path::new("tests/service_test.rs"), &options, false),
+            context_quality_tier(Path::new("tests/service_test.rs"), &options, false, false),
             1
         );
         assert_eq!(
@@ -3584,26 +3683,37 @@ mod tests {
                     "modules/ip-location/src/internalClusterTest/java/GeoIpDownloaderIT.java"
                 ),
                 &options,
+                false,
                 false
             ),
             1
         );
         assert_eq!(
-            context_quality_tier(Path::new("tests/service_test.rs"), &options, true),
+            context_quality_tier(Path::new("tests/service_test.rs"), &options, true, false),
             2,
             "a task about tests keeps test files in the source tier"
         );
         assert_eq!(
-            context_quality_tier(Path::new("docs/guide.md"), &options, true),
+            context_quality_tier(Path::new("docs/guide.md"), &options, true, false),
             1,
             "wanting tests does not promote docs"
         );
         assert_eq!(
-            context_quality_tier(Path::new("src/generated/service.rs"), &options, false),
+            context_quality_tier(Path::new("docs/guide.md"), &options, false, true),
+            2,
+            "a documentation task keeps docs in the source tier"
+        );
+        assert_eq!(
+            context_quality_tier(
+                Path::new("src/generated/service.rs"),
+                &options,
+                false,
+                false
+            ),
             0
         );
         assert_eq!(
-            context_quality_tier(Path::new("vendor/service.rs"), &options, false),
+            context_quality_tier(Path::new("vendor/service.rs"), &options, false, false),
             0
         );
 
@@ -3612,7 +3722,12 @@ mod tests {
             ..RankingOptions::default()
         };
         assert_eq!(
-            context_quality_tier(Path::new("src/generated/service.rs"), &baseline, false),
+            context_quality_tier(
+                Path::new("src/generated/service.rs"),
+                &baseline,
+                false,
+                false
+            ),
             2
         );
 
@@ -3626,6 +3741,7 @@ mod tests {
             context_quality_tier(
                 Path::new("src/generated/service.rs"),
                 &without_path_quality,
+                false,
                 false
             ),
             2

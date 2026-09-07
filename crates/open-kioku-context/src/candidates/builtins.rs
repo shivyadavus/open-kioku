@@ -548,6 +548,13 @@ impl<'a> BuiltinCandidateContext<'a> {
                 )
             }
         };
+        if facts.is_empty() {
+            // Repository-level absence, not a silent stream: routing must not block on it.
+            return CandidateStream::unavailable(
+                RetrievalSourceKind::Runtime,
+                "no runtime traces, logs, or incidents are ingested for this repository",
+            );
+        }
         let files_by_id = self
             .files
             .iter()
