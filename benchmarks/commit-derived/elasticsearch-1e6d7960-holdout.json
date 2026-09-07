@@ -13,19 +13,19 @@
    "modules/",
    "server/"
   ],
-  "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
+  "frozen_from": "commit-derived-bench run 34157937971 (ubuntu-latest), main @ ffe649c",
   "frozen_on": "2026-09-07",
   "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
  },
  "cases": 117,
  "label": "holdout",
- "median_secs": 2.833024024963379,
+ "median_secs": 3.9870965480804443,
  "metrics": {
   "R@1": 0.4103,
   "R@5": 0.5299,
   "R@10": 0.5897,
   "R@20": 0.6581,
-  "MRR": 0.4641,
+  "MRR": 0.4655,
   "gold_recall@20": 0.5094
  },
  "ci": {
@@ -46,8 +46,8 @@
    0.735
   ],
   "MRR": [
-   0.3824,
-   0.5483
+   0.383,
+   0.5494
   ],
   "gold_recall@20": [
    0.4332,

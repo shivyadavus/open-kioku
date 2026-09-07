@@ -159,18 +159,19 @@ reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live und
 corpora nightly as a matrix — Elasticsearch (Java, `libs/ modules/ server/`), hugo (Go),
 deno_std (TypeScript), and transformers (Python) — and fails when a watched metric falls more
 than 0.03 below its baseline. The baselines were frozen from a hosted-runner matrix run on
-2026-09-07 (each file records its run and commit under `provenance`):
+2026-09-07 after the commit-scope anchors landed (each file records its run and commit under
+`provenance`); the run before that change is kept in each file's git history:
 
 | Corpus | Split | Cases | R@5 | R@20 | MRR |
 |---|---|---|---|---|---|
-| elasticsearch-1e6d7960 | dev | 270 | 0.570 | 0.733 | 0.457 |
-| elasticsearch-1e6d7960 | holdout | 117 | 0.530 | 0.658 | 0.464 |
-| hugo-79da24a0 | dev | 336 | 0.310 | 0.426 | 0.211 |
-| hugo-79da24a0 | holdout | 145 | 0.379 | 0.503 | 0.308 |
-| deno_std-d93aa7c9 | dev | 390 | 0.613 | 0.739 | 0.507 |
-| deno_std-d93aa7c9 | holdout | 168 | 0.625 | 0.714 | 0.510 |
-| transformers-7cd9b985 | dev | 463 | 0.598 | 0.732 | 0.509 |
-| transformers-7cd9b985 | holdout | 199 | 0.643 | 0.744 | 0.539 |
+| elasticsearch-1e6d7960 | dev | 270 | 0.570 | 0.733 | 0.453 |
+| elasticsearch-1e6d7960 | holdout | 117 | 0.530 | 0.658 | 0.466 |
+| hugo-79da24a0 | dev | 336 | 0.321 | 0.431 | 0.227 |
+| hugo-79da24a0 | holdout | 145 | 0.428 | 0.517 | 0.338 |
+| deno_std-d93aa7c9 | dev | 390 | 0.797 | 0.892 | 0.633 |
+| deno_std-d93aa7c9 | holdout | 168 | 0.744 | 0.798 | 0.608 |
+| transformers-7cd9b985 | dev | 463 | 0.607 | 0.732 | 0.513 |
+| transformers-7cd9b985 | holdout | 199 | 0.653 | 0.744 | 0.552 |
 
 Hugo is the hardest of the four: 21% of its gold files are `_test.go` benchmarks for tasks
 that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
