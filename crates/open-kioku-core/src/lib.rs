@@ -358,27 +358,53 @@ pub fn task_relevance_score(task: &str, selected: &[SearchResult]) -> f32 {
     if selected.is_empty() {
         return 0.0;
     }
-    let haystack = selected
-        .iter()
-        .map(|result| {
-            let mut text = result.path.to_string_lossy().to_ascii_lowercase();
-            text.push(' ');
-            text.push_str(&result.snippet.to_ascii_lowercase());
-            if let Some(symbol) = &result.symbol {
-                text.push(' ');
-                text.push_str(&symbol.name.to_ascii_lowercase());
-                text.push(' ');
-                text.push_str(&symbol.qualified_name.to_ascii_lowercase());
-            }
-            text
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Whole tokens, not substrings. Substring matching counted `repo` as a hit
+    // against `reporting`, which is how a query reading "zzzzqqq nonsense not in
+    // repo" scored as relevant to a shipping report.
+    let mut haystack: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for result in selected {
+        collect_identifier_tokens(&result.path.to_string_lossy(), &mut haystack);
+        collect_identifier_tokens(&result.snippet, &mut haystack);
+        if let Some(symbol) = &result.symbol {
+            collect_identifier_tokens(&symbol.name, &mut haystack);
+            collect_identifier_tokens(&symbol.qualified_name, &mut haystack);
+        }
+    }
     let matched = terms
         .iter()
         .filter(|term| haystack.contains(term.as_str()))
         .count();
     matched as f32 / terms.len() as f32
+}
+
+/// Split text into lowercase word tokens, breaking camelCase and snake_case so
+/// `issueToken` contributes both `issue` and `token`.
+fn collect_identifier_tokens(text: &str, out: &mut std::collections::HashSet<String>) {
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() && previous_lower && !current.is_empty() {
+                if current.len() >= 3 {
+                    out.insert(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+            }
+            current.push(ch.to_ascii_lowercase());
+            previous_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else {
+            if current.len() >= 3 {
+                out.insert(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            previous_lower = false;
+        }
+    }
+    if current.len() >= 3 {
+        out.insert(current);
+    }
 }
 
 fn task_content_terms(task: &str) -> Vec<String> {
@@ -390,10 +416,12 @@ fn task_content_terms(task: &str) -> Vec<String> {
         "those", "some", "such", "only", "also", "each", "more", "most", "other", "over", "after",
         "before", "between", "under", "while", "where", "which", "what",
     ];
-    let mut terms: Vec<String> = task
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| word.len() >= 3)
-        .map(|word| word.to_ascii_lowercase())
+    // Tokenized identically to the haystack, so `issueToken` in a task matches
+    // `issueToken` in a snippet through the same `issue` + `token` split.
+    let mut tokens = std::collections::HashSet::new();
+    collect_identifier_tokens(task, &mut tokens);
+    let mut terms: Vec<String> = tokens
+        .into_iter()
         .filter(|word| !STOPWORDS.contains(&word.as_str()))
         .collect();
     terms.sort();
