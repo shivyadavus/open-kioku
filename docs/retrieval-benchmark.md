@@ -158,7 +158,23 @@ reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live und
 `benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives four
 corpora nightly as a matrix — java-a (Java, `libs/ modules/ server/`), go-a (Go),
 ts-a (TypeScript), and py-a (Python) — and fails when a watched metric falls more
-than 0.03 below its baseline. The frozen baselines are what an accuracy change is judged
+than 0.03 below its baseline. The baselines were frozen from a hosted-runner matrix run on
+2026-09-07 (each file records its run and commit under `provenance`):
+
+| Corpus | Split | Cases | R@5 | R@20 | MRR |
+|---|---|---|---|---|---|
+| java-a | dev | 270 | 0.570 | 0.733 | 0.457 |
+| java-a | holdout | 117 | 0.530 | 0.658 | 0.464 |
+| go-a | dev | 336 | 0.310 | 0.426 | 0.211 |
+| go-a | holdout | 145 | 0.379 | 0.503 | 0.308 |
+| ts-a | dev | 390 | 0.613 | 0.739 | 0.507 |
+| ts-a | holdout | 168 | 0.625 | 0.714 | 0.510 |
+| py-a | dev | 463 | 0.598 | 0.732 | 0.509 |
+| py-a | holdout | 199 | 0.643 | 0.744 | 0.539 |
+
+go-a is the hardest of the four: 21% of its gold files are `_test.go` benchmarks for tasks
+that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
+an average; a change that helps Java and hurts Go is a regression on Go. The frozen baselines are what an accuracy change is judged
 against; a change that helps one language and hurts another shows up as one failing matrix
 entry rather than a blended average. Queries are commit subjects, so absolute numbers are not comparable with
 published benchmarks that use issue text; compare a change against the frozen baseline,

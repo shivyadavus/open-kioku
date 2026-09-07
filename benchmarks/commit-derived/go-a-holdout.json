@@ -1,57 +1,53 @@
 {
- "corpus": "java-a",
- "split": "dev",
+ "corpus": "go-a",
+ "split": "holdout",
  "provenance": {
   "repo": "<withheld>",
   "base": "<withheld>",
-  "after": 3800,
+  "after": 1500,
   "ext": [
-   ".java"
+   ".go"
   ],
-  "path_prefixes": [
-   "libs/",
-   "modules/",
-   "server/"
-  ],
+  "path_prefixes": [],
   "frozen_from": "commit-derived-bench run 34140351906 (ubuntu-latest), branch fix/go-corpus-findings @ 5e5a9a9",
   "frozen_on": "2026-09-07",
   "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
  },
- "cases": 270,
- "label": "dev",
- "median_secs": 2.7217609882354736,
+ "cases": 145,
+ "label": "holdout",
+ "median_secs": 0.3194124698638916,
  "metrics": {
-  "R@1": 0.3593,
-  "R@5": 0.5704,
-  "R@10": 0.6444,
-  "R@20": 0.7333,
-  "MRR": 0.4573,
-  "gold_recall@20": 0.5879
+  "R@1": 0.2552,
+  "R@5": 0.3793,
+  "R@10": 0.4759,
+  "R@20": 0.5034,
+  "MRR": 0.3077,
+  "gold_recall@20": 0.3774
  },
  "ci": {
   "R@1": [
-   0.3,
-   0.4185
+   0.1862,
+   0.331
   ],
   "R@5": [
-   0.5111,
-   0.6259
+   0.3034,
+   0.4621
   ],
   "R@10": [
-   0.5852,
-   0.7037
+   0.4,
+   0.5586
   ],
   "R@20": [
-   0.6778,
-   0.7852
+   0.4276,
+   0.5862
   ],
   "MRR": [
-   0.4021,
-   0.5073
+   0.2409,
+   0.3794
   ],
   "gold_recall@20": [
-   0.5349,
-   0.639
+   0.3134,
+   0.4449
   ]
  }
 }
