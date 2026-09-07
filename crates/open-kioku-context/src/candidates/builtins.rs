@@ -766,6 +766,10 @@ fn indexed_document_stream(
                     )
             })
     });
+    // One vote per file: a long release-notes file matches most vocabularies in dozens of
+    // sections, and each section used to take its own slot in the pack (20 slots, one file).
+    let mut seen_paths = std::collections::BTreeSet::<String>::new();
+    scored.retain(|(_, candidate)| seen_paths.insert(normalized_path(&candidate.result.path)));
     CandidateStream::success(
         RetrievalSourceKind::Document,
         scored
