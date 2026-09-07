@@ -22,7 +22,7 @@ on:
         default: libs/ modules/ server/
       after:
         description: Commits after base to scan for cases
-        default: "4000"
+        default: "3800"
       corpus_name:
         description: Baseline name under benchmarks/commit-derived/
         default: elasticsearch-1e6d7960
@@ -32,7 +32,7 @@ env:
   REPO_URL: ${{ github.event.inputs.repo_url || 'https://github.com/elastic/elasticsearch' }}
   BASE_SHA: ${{ github.event.inputs.base_sha || '1e6d79605440aa871287acacb604564d54ca7555' }}
   PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || 'libs/ modules/ server/' }}
-  AFTER: ${{ github.event.inputs.after || '4000' }}
+  AFTER: ${{ github.event.inputs.after || '3800' }}
   CORPUS_NAME: ${{ github.event.inputs.corpus_name || 'elasticsearch-1e6d7960' }}
 
 jobs:
