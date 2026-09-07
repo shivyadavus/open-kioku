@@ -255,6 +255,54 @@
         },
         "id": "context:src/routes.rs",
         "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "query variant `function` matched local index",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "expanded task query `function` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 3,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
         "message": "query variant `subtract OR function` matched local index",
         "source": "open-kioku-search",
         "source_type": "lexical",
@@ -689,6 +737,9 @@
         "confidence": 0.0,
         "evidence": [
           "BM25 lexical match from local Tantivy index",
+          "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
+          "query variant `function` matched local index",
+          "expanded task query `function` matched indexed search",
           "query variant `subtract OR function` matched local index",
           "expanded task query `subtract function` matched indexed search",
           "query variant `function OR next` matched local index",
