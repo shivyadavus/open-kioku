@@ -429,16 +429,25 @@ fn is_test_path(path: &str) -> bool {
     path.contains("test") || path.contains("/spec/") || path.ends_with("_test.rs")
 }
 
-fn is_source_path(path: &str) -> bool {
-    !is_test_path(path)
-        && !path.ends_with(".md")
-        && !path.ends_with(".mdx")
-        && !path.contains("/docs/")
-        && !path.starts_with("docs/")
-}
-
+/// How plausible this result is as an edit target for the query.
+///
+/// Two defects are fixed here. A third, larger one is deliberately left alone.
+///
+/// Fixed: test paths returned 0.0 outright, so for a `code_to_test` query -
+/// where the gold answer *is* a test file - the correct result was barred from
+/// the signal while unrelated source files collected the top tier. And the top
+/// tier fired when any single query term matched any path term, so one generic
+/// token promoted unrelated files in unrelated languages.
+///
+/// Not fixed: the tiers are 18.0 / 0.63 / 0.03 while every other signal ranges
+/// 0..1, which makes the configured weight nearly meaningless. That is not this
+/// function's bug. `text_relevance` is raw unnormalized BM25 (observed 10-45)
+/// at weight 1.0, so a 0..1 signal cannot be heard at all and 18.0 is what it
+/// costs to be audible. Rescaling here without normalizing text_relevance just
+/// silences the signal. Tracked separately.
 fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) -> f32 {
-    if !is_source_path(path) {
+    // Docs are still not edit targets. Tests are.
+    if is_docs_path(path) {
         return 0.0;
     }
     if query
@@ -451,7 +460,7 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
         return if result.symbol.is_some() { 0.63 } else { 0.03 };
     }
     if query
-        .map(|query| query_matches_path(query, path))
+        .map(|query| query_matches_path_discriminatively(query, path))
         .unwrap_or(false)
     {
         return 18.0;
@@ -475,6 +484,13 @@ fn boundary_fit_score(result: &SearchResult, path: &str, query: Option<&str>) ->
     } else {
         0.63
     }
+}
+
+fn is_docs_path(path: &str) -> bool {
+    path.ends_with(".md")
+        || path.ends_with(".mdx")
+        || path.contains("/docs/")
+        || path.starts_with("docs/")
 }
 
 fn exact_identity_match(result: &SearchResult, query: &str) -> bool {
@@ -502,16 +518,55 @@ fn is_structured_identifier(query: &str) -> bool {
                 .any(|ch| matches!(ch, '_' | '-' | ':' | '.' | '/' | '\\')))
 }
 
-fn query_matches_path(query: &str, path: &str) -> bool {
+/// True when the query and the path agree on something discriminative.
+///
+/// The previous rule fired on a single shared term, so `service` in a query
+/// promoted `go/shipping/service.go`, `python/orders/service.py` and
+/// `rust/src/cache/service.rs` equally, in three languages none of which the
+/// query mentioned. Two independent terms, or one term that is not a generic
+/// domain noun, is the weakest signal that actually distinguishes a file.
+fn query_matches_path_discriminatively(query: &str, path: &str) -> bool {
     let query_terms = identifier_terms(query);
-    identifier_terms(path)
+    let matched: Vec<String> = identifier_terms(path)
         .into_iter()
         .filter(|term| !is_structural_path_term(term))
-        .any(|path_term| {
+        .filter(|path_term| {
             query_terms
                 .iter()
-                .any(|query_term| terms_match(query_term, &path_term))
+                .any(|query_term| terms_match(query_term, path_term))
         })
+        .collect();
+    match matched.len() {
+        0 => false,
+        1 => !is_generic_domain_term(&matched[0]),
+        _ => true,
+    }
+}
+
+/// Nouns so common across a polyglot repository that agreement on one of them
+/// alone says nothing about which file to edit.
+///
+/// Deliberately short. Words that *name* a component - `config`, `core`,
+/// `context`, `store` - are discriminative in a repository that has a crate by
+/// that name, and excluding them demotes the file the query was actually about.
+/// This list is a heuristic patched onto a heuristic; the real fix is corpus
+/// term frequency, which the ranker does not have at scoring time.
+fn is_generic_domain_term(term: &str) -> bool {
+    matches!(
+        term,
+        "service"
+            | "services"
+            | "handler"
+            | "handlers"
+            | "util"
+            | "utils"
+            | "helper"
+            | "helpers"
+            | "common"
+            | "base"
+            | "data"
+            | "value"
+    )
 }
 
 fn identifier_terms(value: &str) -> Vec<String> {
@@ -523,9 +578,23 @@ fn identifier_terms(value: &str) -> Vec<String> {
 }
 
 fn terms_match(left: &str, right: &str) -> bool {
-    left == right
-        || (left.len() >= 6 && right.starts_with(left))
-        || (right.len() >= 6 && left.starts_with(right))
+    if left == right {
+        return true;
+    }
+    // A 6-character floor meant the query term `order` could not match the path
+    // term `orders`, while it did match `order_import` - so a gold directory lost
+    // to a legacy distractor on a plural.
+    if singularize(left) == singularize(right) {
+        return true;
+    }
+    (left.len() >= 4 && right.starts_with(left)) || (right.len() >= 4 && left.starts_with(right))
+}
+
+fn singularize(term: &str) -> &str {
+    term.strip_suffix("es")
+        .filter(|stem| stem.len() >= 3)
+        .or_else(|| term.strip_suffix('s').filter(|stem| stem.len() >= 3))
+        .unwrap_or(term)
 }
 
 fn is_structural_path_term(term: &str) -> bool {
@@ -582,6 +651,58 @@ fn normalize_identifier(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_test_file_can_be_a_boundary_match_for_a_test_query() {
+        // `code_to_test` queries have a test file as the gold answer. Barring
+        // test paths from boundary_fit demoted the correct result while
+        // unrelated source files collected the top tier.
+        let gold = make_result("java/test/com/acme/auth/AuthServiceTest.java", 1.0);
+        let options = RankingOptions {
+            query: Some("tests covering AuthService issueToken invalid credentials".into()),
+            ..RankingOptions::default()
+        };
+        let results = rerank_with_options(vec![gold], &options);
+        let boundary = results[0]
+            .score_breakdown
+            .iter()
+            .find(|c| c.signal == "boundary_fit")
+            .expect("test files must still receive the signal");
+        assert!(
+            boundary.raw_value > 0.03,
+            "a test file matching a test query must not sit at the bottom tier, got {}",
+            boundary.raw_value
+        );
+    }
+
+    #[test]
+    fn one_generic_term_does_not_earn_the_top_boundary_tier() {
+        // `service` alone promoted unrelated files in three languages the query
+        // never mentioned.
+        assert!(
+            !super::query_matches_path_discriminatively(
+                "tests covering AuthService issueToken",
+                "go/shipping/service.go"
+            ),
+            "a single generic domain term must not be treated as agreement"
+        );
+        assert!(
+            super::query_matches_path_discriminatively(
+                "fix the shipping service quote handler",
+                "go/shipping/service.go"
+            ),
+            "two independent matching terms are discriminative"
+        );
+    }
+
+    #[test]
+    fn a_plural_path_term_matches_its_singular_query_term() {
+        // The 6-character prefix floor meant `order` missed `orders` but hit
+        // `order_import`, so a gold directory lost to a legacy distractor.
+        assert!(super::terms_match("order", "orders"));
+        assert!(super::terms_match("orders", "order"));
+        assert!(!super::terms_match("order", "ordinal"));
+    }
     use super::RankingFeatures;
 
     // Regression: Tantivy embeds the user's query into its evidence prose
@@ -832,7 +953,7 @@ mod tests {
         assert!(results[0]
             .score_breakdown
             .iter()
-            .any(|component| component.signal == "boundary_fit" && component.raw_value > 1.0));
+            .any(|component| component.signal == "boundary_fit" && component.raw_value >= 1.0));
     }
 
     #[test]
