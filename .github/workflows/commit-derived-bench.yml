@@ -12,33 +12,63 @@ on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: Repository to derive the corpus from
-        default: https://github.com/elastic/elasticsearch
+        description: Override the repository for every matrix entry (leave blank to run the matrix as checked in)
+        default: ""
       base_sha:
         description: Base commit; the repository is indexed here
-        default: 1e6d79605440aa871287acacb604564d54ca7555
+        default: ""
       path_prefixes:
         description: Space-separated subtrees that are extracted and indexed
-        default: libs/ modules/ server/
+        default: ""
       after:
         description: Commits after base to scan for cases
-        default: "3800"
+        default: ""
       corpus_name:
         description: Baseline name under benchmarks/commit-derived/
-        default: elasticsearch-1e6d7960
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
-  REPO_URL: ${{ github.event.inputs.repo_url || 'https://github.com/elastic/elasticsearch' }}
-  BASE_SHA: ${{ github.event.inputs.base_sha || '1e6d79605440aa871287acacb604564d54ca7555' }}
-  PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || 'libs/ modules/ server/' }}
-  AFTER: ${{ github.event.inputs.after || '3800' }}
-  CORPUS_NAME: ${{ github.event.inputs.corpus_name || 'elasticsearch-1e6d7960' }}
 
 jobs:
   bench:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        corpus:
+          - name: elasticsearch-1e6d7960
+            repo: https://github.com/elastic/elasticsearch
+            base: 1e6d79605440aa871287acacb604564d54ca7555
+            prefixes: "libs/ modules/ server/"
+            ext: .java
+            after: "3800"
+          - name: hugo-79da24a0
+            repo: https://github.com/gohugoio/hugo
+            base: 79da24a0ebc0a33be89052188040caeec93c741e
+            prefixes: ""
+            ext: .go
+            after: "1500"
+          - name: deno_std-d93aa7c9
+            repo: https://github.com/denoland/std
+            base: d93aa7c94e640aa7b206e1a08e094eb705c1e1fa
+            prefixes: ""
+            ext: .ts
+            after: "1500"
+          - name: transformers-7cd9b985
+            repo: https://github.com/huggingface/transformers
+            base: 7cd9b985e0698d4f625a18be0125231b6b930390
+            prefixes: ""
+            ext: .py
+            after: "1500"
+    env:
+      REPO_URL: ${{ github.event.inputs.repo_url || matrix.corpus.repo }}
+      BASE_SHA: ${{ github.event.inputs.base_sha || matrix.corpus.base }}
+      PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || matrix.corpus.prefixes }}
+      EXT: ${{ matrix.corpus.ext }}
+      AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
+      CORPUS_NAME: ${{ github.event.inputs.corpus_name || matrix.corpus.name }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +96,7 @@ jobs:
           args=""
           for p in $PATH_PREFIXES; do args="$args --path-prefix $p"; done
           # shellcheck disable=SC2086
-          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" --after "$AFTER" $args --out cases.tsv
+          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" --after "$AFTER" --ext "$EXT" $args --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines()
           cut = int(len(rows) * 0.7)
