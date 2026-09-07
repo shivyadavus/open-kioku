@@ -1006,11 +1006,50 @@ fn retrieval_terms(request: &CandidateRequest) -> Vec<String> {
         .search_terms
         .iter()
         .flat_map(|term| term.split_whitespace())
-        .map(str::to_ascii_lowercase)
-        .filter(|term| term.len() >= 3)
+        .map(|term| {
+            term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .filter(|term| term.len() >= 3 && !is_overlap_stopword(term))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// Words that overlap with almost any test or fact name without saying anything about the task.
+/// "tests for geoip processor" must not rank `ForEachProcessorTests` level with
+/// `GeoIpProcessorTests` because of "for", and commit verbs like "fix" match `testFixedDelay`.
+fn is_overlap_stopword(term: &str) -> bool {
+    crate::is_task_stopword(term)
+        || matches!(
+            term,
+            "the"
+                | "and"
+                | "for"
+                | "not"
+                | "are"
+                | "was"
+                | "has"
+                | "had"
+                | "can"
+                | "all"
+                | "any"
+                | "its"
+                | "our"
+                | "out"
+                | "per"
+                | "via"
+                | "add"
+                | "fix"
+                | "use"
+                | "new"
+                | "when"
+                | "then"
+                | "than"
+                | "should"
+                | "make"
+                | "made"
+        )
 }
 
 fn term_overlap(terms: &[String], haystack: &str) -> usize {
@@ -1181,6 +1220,23 @@ fn update_heading_stack(headings: &mut Vec<String>, level: usize, title: &str) {
 #[cfg(test)]
 mod exact_authority_tests {
     use super::*;
+
+    #[test]
+    fn overlap_terms_drop_function_words_and_commit_verbs() {
+        let request = CandidateRequest::new(
+            "Fix tests for the geoip processor",
+            vec!["Fix tests for the geoip processor".into(), "geoip".into()],
+            10,
+        );
+        assert_eq!(
+            retrieval_terms(&request),
+            vec![
+                "geoip".to_string(),
+                "processor".to_string(),
+                "tests".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn mixed_qualified_and_bare_anchor_keeps_unrelated_same_name_ambiguous() {

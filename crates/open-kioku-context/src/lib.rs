@@ -2490,7 +2490,7 @@ fn task_lexical_terms(task: &str) -> Vec<String> {
     terms
 }
 
-fn is_task_stopword(token: &str) -> bool {
+pub(crate) fn is_task_stopword(token: &str) -> bool {
     matches!(
         token,
         "about"
