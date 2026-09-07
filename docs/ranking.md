@@ -26,7 +26,7 @@ Signals:
 - `graph_proximity`: dependency or impact-graph proximity when available.
 - `boundary_fit`: source-like files that are better primary edit candidates. Docs never qualify; test files qualify only when the task asks about tests (`test`, `tests`, `spec`, `coverage`, ...). Test paths are recognised by directory segment and file name (`src/test`, `src/internalClusterTest`, `__tests__`, `FooTests.java`, `FooIT.java`, `foo_test.go`, `foo.spec.ts`), never by substring, so `latest` is not a test and `javaRestTest` is.
 - `runtime_corroboration`: runtime traces or incidents when configured.
-- `git_cochange`: legacy aggregate weight for bounded local history signals.
+- `git_cochange`: legacy aggregate weight for bounded local history signals. Git history contributes primary-context candidates only when the task names an exact symbol or path it can anchor co-change on; commit-message similarity to task prose is not a retrieval signal (measured on a 10k-file repository with history, those votes cost 0.075 MRR and ~5 s per query).
   Current explanations use the finer-grained component names:
   `history_churn`, `ownership_risk`, `similar_change_overlap`, and
   `reviewer_affinity`.
@@ -47,7 +47,7 @@ remain available inside the configured `max_commits` window.
 History components are advisory and bounded: exact references, exact symbol
 evidence, direct test coverage, and explicit boundary evidence keep larger
 weights than historical heuristics.
-- `validation_proximity`: test and validation-path proximity. Test targets whose names overlap the task vocabulary enter candidate fusion with heuristic authority only; a test never outranks source merely because its name shares a word with the task.
+- `validation_proximity`: test and validation-path proximity. Test targets whose names overlap the task vocabulary enter candidate fusion with heuristic authority only; a test never outranks source merely because its name shares a word with the task. Candidate fusion is reciprocal-rank fusion with k=10 rather than the literature's 60: our streams are one full-text ranker plus name-overlap hints, and at k=60 a lexical rank 2 was indistinguishable from rank 13, so two weak votes always beat one strong one (neutral on the 490-case corpus, restores the workflow benchmark's `test-selector`). In candidate fusion (profile `rrf_measured_v1`) the validation stream votes at half weight: a name overlap is weaker evidence than a full-text match on the task, and at equal weight two such votes outranked a lexical #2 hit. Measured neutral on the 490-case commit-derived corpus; repository overrides scale this prior rather than replace it.
 - `memory_signal`: repo memory evidence when available.
 - `path_quality`: penalties for generated or vendor paths.
 
