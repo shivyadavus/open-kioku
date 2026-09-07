@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub const FASTEMBED_PROVIDER_VERSION: &str = "fastembed-5.17.4";
-pub const QWEN3_MAX_LENGTH: usize = 8_192;
+/// The candle Qwen3 path materializes a `(batch, 1, seq, seq)` f32 attention mask padded to the
+/// longest text in the batch; at the model's 32k/8k context that is tens of GB for a batch of
+/// whole-symbol chunks (the first CI runs were OOM-killed). 2048 tokens covers the path/symbol
+/// header plus the body of any chunk that matters for file-level retrieval.
+pub const QWEN3_MAX_LENGTH: usize = 2_048;
+const QWEN3_MAX_BATCH: usize = 8;
 const QWEN3_QUERY_INSTRUCTION: &str = "Given a code search query, retrieve relevant code and documentation passages that help implement, explain, debug, or verify the requested change.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,16 +263,30 @@ impl FastEmbedEmbeddingProvider {
                 let model = inner.lock().map_err(|_| {
                     OkError::Unsupported("Qwen3 embedding model lock poisoned".into())
                 })?;
-                {
-                    let mut vectors = Vec::with_capacity(inputs.len());
-                    for chunk in inputs.chunks(batch_size.max(1)) {
-                        let mut chunk_vectors = model.embed(chunk).map_err(|err| {
-                            OkError::Unsupported(format!("Qwen3 embedding inference failed: {err}"))
-                        })?;
-                        vectors.append(&mut chunk_vectors);
+                // Batches are padded to their longest member, so group texts of similar length:
+                // one long chunk in a batch of short ones would otherwise cost the whole batch
+                // its O(seq^2) attention.
+                let order = length_sorted_order(inputs);
+                let mut vectors: Vec<Option<Vec<f32>>> = vec![None; inputs.len()];
+                for batch in order.chunks(batch_size.clamp(1, QWEN3_MAX_BATCH)) {
+                    let texts: Vec<&str> = batch.iter().map(|&i| inputs[i].as_str()).collect();
+                    let embedded = model.embed(&texts).map_err(|err| {
+                        OkError::Unsupported(format!("Qwen3 embedding inference failed: {err}"))
+                    })?;
+                    for (&index, vector) in batch.iter().zip(embedded) {
+                        vectors[index] = Some(vector);
                     }
-                    vectors
                 }
+                vectors
+                    .into_iter()
+                    .map(|vector| {
+                        vector.ok_or_else(|| {
+                            OkError::Unsupported(
+                                "Qwen3 embedding returned fewer vectors than inputs".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
             }
             NeuralBackend::Onnx(inner) => {
                 let mut model = inner.lock().map_err(|_| {
@@ -425,6 +444,13 @@ fn with_hf_home<T>(cache_dir: &Path, operation: impl FnOnce() -> Result<T>) -> R
         None => std::env::remove_var("HF_HOME"),
     }
     result
+}
+
+/// Indexes of `inputs` from longest text to shortest, so padded batches waste little.
+fn length_sorted_order(inputs: &[String]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..inputs.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(inputs[i].len()));
+    order
 }
 
 fn reduce_dimensions(mut vector: Vec<f32>, dimensions: usize) -> Result<Vec<f32>> {
