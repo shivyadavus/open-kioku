@@ -107,7 +107,11 @@ pub enum LocalNeuralModel {
 
 const GTE_MODERNBERT_REPO: &str = "Alibaba-NLP/gte-modernbert-base";
 const GTE_MODERNBERT_ONNX: &str = "onnx/model_int8.onnx";
-const GTE_MODERNBERT_MAX_LENGTH: usize = 8_192;
+/// ModernBERT's ONNX export runs full O(n^2) attention with no memory-efficient kernel, so
+/// the model's 8k context is not a usable embedding length: at 8192 tokens x batch 64 the
+/// attention scores alone asked ORT for 55 GB. Chunks are far shorter than 1024 tokens.
+const GTE_MODERNBERT_MAX_LENGTH: usize = 1_024;
+const GTE_MODERNBERT_MAX_BATCH: usize = 16;
 
 impl LocalNeuralModel {
     pub fn parse(value: &str) -> Result<Self> {
@@ -269,11 +273,14 @@ impl FastEmbedEmbeddingProvider {
                 let mut model = inner.lock().map_err(|_| {
                     OkError::Unsupported("ONNX embedding model lock poisoned".into())
                 })?;
-                model
-                    .embed(inputs, Some(batch_size.max(1)))
-                    .map_err(|err| {
-                        OkError::Unsupported(format!("ONNX embedding inference failed: {err}"))
-                    })?
+                let batch = if self.model == LocalNeuralModel::GteModernBertBase {
+                    batch_size.clamp(1, GTE_MODERNBERT_MAX_BATCH)
+                } else {
+                    batch_size.max(1)
+                };
+                model.embed(inputs, Some(batch)).map_err(|err| {
+                    OkError::Unsupported(format!("ONNX embedding inference failed: {err}"))
+                })?
             }
         };
         vectors
