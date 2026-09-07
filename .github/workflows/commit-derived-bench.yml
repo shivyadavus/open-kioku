@@ -22,7 +22,7 @@ on:
         default: libs/ modules/ server/
       after:
         description: Commits after base to scan for cases
-        default: "4000"
+        default: "3800"
       corpus_name:
         description: Baseline name under benchmarks/commit-derived/
         default: java-a
@@ -32,7 +32,7 @@ env:
   REPO_URL: ${{ github.event.inputs.repo_url || '<withheld>' }}
   BASE_SHA: ${{ github.event.inputs.base_sha || '<withheld>' }}
   PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || 'libs/ modules/ server/' }}
-  AFTER: ${{ github.event.inputs.after || '4000' }}
+  AFTER: ${{ github.event.inputs.after || '3800' }}
   CORPUS_NAME: ${{ github.event.inputs.corpus_name || 'java-a' }}
 
 jobs:

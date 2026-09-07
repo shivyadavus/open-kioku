@@ -7,7 +7,7 @@ query and whose modified source files are the gold set, kept only if all of them
 already existed at B. The change itself lives in the future, never in the index,
 so a query cannot retrieve its own diff.
 
-    scripts/commit-derived-cases.py REPO --base B --after 4000 \
+    scripts/commit-derived-cases.py REPO --base B --after 3800 \
         --out cases.tsv [--min-files 1] [--max-files 5] [--ext .java]
 
 Output is TSV: sha, author date, query, gold paths joined by '|'. Split it
@@ -42,7 +42,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("repo")
     ap.add_argument("--base", required=True, help="base commit; the repository is indexed here")
-    ap.add_argument("--after", type=int, default=4000, help="how many commits after base to consider")
+    ap.add_argument("--after", type=int, default=3800, help="how many commits after base to consider; pick a count that exists on every machine that derives the corpus, the window is anchored at base")
     ap.add_argument("--min-files", type=int, default=1)
     ap.add_argument("--max-files", type=int, default=5)
     ap.add_argument("--ext", action="append", default=None, help="source extensions to keep (repeatable); default .java")
@@ -57,14 +57,16 @@ def main():
     prefixes = tuple(args.path_prefix or [""])
 
     at_base = set(git(args.repo, "ls-tree", "-r", "--name-only", args.base).splitlines())
-    # Commits reachable from HEAD that are not ancestors of base, oldest first.
+    # The first `after` commits after base, oldest first. Anchored at base on purpose:
+    # `--max-count` keeps the *newest* N commits before `--reverse` reorders them, so a
+    # HEAD-anchored window would yield a different case set every time upstream moves.
     log = git(
-        args.repo, "log", f"{args.base}..HEAD", "--reverse", f"--max-count={args.after}",
-        "--first-parent", "--format=%x00%H%x1f%as%x1f%s", "--name-only", "--diff-filter=M",
+        args.repo, "log", f"{args.base}..HEAD", "--reverse", "--first-parent",
+        "--format=%x00%H%x1f%as%x1f%s", "--name-only", "--diff-filter=M",
     )
     kept = 0
     with open(args.out, "w") as out:
-        for block in log.split("\x00")[1:]:
+        for block in log.split("\x00")[1 : args.after + 1]:
             header, _, files = block.partition("\n")
             sha, date, subject = header.split("\x1f")
             paths = [p for p in files.split("\n") if p and p.endswith(exts)]
