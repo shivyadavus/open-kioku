@@ -30,11 +30,10 @@ def git(repo, *args):
 
 
 def clean_query(subject):
-    # Strip PR numbers and explicit paths: both would make the case trivially
-    # solvable and neither is how a developer phrases a task.
+    # Strip PR numbers. A subject that names a path is dropped by the caller: kept, the path
+    # is the answer; stripped, what remains ("chore: fix regex in") is unanswerable.
     subject = PR_REF.sub("", subject)
     subject = BACKTICKS.sub(r"\1", subject)
-    subject = PATHLIKE.sub("", subject)
     return " ".join(subject.split()).strip(" .:-")
 
 
@@ -47,6 +46,10 @@ def main():
     ap.add_argument("--max-files", type=int, default=5)
     ap.add_argument("--ext", action="append", default=None, help="source extensions to keep (repeatable); default .java")
     ap.add_argument("--min-query-words", type=int, default=3)
+    ap.add_argument(
+        "--keep-path-subjects", action="store_true",
+        help="keep commits whose subject contains a path-like token (default: drop them; the path is either the answer or, once stripped, the subject no longer describes the change)",
+    )
     ap.add_argument(
         "--path-prefix", action="append", default=None,
         help="only count files under these prefixes as gold (repeatable); use it when only a subtree of the repository is indexed",
@@ -76,6 +79,8 @@ def main():
                 continue
             if any(p not in at_base for p in paths):
                 continue  # a gold file that does not exist at B is unanswerable by construction
+            if PATHLIKE.search(subject) and not args.keep_path_subjects:
+                continue
             query = clean_query(subject)
             if len(query.split()) < args.min_query_words:
                 continue

@@ -136,8 +136,10 @@ showed on a ten-thousand-file repository. Larger corpora are derived from a real
 repository's own history, after the Agent Retrieval Bench methodology:
 
 1. Pick a base commit `B` and index the repository (or a subtree) **at `B`**.
-2. Every case is a later commit: the query is its subject with PR numbers and paths
-   stripped; the gold set is the source files it modified that already existed at `B`.
+2. Every case is a later commit: the query is its subject with PR numbers stripped; the gold
+   set is the source files it modified that already existed at `B`. Commits whose subject
+   names a path are dropped (kept, the path is the answer; stripped, the subject no longer
+   describes the change).
    The change lives in the future, never in the index, so a query cannot retrieve its
    own diff.
 3. Split chronologically — older cases are the development set, newer ones the holdout.
@@ -153,9 +155,12 @@ scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/
 `score-context-cases.py` drives `ok context --json`, the same builder `ok plan` and the MCP
 `build_context_pack` tool use, and ranks files in the order the pack presents them. It
 reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live under
-`benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives the
-Elasticsearch corpus nightly and fails when a watched metric falls more than 0.03 below its
-baseline. Queries are commit subjects, so absolute numbers are not comparable with
+`benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives four
+corpora nightly as a matrix — Elasticsearch (Java, `libs/ modules/ server/`), hugo (Go),
+deno_std (TypeScript), and transformers (Python) — and fails when a watched metric falls more
+than 0.03 below its baseline. The frozen baselines are what an accuracy change is judged
+against; a change that helps one language and hurts another shows up as one failing matrix
+entry rather than a blended average. Queries are commit subjects, so absolute numbers are not comparable with
 published benchmarks that use issue text; compare a change against the frozen baseline,
 not against the literature.
 
