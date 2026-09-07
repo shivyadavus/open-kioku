@@ -2416,15 +2416,32 @@ fn identifiers(value: &str) -> Vec<String> {
     out
 }
 
+/// Whether a task token names a code identifier rather than a word of prose.
+///
+/// A capital first letter is not enough: "Enable", "Fix", "Assert" open almost every
+/// commit-style task, and treating them as the primary edit anchor boosted every file that
+/// merely contained "enable" or "fix" (as in `prefix`) by +0.65 above the real lexical hits.
+/// An identifier shows a case change *inside* the token (`SystemIndexDescriptor`, `getFoo`),
+/// a separator (`random_score`, `max-age`), or digits next to capitals (`ES819`).
 fn is_named_identifier(value: &str) -> bool {
     if value.len() < 3 || is_ticket_id(value) {
         return false;
     }
-    let has_lower = value.chars().any(|ch| ch.is_ascii_lowercase());
     let has_upper = value.chars().any(|ch| ch.is_ascii_uppercase());
     let has_digit = value.chars().any(|ch| ch.is_ascii_digit());
     let has_separator = value.contains('_') || value.contains('-');
-    (has_lower && has_upper) || has_separator || (has_digit && has_upper)
+    has_inner_case_change(value) || has_separator || (has_digit && has_upper)
+}
+
+/// `getFoo`, `SystemIndexDescriptor`, `ES819x`: an upper-case letter after a lower-case letter
+/// or digit. `Enable`, `HTTP`, and `index` have none.
+pub(crate) fn has_inner_case_change(value: &str) -> bool {
+    value
+        .chars()
+        .zip(value.chars().skip(1))
+        .any(|(prev, next)| {
+            (prev.is_ascii_lowercase() || prev.is_ascii_digit()) && next.is_ascii_uppercase()
+        })
 }
 
 fn is_ticket_id(value: &str) -> bool {
@@ -3484,6 +3501,39 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sentence_initial_capitals_are_not_edit_anchors() {
+        let intent = TaskSearchIntent::parse("Enable the index refresh block");
+        assert!(
+            intent.primary_anchors.is_empty(),
+            "{:?}",
+            intent.primary_anchors
+        );
+        let intent = TaskSearchIntent::parse("Fix append writes test for backing indices");
+        assert!(
+            intent.primary_anchors.is_empty(),
+            "{:?}",
+            intent.primary_anchors
+        );
+        let intent = TaskSearchIntent::parse("Assert SystemIndexDescriptor is not used");
+        assert_eq!(
+            intent.primary_anchors,
+            vec!["SystemIndexDescriptor".to_string()]
+        );
+        for token in [
+            "random_score",
+            "getFoo",
+            "ES819",
+            "max-age",
+            "IpPrefixAutomatonUtil",
+        ] {
+            assert!(is_named_identifier(token), "{token}");
+        }
+        for token in ["Enable", "Fix", "HTTP", "index", "Index"] {
+            assert!(!is_named_identifier(token), "{token}");
         }
     }
 
