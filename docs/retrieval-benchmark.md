@@ -143,7 +143,9 @@ repository's own history, after the Agent Retrieval Bench methodology:
    its first instance: on a Go application (~800 files), "publisher: Bump versions for release of X" was a third of its
    holdout with the same gold file every time, so one pattern decided the corpus.
    The change lives in the future, never in the index, so a query cannot retrieve its
-   own diff.
+   own diff. Each gold file also records the line ranges the commit modified (a fifth
+   TSV column, `26-33,36-44|1-1`, base side of `git diff -U0 <parent> <sha>`); the scorer
+   tolerates its absence, so older four-column corpora still score.
 3. Split chronologically — older cases are the development set, newer ones the holdout.
 
 ```sh
@@ -187,6 +189,65 @@ against; a change that helps one language and hurts another shows up as one fail
 entry rather than a blended average. Queries are commit subjects, so absolute numbers are not comparable with
 published benchmarks that use issue text; compare a change against the frozen baseline,
 not against the literature.
+
+## Gold yield at a token budget
+
+Recall@k and MRR say whether the right *file* is in the pack. They do not say whether the
+agent can afford to read it. Across the four commit-derived holdouts (Java, 10k files; Go,
+~800 files; TypeScript, ~900 files; Python, ~4k files) a gold file is 168–844 lines at the
+median (381–1,368 mean) and the commit modifies 2–3 of them at the median — 0.4–1.8% of
+the file, 1.8–8.4% on average — so a pack that names the right file but spends the budget
+on the wrong region still costs the agent a file read. The yield metrics score the pack the
+way an agent consumes it, top-down under a token budget.
+
+For a case, `scripts/score-context-cases.py` takes the pack's selected units in
+presentation order (`retrieval_diagnostics.selection.selected_units`, each with `path`,
+`line_range`, and the builder's own `estimated_tokens`) and accumulates them until the next
+unit would overflow the budget `B`. Everything before that point is what an agent reading
+the pack sees within `B` tokens. Over that prefix:
+
+- `gold_file_yield@B` — the fraction of the case's gold files that have at least one
+  selected unit inside the budget; averaged over cases.
+- `gold_line_yield@B` — where the case carries modified line ranges, the fraction of those
+  lines that the in-budget units' `line_range`s cover; averaged over the cases that have
+  ranges.
+- `tokens_to_first_gold` — the tokens consumed before the first gold unit appears, stored
+  per case and reported as a median over the cases that reach a gold unit at all.
+
+`B` is reported at 4,000, 8,000 (the default, matching `ContextBudget::default().max_tokens`)
+and 16,000; each yield carries a 95% bootstrap interval like the other metrics. The token
+cost is the builder's own estimate — the same accounting the selector uses when it enforces
+a budget — so the metric judges the pack against the arithmetic that built it, not against a
+tokenizer it never saw.
+
+Two caveats travel with the numbers:
+
+- **The line ranges are a proxy.** They are numbered on the commit's parent, and the index
+  is at the base commit `B`, which may be hundreds of commits earlier; a file that moved
+  between `B` and the parent shifts its ranges. The parent side is the nearest thing to `B`
+  that the change is expressed against, and it is used as the best available proxy. Line
+  yield is therefore an underestimate on files that drifted between the two, exact on files
+  that did not.
+- **A unit's `line_range` is the matched region, not the whole symbol.** The production
+  `ok context` path selects the reranked prefix of up to 20 units with an unbounded token
+  budget, and its units are search hits whose `line_range` is usually a few lines around
+  the match (a signature, a comment), occasionally a whole method, with a token estimate
+  sized to that snippet. Measured on 2026-09-08 on a local workstation build (main
+  `92169e9` plus a pending ingest fix), a 20-unit pack was 721–1,152 estimated tokens at
+  the median across the four holdouts and 1,549–5,600 at the 95th percentile, with 27 of
+  626 packs over 4,000 and one Python pack at 33,933; even so, no case's yield differed
+  between the 4,000 and 16,000 budgets, so `gold_file_yield@B` reads the same at every `B`:
+  gold recall within the selected units. It sits below `gold_recall@20` because supporting
+  files (dependency and test neighbours) are presented without a token estimate and are
+  not selected units, so the yield does not count them. `gold_line_yield@B` is bounded by
+  how much of the modified region a snippet-sized match can cover. The metric is defined
+  for the day the pack renders regions or enforces the 8,000-token default; on the current
+  path it documents that the budget is not the binding constraint — region granularity is.
+  The nightly commit-derived matrix carries the reproducible reading; the numbers above
+  are a workstation record, not a guarantee.
+
+`scripts/compare-commit-derived-report.py` prints the yields as informational and does not
+gate on them; a baseline frozen before the metric existed compares without it.
 
 ## Reproduce locally
 
