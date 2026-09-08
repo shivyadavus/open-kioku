@@ -87,7 +87,7 @@ The semantic manifest records the resolved backend and an index-version identity
 
 Hybrid search combines lexical candidates with semantic vector candidates and fuses them through the same explainable ranking pipeline as normal search. Semantic-only evidence is labeled with `semantic_similarity`; exact symbol/reference evidence remains a separate stronger signal for identifier-like queries.
 
-Agents reach the same behavior through `semantic_status`, `semantic_search`, `hybrid_search`, and `explain_search_result`. Every semantic or hybrid response carries semantic index status metadata, so a stale, disabled, missing, or corrupt vector index is explicit rather than silently degrading into a weaker result.
+Agents reach the same behavior through `search_code` with `mode: "semantic"` or `mode: "hybrid"`, and see the index's readiness in `repo_status`'s `semantic_lifecycle`. Every semantic or hybrid response carries semantic index status metadata, so a stale, disabled, missing, or corrupt vector index is explicit rather than silently degrading into a weaker result.
 
 ## Privacy
 

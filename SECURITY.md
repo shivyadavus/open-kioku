@@ -22,10 +22,11 @@ These files are intended to stay on the developer's machine unless the user choo
 
 ## Source-Edit Controls
 
-Open Kioku MCP does not modify source files. Read-only planning tools such as
-`plan_change`, `build_context_pack`, and `propose_patch` produce evidence-backed
-recommendations; apply reviewed source changes with the normal editor, then use
-`verify_change` or `verify_change_contract` to evaluate the resulting diff.
+Open Kioku MCP does not modify source files. Planning tools such as
+`plan_change` (including `detail: "patch"`) and `build_context_pack` produce
+evidence-backed recommendations; apply reviewed source changes with the normal
+editor, then use `verify_change` to evaluate the resulting diff against the
+saved plan or a stored change contract.
 
 ## Path Controls
 

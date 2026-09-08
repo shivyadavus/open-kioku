@@ -82,11 +82,13 @@ print an inline contract only. `contract verify` accepts exactly one of
 `--id`, `--contract`, or `--contract-json`, so callers can use either stored
 contract IDs or inline JSON artifacts.
 
-The MCP server exposes the same workflow through `create_change_contract`,
-`get_change_contract`, `verify_change_contract`, and `explain_verification`.
-`create_change_contract` accepts a task, inline `plan`, or `plan_json`;
-`verify_change_contract` accepts `contract_id`, inline `contract`, or
-`contract_json`; `get_change_contract` can export JSON, Markdown, or TOON.
+The MCP server exposes the same workflow through two tools.
+`plan_change` with `persist: true` creates the contract and accepts a task,
+inline `plan`, or `plan_json` (`store: false` keeps it transient).
+`verify_change` accepts `contract_id`, inline `contract`, or `contract_json`,
+and explains a report with `explain: true` or with `verification` /
+`verification_json`. Retrieving a stored contract is a CLI read:
+`ok contract show <id> --format json|markdown|toon`.
 Stored contract verification appends JSONL verification records next to the
 contract, while inline verification leaves the store untouched.
 
