@@ -4,33 +4,38 @@ description: Use when navigating a codebase, searching for symbols, tracing defi
 
 # Open Kioku — Code Intelligence
 
-This plugin gives Cursor a persistent, evidence-backed memory of the indexed repository through 35+ MCP tools. All operations are local and read-only by default.
+This plugin gives Cursor an evidence-backed view of the indexed repository through 16 MCP tools, one per question nothing else answers. All operations are local, and read-only unless a parameter named below says otherwise. The full routine is in the `open-kioku` skill; this is the tool map.
 
 ## Key tools by task
 
 ### Search
-- `search_code` — BM25 full-text search across indexed chunks (best for keywords and logic)
-- `regex_search` — pattern-based search for exact syntax matches
-- `list_symbols` — browse all symbols by name substring
+- `search_code` — the single entry point. `mode`: `code` (lexical BM25, the default), `graph`, `semantic`, `hybrid`
+- `regex_search` — exact line matching for a literal pattern; unranked, path-ordered, and `caveats` says what was not searched
+- `search_symbols` — browse or substring-filter the symbol table
+- `list_files` — the indexed inventory, or one file's record and chunks with `path`
 
 ### Symbol navigation
-- `get_definition` — locate where a symbol is defined
-- `get_references` — find every usage of a symbol
-- `get_callers` / `get_callees` — trace call graphs
-- `get_implementations` — find all implementations of a trait or interface
+- `get_definition` — where a symbol is defined; `include_body: true` adds the definition text and the lines around it
+- `get_references` — what else touches it. `kind`: `references` (the default), `callers`, `callees`, `implementations`, `all`. Read each section's `evidence_source` and `caveats` — an empty occurrence list and an empty IMPLEMENTS list are different claims
 
 ### Change impact
-- `impact_analysis` — measure blast radius before modifying a file
-- `find_tests_for_change` — identify tests to run after editing
-- `dependency_path` — find how two files or symbols are connected
+- `impact_analysis` — blast radius before modifying a file, with dependents split into structurally proven and heuristic
+- `find_tests_for_change` — the tests to run; a ranked test is a candidate, not proof of coverage
+- `dependency_path` — how two nodes connect, or one node's neighbours when `to` is omitted
+- `explain_flow` — indexed endpoints and the call paths they start
 
-### Architecture
-- `detect_architecture` — get a high-level component map
-- `architecture_violations` — report boundary violations
+### Planning and verification
+- `build_context_pack` — file, symbol and test context for a complex task; `compress: true` returns handles (this writes) that `retrieve_context` expands
+- `plan_change` — the evidence-backed plan with edit boundaries. `detail: "preflight"` for a short start decision, `detail: "patch"` for a patch plan, `persist: true` to store a change contract (this writes)
+- `verify_change` — hold the actual edit to the saved plan or a `contract_id`
 
-### Refactoring
-- `build_context_pack` — assemble file + symbol + test context for a complex task
-- `propose_patch` — plan a change without writing files
+### Escape hatch
+- `query_evidence_graph` — anything the above do not answer; call it with no `query` first for the evidence schema
+- `repo_status` — what the index holds and how much of the repository it covers
+
+## Not MCP tools
+
+Architecture reports, git history, ownership and stored contracts are CLI reads: `ok architecture summary|detect|boundaries|violations|policy …`, `ok history provenance|churn|similar|ownership|reviewers`, `ok contract show <id>`. Memory and runtime-error tools appear in `tools/list` only when those features are configured.
 
 ## Prerequisites
 
@@ -46,4 +51,4 @@ ok index .
 
 Before editing any symbol: `get_definition` → `get_references` → `impact_analysis` → `find_tests_for_change`
 
-Before a large refactor: `build_context_pack` with a natural language task description → `propose_patch` → `validate_patch`
+Before a large refactor: `build_context_pack` with a natural language task description → `plan_change` → apply the edit with your editor → `verify_change`

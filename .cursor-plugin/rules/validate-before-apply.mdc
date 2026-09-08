@@ -1,11 +1,16 @@
 ---
-description: Require patch validation before applying any proposed code change
+description: Require boundary verification after applying any proposed code change
 globs: ["**/*.rs", "**/*.ts", "**/*.py", "**/*.go", "**/*.java", "**/*.js"]
 alwaysApply: false
 ---
 
-# Validate patch before applying
+# Verify the change against the plan
 
-When using `propose_patch`, always follow it with `validate_patch` before writing any changes to disk.
+Before a multi-file edit, call `plan_change` via Open Kioku. It returns the files
+expected to change and an explicit edit boundary. Apply the edit with your normal
+editor — Open Kioku never writes source.
 
-`validate_patch` confirms the patch plan is structurally sound, targets the correct symbols, and will not produce broken imports or missing references. Skipping this step risks introducing silent breakage.
+After the edit, call `verify_change` with that plan (save it with
+`format: "json"`) or with a `contract_id` from `plan_change` with
+`persist: true`. It compares the files that actually changed against the boundary
+that was declared. A green test run is not proof the right files changed.

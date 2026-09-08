@@ -464,8 +464,9 @@ a replacement for reading the relevant source.\n\n\
 ## Routine\n\n\
 1. **Explore** with `search_code` or `get_definition` before claiming what\n\
    exists.\n\
-2. **Preflight** with `preflight_change` before a multi-file edit, rename,\n\
-   deletion, or public interface change. Read its caveats before editing.\n\
+2. **Preflight** with `plan_change` and `detail: \"preflight\"` before a\n\
+   multi-file edit, rename, deletion, or public interface change. Read its\n\
+   caveats before editing.\n\
 3. **Edit** only within the returned scope unless new evidence justifies an\n\
    expansion.\n\
 4. **Verify** the changed files and selected tests before finishing. For\n\
@@ -487,9 +488,9 @@ alwaysApply: true\n\
 # Open Kioku pre-edit workflow\n\n\
 Follow this routine: **Explore -> Preflight -> Edit -> Verify**. For unfamiliar\n\
 code, investigate with `search_code` or `get_definition` before making claims.\n\
-Before a multi-file edit, rename, deletion, or public API change, run\n\
-`preflight_change` and read its caveats. Keep edits within its returned scope\n\
-unless new evidence supports expansion. Before finishing, run the selected tests\n\
+Before a multi-file edit, rename, deletion, or public API change, call\n\
+`plan_change` with `detail: \"preflight\"` and read its caveats. Keep edits\n\
+within its returned scope unless new evidence supports expansion. Before finishing, run the selected tests\n\
 and verify the changed files. When boundary verification is needed, save a\n\
 `plan_change` result with `format: \"json\"` and pass it to `verify_change`.\n\
 Otherwise call `plan_change` and `build_context_pack` without `format`: the\n\
@@ -656,9 +657,16 @@ mod onboarding_tests {
             assert!(guidance.contains("Preflight"));
             assert!(guidance.contains("Edit"));
             assert!(guidance.contains("Verify"));
-            assert!(guidance.contains("preflight_change"));
             assert!(guidance.contains("plan_change"));
             assert!(guidance.contains("verify_change"));
+            // This rule is written into the user's own repository, so a retired
+            // name here fails on first use with nothing to point at the fix.
+            for retired in ["preflight_change", "propose_patch", "create_change_contract"] {
+                assert!(
+                    !guidance.contains(retired),
+                    "installed guidance must not name the retired `{retired}`"
+                );
+            }
             assert!(guidance.contains("enforced behavior") || guidance.contains("does not enforce"));
         }
     }
