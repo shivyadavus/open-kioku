@@ -121,12 +121,17 @@ jobs:
 
       - name: Index the corpus
         run: |
+          mkdir -p artifacts
           ./target/release/ok init corpus
           ./target/release/ok index corpus 2>&1 | tail -5
+          # Coverage is what the index did not hold; it travels with every score below.
+          # Only the coverage object is kept: the full status carries skipped paths.
+          ./target/release/ok --repo corpus --json status \
+            | python3 -c 'import json, sys; json.dump(json.load(sys.stdin).get("coverage"), sys.stdout, indent=1)' \
+            > artifacts/coverage.json
 
       - name: Score the production context path
         run: |
-          mkdir -p artifacts
           python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
             --cases cases-holdout.tsv --label holdout --workers 3 --out artifacts/holdout.json
           python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
@@ -138,6 +143,24 @@ jobs:
             "benchmarks/commit-derived/${CORPUS_NAME}-holdout.json"
           python3 scripts/compare-commit-derived-report.py artifacts/dev.json \
             "benchmarks/commit-derived/${CORPUS_NAME}-dev.json"
+
+      - name: Record coverage next to accuracy in the job summary
+        if: always()
+        run: |
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, os
+          print(f"### {os.environ['CORPUS_NAME']}")
+          print("| split | coverage | R@5 | R@20 | MRR |")
+          print("| --- | --- | ---: | ---: | ---: |")
+          for split in ("holdout", "dev"):
+              try:
+                  r = json.load(open(f"artifacts/{split}.json"))
+              except OSError:
+                  print(f"| {split} | (no report) | | | |")
+                  continue
+              m = r["metrics"]
+              print(f"| {split} | {r.get('coverage_line', 'not recorded')} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
+          PY
 
       - name: Upload reports
         if: always()
