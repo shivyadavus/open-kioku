@@ -91,7 +91,8 @@ impl<'a> BuiltinCandidateContext<'a> {
     }
 
     fn lexical_stream(&self, request: &CandidateRequest) -> CandidateStream {
-        let intent = TaskSearchIntent::parse(&request.task);
+        let intent = TaskSearchIntent::parse(&request.task)
+            .with_repository_vocabulary(self.files, self.symbols);
         match search_candidates(
             self.chunks,
             self.files,
