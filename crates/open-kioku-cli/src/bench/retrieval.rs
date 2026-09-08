@@ -1072,10 +1072,13 @@ fn run_cc2_retrieval_case(
     let files = store.list_files(usize::MAX, 0)?;
     let chunks = store.all_chunks()?;
     let symbols = store.list_symbols(None, usize::MAX, 0)?;
-    let request = open_kioku_context::candidates::CandidateRequest::new(
+    // Built the way the context builder builds it, lattice terms included: a request that
+    // omits them measures a retrieval path the product does not ship.
+    let request = open_kioku_context::task_candidate_request(
         &case.query,
-        expanded_task_search_terms(&case.query),
         ranking_candidate_limit(limit),
+        &files,
+        &symbols,
     );
     let context = open_kioku_context::candidates::builtins::BuiltinCandidateContext {
         store: store as &dyn OkStore,

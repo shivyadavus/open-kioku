@@ -470,6 +470,20 @@ pub fn expanded_task_search_terms(task: &str) -> Vec<String> {
     TaskSearchIntent::parse(task).search_terms(task)
 }
 
+/// The candidate request the context builder builds for `task`, identifier-lattice terms
+/// included. Benchmarks must construct requests the way production does, or they measure a
+/// retrieval path the product does not ship.
+pub fn task_candidate_request(
+    task: &str,
+    limit: usize,
+    files: &[File],
+    symbols: &[Symbol],
+) -> candidates::CandidateRequest {
+    let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(files, symbols);
+    candidates::CandidateRequest::new(task, intent.search_terms(task), limit)
+        .with_lattice_terms(intent.lattice_terms())
+}
+
 impl<'a> ContextPackBuilder<'a> {
     pub fn new(store: &'a dyn OkStore) -> Self {
         Self {
@@ -2116,7 +2130,12 @@ impl TaskSearchIntent {
             .chain(self.reference_anchors.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let expansion = lattice::expand(&task_identifiers, files, symbols);
+        let expansion = lattice::expand(
+            &task_identifiers,
+            self.primary_anchors.len(),
+            files,
+            symbols,
+        );
         self.lattice_anchors = expansion.identifiers;
         self.unreached_identifiers = expansion.unreached_identifiers;
         self
@@ -2139,6 +2158,14 @@ impl TaskSearchIntent {
         self.lattice_anchors.clone()
     }
 
+    /// Adopt lattice terms the caller already built. The context builder scans the symbol
+    /// table once and hands the result to every stream; recomputing it inside a stream doubled
+    /// the per-query cost of the feature for an identical answer.
+    fn with_lattice_terms(mut self, terms: Vec<lattice::LatticeTerm>) -> Self {
+        self.lattice_anchors = terms;
+        self
+    }
+
     /// Hops that name one edit target, and so may carry the named-target tier and its boost.
     /// A name dozens of files share widens retrieval but points at nothing in particular.
     fn naming_lattice_anchors(&self) -> impl Iterator<Item = &lattice::LatticeTerm> {
@@ -2154,14 +2181,31 @@ impl TaskSearchIntent {
     /// Caveats for task identifiers the repository does not know in any spelling. Absence is
     /// evidence: retrieval for such a task rests on its remaining words.
     fn vocabulary_caveats(&self) -> Vec<String> {
-        self.unreached_identifiers
+        let mut caveats = self
+            .unreached_identifiers
             .iter()
             .map(|identifier| {
                 format!(
-                    "task identifier `{identifier}` names no indexed symbol or file, and no identifier within a stem or one edit of its parts exists; retrieval relies on the task's other words"
+                    "task identifier `{identifier}` names no indexed multi-part code identifier, and no identifier within a stem or one edit of its parts exists; retrieval relies on the task's other words"
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // Absence of a usable name is evidence too: the reach still widened the search, but it
+        // conferred no relevance, and the pack would otherwise show the hop unqualified.
+        caveats.extend(
+            self.lattice_anchors
+                .iter()
+                .filter(|hop| hop.ambiguous)
+                .map(|hop| {
+                    format!(
+                        "identifier lattice reached `{}` from task term `{}`, but more than {} files carry that name; it widened retrieval and was denied anchor relevance",
+                        hop.term,
+                        hop.origin,
+                        lattice::MAX_FILES_PER_NAMED_TERM
+                    )
+                }),
+        );
+        caveats
     }
 
     fn search_terms(&self, task: &str) -> Vec<String> {
@@ -2335,15 +2379,20 @@ fn rerank_fused_for_task_with_files(
         let identity = result_identity_text(result);
         for hop in intent.naming_lattice_anchors() {
             if contains_anchor(&identity, &hop.term) {
-                result.score += LATTICE_ANCHOR_BOOST;
+                let boost = if hop.from_primary {
+                    LATTICE_ANCHOR_BOOST
+                } else {
+                    LATTICE_REFERENCE_ANCHOR_BOOST
+                };
+                result.score += boost;
                 result.confidence = result.confidence.max(0.7);
                 result.evidence.push(hop.evidence());
                 result.add_score_component(ScoreComponent::adjustment(
                     "identifier_lattice_anchor_boost",
-                    LATTICE_ANCHOR_BOOST,
+                    boost,
                     result.derived_evidence_ids(),
                     format!(
-                        "repository identifier `{}` reached from task term `{}` matched result text",
+                        "repository identifier `{}` reached from task term `{}` names this result",
                         hop.term, hop.origin
                     ),
                 ));
@@ -2448,10 +2497,13 @@ fn rerank_fused_for_task_with_files(
 /// Relevance tier at which a file *is* the task's named target (its path or symbol names a
 /// primary anchor) and quality demotion no longer applies.
 const NAMED_TARGET_RELEVANCE_TIER: u8 = 4;
-/// Below the primary anchor's +0.65: the lattice link from task spelling to repository spelling
-/// is a heuristic, so a file that names the reached identifier must not outscore a file that
-/// names an identifier the task spelled exactly.
+/// A lattice hop is a guess at what the task meant, so it sits a whole relevance tier below a
+/// name the task spelled exactly — score only orders results that already tie on quality,
+/// relevance and authority, so the tier is what actually keeps an exact fact on top.
 const LATTICE_ANCHOR_BOOST: f32 = 0.45;
+/// A hop from a trailing reference mention ("… similar to X") is a guess about a secondary
+/// name, and ranks with the reference anchors it came from.
+const LATTICE_REFERENCE_ANCHOR_BOOST: f32 = 0.25;
 /// The quality tier of ordinary source, which a named target is always treated as.
 const SOURCE_QUALITY_TIER: u8 = 2;
 
@@ -2550,9 +2602,6 @@ fn task_relevance_tier(
         .primary_anchors
         .iter()
         .any(|anchor| contains_anchor(&identity, anchor))
-        || intent
-            .naming_lattice_anchors()
-            .any(|hop| contains_anchor(&identity, &hop.term))
     {
         4
     } else if intent
@@ -2562,6 +2611,13 @@ fn task_relevance_tier(
         .any(|anchor| contains_anchor(haystack, anchor))
         || path_matches_scope(&normalize_path(path), &intent.scope_anchors)
         || (intent.documentation_target && is_documentation_path(&normalize_path(path)))
+        // A hop is a guess at the repository's spelling, so a file it names ranks with an
+        // explicitly typed path — never with a name the task spelled exactly, and never with
+        // the named-target exemption that would lift it over the docs/tests demotion.
+        || intent
+            .naming_lattice_anchors()
+            .filter(|hop| hop.from_primary)
+            .any(|hop| contains_anchor(&identity, &hop.term))
     {
         3
     } else if intent
@@ -2574,6 +2630,10 @@ fn task_relevance_tier(
         .reference_anchors
         .iter()
         .any(|anchor| contains_anchor(haystack, anchor))
+        || intent
+            .naming_lattice_anchors()
+            .filter(|hop| !hop.from_primary)
+            .any(|hop| contains_anchor(&identity, &hop.term))
     {
         1
     } else {
@@ -5093,6 +5153,123 @@ mod tests {
             "lexical terms carry the hop: {lexical:?}"
         );
         assert!(intent.vocabulary_caveats().is_empty());
+    }
+
+    fn lattice_hop(
+        term: &str,
+        origin: &str,
+        from_primary: bool,
+        ambiguous: bool,
+    ) -> lattice::LatticeTerm {
+        lattice::LatticeTerm {
+            term: term.into(),
+            origin: origin.into(),
+            from_primary,
+            relation: lattice::LatticeRelation::Stem,
+            ambiguous,
+        }
+    }
+
+    fn plain_result(path: &str, score: f32) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range: None,
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    fn tier_of(intent: &TaskSearchIntent, result: &SearchResult) -> u8 {
+        let haystack = searchable_result_text(result);
+        task_relevance_tier(&result.path.clone(), result, &haystack, intent)
+    }
+
+    #[test]
+    fn a_lattice_hop_ranks_below_a_name_the_task_spelled_exactly() {
+        // Score is the fourth sort key, so what keeps an exact fact on top is the relevance
+        // tier, not the size of the boost: a hop must not reach the named-target tier.
+        let intent = TaskSearchIntent::parse("Fix retry in the HttpPollers loop")
+            .with_lattice_terms(vec![lattice_hop("HttpPoller", "HttpPollers", true, false)]);
+        let exact = plain_result("src/poll/HttpPollers.java", 0.1);
+        let hopped = plain_result("src/poll/HttpPoller.java", 0.9);
+        assert_eq!(tier_of(&intent, &exact), NAMED_TARGET_RELEVANCE_TIER);
+        assert_eq!(tier_of(&intent, &hopped), 3);
+        let ranked = rerank_fused_for_task(
+            vec![hopped, exact],
+            &intent,
+            &RetrievalDiagnostics::default(),
+        );
+        assert!(
+            ranked[0].path.ends_with("HttpPollers.java"),
+            "the exactly-spelled name must lead its re-spelling: {:?}",
+            ranked
+                .iter()
+                .map(|r| r.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_lattice_hop_does_not_exempt_a_test_file_from_quality_demotion() {
+        let intent = TaskSearchIntent::parse("Fix the HttpPollers backoff")
+            .with_lattice_terms(vec![lattice_hop("HttpPoller", "HttpPollers", true, false)]);
+        let source = plain_result("src/main/java/net/Backoff.java", 0.2);
+        let test = plain_result("src/test/java/net/HttpPollerTests.java", 0.9);
+        let ranked = rerank_fused_for_task(
+            vec![test, source],
+            &intent,
+            &RetrievalDiagnostics::default(),
+        );
+        assert!(
+            ranked[0].path.ends_with("Backoff.java"),
+            "a test named only through a hop stays support material: {:?}",
+            ranked
+                .iter()
+                .map(|r| r.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_hop_gets_neither_the_boost_nor_anchor_relevance() {
+        let intent = TaskSearchIntent::parse("Warn when NumFrames exceeds the total")
+            .with_lattice_terms(vec![lattice_hop("num_frames", "NumFrames", true, true)]);
+        let result = plain_result("src/video/num_frames_reader.py", 0.5);
+        assert_eq!(tier_of(&intent, &result), 0);
+        let ranked = rerank_fused_for_task(vec![result], &intent, &RetrievalDiagnostics::default());
+        assert!(
+            !ranked[0]
+                .score_breakdown
+                .iter()
+                .any(|component| component.signal == "identifier_lattice_anchor_boost"),
+            "an ambiguous hop must not score: {:?}",
+            ranked[0].score_breakdown
+        );
+        assert!(
+            intent
+                .vocabulary_caveats()
+                .iter()
+                .any(|caveat| caveat.contains("denied anchor relevance")),
+            "withholding must be disclosed: {:?}",
+            intent.vocabulary_caveats()
+        );
+    }
+
+    #[test]
+    fn a_hop_from_a_reference_mention_ranks_with_reference_anchors() {
+        let intent = TaskSearchIntent::parse("Add retry to Uploader similar to HttpPollers")
+            .with_lattice_terms(vec![lattice_hop("HttpPoller", "HttpPollers", false, false)]);
+        assert_eq!(
+            tier_of(&intent, &plain_result("src/poll/HttpPoller.java", 0.9)),
+            1,
+            "a guessed re-spelling of a secondary mention is not an edit target"
+        );
     }
 
     #[test]

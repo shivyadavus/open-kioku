@@ -25,11 +25,21 @@ use std::collections::HashSet;
 /// Repository identifiers per task identifier. Substring matching makes a shorter identifier
 /// reach its longer neighbours, so after containment dedupe this is rarely reached.
 const MAX_IDENTIFIERS_PER_PROBE: usize = 3;
+/// The scan costs one comparison per probe per repository name, so a task that pastes a stack
+/// trace with two hundred identifiers would cost two hundred times a normal query. A task
+/// names the thing it is about within its first few identifiers.
+const MAX_PROBES_PER_TASK: usize = 8;
 /// Lattice terms per task: each one is another full lexical pass over the chunk store.
 const MAX_TERMS_PER_TASK: usize = 6;
-/// Above this many distinct files carrying the reached name, the hop is a common word in
-/// identifier form rather than a name, and only widens retrieval.
-const MAX_FILES_PER_NAMED_TERM: usize = 4;
+/// Above this many files whose path or symbols contain the reached name, the hop is a common
+/// word in identifier form rather than a name, and only widens retrieval.
+///
+/// Fitted on the four cases that regressed when snake_case task identifiers were rewritten to
+/// CamelCase; it has not been swept, and the right value is likely language-dependent. The
+/// count deliberately mirrors what the tier grant matches — a case-insensitive substring of a
+/// path, a qualified name, or a symbol name — rather than symbol-name equality, which would
+/// have let a term defined in two files still take the tier on forty paths that contain it.
+pub(crate) const MAX_FILES_PER_NAMED_TERM: usize = 4;
 /// A single edit is only trusted on parts long enough that one edit is unlikely to land on an
 /// unrelated word (`reader` / `header` are one edit apart; so are most five-letter words).
 const MIN_EDIT_PART_LEN: usize = 6;
@@ -59,6 +69,10 @@ pub(crate) struct LatticeTerm {
     pub term: String,
     /// The task token that reached it.
     pub origin: String,
+    /// Whether `origin` was a primary edit anchor rather than a trailing reference mention
+    /// ("… similar to X"). A guessed re-spelling of a secondary mention must not rank like a
+    /// name the task actually asked to edit.
+    pub from_primary: bool,
     pub relation: LatticeRelation,
     /// The name is spread across more files than one edit target can be (`num_frames` is a
     /// parameter in dozens). Such a hop still widens retrieval, but it names nothing in
@@ -171,6 +185,7 @@ impl ProbeTable {
 }
 
 struct IdentifierProbe {
+    from_primary: bool,
     original: String,
     lower: String,
     /// Some repository identifier already contains the task's spelling, so ordinary substring
@@ -218,6 +233,7 @@ impl std::hash::Hasher for Fnv {
 /// first left unreached, which is rare enough that most queries never pay for it.
 pub(crate) fn expand(
     task_identifiers: &[String],
+    primary_count: usize,
     files: &[File],
     symbols: &[Symbol],
 ) -> LatticeExpansion {
@@ -225,6 +241,7 @@ pub(crate) fn expand(
     for identifier in task_identifiers
         .iter()
         .filter(|value| is_code_shaped(value))
+        .take(MAX_PROBES_PER_TASK)
     {
         let mut parts = Vec::<(Vec<u8>, Vec<u8>)>::new();
         for_each_part(identifier, |part| {
@@ -233,11 +250,18 @@ pub(crate) fn expand(
             parts.push((lower, stem));
         });
         // One part is a word, not an identifier: `_slice` would reach every identifier that
-        // contains `slice` and hand each of them the named-target tier.
-        if parts.len() < 2 || parts.len() > 32 {
+        // contains `slice`. The upper bound is what the u32 coverage mask can represent —
+        // at 32 the `1 << len` below overflows, and a masked shift in release would make an
+        // empty mask read as full coverage and manufacture hops.
+        if parts.len() < 2 || parts.len() > 31 {
             continue;
         }
+        let from_primary = task_identifiers
+            .iter()
+            .position(|value| value == identifier)
+            .is_some_and(|index| index < primary_count);
         identifier_probes.push(IdentifierProbe {
+            from_primary,
             original: identifier.clone(),
             lower: identifier.to_ascii_lowercase(),
             reachable: false,
@@ -334,6 +358,7 @@ pub(crate) fn expand(
             chosen.push(LatticeTerm {
                 term: name,
                 origin: probe.original.clone(),
+                from_primary: probe.from_primary,
                 relation: if edited == 0 {
                     LatticeRelation::Stem
                 } else {
@@ -349,25 +374,43 @@ pub(crate) fn expand(
     }
 
     expansion.identifiers.truncate(MAX_TERMS_PER_TASK);
-    mark_ambiguous_terms(&mut expansion.identifiers, symbols);
+    mark_ambiguous_terms(&mut expansion.identifiers, files, symbols);
     expansion
 }
 
 /// Flag reached names that too many files carry. One pass over the symbol table, comparing
 /// only against the handful of chosen terms.
-fn mark_ambiguous_terms(terms: &mut [LatticeTerm], symbols: &[Symbol]) {
+fn mark_ambiguous_terms(terms: &mut [LatticeTerm], files: &[File], symbols: &[Symbol]) {
     if terms.is_empty() {
         return;
     }
-    let mut files: Vec<HashSet<&str>> = vec![HashSet::new(); terms.len()];
-    for symbol in symbols {
-        for (index, term) in terms.iter().enumerate() {
-            if symbol.name == term.term && files[index].len() <= MAX_FILES_PER_NAMED_TERM {
-                files[index].insert(symbol.file_id.0.as_str());
+    let needles = terms
+        .iter()
+        .map(|term| term.term.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut matched: Vec<HashSet<&str>> = vec![HashSet::new(); terms.len()];
+    // File paths carry stems, which a hop can name and which no symbol pass would ever see.
+    for file in files {
+        let path = file.path.to_string_lossy();
+        for (index, needle) in needles.iter().enumerate() {
+            if matched[index].len() <= MAX_FILES_PER_NAMED_TERM
+                && contains_ascii_ci(&path, needle.as_bytes())
+            {
+                matched[index].insert(file.id.0.as_str());
             }
         }
     }
-    for (term, seen) in terms.iter_mut().zip(files) {
+    for symbol in symbols {
+        for (index, needle) in needles.iter().enumerate() {
+            if matched[index].len() <= MAX_FILES_PER_NAMED_TERM
+                && (contains_ascii_ci(&symbol.name, needle.as_bytes())
+                    || contains_ascii_ci(&symbol.qualified_name, needle.as_bytes()))
+            {
+                matched[index].insert(symbol.file_id.0.as_str());
+            }
+        }
+    }
+    for (term, seen) in terms.iter_mut().zip(matched) {
         term.ambiguous = seen.len() > MAX_FILES_PER_NAMED_TERM;
     }
 }
@@ -713,6 +756,11 @@ mod tests {
         }
     }
 
+    /// Every existing case treats its identifiers as primary edit anchors.
+    fn expand_primary(ids: &[String], files: &[File], symbols: &[Symbol]) -> LatticeExpansion {
+        expand(ids, ids.len(), files, symbols)
+    }
+
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -782,7 +830,7 @@ mod tests {
             symbol("ArrayUtils"),
         ];
         let files = vec![file("server/src/test/java/util/CollectionUtilsTests.java")];
-        let expansion = expand(&strings(&["CollectionsUtils"]), &files, &symbols);
+        let expansion = expand_primary(&strings(&["CollectionsUtils"]), &files, &symbols);
         // The shorter identifier reaches the longer one by substring; only it is added.
         assert_eq!(
             expansion
@@ -806,16 +854,16 @@ mod tests {
             symbol("NearestVectorValuesTests"),
         ];
         // `_slice` is a word with a separator, not an identifier with parts to re-inflect.
-        let word = expand(&strings(&["_slice"]), &[], &symbols);
+        let word = expand_primary(&strings(&["_slice"]), &[], &symbols);
         assert!(word.is_empty());
         assert!(word.unreached_identifiers.is_empty());
         // `NearestVectorValues` sits inside `NearestVectorValuesTests`, which substring retrieval
         // already reaches; and the five-part field is not the same identifier in any case.
-        let superset = expand(&strings(&["NearestVectorValues"]), &[], &symbols);
+        let superset = expand_primary(&strings(&["NearestVectorValues"]), &[], &symbols);
         assert!(superset.is_empty(), "{superset:?}");
         // With only the longer, differently-inflected field present, the part-count cap still
         // rejects it: three parts do not become five.
-        let capped = expand(
+        let capped = expand_primary(
             &strings(&["NearestVectorValue"]),
             &[],
             &[symbol("NearestVectorScriptFieldValuesTests")],
@@ -834,13 +882,13 @@ mod tests {
             symbol("read_frame_buffer"),
         ];
         for probe in ["ImageBackbone", "read_frame"] {
-            let expansion = expand(&strings(&[probe]), &[], &symbols);
+            let expansion = expand_primary(&strings(&[probe]), &[], &symbols);
             assert!(expansion.is_empty(), "{probe}: {expansion:?}");
             assert!(expansion.unreached_identifiers.is_empty());
         }
         // The misspelling is a substring of nothing, so it is still expanded — to the
         // identifier whose parts it re-inflects, not to the longer names built on it.
-        let typo = expand(&strings(&["ImageBackbones"]), &[], &symbols);
+        let typo = expand_primary(&strings(&["ImageBackbones"]), &[], &symbols);
         assert_eq!(
             typo.identifiers
                 .iter()
@@ -853,20 +901,64 @@ mod tests {
     #[test]
     fn hyphenated_prose_is_not_treated_as_an_identifier() {
         let symbols = vec![symbol("right_trim"), symbol("CollectionUtils")];
-        let prose = expand(&strings(&["right-trimmed", "kernel-direct"]), &[], &symbols);
+        let prose = expand_primary(&strings(&["right-trimmed", "kernel-direct"]), &[], &symbols);
         assert!(prose.is_empty(), "{prose:?}");
         // Nor is it reported as missing vocabulary: it was never a code name to look for.
         assert!(prose.unreached_identifiers.is_empty());
         // A snake_case or CamelCase token still is one.
-        assert!(!expand(&strings(&["right_trimmed"]), &[], &symbols)
+        assert!(!expand_primary(&strings(&["right_trimmed"]), &[], &symbols)
             .identifiers
             .is_empty());
     }
 
     #[test]
+    fn a_pathological_identifier_is_ignored_rather_than_overflowing_the_coverage_mask() {
+        // 32 parts would shift a u32 by 32: a panic in debug, and in release a masked shift
+        // that reports an empty coverage mask as full and manufactures hops.
+        let huge = (0..40)
+            .map(|i| format!("seg{i}"))
+            .collect::<Vec<_>>()
+            .join("_");
+        let symbols = vec![symbol(&huge), symbol("CollectionUtils")];
+        let expansion = expand_primary(&strings(&[huge.as_str()]), &[], &symbols);
+        assert!(expansion.is_empty(), "{expansion:?}");
+        assert!(expansion.unreached_identifiers.is_empty());
+    }
+
+    #[test]
+    fn the_probe_list_is_capped_so_a_pasted_stack_trace_cannot_multiply_the_scan() {
+        let ids = (0..40)
+            .map(|i| format!("WidgetHandler{i}x"))
+            .collect::<Vec<_>>();
+        let symbols = vec![symbol("WidgetHandlers0x")];
+        // Only the first probes are considered; the reach for the capped-out one is absent.
+        let expansion = expand_primary(&ids, &[], &symbols);
+        assert!(expansion.identifiers.len() <= MAX_TERMS_PER_TASK);
+        assert!(expansion.unreached_identifiers.len() <= MAX_PROBES_PER_TASK);
+    }
+
+    #[test]
+    fn ambiguity_counts_the_files_the_tier_grant_would_match_including_stems() {
+        // The grant is a case-insensitive substring of a path or a symbol name, so the guard
+        // must count that population — a term defined as a symbol in one file can still be a
+        // substring of many paths, and a hop to a file stem has no symbol at all.
+        let files = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|dir| file(&format!("src/{dir}/image_loader.py")))
+            .collect::<Vec<_>>();
+        let expansion = expand_primary(&strings(&["ImageLoaders"]), &files, &[]);
+        assert_eq!(expansion.identifiers.len(), 1);
+        assert!(
+            expansion.identifiers[0].ambiguous,
+            "a stem on six files names no single edit target: {:?}",
+            expansion.identifiers[0]
+        );
+    }
+
+    #[test]
     fn exact_identifier_is_not_expanded() {
         let symbols = vec![symbol("CollectionUtils"), symbol("CollectionUtilsTests")];
-        let expansion = expand(&strings(&["CollectionUtils"]), &[], &symbols);
+        let expansion = expand_primary(&strings(&["CollectionUtils"]), &[], &symbols);
         assert!(expansion.is_empty());
         assert!(expansion.unreached_identifiers.is_empty());
     }
@@ -875,11 +967,11 @@ mod tests {
     fn typo_in_a_long_part_is_corrected_only_when_the_repository_lacks_that_spelling() {
         let symbols = vec![symbol("ReaderUtils"), symbol("HeaderUtils")];
         // `Header` exists, so `HeaderUtils` is exact and nothing is expanded.
-        let exact = expand(&strings(&["HeaderUtils"]), &[], &symbols);
+        let exact = expand_primary(&strings(&["HeaderUtils"]), &[], &symbols);
         assert!(exact.is_empty());
         // `Haeder` exists nowhere: one transposition reaches `Header`; `Reader` is three
         // edits away and is not offered.
-        let typo = expand(&strings(&["HaederUtils"]), &[], &symbols);
+        let typo = expand_primary(&strings(&["HaederUtils"]), &[], &symbols);
         let names = typo
             .identifiers
             .iter()
@@ -891,7 +983,7 @@ mod tests {
             .iter()
             .all(|term| term.relation == LatticeRelation::OneEdit));
         // `Readr` is a five-letter part: too short for an edit to be trusted.
-        let short = expand(&strings(&["ReadrUtils"]), &[], &symbols);
+        let short = expand_primary(&strings(&["ReadrUtils"]), &[], &symbols);
         assert!(short.identifiers.is_empty());
         assert_eq!(short.unreached_identifiers, strings(&["ReadrUtils"]));
     }
@@ -909,7 +1001,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         symbols.push(symbol("CollectionUtils"));
-        let expansion = expand(&strings(&["NumFrames", "CollectionsUtils"]), &[], &symbols);
+        let expansion = expand_primary(&strings(&["NumFrames", "CollectionsUtils"]), &[], &symbols);
         let flags = expansion
             .identifiers
             .iter()
@@ -924,7 +1016,7 @@ mod tests {
     #[test]
     fn unreached_identifier_is_reported_as_negative_evidence() {
         let symbols = vec![symbol("CollectionUtils")];
-        let expansion = expand(&strings(&["QuantumFluxCapacitor"]), &[], &symbols);
+        let expansion = expand_primary(&strings(&["QuantumFluxCapacitor"]), &[], &symbols);
         assert!(expansion.is_empty());
         assert_eq!(
             expansion.unreached_identifiers,
@@ -935,7 +1027,7 @@ mod tests {
     #[test]
     fn file_stems_count_as_vocabulary() {
         let files = vec![file("src/processors/image_loaders.py")];
-        let expansion = expand(&strings(&["ImageLoader"]), &files, &[]);
+        let expansion = expand_primary(&strings(&["ImageLoader"]), &files, &[]);
         assert_eq!(expansion.identifiers.len(), 1);
         assert_eq!(expansion.identifiers[0].term, "image_loaders");
     }
@@ -948,7 +1040,7 @@ mod tests {
         let identifiers = (0..10)
             .map(|index| format!("Widgets{index}Handlers"))
             .collect::<Vec<_>>();
-        let expansion = expand(&identifiers, &[], &symbols);
+        let expansion = expand_primary(&identifiers, &[], &symbols);
         assert!(expansion.identifiers.len() <= MAX_TERMS_PER_TASK);
     }
 }
