@@ -27,6 +27,9 @@ use std::collections::HashSet;
 const MAX_IDENTIFIERS_PER_PROBE: usize = 3;
 /// Lattice terms per task: each one is another full lexical pass over the chunk store.
 const MAX_TERMS_PER_TASK: usize = 6;
+/// Above this many distinct files carrying the reached name, the hop is a common word in
+/// identifier form rather than a name, and only widens retrieval.
+const MAX_FILES_PER_NAMED_TERM: usize = 4;
 /// A single edit is only trusted on parts long enough that one edit is unlikely to land on an
 /// unrelated word (`reader` / `header` are one edit apart; so are most five-letter words).
 const MIN_EDIT_PART_LEN: usize = 6;
@@ -57,6 +60,10 @@ pub(crate) struct LatticeTerm {
     /// The task token that reached it.
     pub origin: String,
     pub relation: LatticeRelation,
+    /// The name is spread across more files than one edit target can be (`num_frames` is a
+    /// parameter in dozens). Such a hop still widens retrieval, but it names nothing in
+    /// particular, so it must not confer the named-target tier on every file that has it.
+    pub ambiguous: bool,
 }
 
 impl LatticeTerm {
@@ -332,6 +339,7 @@ pub(crate) fn expand(
                 } else {
                     LatticeRelation::OneEdit
                 },
+                ambiguous: false,
             });
             if chosen.len() >= MAX_IDENTIFIERS_PER_PROBE {
                 break;
@@ -341,7 +349,27 @@ pub(crate) fn expand(
     }
 
     expansion.identifiers.truncate(MAX_TERMS_PER_TASK);
+    mark_ambiguous_terms(&mut expansion.identifiers, symbols);
     expansion
+}
+
+/// Flag reached names that too many files carry. One pass over the symbol table, comparing
+/// only against the handful of chosen terms.
+fn mark_ambiguous_terms(terms: &mut [LatticeTerm], symbols: &[Symbol]) {
+    if terms.is_empty() {
+        return;
+    }
+    let mut files: Vec<HashSet<&str>> = vec![HashSet::new(); terms.len()];
+    for symbol in symbols {
+        for (index, term) in terms.iter().enumerate() {
+            if symbol.name == term.term && files[index].len() <= MAX_FILES_PER_NAMED_TERM {
+                files[index].insert(symbol.file_id.0.as_str());
+            }
+        }
+    }
+    for (term, seen) in terms.iter_mut().zip(files) {
+        term.ambiguous = seen.len() > MAX_FILES_PER_NAMED_TERM;
+    }
 }
 
 /// Per-name scratch state: coverage bits per identifier probe and the lowercase and stem
@@ -420,9 +448,10 @@ impl Scan {
         for (index, probe) in identifier_probes.iter_mut().enumerate() {
             let full = (1u32 << probe.parts.len()) - 1;
             // The repository's spelling of the task's identifier re-inflects its parts; it
-            // does not bury them among more. `NearestVectorValues` is not
-            // `NearestVectorScriptFieldValuesTests`, whatever the parts have in common.
-            if self.covered[index] == full && part_count <= probe.parts.len() + 1 {
+            // neither drops them nor adds new ones. `MaxNewTokens` is not
+            // `_with_max_new_tokens`, whatever the parts have in common — allowing one spare
+            // part let a test helper outrank the module the task was about.
+            if self.covered[index] == full && part_count == probe.parts.len() {
                 if probe.lower.as_bytes() == name.to_ascii_lowercase().as_bytes() {
                     probe.exact = true;
                 }
@@ -799,6 +828,7 @@ mod tests {
         // Every file that matters mentions `ImageBackboneModel`, and plain substring retrieval
         // finds them from `ImageBackbone`; expanding would only re-tier the whole module.
         let symbols = vec![
+            symbol("ImageBackbone"),
             symbol("ImageBackboneModel"),
             symbol("ImageBackboneConfig"),
             symbol("read_frame_buffer"),
@@ -808,15 +838,15 @@ mod tests {
             assert!(expansion.is_empty(), "{probe}: {expansion:?}");
             assert!(expansion.unreached_identifiers.is_empty());
         }
-        // The misspelling is a substring of nothing, so it is still expanded — to both
-        // identifiers whose parts it re-inflects.
+        // The misspelling is a substring of nothing, so it is still expanded — to the
+        // identifier whose parts it re-inflects, not to the longer names built on it.
         let typo = expand(&strings(&["ImageBackbones"]), &[], &symbols);
         assert_eq!(
             typo.identifiers
                 .iter()
                 .map(|term| term.term.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ImageBackboneModel", "ImageBackboneConfig"]
+            vec!["ImageBackbone"]
         );
     }
 
@@ -864,6 +894,31 @@ mod tests {
         let short = expand(&strings(&["ReadrUtils"]), &[], &symbols);
         assert!(short.identifiers.is_empty());
         assert_eq!(short.unreached_identifiers, strings(&["ReadrUtils"]));
+    }
+
+    #[test]
+    fn a_name_many_files_carry_is_kept_but_flagged_ambiguous() {
+        // `num_frames` is a parameter across a whole package: reaching it widens retrieval,
+        // but it names no single edit target, so it must not confer the named-target tier.
+        let mut symbols = (0..6)
+            .map(|index| {
+                let mut sym = symbol("num_frames");
+                sym.id = SymbolId::new(format!("num_frames-{index}"));
+                sym.file_id = FileId::new(format!("file-{index}"));
+                sym
+            })
+            .collect::<Vec<_>>();
+        symbols.push(symbol("CollectionUtils"));
+        let expansion = expand(&strings(&["NumFrames", "CollectionsUtils"]), &[], &symbols);
+        let flags = expansion
+            .identifiers
+            .iter()
+            .map(|term| (term.term.as_str(), term.ambiguous))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            flags,
+            vec![("num_frames", true), ("CollectionUtils", false)]
+        );
     }
 
     #[test]

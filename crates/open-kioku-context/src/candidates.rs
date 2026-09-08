@@ -1279,6 +1279,7 @@ mod tests {
                 term: "CollectionUtils".into(),
                 origin: "CollectionsUtils".into(),
                 relation: crate::lattice::LatticeRelation::Stem,
+                ambiguous: false,
             },
         ]);
         let stream = source.retrieve(&request).unwrap();
