@@ -11,27 +11,27 @@
 -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,800&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@500;700&display=swap">
 <style>
-:root{--bg:#050608;--panel:#0b0e13;--text:#f4f6f9;--muted:#9aa3ae;--soft:#646d78;--line:rgba(255,255,255,.06);--line2:rgba(255,255,255,.11);--mint:#57e6c4;
---mono:"JetBrains Mono",Menlo,monospace;--sans:Inter,-apple-system,"Segoe UI",sans-serif;--display:"Space Grotesk",Inter,sans-serif}
-html,body{margin:0;width:1200px;height:630px;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
-.grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);background-size:56px 56px;mask-image:radial-gradient(ellipse 90% 70% at 50% -8%,black 30%,transparent 78%);-webkit-mask-image:radial-gradient(ellipse 90% 70% at 50% -8%,black 30%,transparent 78%)}
-.glow{position:absolute;left:50%;top:-360px;transform:translateX(-50%);width:1000px;height:560px;border-radius:50%;filter:blur(110px);background:radial-gradient(closest-side,rgba(87,230,196,.10),rgba(122,167,255,.05),transparent)}
+:root{--bg:#07090b;--surface:#0e1215;--text:#e8edf0;--muted:#a7b1b9;--soft:#7f8b95;--line:#1b2228;--line2:#28323a;--accent:#3ce3c1;--grid:rgba(232,237,240,.045);
+--mono:"JetBrains Mono",Menlo,monospace;--sans:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;--display:"Bricolage Grotesque",sans-serif}
+html,body{margin:0;width:1200px;height:630px;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+.grid{position:absolute;inset:0;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse 85% 75% at 50% 0%,black 25%,transparent 80%);-webkit-mask-image:radial-gradient(ellipse 85% 75% at 50% 0%,black 25%,transparent 80%)}
+.scan{position:absolute;left:0;right:0;top:500px;height:1px;background:linear-gradient(90deg,transparent 5%,var(--accent) 50%,transparent 95%);opacity:.35}
 .wrap{position:absolute;left:80px;right:80px;top:64px}
-.brand{display:flex;align-items:center;gap:12px;font-family:var(--display);font-weight:700;font-size:26px;letter-spacing:-.01em}
-.brand svg{width:40px;height:40px}
-h1{font-family:var(--display);font-weight:700;font-size:104px;line-height:.96;letter-spacing:-.045em;margin:52px 0 30px}
-.grad{background:linear-gradient(95deg,#8ef0d9 0%,#b9c9ff 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand{display:flex;align-items:center;gap:12px;font-family:var(--display);font-weight:800;font-size:26px;letter-spacing:-.01em}
+.brand svg{width:40px;height:40px;color:var(--accent)}
+h1{font-family:var(--display);font-weight:800;font-size:108px;line-height:.94;letter-spacing:-.045em;margin:52px 0 30px}
+.grad{color:var(--accent)}
 .lead{font-size:25px;line-height:1.42;color:var(--muted);max-width:960px;margin:0;font-weight:400}
 .lead b{color:var(--text);font-weight:600}
-.chips{position:absolute;left:80px;top:548px;display:flex;gap:14px}
-.chip{border:1px solid var(--line2);background:rgba(255,255,255,.03);border-radius:999px;padding:12px 20px;font:15px var(--mono);color:#aab5c2}
-.chip b{color:var(--mint);font-weight:700}
+.chips{position:absolute;left:80px;top:548px;display:flex;gap:12px}
+.chip{border:1px solid var(--line2);background:var(--surface);border-radius:6px;padding:12px 18px;font:15px var(--mono);color:var(--muted)}
+.chip b{color:var(--accent);font-weight:700}
 </style></head><body>
-<div class="grid"></div><div class="glow"></div>
+<div class="grid"></div><div class="scan"></div>
 <div class="wrap">
-<div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2bd2ad"/><stop offset="1" stop-color="#7a8cff"/></linearGradient></defs><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="url(#lg)" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="url(#lg)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="#2bd2ad"/></svg><span>Open Kioku</span></div>
+<div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg><span>Open Kioku</span></div>
 <h1><span class="grad">Evidence</span><br>before edits.</h1>
 <p class="lead">Your coding agent <b>shows its evidence</b> before it edits, and its diff is <b>verified against the plan</b> it declared. Local-first; nothing leaves your machine.</p>
 </div>
