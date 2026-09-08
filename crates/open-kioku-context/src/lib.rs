@@ -631,6 +631,18 @@ impl<'a> ContextPackBuilder<'a> {
                 &self.ranking_options,
                 &generated,
             );
+            // Derived siblings join the ranked list before selection, so the budget sees them
+            // and widening below still receives the full list it ranks against.
+            let ranked = admit_derived_siblings(
+                ranked,
+                &files,
+                &chunks,
+                &intent,
+                &self.ranking_options,
+                limit,
+                &mut diagnostics,
+                &mut |path| derived_siblings(self.store, path),
+            );
             let selected = select_context_units(ranked.clone(), &budget, &mut diagnostics);
             // Widening runs after selection and only grows or appends units, so it cannot
             // remove or reorder what selection chose.
@@ -2565,15 +2577,8 @@ fn rerank_fused_for_task_with_files(
                 // A generated file defines the same symbols as the file it was generated
                 // from, so a symbol match cannot exempt it; only its own path can.
                 0
-            } else if relevance >= NAMED_TARGET_RELEVANCE_TIER {
-                SOURCE_QUALITY_TIER
             } else {
-                context_quality_tier(
-                    &result.path,
-                    ranking_options,
-                    intent.wants_tests,
-                    intent.documentation_target,
-                )
+                result_quality_tier(result, relevance, intent, ranking_options)
             }
         };
         quality(b, b_relevance)
@@ -2797,6 +2802,274 @@ const MODULE_ENTRY_FILE_NAMES: &[&str] = &[
 /// it shares no vocabulary with the task: `feat(async): stabilize Channel` edits `async/mod.ts`,
 /// which does not mention Channel until the commit lands. Injected at a low score so a file
 /// that actually matches the task still outranks it inside the scope tier.
+/// The quality tier the pack ordering gives a result: a file the task names is source whatever
+/// kind of file it is; otherwise the path decides.
+fn result_quality_tier(
+    result: &SearchResult,
+    relevance: u8,
+    intent: &TaskSearchIntent,
+    ranking_options: &RankingOptions,
+) -> u8 {
+    if relevance >= NAMED_TARGET_RELEVANCE_TIER {
+        SOURCE_QUALITY_TIER
+    } else {
+        context_quality_tier(
+            &result.path,
+            ranking_options,
+            intent.wants_tests,
+            intent.documentation_target,
+        )
+    }
+}
+
+/// A file the graph records as a derived sibling of another: generated from it, its test, or
+/// its declaration file (`DERIVED_FROM`, built at index time; `docs/graph-model.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedSibling {
+    /// Repository-relative path of the sibling.
+    pub path: String,
+    /// Persisted graph edge the admission cites as `derived:<edge>`.
+    pub edge_id: String,
+    /// True when the edge carries a declared-origin proof; a naming-convention pairing is not.
+    pub authoritative: bool,
+    /// `declared-origin`, `test-pairing`, or `declaration-pairing`.
+    pub derivation: String,
+    pub message: String,
+}
+
+/// Edges read per direction for one file; a file with more derived siblings than this is a
+/// fixture directory, not a module.
+const DERIVED_SIBLING_EDGE_LIMIT: usize = 8;
+/// Origins expanded: twice the pack's file limit, at least this many, since only a sibling of
+/// a file that can itself reach the pack changes it.
+const DERIVED_SIBLING_MIN_WINDOW: usize = 20;
+
+/// Both directions of the `DERIVED_FROM` edges incident to a repository-relative path.
+fn derived_siblings(store: &dyn OkStore, path: &str) -> Result<Vec<DerivedSibling>> {
+    let node = open_kioku_core::identity::try_file_node_id(std::path::Path::new(path))?;
+    let mut siblings = Vec::new();
+    for outgoing in [true, false] {
+        for edge in store.edges_by_type_for_node(
+            GraphEdgeType::DerivedFrom,
+            &node.0,
+            outgoing,
+            DERIVED_SIBLING_EDGE_LIMIT,
+            0,
+        )? {
+            let other = if outgoing { &edge.to } else { &edge.from };
+            let Some(sibling_path) = other.0.strip_prefix("file:") else {
+                continue;
+            };
+            siblings.push(DerivedSibling {
+                path: sibling_path.to_string(),
+                edge_id: edge.id.0.clone(),
+                authoritative: edge.is_authoritative_relationship(),
+                derivation: edge
+                    .properties
+                    .get("derivation")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("derived")
+                    .to_string(),
+                message: edge.evidence.message.to_string(),
+            });
+        }
+    }
+    Ok(siblings)
+}
+
+/// A candidate's derived siblings join the ordered list with the candidate's score and the
+/// edge as evidence: the generated module and its modular source, the test and its subject,
+/// the declaration and its implementation are one edit, and a task that reaches one has
+/// reached the other. A generated sibling keeps the generated-file demotion unless the task
+/// names it; a sibling already in the list is left where it is.
+#[allow(clippy::too_many_arguments)]
+fn admit_derived_siblings(
+    ranked: Vec<SearchResult>,
+    files: &[File],
+    chunks: &[CodeChunk],
+    intent: &TaskSearchIntent,
+    ranking_options: &RankingOptions,
+    limit: usize,
+    diagnostics: &mut RetrievalDiagnostics,
+    siblings_for: &mut dyn FnMut(&str) -> Result<Vec<DerivedSibling>>,
+) -> Vec<SearchResult> {
+    if ranked.is_empty() {
+        return ranked;
+    }
+    let files_by_path: std::collections::BTreeMap<String, &File> = files
+        .iter()
+        .map(|file| (normalize_path(&file.path), file))
+        .collect();
+    // The same rule the ordering applied: a generated file is exempt from its demotion only
+    // when the task names its path.
+    let quality = |result: &SearchResult, is_generated: bool| -> u8 {
+        if is_generated && !path_names_primary_anchor(&result.path, intent) {
+            return 0;
+        }
+        let haystack = searchable_result_text(result);
+        let relevance = task_relevance_tier(&result.path, result, &haystack, intent);
+        result_quality_tier(result, relevance, intent, ranking_options)
+    };
+    let relative: Vec<Option<String>> = ranked
+        .iter()
+        .map(|result| repository_relative_path(&result.path, &files_by_path))
+        .collect();
+    let tiers: Vec<u8> = ranked
+        .iter()
+        .zip(&relative)
+        .map(|(result, path)| {
+            let generated = path
+                .as_ref()
+                .and_then(|path| files_by_path.get(path))
+                .is_some_and(|file| file.is_generated);
+            quality(result, generated)
+        })
+        .collect();
+    let mut present: std::collections::BTreeSet<String> =
+        relative.iter().flatten().cloned().collect();
+    let mut before: Vec<Vec<SearchResult>> = ranked.iter().map(|_| Vec::new()).collect();
+    let mut end = Vec::new();
+    let window = ranked
+        .len()
+        .min(limit.max(DERIVED_SIBLING_MIN_WINDOW).saturating_mul(2));
+    for index in 0..window {
+        let Some(origin_path) = relative[index].as_deref() else {
+            continue;
+        };
+        let siblings = match siblings_for(origin_path) {
+            Ok(siblings) => siblings,
+            Err(err) => {
+                // One failure is every failure (the store is refusing relationship reads);
+                // say so once rather than silently returning a pack without siblings.
+                diagnostics
+                    .caveats
+                    .push(format!("derived-file siblings unavailable: {err}"));
+                break;
+            }
+        };
+        for sibling in siblings {
+            if present.contains(&sibling.path) {
+                continue;
+            }
+            let Some(file) = files_by_path.get(&sibling.path) else {
+                continue;
+            };
+            let origin = &ranked[index];
+            let mut result = derived_sibling_result(origin, origin_path, file, &sibling, chunks);
+            let tier = quality(&result, file.is_generated);
+            // Admitted, not ranked: the sibling scores below everything already in its tier, so
+            // neither the ordering nor the budget selection — which compares scores again —
+            // can float it past a result that earned its place. Inheriting the origin's score
+            // instead put two siblings above a gold file on the Go corpus (rank 4 -> 7).
+            result.score = tier_floor_score(&ranked, &tiers, tier);
+            let authority = if sibling.authoritative {
+                RetrievalAuthority::Corroborating
+            } else {
+                RetrievalAuthority::Heuristic
+            };
+            diagnostics.traces.push(RetrievalTrace {
+                path: result.path.clone(),
+                unit_key: Some(RetrievalUnitKey::from_result(&result)),
+                fused_score: result.score,
+                authority,
+                contributions: vec![open_kioku_core::RetrievalContribution {
+                    source: RetrievalSourceKind::Graph,
+                    rank: index + 1,
+                    raw_score: Some(origin.score),
+                    rrf_contribution: 0.0,
+                    authority,
+                    symbol_id: None,
+                    evidence_refs: result.evidence_refs.clone(),
+                    rationale: format!(
+                        "derived-file sibling ({}) of `{origin_path}`",
+                        sibling.derivation
+                    ),
+                }],
+            });
+            present.insert(sibling.path.clone());
+            // A sibling closes its own quality tier: the ranked list is ordered by tier, so the
+            // first result below the sibling's tier is the end of that block. It is admitted,
+            // not ranked — nothing about the edge says it beats a result already there — so it
+            // never displaces one. Inserting at the head of the block instead cost R@5 on all
+            // three corpora (a gold file at rank 5 moved to 6) and gained nothing.
+            match tiers.iter().position(|&t| t < tier) {
+                Some(at) => before[at].push(result),
+                None => end.push(result),
+            }
+        }
+    }
+    let mut admitted = Vec::with_capacity(ranked.len() + end.len());
+    for (index, result) in ranked.into_iter().enumerate() {
+        admitted.append(&mut before[index]);
+        admitted.push(result);
+    }
+    admitted.append(&mut end);
+    admitted
+}
+
+/// A score strictly below every ranked result in `tier`, and never negative. An empty tier
+/// (the sibling opens one) sits below the whole list.
+fn tier_floor_score(ranked: &[SearchResult], tiers: &[u8], tier: u8) -> f32 {
+    let floor = ranked
+        .iter()
+        .zip(tiers)
+        .filter(|(_, &result_tier)| result_tier == tier)
+        .map(|(result, _)| result.score)
+        .fold(f32::INFINITY, f32::min);
+    let floor = if floor.is_finite() {
+        floor
+    } else {
+        ranked
+            .iter()
+            .map(|result| result.score)
+            .fold(f32::INFINITY, f32::min)
+    };
+    if floor.is_finite() {
+        (floor - f32::EPSILON).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn derived_sibling_result(
+    origin: &SearchResult,
+    origin_path: &str,
+    file: &File,
+    sibling: &DerivedSibling,
+    chunks: &[CodeChunk],
+) -> SearchResult {
+    let chunk = chunks.iter().find(|chunk| chunk.file_id == file.id);
+    SearchResult {
+        path: file.path.clone(),
+        line_range: chunk.map(|chunk| chunk.range.clone()),
+        snippet: chunk.map(|chunk| chunk.text.clone()).unwrap_or_default(),
+        symbol: None,
+        score: origin.score,
+        match_reason: format!("derived-file sibling of `{origin_path}`"),
+        evidence: vec![format!("{}: {}", sibling.derivation, sibling.message)],
+        evidence_refs: vec![format!("derived:{}", sibling.edge_id)],
+        confidence: origin.confidence * if sibling.authoritative { 0.9 } else { 0.7 },
+        score_breakdown: Vec::new(),
+    }
+}
+
+/// Result paths may be absolute while the index stores repository-relative paths; the
+/// longest suffix that names an indexed file is the file.
+fn repository_relative_path(
+    path: &std::path::Path,
+    files_by_path: &std::collections::BTreeMap<String, &File>,
+) -> Option<String> {
+    let normalized = normalize_path(path);
+    let mut candidate = normalized.as_str();
+    loop {
+        if files_by_path.contains_key(candidate) {
+            return Some(candidate.to_string());
+        }
+        let (_, rest) = candidate.split_once('/')?;
+        candidate = rest;
+    }
+}
+
 fn append_scope_entry_points(
     results: &mut Vec<SearchResult>,
     files: &[File],
@@ -3682,6 +3955,283 @@ mod tests {
             &TaskSearchIntent::parse("Fix panic"),
         );
         assert!(none.is_empty());
+    }
+
+    fn derived_fixture_files() -> Vec<File> {
+        let file = |path: &str, language: Language, is_generated: bool| File {
+            id: FileId::new(path),
+            repository_id: RepositoryId::new("repo"),
+            path: path.into(),
+            language,
+            size_bytes: 200,
+            content_hash: path.into(),
+            is_generated,
+            is_vendor: false,
+        };
+        vec![
+            file("src/orbit/pipeline.py", Language::Python, false),
+            file("tests/orbit/test_pipeline.py", Language::Python, false),
+            file("src/orbit/scheduler.py", Language::Python, false),
+            file("src/orbit/models/modular_orbit.py", Language::Python, false),
+            file("src/orbit/models/modeling_orbit.py", Language::Python, true),
+        ]
+    }
+
+    /// The `DERIVED_FROM` edges the fixture index would hold, read from either endpoint.
+    fn derived_fixture_siblings(path: &str) -> Result<Vec<DerivedSibling>> {
+        let pairs = [
+            (
+                "tests/orbit/test_pipeline.py",
+                "src/orbit/pipeline.py",
+                "test-pairing",
+                false,
+            ),
+            (
+                "src/orbit/models/modeling_orbit.py",
+                "src/orbit/models/modular_orbit.py",
+                "declared-origin",
+                true,
+            ),
+        ];
+        Ok(pairs
+            .iter()
+            .filter(|(derived, origin, _, _)| *derived == path || *origin == path)
+            .map(
+                |(derived, origin, derivation, authoritative)| DerivedSibling {
+                    path: if *derived == path { origin } else { derived }.to_string(),
+                    edge_id: format!("edge:{derivation}:{derived}"),
+                    authoritative: *authoritative,
+                    derivation: derivation.to_string(),
+                    message: "fixture edge".into(),
+                },
+            )
+            .collect())
+    }
+
+    fn ranked_result(path: &str, score: f32) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range: None,
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: "lexical".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.8,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    fn admitted_paths(
+        task: &str,
+        ranked: Vec<SearchResult>,
+    ) -> (Vec<String>, RetrievalDiagnostics) {
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let admitted = admit_derived_siblings(
+            ranked,
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse(task),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut derived_fixture_siblings,
+        );
+        (
+            admitted
+                .iter()
+                .map(|result| normalize_path(&result.path))
+                .collect(),
+            diagnostics,
+        )
+    }
+
+    #[test]
+    fn an_admitted_sibling_scores_below_every_ranked_result_in_its_tier() {
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let admitted = admit_derived_siblings(
+            vec![
+                ranked_result("src/orbit/pipeline.py", 0.9),
+                ranked_result("src/orbit/scheduler.py", 0.5),
+            ],
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse("Fix pipeline batching"),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut derived_fixture_siblings,
+        );
+        let sibling = admitted
+            .iter()
+            .find(|result| result.path.ends_with("test_pipeline.py"))
+            .expect("the test sibling is admitted");
+        // Below the whole list: its own (test) tier is empty, so it opens one at the floor.
+        assert!(
+            sibling.score < 0.5,
+            "sibling scored {}, at or above a ranked result",
+            sibling.score
+        );
+        assert!(sibling.score >= 0.0);
+    }
+
+    #[test]
+    fn an_admitted_sibling_never_displaces_a_result_already_in_its_tier() {
+        // Every rank loss the first placement caused was this: a sibling inserted at the head
+        // of its tier pushed a gold file from rank 5 to 6.
+        let (paths, _) = admitted_paths(
+            "Fix pipeline batching",
+            vec![
+                ranked_result("src/orbit/pipeline.py", 0.9),
+                ranked_result("src/orbit/scheduler.py", 0.5),
+                ranked_result("tests/orbit/other_test.py", 0.4),
+            ],
+        );
+        assert_eq!(
+            paths,
+            vec![
+                "src/orbit/pipeline.py",
+                "src/orbit/scheduler.py",
+                "tests/orbit/other_test.py",
+                "tests/orbit/test_pipeline.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_source_candidate_admits_its_test_sibling_with_the_edge_as_evidence() {
+        let (paths, diagnostics) = admitted_paths(
+            "Fix pipeline batching",
+            vec![
+                ranked_result("/repo/src/orbit/pipeline.py", 0.9),
+                ranked_result("src/orbit/scheduler.py", 0.5),
+            ],
+        );
+        // The test is below every source (the task is not about tests) but is now in the pack;
+        // the origin's own (absolute) path is left as the stream produced it.
+        assert_eq!(
+            paths,
+            vec![
+                "/repo/src/orbit/pipeline.py",
+                "src/orbit/scheduler.py",
+                "tests/orbit/test_pipeline.py",
+            ]
+        );
+        let trace = diagnostics
+            .traces
+            .iter()
+            .find(|trace| trace.path.ends_with("test_pipeline.py"))
+            .expect("an admitted sibling is traced");
+        assert_eq!(trace.authority, RetrievalAuthority::Heuristic);
+        assert_eq!(
+            trace.contributions[0].evidence_refs,
+            vec!["derived:edge:test-pairing:tests/orbit/test_pipeline.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_test_candidate_admits_its_source_sibling_into_the_source_tier() {
+        let (paths, _) = admitted_paths(
+            "Fix pipeline batching",
+            vec![
+                ranked_result("src/orbit/scheduler.py", 0.9),
+                ranked_result("tests/orbit/test_pipeline.py", 0.7),
+            ],
+        );
+        assert_eq!(
+            paths,
+            vec![
+                "src/orbit/scheduler.py",
+                "src/orbit/pipeline.py",
+                "tests/orbit/test_pipeline.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_generated_sibling_keeps_its_demotion_unless_the_task_names_it() {
+        let (paths, diagnostics) = admitted_paths(
+            "Fix orbit batching",
+            vec![
+                ranked_result("src/orbit/models/modular_orbit.py", 0.9),
+                ranked_result("src/orbit/scheduler.py", 0.5),
+            ],
+        );
+        assert_eq!(
+            paths,
+            vec![
+                "src/orbit/models/modular_orbit.py",
+                "src/orbit/scheduler.py",
+                "src/orbit/models/modeling_orbit.py",
+            ]
+        );
+        let trace = diagnostics
+            .traces
+            .iter()
+            .find(|trace| trace.path.ends_with("modeling_orbit.py"))
+            .unwrap();
+        assert_eq!(trace.authority, RetrievalAuthority::Corroborating);
+
+        // Named by the task, the generated sibling joins the source tier instead of the
+        // bottom — it still closes that tier rather than displacing a source already ranked
+        // there, which here leaves the order unchanged but its tier is now 2, not 0.
+        let (paths, _) = admitted_paths(
+            "Fix modeling_orbit hidden size",
+            vec![
+                ranked_result("src/orbit/models/modular_orbit.py", 0.9),
+                ranked_result("src/orbit/scheduler.py", 0.5),
+                ranked_result("tests/orbit/test_pipeline.py", 0.4),
+            ],
+        );
+        assert_eq!(
+            paths,
+            vec![
+                "src/orbit/models/modular_orbit.py",
+                "src/orbit/scheduler.py",
+                "src/orbit/models/modeling_orbit.py",
+                // the test candidate's own source sibling, admitted into the same tier
+                "src/orbit/pipeline.py",
+                "tests/orbit/test_pipeline.py",
+            ],
+            "a named generated sibling closes the source tier, above the demoted test block"
+        );
+    }
+
+    #[test]
+    fn present_siblings_are_not_duplicated_and_a_failed_lookup_is_a_caveat() {
+        let (paths, _) = admitted_paths(
+            "Fix pipeline batching",
+            vec![
+                ranked_result("src/orbit/pipeline.py", 0.9),
+                ranked_result("tests/orbit/test_pipeline.py", 0.4),
+            ],
+        );
+        assert_eq!(
+            paths,
+            vec!["src/orbit/pipeline.py", "tests/orbit/test_pipeline.py"]
+        );
+
+        let mut diagnostics = RetrievalDiagnostics::default();
+        let admitted = admit_derived_siblings(
+            vec![ranked_result("src/orbit/pipeline.py", 0.9)],
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse("Fix pipeline batching"),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut |_| {
+                Err(open_kioku_errors::OkError::Storage(
+                    "semantics mismatch".into(),
+                ))
+            },
+        );
+        assert_eq!(admitted.len(), 1);
+        assert!(diagnostics
+            .caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("derived-file siblings unavailable")));
     }
 
     #[test]
