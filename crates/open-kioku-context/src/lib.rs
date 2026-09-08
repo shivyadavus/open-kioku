@@ -567,7 +567,25 @@ impl<'a> ContextPackBuilder<'a> {
         .collect_excluding(&request, &overridden_sources);
         streams.retain(|stream| routing.policy.allows(stream.source));
         streams.extend(external_streams);
+        // Generated files go to the back of every stream before the cap is applied: they are
+        // indexed so an agent can read them, but a `modeling_*.py` regenerated from its modular
+        // twin matches the same vocabulary and, competing for the lexical stream's slots, pushed
+        // the real module out of the pool before fusion ever ranked it (transformers holdout
+        // MRR 0.565 -> 0.552 with generated files admitted to the streams unranked).
+        let generated: std::collections::BTreeSet<String> = files
+            .iter()
+            .filter(|file| file.is_generated)
+            .map(|file| normalize_path(&file.path))
+            .collect();
         for stream in &mut streams {
+            if !generated.is_empty() {
+                let (source, derived): (Vec<_>, Vec<_>) =
+                    stream.candidates.drain(..).partition(|candidate| {
+                        !is_generated_result(&candidate.result.path, &generated)
+                    });
+                stream.candidates = source;
+                stream.candidates.extend(derived);
+            }
             stream
                 .candidates
                 .truncate(routing.policy.candidate_cap(stream.source, limit));
@@ -588,11 +606,12 @@ impl<'a> ContextPackBuilder<'a> {
         } else {
             let mut results = fused.results;
             append_scope_entry_points(&mut results, &files, &chunks, &intent);
-            let primary = rerank_fused_for_task_with_options(
+            let primary = rerank_fused_for_task_with_files(
                 results,
                 &intent,
                 &diagnostics,
                 &self.ranking_options,
+                &generated,
             );
             select_context_units(primary, &budget, &mut diagnostics)
         };
@@ -2161,14 +2180,45 @@ fn rerank_fused_for_task(
     intent: &TaskSearchIntent,
     diagnostics: &RetrievalDiagnostics,
 ) -> Vec<SearchResult> {
-    rerank_fused_for_task_with_options(results, intent, diagnostics, &RankingOptions::default())
+    rerank_fused_for_task_with_files(
+        results,
+        intent,
+        diagnostics,
+        &RankingOptions::default(),
+        &std::collections::BTreeSet::new(),
+    )
 }
 
-fn rerank_fused_for_task_with_options(
+/// Candidate paths are repository-relative, like the index; an exact match on the normalized
+/// path is the only safe test (a suffix match would mark `src/proto/types.py` generated because
+/// `proto/types.py` is).
+fn is_generated_result(
+    path: &std::path::Path,
+    generated_paths: &std::collections::BTreeSet<String>,
+) -> bool {
+    !generated_paths.is_empty() && generated_paths.contains(&normalize_path(path))
+}
+
+/// The file's own path (not a symbol it defines) names a primary task anchor.
+fn path_names_primary_anchor(path: &std::path::Path, intent: &TaskSearchIntent) -> bool {
+    let path_text = normalize_path(path).to_ascii_lowercase();
+    intent
+        .primary_anchors
+        .iter()
+        .any(|anchor| contains_anchor(&path_text, anchor))
+}
+
+/// `generated_paths`: files the index flagged as generated (a "do not edit" banner). They are
+/// indexed so an agent can read them and so derived-file links can be built, but they rank at
+/// the lowest quality tier: on a Python monorepo where every `modeling_*.py` is generated from
+/// a `modular_*.py`, letting them compete as source cost 0.015 R@5 because they share the
+/// modular file's vocabulary and displaced it.
+fn rerank_fused_for_task_with_files(
     results: Vec<SearchResult>,
     intent: &TaskSearchIntent,
     diagnostics: &RetrievalDiagnostics,
     ranking_options: &RankingOptions,
+    generated_paths: &std::collections::BTreeSet<String>,
 ) -> Vec<SearchResult> {
     // Candidate streams have already been fused by rank. Only apply deterministic task-anchor
     // adjustments here; running the legacy weighted fusion again would reinterpret RRF as text
@@ -2247,13 +2297,34 @@ fn rerank_fused_for_task_with_options(
     // ConnectionPoolMetricsIT"): it is the edit target whatever kind of file it is, and demoting
     // it put twenty source files that merely share vocabulary above the file three streams had
     // ranked first.
+    for result in results.iter_mut() {
+        if is_generated_result(&result.path, generated_paths)
+            && !path_names_primary_anchor(&result.path, intent)
+        {
+            result
+                .evidence
+                .push("generated file: ranked below hand-written source".to_string());
+            result.add_score_component(ScoreComponent::adjustment(
+                "generated_file_demotion",
+                0.0,
+                result.derived_evidence_ids(),
+                "generated file (do-not-edit banner) ranked at the lowest quality tier",
+            ));
+        }
+    }
     results.sort_by(|a, b| {
         let a_haystack = searchable_result_text(a);
         let b_haystack = searchable_result_text(b);
         let a_relevance = task_relevance_tier(&a.path, a, &a_haystack, intent);
         let b_relevance = task_relevance_tier(&b.path, b, &b_haystack, intent);
         let quality = |result: &SearchResult, relevance: u8| {
-            if relevance >= NAMED_TARGET_RELEVANCE_TIER {
+            if is_generated_result(&result.path, generated_paths)
+                && !path_names_primary_anchor(&result.path, intent)
+            {
+                // A generated file defines the same symbols as the file it was generated
+                // from, so a symbol match cannot exempt it; only its own path can.
+                0
+            } else if relevance >= NAMED_TARGET_RELEVANCE_TIER {
                 SOURCE_QUALITY_TIER
             } else {
                 context_quality_tier(
@@ -3178,6 +3249,68 @@ mod tests {
         assert!(commit_scope_tokens("docs: fix typo").is_empty());
         assert!(commit_scope_tokens("Fix geoip processor timeout").is_empty());
         assert!(commit_scope_tokens("Note: this is prose with a colon").is_empty());
+    }
+
+    #[test]
+    fn generated_files_rank_below_source_unless_the_task_names_them() {
+        let intent = TaskSearchIntent::parse("Fix DBRX MoE hidden size");
+        let result = |path: &str, score: f32| SearchResult {
+            path: path.into(),
+            line_range: None,
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let generated: std::collections::BTreeSet<String> =
+            ["src/models/dbrx/modeling_dbrx.py".to_string()]
+                .into_iter()
+                .collect();
+        let ranked = rerank_fused_for_task_with_files(
+            vec![
+                result("src/models/dbrx/modeling_dbrx.py", 0.9),
+                result("src/models/dbrx/modular_dbrx.py", 0.5),
+            ],
+            &intent,
+            &RetrievalDiagnostics::default(),
+            &RankingOptions::default(),
+            &generated,
+        );
+        assert!(ranked[0].path.ends_with("modular_dbrx.py"));
+        assert!(ranked[1]
+            .evidence
+            .iter()
+            .any(|line| line.contains("generated file")));
+        // Both files define the same class, so a symbol anchor must not exempt the generated one.
+        let intent = TaskSearchIntent::parse("Fix DbrxAttention rotary embedding");
+        let ranked = rerank_fused_for_task_with_files(
+            vec![
+                result("src/models/dbrx/modeling_dbrx.py", 0.9),
+                result("src/models/dbrx/modular_dbrx.py", 0.5),
+            ],
+            &intent,
+            &RetrievalDiagnostics::default(),
+            &RankingOptions::default(),
+            &generated,
+        );
+        assert!(ranked[0].path.ends_with("modular_dbrx.py"));
+        // A task that names the generated file's own path is asking for it.
+        let intent = TaskSearchIntent::parse("Regenerate modeling_dbrx after modular change");
+        let ranked = rerank_fused_for_task_with_files(
+            vec![
+                result("src/models/dbrx/modeling_dbrx.py", 0.9),
+                result("src/models/dbrx/modular_dbrx.py", 0.5),
+            ],
+            &intent,
+            &RetrievalDiagnostics::default(),
+            &RankingOptions::default(),
+            &generated,
+        );
+        assert!(ranked[0].path.ends_with("modeling_dbrx.py"));
     }
 
     #[test]

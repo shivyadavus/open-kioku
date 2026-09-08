@@ -5,7 +5,7 @@
 3. Apply ignore, exclude, hidden-file, max-size, and deny-path policy.
 4. Detect Git branch and commit from `.git/HEAD` when available.
 5. Walk files using the `ignore` crate.
-6. Skip binary, vendor, generated, unsupported, ignored, denied, and over-limit files.
+6. Skip binary, vendor, unsupported, ignored, denied, and over-limit files; index generated source files and flag them `is_generated` (they rank last unless the task names them).
 7. Fingerprint indexed files with SHA-256.
 8. Detect language from extension.
 9. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback.
