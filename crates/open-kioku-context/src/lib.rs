@@ -2048,6 +2048,7 @@ struct TaskSearchIntent {
     /// (`CollectionsUtils` → `CollectionUtils`). Heuristic links to exact names: they rank and
     /// tier like a primary anchor but never seed the exact-symbol stream.
     lattice_anchors: Vec<lattice::LatticeTerm>,
+
     /// Task identifiers that name nothing in the repository, exactly or through the lattice.
     unreached_identifiers: Vec<String>,
     /// The task is about tests, so test files are legitimate primary context rather than
@@ -2136,6 +2137,12 @@ impl TaskSearchIntent {
 
     fn lattice_terms(&self) -> Vec<lattice::LatticeTerm> {
         self.lattice_anchors.clone()
+    }
+
+    /// Hops that name one edit target, and so may carry the named-target tier and its boost.
+    /// A name dozens of files share widens retrieval but points at nothing in particular.
+    fn naming_lattice_anchors(&self) -> impl Iterator<Item = &lattice::LatticeTerm> {
+        self.lattice_anchors.iter().filter(|hop| !hop.ambiguous)
     }
 
     fn lattice_term(&self, term: &str) -> Option<&lattice::LatticeTerm> {
@@ -2326,7 +2333,7 @@ fn rerank_fused_for_task_with_files(
         // that mentions it flattened whole directories into one tier: every file under a
         // module mentions the module's main class, and the gold file lost its lead.
         let identity = result_identity_text(result);
-        for hop in &intent.lattice_anchors {
+        for hop in intent.naming_lattice_anchors() {
             if contains_anchor(&identity, &hop.term) {
                 result.score += LATTICE_ANCHOR_BOOST;
                 result.confidence = result.confidence.max(0.7);
@@ -2544,8 +2551,7 @@ fn task_relevance_tier(
         .iter()
         .any(|anchor| contains_anchor(&identity, anchor))
         || intent
-            .lattice_anchors
-            .iter()
+            .naming_lattice_anchors()
             .any(|hop| contains_anchor(&identity, &hop.term))
     {
         4
