@@ -127,6 +127,10 @@ moves one of those files.
 
 ## Source-Read Tools
 
+The server advertises 58 tools. That number is derived from the tool table in
+`crates/open-kioku-mcp/src/lib.rs` and checked against this file and `README.md`
+by `scripts/validate-docs.sh`, so it cannot drift from the code.
+
 The source-read tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
 
 - `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
