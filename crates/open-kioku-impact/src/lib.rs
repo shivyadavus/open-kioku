@@ -879,6 +879,23 @@ fn service_search_terms(fact: &AnalysisFact) -> Vec<String> {
     terms
 }
 
+/// Edge types whose source file is affected when the changed file is edited.
+///
+/// A structural dependency is one reason; derivation is the other. A generated file does not
+/// import the source its banner names and a test imports far more than its subject, so neither
+/// reaches the changed file through a dependency edge — yet editing the origin is exactly what
+/// makes them stale. Direction carries the distinction: `DERIVED_FROM` runs derived -> origin,
+/// and only incoming edges are walked here, so editing an origin surfaces what is derived from
+/// it while editing a generated file does not claim to affect its source.
+///
+/// Authority still decides how the result may be presented: the caller classifies every edge
+/// through [`RelationshipUsePolicy`], so a declared-origin banner (an authoritative proof) is
+/// proven impact while a naming-convention pairing carries no proof and can only ever be
+/// surfaced as a labeled possibility.
+fn is_impacted_by_edge_type(edge_type: &GraphEdgeType) -> bool {
+    is_dependency_edge_type(edge_type) || matches!(edge_type, GraphEdgeType::DerivedFrom)
+}
+
 /// Relationship edge types that assert a structural dependency on the changed code.
 fn is_dependency_edge_type(edge_type: &GraphEdgeType) -> bool {
     matches!(
@@ -936,7 +953,7 @@ fn relationship_impacts(
             .map(|node| (node.id.clone(), node))
             .collect::<HashMap<NodeId, &GraphNode>>();
         for edge in &edges {
-            if edge.to != *node_id || !is_dependency_edge_type(&edge.edge_type) {
+            if edge.to != *node_id || !is_impacted_by_edge_type(&edge.edge_type) {
                 continue;
             }
             let Some(impact) =
@@ -2044,6 +2061,160 @@ mod tests {
                 .iter()
                 .any(|impact| impact.path == Path::new("src/billing.rs")),
             "heuristic same-name edge must never be presented as proven impact"
+        );
+    }
+
+    #[test]
+    fn editing_an_origin_surfaces_the_files_derived_from_it() {
+        use open_kioku_core::{
+            identity, Evidence, GraphEdge, GraphNode, RelationshipAuthority, RelationshipProof,
+            RelationshipProofKind,
+        };
+
+        let store = make_store();
+        let repo_id = RepositoryId::new("repo");
+        let make_file = |id: &str, path: &str, generated: bool| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: PathBuf::from(path),
+            language: Language::TypeScript,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: generated,
+            is_vendor: false,
+        };
+        // The edit target; a declaration file generated from it by a banner; and its test.
+        let source = make_file("source", "src/client.ts", false);
+        let declaration = make_file("declaration", "src/client.d.ts", true);
+        let test = make_file("test", "src/client_test.ts", false);
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: repo_id.clone(),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 3,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            // Graph reads fail closed unless the index declares current analysis semantics.
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            quality: IndexQuality::default(),
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[source.clone(), declaration.clone(), test.clone()],
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let file_node = |file: &File| GraphNode {
+            id: identity::file_node_id(&file.path),
+            node_type: GraphNodeType::File,
+            label: file.path.display().to_string(),
+            file_id: Some(file.id.clone()),
+            ..Default::default()
+        };
+        let source_node = identity::file_node_id(&source.path);
+        // A banner that names its origin: an authoritative declared-origin proof.
+        let mut declared = GraphEdge {
+            id: open_kioku_core::EdgeId::new("edge:declared"),
+            from: identity::file_node_id(&declaration.path),
+            to: source_node.clone(),
+            edge_type: GraphEdgeType::DerivedFrom,
+            evidence: Evidence::default(),
+            ..Default::default()
+        };
+        let mut proof = RelationshipProof::new(
+            RelationshipProofKind::DeclaredOrigin,
+            open_kioku_core::DERIVED_FILE_DECLARED_ORIGIN_SOURCE,
+            1,
+        );
+        proof.authority = RelationshipAuthority::Authoritative;
+        declared.set_relationship_proofs(vec![proof]).unwrap();
+        // A naming-convention pairing: no proof at all.
+        let paired = GraphEdge {
+            id: open_kioku_core::EdgeId::new("edge:paired"),
+            from: identity::file_node_id(&test.path),
+            to: source_node,
+            edge_type: GraphEdgeType::DerivedFrom,
+            evidence: Evidence::default(),
+            ..Default::default()
+        };
+        store
+            .replace_graph(
+                &[
+                    file_node(&source),
+                    file_node(&declaration),
+                    file_node(&test),
+                ],
+                &[declared, paired],
+            )
+            .unwrap();
+
+        let report = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/client.ts"))
+            .unwrap();
+
+        // The declared origin is repository truth, so the generated file is proven impact.
+        assert!(
+            report
+                .proven_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/client.d.ts")
+                    && impact.authority == RelationshipAuthority::Authoritative
+                    && impact.proof_kinds == vec![RelationshipProofKind::DeclaredOrigin]),
+            "{:?}",
+            report.proven_impact
+        );
+        // The naming pairing is a guess: surfaced, but never as structural truth.
+        assert!(
+            report
+                .possible_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/client_test.ts")
+                    && impact.authority == RelationshipAuthority::Heuristic),
+            "{:?}",
+            report.possible_impact
+        );
+        assert!(
+            !report
+                .proven_impact
+                .iter()
+                .any(|impact| impact.path == Path::new("src/client_test.ts")),
+            "a naming-convention pairing must never be presented as proven impact"
+        );
+
+        // Direction holds: editing the generated file does not claim to affect its origin.
+        let reverse = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/client.d.ts"))
+            .unwrap();
+        assert!(
+            !reverse
+                .proven_impact
+                .iter()
+                .chain(reverse.possible_impact.iter())
+                .any(|impact| impact.path == Path::new("src/client.ts")),
+            "{:?} {:?}",
+            reverse.proven_impact,
+            reverse.possible_impact
         );
     }
 
