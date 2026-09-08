@@ -60,6 +60,16 @@ weights than historical heuristics.
 - `memory_signal`: repo memory evidence when available.
 - `path_quality`: penalties for generated or vendor paths.
 
+Region widening is not a ranking signal. Once selection has ordered the pack, the first
+three primary files have their selected regions widened — enclosing symbol, the file's other
+task-ranked units, adjacent chunks — up to a per-file token cap, spending only the budget
+selection left over (`docs/context-pack-spec.md`, "Selection and region widening"). It changes
+what the pack shows of a file, never which files or in what order: on the commit-derived
+holdouts of four large public repositories R@5, R@20 and MRR are bit-identical before and after,
+while the share of changed lines the pack shows within 8k tokens rises from 0.13-0.22 to
+0.22-0.36 depending on the language, with median pack size 3.0-3.9k estimated tokens. Each widening step is an
+evidence ref (`region:enclosing-symbol`, `region:ranked-unit`, `region:adjacent-unit`) on the unit.
+
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
 ablations with recall, MRR, and nDCG metrics.
