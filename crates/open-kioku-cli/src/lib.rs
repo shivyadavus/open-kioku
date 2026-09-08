@@ -15,14 +15,16 @@ use open_kioku_contract::{
     FsContractStore, StoredContractRecord,
 };
 use open_kioku_core::{
-    ChurnSummary, Confidence, ContextHandleId, EdgeId, EnforcedEdgeType, Evidence, EvidenceId,
-    EvidenceSourceType, FileProvenance, GitChangeKind, GitCochangeEdge, GitCommitId,
-    GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode, HistoryRecordId, HistorySnapshot,
-    HistorySummary, IndexManifest, IndexMode, NodeId, Owner, OwnerSuggestion, OwnershipEvidence,
-    OwnershipReport, OwnershipSourceType, PlanReport, PolicyCheckReport, PolicyComponentMatch,
-    PolicyExemptionEvidence, PolicyViolation, ProvenanceTouch, ReviewerAvailability,
-    ReviewerEvidence, ReviewerRole, ReviewerSuggestionReport, ScoreComponent, SearchResult,
-    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolProvenance, TestTarget,
+    format_skip_reasons, group_thousands, ChurnSummary, Confidence, ContextHandleId, EdgeId,
+    EnforcedEdgeType, Evidence, EvidenceId, EvidenceSourceType, FileProvenance, GitChangeKind,
+    GitCochangeEdge, GitCommitId, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode,
+    HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage, IndexManifest, IndexMode,
+    NodeId, Owner, OwnerSuggestion, OwnershipEvidence, OwnershipReport, OwnershipSourceType,
+    PlanReport, PolicyCheckReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
+    ProvenanceTouch, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
+    ReviewerSuggestionReport, ScoreComponent, SearchResult, SimilarChangeQuery,
+    SimilarChangeReport, Symbol, SymbolId, SymbolProvenance, TestTarget,
+    INDEX_COVERAGE_WARN_PERCENT,
 };
 use open_kioku_graph::InMemoryGraph;
 use open_kioku_impact::ImpactEngine;

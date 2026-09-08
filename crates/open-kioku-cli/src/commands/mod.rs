@@ -112,6 +112,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     snapshot.manifest.chunk_count,
                     snapshot.manifest.index_mode
                 );
+                // The one line that makes a silent omission visible: what discovery saw
+                // versus what the index holds, with every gap attributed to a skip rule.
+                if let Some(coverage) = snapshot.manifest.quality.coverage.as_ref() {
+                    println!("coverage: {}", coverage.summary_line());
+                }
                 if let Some(scip) = &snapshot.scip {
                     println!(
                         "SCIP: mode {:?}, imported {} index(es), {} exact references",
@@ -218,6 +223,14 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 let mut status = serde_json::to_value(&manifest)?;
                 if let Some(object) = status.as_object_mut() {
                     object.insert("analysis_semantics_status".into(), serde_json::to_value(compatibility)?);
+                    // Mirrors the MCP `repo_status` tool: null when the manifest predates
+                    // coverage recording, so a reader cannot mistake absence for 100%.
+                    object.insert(
+                        "coverage".into(),
+                        serde_json::to_value(
+                            manifest.as_ref().and_then(|manifest| manifest.quality.coverage.as_ref()),
+                        )?,
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else if let Some(manifest) = manifest {
@@ -229,6 +242,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     manifest.index_mode,
                     manifest.indexed_at
                 );
+                match manifest.quality.coverage.as_ref() {
+                    Some(coverage) => println!("Coverage: {}", coverage.summary_line()),
+                    None => println!("Coverage: not recorded by this index; run `ok index .`"),
+                }
                 let semantics = analysis_semantics_compatibility_for_manifest(Some(&manifest));
                 println!(
                     "Analysis semantics: {:?}; stored={}, current={}",
@@ -270,6 +287,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         CheckStatus::Fail => "[fail]",
                     };
                     println!("{marker:<6} {:<16} {}", check.name, check.message);
+                }
+                if let Some(coverage) = report.coverage.as_ref() {
+                    println!("\nCoverage by language:");
+                    for line in coverage_table_lines(coverage) {
+                        println!("  {line}");
+                    }
                 }
                 let passes = report
                     .checks
