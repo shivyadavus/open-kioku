@@ -78,8 +78,18 @@ def parse_ranges(field, gold):
     return ranges or None
 
 
+SUPPORTING_UNIT_MARKER = "supporting file listed from impact expansion"
+
+
 def selected_units(pack, repo):
-    """The pack's selected units in presentation order as (path, start, end, tokens)."""
+    """The pack's selected units in order as (path, start, end, tokens, primary).
+
+    A pack may list supporting files in the same ledger, costed at their listing size. They
+    are marked so yield can be scored over the primary units alone: retrieval changes that
+    only affect which regions of the primary files are shown must not be credited with the
+    files that impact expansion contributed. Packs that list no supporting units are
+    unaffected, so the primary-only view is comparable across versions.
+    """
     units = []
     selection = pack.get("retrieval_diagnostics", {}).get("selection", {})
     for unit in selection.get("selected_units") or []:
@@ -89,8 +99,13 @@ def selected_units(pack, repo):
             int(span.get("start", 0) or 0),
             int(span.get("end", 0) or 0),
             int(unit.get("estimated_tokens", 0) or 0),
+            SUPPORTING_UNIT_MARKER not in (unit.get("rationale") or ""),
         ))
     return units
+
+
+def primary_units(units):
+    return [unit for unit in units if unit[4]]
 
 
 def yield_at(units, gold, ranges, budget):
@@ -98,7 +113,7 @@ def yield_at(units, gold, ranges, budget):
     consumed = 0
     files_hit = set()
     lines_hit = {path: set() for path in (ranges or {})}
-    for path, start, end, tokens in units:
+    for path, start, end, tokens, _primary in units:
         if consumed + tokens > budget:
             break
         consumed += tokens
@@ -123,22 +138,22 @@ def percentile(values, fraction):
 
 def tokens_to_first_gold(units, gold):
     consumed = 0
-    for path, _, _, tokens in units:
+    for path, _, _, tokens, _primary in units:
         if path in gold:
             return consumed
         consumed += tokens
     return None
 
 
-def yield_row(units, gold, ranges):
+def yield_row(units, gold, ranges, suffix=""):
     """Per-case yield fields; None when the binary exposes no selected units."""
     if not units:
         return {
-            "gold_file_yield": None,
-            "gold_line_yield": None,
-            "line_yield_measurable": bool(ranges),
-            "tokens_to_first_gold": None,
-            "pack_tokens": 0,
+            f"gold_file_yield{suffix}": None,
+            f"gold_line_yield{suffix}": None,
+            f"line_yield_measurable{suffix}": bool(ranges),
+            f"tokens_to_first_gold{suffix}": None,
+            f"pack_tokens{suffix}": 0,
         }
     file_yield = {}
     line_yield = {}
@@ -147,11 +162,11 @@ def yield_row(units, gold, ranges):
         file_yield[str(budget)] = f
         line_yield[str(budget)] = l
     return {
-        "gold_file_yield": file_yield,
-        "gold_line_yield": line_yield if ranges else None,
-        "line_yield_measurable": bool(ranges),
-        "tokens_to_first_gold": tokens_to_first_gold(units, gold),
-        "pack_tokens": sum(tokens for _, _, _, tokens in units),
+        f"gold_file_yield{suffix}": file_yield,
+        f"gold_line_yield{suffix}": line_yield if ranges else None,
+        f"line_yield_measurable{suffix}": bool(ranges),
+        f"tokens_to_first_gold{suffix}": tokens_to_first_gold(units, gold),
+        f"pack_tokens{suffix}": sum(tokens for _, _, _, tokens, _p in units),
     }
 
 
@@ -219,24 +234,33 @@ def metrics(sample):
     # Line yield is averaged over the cases where line ranges exist to measure against
     # (`line_yield_measurable`), which is a property of the case file, not of the run.
     with_units = [r for r in sample if r.get("gold_file_yield")]
-    line_measurable = [r for r in sample if r.get("line_yield_measurable")]
-    for budget in BUDGETS:
-        key = str(budget)
-        if with_units:
-            out[f"gold_file_yield@{budget}"] = statistics.mean(
-                (r["gold_file_yield"][key] if r.get("gold_file_yield") else 0.0) for r in sample
-            )
-        if line_measurable and any(r.get("gold_line_yield") for r in line_measurable):
-            out[f"gold_line_yield@{budget}"] = statistics.mean(
-                (r["gold_line_yield"][key] if r.get("gold_line_yield") else 0.0) for r in line_measurable
-            )
+    for suffix in ("", "_primary"):
+        any_units = [r for r in sample if r.get(f"gold_file_yield{suffix}")]
+        line_measurable = [r for r in sample if r.get(f"line_yield_measurable{suffix}")]
+        for budget in BUDGETS:
+            key = str(budget)
+            if any_units:
+                out[f"gold_file_yield{suffix}@{budget}"] = statistics.mean(
+                    (r[f"gold_file_yield{suffix}"][key] if r.get(f"gold_file_yield{suffix}") else 0.0)
+                    for r in sample
+                )
+            if line_measurable and any(r.get(f"gold_line_yield{suffix}") for r in line_measurable):
+                out[f"gold_line_yield{suffix}@{budget}"] = statistics.mean(
+                    (r[f"gold_line_yield{suffix}"][key] if r.get(f"gold_line_yield{suffix}") else 0.0)
+                    for r in line_measurable
+                )
     first = [r["tokens_to_first_gold"] for r in with_units if r["tokens_to_first_gold"] is not None]
     if first:
         out["tokens_to_first_gold_p50"] = statistics.median(first)
     return out
 
 
-YIELD_KEYS = tuple(f"gold_file_yield@{b}" for b in BUDGETS) + tuple(f"gold_line_yield@{b}" for b in BUDGETS)
+YIELD_KEYS = (
+    tuple(f"gold_file_yield@{b}" for b in BUDGETS)
+    + tuple(f"gold_line_yield@{b}" for b in BUDGETS)
+    + tuple(f"gold_file_yield_primary@{b}" for b in BUDGETS)
+    + tuple(f"gold_line_yield_primary@{b}" for b in BUDGETS)
+)
 
 
 def main():
@@ -284,7 +308,12 @@ def main():
             "confidence": pack.get("confidence_breakdown", {}).get("overall_enum"),
             "secs": time.time() - started,
         }
-        row.update(yield_row(selected_units(pack, repo), gold_set, ranges))
+        units = selected_units(pack, repo)
+        row.update(yield_row(units, gold_set, ranges))
+        # Scored twice: over every ledger unit, and over the primary units alone. Only the
+        # second isolates what retrieval put in front of the caller from what impact
+        # expansion appended, so a change to one is never credited to the other.
+        row.update(yield_row(primary_units(units), gold_set, ranges, "_primary"))
         row["pack_bytes"] = len(out.encode("utf-8"))
         return row
 
