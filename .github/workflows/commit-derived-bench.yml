@@ -5,6 +5,12 @@ name: commit-derived-bench
 # fixture in `ci.yml` catches determinism and gross regressions; this job is what catches a
 # ranking change that only shows on ten thousand files. It is scheduled because indexing the
 # corpus and scoring ~400 queries takes about 45 minutes.
+#
+# Matrix entries are keyed java-a, go-a, ts-a, py-a (a Java service, a Go application, a TypeScript
+# standard library, a Python ML library); the keys name the baseline files. Each repository URL lives in
+# a repository variable named `BENCH_<CODE>_URL` (Settings > Secrets and variables > Actions),
+# never in this file or in `benchmarks/commit-derived/`; the base commit, extension, and
+# indexed subtrees are checked in because they name nothing.
 
 on:
   schedule:
@@ -12,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: Override the repository for every matrix entry (leave blank to run the matrix as checked in)
+        description: Override the repository for every matrix entry (leave blank to read each corpus's BENCH_<CODE>_URL variable)
         default: ""
       base_sha:
         description: Base commit; the repository is indexed here
@@ -24,7 +30,7 @@ on:
         description: Commits after base to scan for cases
         default: ""
       corpus_name:
-        description: Baseline name under benchmarks/commit-derived/
+        description: Corpus code whose baseline under benchmarks/commit-derived/ is compared against (java-a, go-a, ts-a, py-a)
         default: ""
 
 env:
@@ -38,32 +44,33 @@ jobs:
       fail-fast: false
       matrix:
         corpus:
-          - name: elasticsearch-1e6d7960
-            repo: https://github.com/elastic/elasticsearch
+          - name: java-a
+            url_var: BENCH_JAVA_A_URL
             base: 1e6d79605440aa871287acacb604564d54ca7555
             prefixes: "libs/ modules/ server/"
             ext: .java
             after: "3800"
-          - name: hugo-79da24a0
-            repo: https://github.com/gohugoio/hugo
+          - name: go-a
+            url_var: BENCH_GO_A_URL
             base: 79da24a0ebc0a33be89052188040caeec93c741e
             prefixes: ""
             ext: .go
             after: "1500"
-          - name: deno_std-d93aa7c9
-            repo: https://github.com/denoland/std
+          - name: ts-a
+            url_var: BENCH_TS_A_URL
             base: d93aa7c94e640aa7b206e1a08e094eb705c1e1fa
             prefixes: ""
             ext: .ts
             after: "1500"
-          - name: transformers-7cd9b985
-            repo: https://github.com/huggingface/transformers
+          - name: py-a
+            url_var: BENCH_PY_A_URL
             base: 7cd9b985e0698d4f625a18be0125231b6b930390
             prefixes: ""
             ext: .py
             after: "1500"
+    name: bench (${{ matrix.corpus.name }})
     env:
-      REPO_URL: ${{ github.event.inputs.repo_url || matrix.corpus.repo }}
+      REPO_URL: ${{ github.event.inputs.repo_url || vars[matrix.corpus.url_var] }}
       BASE_SHA: ${{ github.event.inputs.base_sha || matrix.corpus.base }}
       PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || matrix.corpus.prefixes }}
       EXT: ${{ matrix.corpus.ext }}
@@ -71,6 +78,13 @@ jobs:
       CORPUS_NAME: ${{ github.event.inputs.corpus_name || matrix.corpus.name }}
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve the corpus repository
+        run: |
+          if [ -z "$REPO_URL" ]; then
+            echo "::error::no repository URL for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.url_var }} repository variable or pass repo_url"
+            exit 1
+          fi
+          echo "corpus ${{ matrix.corpus.name }} at $BASE_SHA (URL from ${{ matrix.corpus.url_var }})"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -80,7 +94,7 @@ jobs:
 
       - name: Clone source repository (history only, blobs on demand)
         run: |
-          git clone --filter=blob:none --no-checkout "$REPO_URL" source
+          git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "$BASE_SHA" || true
 
       - name: Extract the indexed subtree at the base commit

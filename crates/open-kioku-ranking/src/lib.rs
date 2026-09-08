@@ -949,7 +949,7 @@ mod tests {
         source.symbol = Some(Symbol {
             id: SymbolId::new("dot-prefix-validator"),
             name: "DotPrefixValidator".into(),
-            qualified_name: "org.elasticsearch.validation.DotPrefixValidator".into(),
+            qualified_name: "com.acme.validation.DotPrefixValidator".into(),
             kind: SymbolKind::Class,
             file_id: FileId::new("source"),
             range: Some(LineRange::single(1)),

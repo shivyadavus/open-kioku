@@ -1,8 +1,7 @@
 {
- "corpus": "hugo-79da24a0",
- "split": "dev",
+ "corpus": "go-a",
+ "split": "holdout",
  "provenance": {
-  "repo": "https://github.com/gohugoio/hugo",
   "base": "79da24a0ebc0a33be89052188040caeec93c741e",
   "after": 1500,
   "ext": [
@@ -13,41 +12,41 @@
   "frozen_on": "2026-09-07",
   "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
  },
- "cases": 196,
- "label": "dev",
- "median_secs": 0.4156785011291504,
+ "cases": 84,
+ "label": "holdout",
+ "median_secs": 0.43080830574035645,
  "metrics": {
-  "R@1": 0.2449,
-  "R@5": 0.5714,
-  "R@10": 0.6684,
-  "R@20": 0.7653,
-  "MRR": 0.3946,
-  "gold_recall@20": 0.5778
+  "R@1": 0.4524,
+  "R@5": 0.6905,
+  "R@10": 0.7857,
+  "R@20": 0.8095,
+  "MRR": 0.5506,
+  "gold_recall@20": 0.6085
  },
  "ci": {
   "R@1": [
-   0.1888,
-   0.3061
+   0.3452,
+   0.5595
   ],
   "R@5": [
-   0.5051,
-   0.6429
+   0.5833,
+   0.7857
   ],
   "R@10": [
-   0.6071,
-   0.7347
+   0.6905,
+   0.869
   ],
   "R@20": [
-   0.7092,
-   0.8265
+   0.7143,
+   0.8929
   ],
   "MRR": [
-   0.3421,
-   0.4489
+   0.4577,
+   0.6455
   ],
   "gold_recall@20": [
-   0.5229,
-   0.6348
+   0.5298,
+   0.6841
   ]
  }
 }

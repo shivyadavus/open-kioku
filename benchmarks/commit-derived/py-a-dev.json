@@ -1,0 +1,52 @@
+{
+ "corpus": "py-a",
+ "split": "dev",
+ "provenance": {
+  "base": "7cd9b985e0698d4f625a18be0125231b6b930390",
+  "after": 1500,
+  "ext": [
+   ".py"
+  ],
+  "path_prefixes": [],
+  "frozen_from": "commit-derived-bench run 34173575188 (ubuntu-latest), main after #375 (repeated subjects dropped)",
+  "frozen_on": "2026-09-07",
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
+ },
+ "cases": 462,
+ "label": "dev",
+ "median_secs": 1.6064616441726685,
+ "metrics": {
+  "R@1": 0.4286,
+  "R@5": 0.6061,
+  "R@10": 0.6732,
+  "R@20": 0.7316,
+  "MRR": 0.5119,
+  "gold_recall@20": 0.5802
+ },
+ "ci": {
+  "R@1": [
+   0.3874,
+   0.4762
+  ],
+  "R@5": [
+   0.5584,
+   0.6494
+  ],
+  "R@10": [
+   0.6277,
+   0.7165
+  ],
+  "R@20": [
+   0.6926,
+   0.7706
+  ],
+  "MRR": [
+   0.4728,
+   0.5546
+  ],
+  "gold_recall@20": [
+   0.5426,
+   0.6154
+  ]
+ }
+}

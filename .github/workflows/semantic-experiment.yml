@@ -5,12 +5,16 @@ name: semantic-experiment
 # ONNX model (treatment), on identical cases. Dispatch-only; nothing here changes defaults.
 # Runs on Linux because the `ort` crate needs an ONNX Runtime the macOS-Intel prebuilts do not
 # provide; on Linux it downloads its own runtime.
+#
+# Defaults to the Go application corpus, matrix key go-a (docs/retrieval-benchmark.md, "Commit-derived corpora"). The
+# repository URL comes from the `BENCH_GO_A_URL` repository variable, never from this file.
 
 on:
   workflow_dispatch:
     inputs:
       repo_url:
-        default: https://github.com/gohugoio/hugo
+        description: Repository to derive the corpus from (blank = the BENCH_GO_A_URL repository variable, the go-a corpus)
+        default: ""
       base_sha:
         default: 79da24a0ebc0a33be89052188040caeec93c741e
       ext:
@@ -49,8 +53,14 @@ jobs:
         run: cargo build --release -p open-kioku-cli
 
       - name: Derive the corpus at the base commit
+        env:
+          REPO_URL: ${{ github.event.inputs.repo_url || vars.BENCH_GO_A_URL }}
         run: |
-          git clone --filter=blob:none --no-checkout "${{ github.event.inputs.repo_url }}" source
+          if [ -z "$REPO_URL" ]; then
+            echo "::error::no repository URL: set the BENCH_GO_A_URL repository variable or pass repo_url"
+            exit 1
+          fi
+          git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "${{ github.event.inputs.base_sha }}" || true
           PREFIXES="${{ github.event.inputs.path_prefixes }}"
           # shellcheck disable=SC2086

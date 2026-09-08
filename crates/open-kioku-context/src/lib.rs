@@ -2018,7 +2018,7 @@ struct TaskSearchIntent {
     reference_anchors: Vec<String>,
     ticket_anchors: Vec<String>,
     path_anchors: Vec<String>,
-    /// Tokens of a commit-style scope prefix — `docs(fs): …`, `tpl/tplimpl: …`, `[Whisper] …` —
+    /// Tokens of a commit-style scope prefix — `docs(fs): …`, `pkg/render: …`, `[Scheduler] …` —
     /// which name the package or directory the change lives in.
     scope_anchors: Vec<String>,
     lexical_anchors: Vec<String>,
@@ -2243,8 +2243,8 @@ fn rerank_fused_for_task_with_options(
     }
     // Quality tier first: docs and tests are support material for a task that is not about
     // them, however strongly they mention its anchors; then anchor relevance, authority, score.
-    // The one exception is a file the task names outright ("Guard cluster cleanup in
-    // ReindexPluginMetricsIT"): it is the edit target whatever kind of file it is, and demoting
+    // The one exception is a file the task names outright ("Guard pool shutdown in
+    // ConnectionPoolMetricsIT"): it is the edit target whatever kind of file it is, and demoting
     // it put twenty source files that merely share vocabulary above the file three streams had
     // ranked first.
     results.sort_by(|a, b| {
@@ -2411,8 +2411,8 @@ fn task_relevance_tier(
 }
 
 /// Tokens of the scope a commit-style subject carries: `docs(fs): …` and `feat(path/posix): …`
-/// (conventional commits), `tpl/tplimpl: …` and `commands: …` (Go style, where the prefix is
-/// the package), and `[Whisper] …` (bracketed area). The scope names where the change lives,
+/// (conventional commits), `pkg/render: …` and `commands: …` (Go style, where the prefix is
+/// the package), and `[Scheduler] …` (bracketed area). The scope names where the change lives,
 /// which the subject body usually does not repeat. Empty when the subject has no such prefix.
 fn commit_scope_tokens(task: &str) -> Vec<String> {
     const TYPES: &[&str] = &[
@@ -2483,10 +2483,10 @@ fn append_scope_entry_points(
     // Where the entry point sits among the files the scope already matched depends on whether
     // any of them matched the task's own words. `feat(async): stabilize Channel` matches
     // async/ files on "async" alone — nothing in the directory knows "Channel" yet — so the
-    // barrel is the best guess and goes just below the group's best. `[Whisper] Fix speculative
-    // decoding` matches real modules on "speculative" and "decoding", so the barrel goes last:
+    // barrel is the best guess and goes just below the group's best. `[Scheduler] Fix speculative
+    // prefetch` matches real modules on "speculative" and "prefetch", so the barrel goes last:
     // as runner-up it pushed rank-2 modules to rank 3 on a Python monorepo (MRR -0.011), and
-    // at the floor it never surfaced on deno_std at all (gain 0.000).
+    // at the floor it never surfaced on the TypeScript standard library at all (gain 0.000).
     let scope_group: Vec<&SearchResult> = results
         .iter()
         .filter(|result| path_matches_scope(&normalize_path(&result.path), &intent.scope_anchors))
@@ -3168,12 +3168,12 @@ mod tests {
             vec!["path", "posix"]
         );
         assert_eq!(
-            commit_scope_tokens("tpl/tplimpl: Fix template lookup"),
-            vec!["tpl", "tplimpl"]
+            commit_scope_tokens("pkg/render: Fix template lookup"),
+            vec!["pkg", "render"]
         );
         assert_eq!(
-            commit_scope_tokens("[Whisper] fix generation config"),
-            vec!["whisper"]
+            commit_scope_tokens("[Scheduler] fix retry config"),
+            vec!["scheduler"]
         );
         assert!(commit_scope_tokens("docs: fix typo").is_empty());
         assert!(commit_scope_tokens("Fix geoip processor timeout").is_empty());
@@ -3182,7 +3182,7 @@ mod tests {
 
     #[test]
     fn a_test_file_the_task_names_is_not_demoted_below_source() {
-        let intent = TaskSearchIntent::parse("Guard cluster cleanup in ReindexPluginMetricsIT");
+        let intent = TaskSearchIntent::parse("Guard pool shutdown in ConnectionPoolMetricsIT");
         let result = |path: &str, score: f32| SearchResult {
             path: path.into(),
             line_range: None,
@@ -3197,9 +3197,9 @@ mod tests {
         };
         let ranked = rerank_fused_for_task(
             vec![
-                result("server/src/main/java/org/elasticsearch/cleanup/CleanupAction.java", 0.9),
+                result("server/src/main/java/com/acme/shutdown/ShutdownAction.java", 0.9),
                 result(
-                    "modules/reindex/src/internalClusterTest/java/org/elasticsearch/index/reindex/ReindexPluginMetricsIT.java",
+                    "modules/netpool/src/internalClusterTest/java/com/acme/netpool/ConnectionPoolMetricsIT.java",
                     0.8,
                 ),
             ],
@@ -3207,7 +3207,7 @@ mod tests {
             &RetrievalDiagnostics::default(),
         );
         assert!(
-            ranked[0].path.ends_with("ReindexPluginMetricsIT.java"),
+            ranked[0].path.ends_with("ConnectionPoolMetricsIT.java"),
             "the named test file must lead: {:?}",
             ranked
                 .iter()
@@ -3215,22 +3215,22 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         // A test the task does not name is still support material below source.
-        let intent = TaskSearchIntent::parse("Guard cluster cleanup in reindex");
+        let intent = TaskSearchIntent::parse("Guard pool shutdown in netpool");
         let ranked = rerank_fused_for_task(
             vec![
                 result(
-                    "modules/reindex/src/main/java/org/elasticsearch/reindex/Reindexer.java",
+                    "modules/netpool/src/main/java/com/acme/netpool/Pooler.java",
                     0.5,
                 ),
                 result(
-                    "modules/reindex/src/test/java/org/elasticsearch/reindex/ReindexerTests.java",
+                    "modules/netpool/src/test/java/com/acme/netpool/PoolerTests.java",
                     0.9,
                 ),
             ],
             &intent,
             &RetrievalDiagnostics::default(),
         );
-        assert!(ranked[0].path.ends_with("Reindexer.java"));
+        assert!(ranked[0].path.ends_with("Pooler.java"));
     }
 
     #[test]
@@ -3282,13 +3282,13 @@ mod tests {
         assert!(path_matches_scope("path/posix/join.ts", &posix));
         assert!(!path_matches_scope("path/windows/join.ts", &posix));
         assert!(!path_matches_scope("anything", &[]));
-        let intent = TaskSearchIntent::parse("docs(expect): correct minor typo");
-        assert_eq!(intent.scope_anchors, vec!["expect"]);
+        let intent = TaskSearchIntent::parse("docs(yaml): correct minor typo");
+        assert_eq!(intent.scope_anchors, vec!["yaml"]);
         assert_eq!(
             task_relevance_tier(
-                std::path::Path::new("expect/expect.ts"),
+                std::path::Path::new("yaml/yaml.ts"),
                 &SearchResult {
-                    path: "expect/expect.ts".into(),
+                    path: "yaml/yaml.ts".into(),
                     line_range: None,
                     snippet: String::new(),
                     symbol: None,
@@ -3299,7 +3299,7 @@ mod tests {
                     confidence: 0.5,
                     score_breakdown: Vec::new(),
                 },
-                "expect/expect.ts",
+                "yaml/yaml.ts",
                 &intent
             ),
             3

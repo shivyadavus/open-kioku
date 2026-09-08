@@ -1,53 +1,52 @@
 {
- "corpus": "transformers-7cd9b985",
- "split": "holdout",
+ "corpus": "ts-a",
+ "split": "dev",
  "provenance": {
-  "repo": "https://github.com/huggingface/transformers",
-  "base": "7cd9b985e0698d4f625a18be0125231b6b930390",
+  "base": "d93aa7c94e640aa7b206e1a08e094eb705c1e1fa",
   "after": 1500,
   "ext": [
-   ".py"
+   ".ts"
   ],
   "path_prefixes": [],
   "frozen_from": "commit-derived-bench run 34173575188 (ubuntu-latest), main after #375 (repeated subjects dropped)",
   "frozen_on": "2026-09-07",
   "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
  },
- "cases": 199,
- "label": "holdout",
- "median_secs": 1.6490576267242432,
+ "cases": 385,
+ "label": "dev",
+ "median_secs": 0.35067009925842285,
  "metrics": {
-  "R@1": 0.4673,
-  "R@5": 0.6583,
-  "R@10": 0.7085,
-  "R@20": 0.7487,
-  "MRR": 0.5564,
-  "gold_recall@20": 0.6639
+  "R@1": 0.5169,
+  "R@5": 0.7974,
+  "R@10": 0.8623,
+  "R@20": 0.8935,
+  "MRR": 0.6363,
+  "gold_recall@20": 0.8122
  },
  "ci": {
   "R@1": [
-   0.397,
-   0.5377
+   0.4701,
+   0.5636
   ],
   "R@5": [
-   0.593,
-   0.7186
+   0.7584,
+   0.8364
   ],
   "R@10": [
-   0.6432,
-   0.7688
+   0.8286,
+   0.8961
   ],
   "R@20": [
-   0.6834,
-   0.809
+   0.8623,
+   0.9221
   ],
   "MRR": [
-   0.4971,
-   0.6178
+   0.5985,
+   0.6746
   ],
   "gold_recall@20": [
-   0.6061,
-   0.7251
+   0.7795,
+   0.8457
   ]
  }
 }

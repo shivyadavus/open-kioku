@@ -1,8 +1,7 @@
 {
- "corpus": "elasticsearch-1e6d7960",
+ "corpus": "java-a",
  "split": "holdout",
  "provenance": {
-  "repo": "https://github.com/elastic/elasticsearch",
   "base": "1e6d79605440aa871287acacb604564d54ca7555",
   "after": 3800,
   "ext": [

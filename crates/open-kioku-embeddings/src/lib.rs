@@ -147,7 +147,8 @@ const GTE_MODERNBERT_MAX_BATCH: usize = 8;
 impl LocalNeuralModel {
     /// The neural profile a configuration gets when it names none. Chosen on commit-derived
     /// corpora (2026-09-07, hosted 4-core runners): gte-modernbert-base beat jina-v2-code on
-    /// every metric on hugo and deno_std (holdout MRR +0.025/+0.027 vs +0.007/+0.005) at a
+    /// every metric on a Go application (~800 files) and a TypeScript standard library (~900 files)
+    /// (holdout MRR +0.025/+0.027 vs +0.007/+0.005) at a
     /// third of the peak memory, and Qwen3-0.6B on CPU could not index an 18k-chunk repository
     /// inside three hours where gte took 25 minutes. Apache-2.0, pinned by revision and digest.
     pub const DEFAULT: Self = Self::GteModernBertBase;
