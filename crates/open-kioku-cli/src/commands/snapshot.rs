@@ -549,12 +549,8 @@ fn load_boundary_edges(
     nodes: &HashMap<String, GraphNode>,
     edge_type: GraphEdgeType,
 ) -> anyhow::Result<Vec<ProjectBoundaryEdge>> {
-    let mut stmt = conn.prepare("SELECT json FROM graph_edges WHERE edge_type = ?1 ORDER BY id")?;
-    let mut rows = stmt.query(params![format!("{:?}", edge_type)])?;
     let mut edges = Vec::new();
-    while let Some(row) = rows.next()? {
-        let raw: String = row.get(0)?;
-        let edge: GraphEdge = serde_json::from_str(&raw)?;
+    for edge in open_kioku_storage_sqlite::read_graph_edges_by_type(conn, edge_type)? {
         let Some(source) = nodes.get(&edge.from.0).cloned() else {
             continue;
         };
@@ -840,13 +836,11 @@ fn string_property<'a>(node: &'a GraphNode, key: &str) -> Option<&'a str> {
 }
 
 fn load_workspace_link_summaries(conn: &Connection) -> anyhow::Result<Vec<WorkspaceLinkSummary>> {
-    let mut stmt = conn
-        .prepare("SELECT json FROM graph_edges WHERE source_type = 'StaticAnalysis' ORDER BY id")?;
-    let mut rows = stmt.query([])?;
     let mut links = Vec::new();
-    while let Some(row) = rows.next()? {
-        let raw: String = row.get(0)?;
-        let edge: GraphEdge = serde_json::from_str(&raw)?;
+    for edge in open_kioku_storage_sqlite::read_graph_edges_by_source_type(
+        conn,
+        open_kioku_core::EvidenceSourceType::StaticAnalysis,
+    )? {
         if edge.source_pass.as_deref() != Some("workspace_linker") {
             continue;
         }
@@ -998,6 +992,17 @@ fn validate_snapshot_metadata(metadata: &SnapshotMetadata) -> anyhow::Result<Vec
     if metadata.sqlite_user_version > SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION {
         anyhow::bail!(
             "snapshot sqlite user_version {} is newer than supported version {}",
+            metadata.sqlite_user_version,
+            SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
+        );
+    }
+    // Importing an older store would open cleanly and then answer relationship questions from
+    // graph tables the compact reader had to discard. Refuse it here, where the message can
+    // name the fix, rather than importing something that only looks complete.
+    if metadata.sqlite_user_version < SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION {
+        anyhow::bail!(
+            "snapshot sqlite user_version {} predates the compact graph storage introduced in \
+             user_version {}; re-export the snapshot from a rebuilt index (`ok index`)",
             metadata.sqlite_user_version,
             SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION
         );

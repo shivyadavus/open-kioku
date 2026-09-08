@@ -1,3 +1,5 @@
+mod compact;
+
 use chrono::{DateTime, Utc};
 use open_kioku_core::{
     AnalysisFact, ChurnEntityKind, ChurnStats, ChurnSummary, CodeChunk, Confidence,
@@ -20,7 +22,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const SQLITE_HISTORY_SCHEMA_VERSION: i64 = 1;
-pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 3;
+pub const SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION: i64 = 4;
 const SQLITE_GRAPH_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_SUPPORTED_SCHEMA_VERSION: i64 = SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -248,6 +250,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         ensure_supported_sqlite_schema(&conn)?;
+        reset_legacy_graph_storage(&mut conn)?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -366,20 +369,36 @@ impl MetadataStore for SqliteStore {
               node_type TEXT DEFAULT '',
               file_id TEXT DEFAULT '',
               symbol_id TEXT DEFAULT '',
+              evidence_available BOOLEAN DEFAULT 0,
+              freshness INTEGER DEFAULT 0,
               json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS graph_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash);
             CREATE TABLE IF NOT EXISTS graph_edges (
               id TEXT PRIMARY KEY,
-              from_id TEXT NOT NULL,
-              to_id TEXT NOT NULL,
+              from_sid INTEGER NOT NULL,
+              to_sid INTEGER NOT NULL,
               edge_type TEXT NOT NULL,
-              confidence TEXT DEFAULT '',
-              source_type TEXT DEFAULT '',
-              source_file TEXT DEFAULT '',
-              json TEXT NOT NULL
+              confidence TEXT NOT NULL DEFAULT '',
+              source_type TEXT NOT NULL DEFAULT '',
+              source_sid INTEGER,
+              freshness INTEGER NOT NULL DEFAULT 0,
+              ev_id TEXT NOT NULL DEFAULT '',
+              ev_path_sid INTEGER,
+              ev_line_start INTEGER,
+              ev_line_end INTEGER,
+              ev_symbol_sid INTEGER,
+              ev_message_sid INTEGER,
+              ev_indexed_at_sid INTEGER,
+              extra_sid INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_id);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_id);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid);
 
             CREATE TABLE IF NOT EXISTS scopes (
               id TEXT PRIMARY KEY,
@@ -400,17 +419,28 @@ impl MetadataStore for SqliteStore {
             );
             CREATE INDEX IF NOT EXISTS idx_bindings_lookup ON bindings(file_id, scope_id, name);
 
+            CREATE TABLE IF NOT EXISTS call_site_strings (
+              sid INTEGER PRIMARY KEY,
+              vhash INTEGER NOT NULL,
+              value TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_call_site_strings_vhash ON call_site_strings(vhash);
             CREATE TABLE IF NOT EXISTS call_sites (
-              id TEXT PRIMARY KEY,
-              file_id TEXT NOT NULL,
-              caller_symbol_id TEXT,
-              callee_name TEXT NOT NULL,
+              id_sid INTEGER PRIMARY KEY,
+              file_sid INTEGER NOT NULL,
+              scope_sid INTEGER NOT NULL,
+              caller_sid INTEGER,
+              callee_sid INTEGER NOT NULL,
+              receiver_sid INTEGER,
+              receiver_kind TEXT NOT NULL DEFAULT 'Unknown',
               start_line INTEGER NOT NULL,
               start_column INTEGER NOT NULL,
-              json TEXT NOT NULL
+              end_line INTEGER NOT NULL DEFAULT 0,
+              end_column INTEGER NOT NULL DEFAULT 0
             );
-            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_symbol_id);
-            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_name);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_name ON call_sites(callee_sid);
+            CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_sid);
 
             CREATE TABLE IF NOT EXISTS relationship_evidence (
               id TEXT PRIMARY KEY,
@@ -573,18 +603,24 @@ impl MetadataStore for SqliteStore {
         .map_err(storage_err)?;
 
         for node_id in &affected_node_ids {
-            tx.execute(
-                "DELETE FROM graph_edges WHERE from_id = ?1 OR to_id = ?1",
-                params![node_id],
-            )
-            .map_err(storage_err)?;
+            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
+                tx.execute(
+                    "DELETE FROM graph_edges WHERE from_sid = ?1 OR to_sid = ?1",
+                    params![sid],
+                )
+                .map_err(storage_err)?;
+            }
         }
         for path in &affected_file_paths {
-            tx.execute(
-                "DELETE FROM graph_edges WHERE source_file = ?1",
-                params![path],
-            )
-            .map_err(storage_err)?;
+            // Unchanged semantics: `source_sid` holds `evidence.source` (the producing pass),
+            // which is what the pre-compaction `source_file` column held too.
+            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, path)? {
+                tx.execute(
+                    "DELETE FROM graph_edges WHERE source_sid = ?1",
+                    params![sid],
+                )
+                .map_err(storage_err)?;
+            }
         }
         for node_id in &affected_node_ids {
             tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
@@ -646,15 +682,17 @@ impl MetadataStore for SqliteStore {
                 params![&file_id.0],
             )
             .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM call_sites WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
+            if let Some(sid) = compact::lookup_sid(&tx, compact::CALL_SITE_STRINGS, &file_id.0)? {
+                tx.execute("DELETE FROM call_sites WHERE file_sid = ?1", params![sid])
+                    .map_err(storage_err)?;
+            }
         }
 
+        let mut call_site_strings =
+            compact::StringWriter::incremental(&tx, compact::CALL_SITE_STRINGS)?;
         insert_index_rows(
             &tx,
+            &mut call_site_strings,
             IndexRows {
                 files: update.changed_files,
                 symbols: update.symbols,
@@ -668,7 +706,13 @@ impl MetadataStore for SqliteStore {
                 call_sites: update.call_sites,
             },
         )?;
-        insert_graph_rows(&tx, update.graph_nodes, update.graph_edges)?;
+        let mut graph_strings = compact::StringWriter::incremental(&tx, compact::GRAPH_STRINGS)?;
+        insert_graph_rows(
+            &tx,
+            &mut graph_strings,
+            update.graph_nodes,
+            update.graph_edges,
+        )?;
         tx.commit().map_err(storage_err)?;
         self.invalidate_semantics_verdict();
         Ok(())
@@ -2386,6 +2430,10 @@ struct IndexRows<'a> {
 fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
     tx.execute("DELETE FROM call_sites", [])
         .map_err(storage_err)?;
+    // The dictionary is owned by `call_sites`, so it is emptied with the rows that reference
+    // it rather than being allowed to accumulate strings from earlier index runs.
+    tx.execute("DELETE FROM call_site_strings", [])
+        .map_err(storage_err)?;
     tx.execute("DELETE FROM bindings", [])
         .map_err(storage_err)?;
     tx.execute("DELETE FROM scopes", []).map_err(storage_err)?;
@@ -2405,8 +2453,10 @@ fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
         params![serde_json::to_string(data.manifest)?],
     )
     .map_err(storage_err)?;
+    let mut call_site_strings = compact::StringWriter::bulk(compact::CALL_SITE_STRINGS);
     insert_index_rows(
         tx,
+        &mut call_site_strings,
         IndexRows {
             files: data.files,
             symbols: data.symbols,
@@ -2443,7 +2493,11 @@ fn insert_document_sections(tx: &Transaction<'_>, sections: &[DocumentSection]) 
     Ok(())
 }
 
-fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
+fn insert_index_rows(
+    tx: &Transaction<'_>,
+    call_site_strings: &mut compact::StringWriter,
+    rows: IndexRows<'_>,
+) -> Result<()> {
     {
         let mut stmt = tx
             .prepare_cached("INSERT INTO files(id, path, json) VALUES(?1, ?2, ?3)")
@@ -2570,20 +2624,24 @@ fn insert_index_rows(tx: &Transaction<'_>, rows: IndexRows<'_>) -> Result<()> {
             .map_err(storage_err)?;
         }
     }
-    {
-        let mut stmt = tx.prepare_cached("INSERT INTO call_sites(id, file_id, caller_symbol_id, callee_name, start_line, start_column, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)").map_err(storage_err)?;
-        for call_site in rows.call_sites {
-            stmt.execute(params![
-                &call_site.id.0,
-                &call_site.file_id.0,
-                call_site.caller_symbol_id.as_ref().map(|id| &id.0),
-                &call_site.callee_name,
-                call_site.range.start_line,
-                call_site.range.start_column,
-                serde_json::to_string(call_site)?
+    for call_site in rows.call_sites {
+        let row = compact::encode_call_site(tx, call_site_strings, call_site)?;
+        tx.prepare_cached("INSERT INTO call_sites(id_sid, file_sid, scope_sid, caller_sid, callee_sid, receiver_sid, receiver_kind, start_line, start_column, end_line, end_column) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
+            .map_err(storage_err)?
+            .execute(params![
+                row.id_sid,
+                row.file_sid,
+                row.scope_sid,
+                row.caller_sid,
+                row.callee_sid,
+                row.receiver_sid,
+                row.receiver_kind,
+                row.start_line,
+                row.start_column,
+                row.end_line,
+                row.end_column,
             ])
             .map_err(storage_err)?;
-        }
     }
     Ok(())
 }
@@ -2610,11 +2668,11 @@ const GRAPH_INDEXES: &[(&str, &str)] = &[
     ),
     (
         "idx_graph_edges_from",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_id)",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_sid)",
     ),
     (
         "idx_graph_edges_to",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_id)",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_sid)",
     ),
     (
         "idx_graph_edges_type",
@@ -2622,19 +2680,28 @@ const GRAPH_INDEXES: &[(&str, &str)] = &[
     ),
     (
         "idx_graph_edges_from_type",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_id, edge_type)",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from_type ON graph_edges(from_sid, edge_type)",
     ),
     (
         "idx_graph_edges_to_type",
-        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_id, edge_type)",
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_to_type ON graph_edges(to_sid, edge_type)",
     ),
     (
         "idx_graph_edges_source_type",
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_type ON graph_edges(source_type)",
     ),
+    (
+        "idx_graph_strings_vhash",
+        "CREATE INDEX IF NOT EXISTS idx_graph_strings_vhash ON graph_strings(vhash)",
+    ),
 ];
 
-fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEdge]) -> Result<()> {
+fn insert_graph_rows(
+    tx: &Transaction<'_>,
+    strings: &mut compact::StringWriter,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> Result<()> {
     // Insert in primary-key order so the id B-tree fills mostly append-only instead of taking
     // millions of random-page inserts (ids are content hashes, i.e. uniformly random).
     let mut nodes = nodes.iter().collect::<Vec<_>>();
@@ -2657,26 +2724,33 @@ fn insert_graph_rows(tx: &Transaction<'_>, nodes: &[GraphNode], edges: &[GraphEd
             .map_err(storage_err)?;
         }
     }
-    {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO graph_edges(id, from_id, to_id, edge_type, confidence, source_type, source_file, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        ).map_err(storage_err)?;
-        for edge in edges {
-            let freshness = edge.evidence.indexed_at.timestamp();
-            stmt.execute(params![
-                &edge.id.0,
-                &edge.from.0,
-                &edge.to.0,
-                format!("{:?}", edge.edge_type),
-                format!("{:?}", edge.evidence.confidence),
-                format!("{:?}", edge.evidence.source_type),
-                edge.evidence.source.as_str(),
-                true,
-                freshness,
-                serde_json::to_string(edge)?
-            ])
-            .map_err(storage_err)?;
-        }
+    for edge in edges {
+        // Interning writes into the same transaction, so the row encode has to finish before
+        // the edge statement is prepared; `prepare_cached` makes the reborrow free.
+        let row = compact::encode_edge(tx, strings, edge)?;
+        tx.prepare_cached(
+            "INSERT INTO graph_edges(id, from_sid, to_sid, edge_type, confidence, source_type, source_sid, freshness, ev_id, ev_path_sid, ev_line_start, ev_line_end, ev_symbol_sid, ev_message_sid, ev_indexed_at_sid, extra_sid) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )
+        .map_err(storage_err)?
+        .execute(params![
+            row.id,
+            row.from_sid,
+            row.to_sid,
+            row.edge_type,
+            row.confidence,
+            row.source_type,
+            row.source_sid,
+            row.freshness,
+            row.ev_id,
+            row.ev_path_sid,
+            row.ev_line_start,
+            row.ev_line_end,
+            row.ev_symbol_sid,
+            row.ev_message_sid,
+            row.ev_indexed_at_sid,
+            row.extra_sid,
+        ])
+        .map_err(storage_err)?;
     }
     Ok(())
 }
@@ -2711,6 +2785,23 @@ fn require_authoritative_relationship_semantics(store: &SqliteStore) -> Result<(
 }
 
 fn compute_relationship_semantics_verdict(store: &SqliteStore) -> std::result::Result<(), String> {
+    // A store whose pre-4.0 edge rows were discarded has an empty graph, not a graph with no
+    // relationships. Reporting that difference is the point: an empty answer here would read
+    // as "no such relationship exists".
+    let rebuild_required = {
+        let conn = store
+            .connection
+            .lock()
+            .map_err(|_| "sqlite mutex poisoned".to_string())?;
+        schema_meta_flag(&conn, GRAPH_REBUILD_REQUIRED_FLAG).map_err(|err| err.to_string())?
+    };
+    if rebuild_required {
+        return Err(
+            "graph edges were built by an older index format and were discarded on open; \
+             run `ok index` to rebuild them"
+                .to_string(),
+        );
+    }
     let manifest = MetadataStore::manifest(store).map_err(|err| err.to_string())?;
     let compatibility = open_kioku_core::classify_analysis_semantics(
         manifest
@@ -2756,10 +2847,16 @@ impl GraphStore for SqliteStore {
                 .map_err(storage_err)?;
             tx.execute("DELETE FROM graph_nodes", [])
                 .map_err(storage_err)?;
-            insert_graph_rows(&tx, nodes, edges)?;
+            // The dictionary is owned by `graph_edges`: emptying it here is what keeps a
+            // re-index from accumulating strings no surviving row references.
+            tx.execute("DELETE FROM graph_strings", [])
+                .map_err(storage_err)?;
+            let mut strings = compact::StringWriter::bulk(compact::GRAPH_STRINGS);
+            insert_graph_rows(&tx, &mut strings, nodes, edges)?;
             for (_, ddl) in GRAPH_INDEXES {
                 tx.execute(ddl, []).map_err(storage_err)?;
             }
+            clear_schema_meta_flag(&tx, GRAPH_REBUILD_REQUIRED_FLAG)?;
             tx.commit().map_err(storage_err)?;
             Ok(())
         })();
@@ -2804,7 +2901,11 @@ impl GraphStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT edge_type, COUNT(*), MAX(evidence_available), MAX(freshness) FROM graph_edges GROUP BY edge_type")
+            // Every edge carries evidence by construction — `GraphEdge.evidence` is not an
+            // `Option` — so the column this used to aggregate was a stored constant.
+            .prepare(
+                "SELECT edge_type, COUNT(*), 1, MAX(freshness) FROM graph_edges GROUP BY edge_type",
+            )
             .map_err(storage_err)?;
         let mut rows = stmt.query([]).map_err(storage_err)?;
         let mut map = std::collections::HashMap::new();
@@ -2839,13 +2940,19 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node)? else {
+            return Ok((Vec::new(), Vec::new()));
+        };
         let mut stmt = conn
-            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1 OR to_id = ?1 LIMIT ?2")
+            .prepare(&format!(
+                "{} WHERE e.from_sid = ?1 OR e.to_sid = ?1 LIMIT ?2",
+                compact::EDGE_SELECT
+            ))
             .map_err(storage_err)?;
-        let rows = stmt
-            .query_map(params![node, limit as i64], |row| row.get::<_, String>(0))
+        let mut rows = stmt
+            .query(params![node_sid, limit as i64])
             .map_err(storage_err)?;
-        let edges: Vec<GraphEdge> = collect_json(rows)?;
+        let edges = collect_edges(&mut rows)?;
         let mut ids = edges
             .iter()
             .flat_map(|edge| [edge.from.0.clone(), edge.to.0.clone()])
@@ -2873,7 +2980,7 @@ impl GraphStore for SqliteStore {
         // Prepare the statement once outside the BFS loop to avoid
         // O(N) statement recompilation on large graphs.
         let mut edge_stmt = conn
-            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1")
+            .prepare(&format!("{} WHERE e.from_sid = ?1", compact::EDGE_SELECT))
             .map_err(storage_err)?;
 
         let mut queue = VecDeque::from([(from.to_string(), Vec::<GraphEdge>::new())]);
@@ -2885,10 +2992,11 @@ impl GraphStore for SqliteStore {
             if path.len() >= max_depth || !seen.insert(node.clone()) {
                 continue;
             }
-            let rows = edge_stmt
-                .query_map(params![&node], |row| row.get::<_, String>(0))
-                .map_err(storage_err)?;
-            let edges: Vec<GraphEdge> = collect_json(rows)?;
+            let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, &node)? else {
+                continue;
+            };
+            let mut rows = edge_stmt.query(params![node_sid]).map_err(storage_err)?;
+            let edges = collect_edges(&mut rows)?;
             for edge in edges {
                 let mut next_path = path.clone();
                 next_path.push(edge.clone());
@@ -2991,16 +3099,15 @@ impl GraphStore for SqliteStore {
         let offset = offset as i64;
         let type_str = format!("{:?}", edge_type);
         let mut stmt = conn
-            .prepare(
-                "SELECT json FROM graph_edges WHERE edge_type = ?1 ORDER BY id LIMIT ?2 OFFSET ?3",
-            )
+            .prepare(&format!(
+                "{} WHERE e.edge_type = ?1 ORDER BY e.id LIMIT ?2 OFFSET ?3",
+                compact::EDGE_SELECT
+            ))
             .map_err(storage_err)?;
-        let rows = stmt
-            .query_map(params![type_str, limit, offset], |row| {
-                row.get::<_, String>(0)
-            })
+        let mut rows = stmt
+            .query(params![type_str, limit, offset])
             .map_err(storage_err)?;
-        collect_json(rows)
+        collect_edges(&mut rows)
     }
 
     fn edges_by_type_for_node(
@@ -3019,17 +3126,19 @@ impl GraphStore for SqliteStore {
         let limit = clamp_limit(limit) as i64;
         let offset = offset as i64;
         let edge_type = format!("{edge_type:?}");
-        let endpoint_column = if outgoing { "from_id" } else { "to_id" };
+        let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node_id)? else {
+            return Ok(Vec::new());
+        };
+        let endpoint_column = if outgoing { "from_sid" } else { "to_sid" };
         let sql = format!(
-            "SELECT json FROM graph_edges WHERE {endpoint_column} = ?1 AND edge_type = ?2 ORDER BY id LIMIT ?3 OFFSET ?4"
+            "{} WHERE e.{endpoint_column} = ?1 AND e.edge_type = ?2 ORDER BY e.id LIMIT ?3 OFFSET ?4",
+            compact::EDGE_SELECT
         );
         let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
-        let rows = stmt
-            .query_map(params![node_id, edge_type, limit, offset], |row| {
-                row.get::<_, String>(0)
-            })
+        let mut rows = stmt
+            .query(params![node_sid, edge_type, limit, offset])
             .map_err(storage_err)?;
-        collect_json(rows)
+        collect_edges(&mut rows)
     }
 
     fn graph_counts(&self) -> Result<GraphCounts> {
@@ -3091,14 +3200,70 @@ impl GraphStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let limit = clamp_limit(limit) as i64;
+        let (Some(from_sid), Some(to_sid)) = (
+            compact::lookup_sid(&conn, compact::GRAPH_STRINGS, from)?,
+            compact::lookup_sid(&conn, compact::GRAPH_STRINGS, to)?,
+        ) else {
+            return Ok(Vec::new());
+        };
         let mut stmt = conn
-            .prepare("SELECT json FROM graph_edges WHERE from_id = ?1 AND to_id = ?2 ORDER BY id LIMIT ?3")
+            .prepare(&format!(
+                "{} WHERE e.from_sid = ?1 AND e.to_sid = ?2 ORDER BY e.id LIMIT ?3",
+                compact::EDGE_SELECT
+            ))
             .map_err(storage_err)?;
-        let rows = stmt
-            .query_map(params![from, to, limit], |row| row.get::<_, String>(0))
+        let mut rows = stmt
+            .query(params![from_sid, to_sid, limit])
             .map_err(storage_err)?;
-        collect_json(rows)
+        collect_edges(&mut rows)
     }
+}
+
+/// Materialize [`GraphEdge`]s from a statement projecting [`compact::EDGE_SELECT`].
+fn collect_edges(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<GraphEdge>> {
+    let mut edges = Vec::new();
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        edges.push(compact::edge_from_row(row)?);
+    }
+    Ok(edges)
+}
+
+/// Every edge of one type, read straight from an open index connection.
+///
+/// The cross-project workspace linker opens each member repository's index file directly
+/// rather than through a [`SqliteStore`], and edges are no longer a self-describing JSON
+/// column it can decode on its own.
+pub fn read_graph_edges_by_type(
+    conn: &Connection,
+    edge_type: GraphEdgeType,
+) -> Result<Vec<GraphEdge>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{} WHERE e.edge_type = ?1 ORDER BY e.id",
+            compact::EDGE_SELECT
+        ))
+        .map_err(storage_err)?;
+    let mut rows = stmt
+        .query(params![format!("{edge_type:?}")])
+        .map_err(storage_err)?;
+    collect_edges(&mut rows)
+}
+
+/// Every edge whose evidence carries `source_type`, read from an open index connection.
+pub fn read_graph_edges_by_source_type(
+    conn: &Connection,
+    source_type: EvidenceSourceType,
+) -> Result<Vec<GraphEdge>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{} WHERE e.source_type = ?1 ORDER BY e.id",
+            compact::EDGE_SELECT
+        ))
+        .map_err(storage_err)?;
+    let mut rows = stmt
+        .query(params![format!("{source_type:?}")])
+        .map_err(storage_err)?;
+    collect_edges(&mut rows)
 }
 
 fn is_duplicate_column(err: &rusqlite::Error) -> bool {
@@ -3154,9 +3319,20 @@ fn set_schema_meta_flag(conn: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
+fn clear_schema_meta_flag(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        [],
+    )
+    .map_err(storage_err)?;
+    conn.execute("DELETE FROM schema_meta WHERE key = ?1", params![key])
+        .map_err(storage_err)?;
+    Ok(())
+}
+
 fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
-    // Add columns to graph_nodes and graph_edges. If any column was actually added, the tables
-    // were genuinely pre-migration and the backfill must run regardless of the marker.
+    // Add columns to graph_nodes. If any column was actually added, the table was genuinely
+    // pre-migration and the backfill must run regardless of the marker.
     let mut columns_added = false;
     for stmt in [
         "ALTER TABLE graph_nodes ADD COLUMN node_type TEXT DEFAULT ''",
@@ -3164,11 +3340,6 @@ fn migrate_graph_schema(conn: &mut Connection) -> Result<()> {
         "ALTER TABLE graph_nodes ADD COLUMN symbol_id TEXT DEFAULT ''",
         "ALTER TABLE graph_nodes ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
         "ALTER TABLE graph_nodes ADD COLUMN freshness INTEGER DEFAULT 0",
-        "ALTER TABLE graph_edges ADD COLUMN confidence TEXT DEFAULT ''",
-        "ALTER TABLE graph_edges ADD COLUMN source_type TEXT DEFAULT ''",
-        "ALTER TABLE graph_edges ADD COLUMN source_file TEXT DEFAULT ''",
-        "ALTER TABLE graph_edges ADD COLUMN evidence_available BOOLEAN DEFAULT 0",
-        "ALTER TABLE graph_edges ADD COLUMN freshness INTEGER DEFAULT 0",
     ] {
         columns_added |= add_column_if_not_exists(conn, stmt)?;
     }
@@ -3248,60 +3419,53 @@ fn backfill_graph_query_columns(conn: &mut Connection) -> Result<()> {
         tx.commit().map_err(storage_err)?;
     }
 
-    let edge_rows = {
-        let mut stmt = conn
-            .prepare(
-                // edge_type is populated by every writer and by the backfill itself; the other
-                // columns can be legitimately empty and must not retrigger the backfill.
-                "SELECT id, json FROM graph_edges WHERE COALESCE(edge_type, '') = ''",
-            )
-            .map_err(storage_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(storage_err)?;
-        let mut rows_out = Vec::new();
-        for row in rows {
-            rows_out.push(row.map_err(storage_err)?);
-        }
-        rows_out
-    };
-    if !edge_rows.is_empty() {
-        let tx = conn.transaction().map_err(storage_err)?;
-        for (id, json) in edge_rows {
-            let Ok(edge) = serde_json::from_str::<GraphEdge>(&json) else {
-                continue;
-            };
-            tx.execute(
-                "UPDATE graph_edges
-                 SET from_id = ?1,
-                     to_id = ?2,
-                     edge_type = ?3,
-                     confidence = ?4,
-                     source_type = ?5,
-                     source_file = ?6,
-                     evidence_available = ?7,
-                     freshness = ?8
-                 WHERE id = ?9",
-                params![
-                    edge.from.0.as_str(),
-                    edge.to.0.as_str(),
-                    format!("{:?}", edge.edge_type),
-                    format!("{:?}", edge.evidence.confidence),
-                    format!("{:?}", edge.evidence.source_type),
-                    edge.evidence.source.as_str(),
-                    true,
-                    edge.evidence.indexed_at.timestamp(),
-                    id,
-                ],
-            )
-            .map_err(storage_err)?;
-        }
-        tx.commit().map_err(storage_err)?;
-    }
-
     Ok(())
+}
+
+/// Marker recording that the graph tables were reset because they held a pre-4.0 layout.
+///
+/// Set by [`reset_legacy_graph_storage`] and cleared by `replace_graph`, so a store whose
+/// edges were discarded reports a rebuild instruction rather than answering relationship
+/// questions from an empty table.
+const GRAPH_REBUILD_REQUIRED_FLAG: &str = "graph_rebuild_required_v4";
+
+/// Drop pre-4.0 `graph_edges` / `call_sites` so the schema batch can recreate them compact.
+///
+/// The two tables used to carry a `json` column holding a self-contained copy of every row;
+/// 4.0 replaces it with typed columns and a string dictionary. The old rows cannot be read
+/// by the new statements, so the shapes are mutually exclusive and the `json` column is an
+/// exact discriminator. This runs at most once per store: after the reset the column is
+/// gone, so the detection cannot match again.
+fn reset_legacy_graph_storage(conn: &mut Connection) -> Result<()> {
+    let legacy =
+        has_column(conn, "graph_edges", "json")? || has_column(conn, "call_sites", "json")?;
+    if !legacy {
+        return Ok(());
+    }
+    let tx = conn.transaction().map_err(storage_err)?;
+    for stmt in [
+        "DROP TABLE IF EXISTS graph_edges",
+        "DROP TABLE IF EXISTS call_sites",
+    ] {
+        tx.execute(stmt, []).map_err(storage_err)?;
+    }
+    tx.commit().map_err(storage_err)?;
+    set_schema_meta_flag(conn, GRAPH_REBUILD_REQUIRED_FLAG)
+}
+
+/// Whether `table` exists and has `column`. A missing table reports `false`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(storage_err)?;
+    let mut rows = stmt.query([]).map_err(storage_err)?;
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        let name: String = row.get(1).map_err(storage_err)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn migrate_history_schema(conn: &mut Connection) -> Result<()> {
@@ -3886,11 +4050,14 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{SqliteStore, SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION};
+    use super::{
+        compact, schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
+        SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
+    };
     use chrono::{TimeZone, Utc};
     use open_kioku_core::{
         AnalysisFact, ChurnEntityKind, CodeChunk, Confidence, EdgeId, Evidence, EvidenceId,
-        EvidenceSourceType, File, FileId, GitChangeKind, GitCochangeEdge, GitCommitId,
+        EvidenceSourceType, File, FileId, FileRange, GitChangeKind, GitCochangeEdge, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
         GraphNodeType, HistoryRecordId, HistorySignalQuery, HistorySnapshot, IndexManifest,
         IndexQuality, Language, LineRange, NodeId, Owner, Repository, RepositoryId,
@@ -5478,7 +5645,7 @@ mod tests {
     }
 
     #[test]
-    fn test_old_graph_tables_migrate_and_replace_graph_backfills_columns() {
+    fn legacy_graph_tables_are_discarded_and_report_a_rebuild_instead_of_empty_results() {
         let store = make_store();
         let legacy_file = GraphNode {
             id: NodeId::new("legacy_file"),
@@ -5552,34 +5719,34 @@ mod tests {
         assert_eq!(migrated_nodes.len(), 1);
         assert_eq!(migrated_nodes[0].id.0, "legacy_file");
 
-        let edge_read_error = store
-            .edges_by_type(GraphEdgeType::Defines, 10, 0)
-            .unwrap_err()
-            .to_string();
-        assert!(edge_read_error.contains("legacy index has no analysis-semantics descriptor"));
-        let between_read_error = store
-            .graph_edges_between("legacy_file", "legacy_symbol", 10)
-            .unwrap_err()
-            .to_string();
-        assert!(between_read_error.contains("legacy index has no analysis-semantics descriptor"));
-
-        let (migrated_edge_type, migrated_from, migrated_to): (String, String, String) = store
+        // The legacy edge rows cannot be read by the compact statements, so they are dropped
+        // rather than half-interpreted, and every relationship read says so.
+        let edge_count: i64 = store
             .connection
             .lock()
             .unwrap()
-            .query_row(
-                "SELECT edge_type, from_id, to_id FROM graph_edges WHERE id = 'legacy_edge'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .query_row("SELECT COUNT(*) FROM graph_edges", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(migrated_edge_type, "Defines");
-        assert_eq!(migrated_from, "legacy_file");
-        assert_eq!(migrated_to, "legacy_symbol");
+        assert_eq!(edge_count, 0);
+
+        for error in [
+            store
+                .edges_by_type(GraphEdgeType::Defines, 10, 0)
+                .unwrap_err()
+                .to_string(),
+            store
+                .graph_edges_between("legacy_file", "legacy_symbol", 10)
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(
+                error.contains("older index format") && error.contains("ok index"),
+                "expected a rebuild instruction, got: {error}"
+            );
+        }
 
         let migrated_counts = store.graph_schema_counts().unwrap();
         assert_eq!(migrated_counts.node_types.get("File"), Some(&1));
-        assert_eq!(migrated_counts.edge_types.get("Defines"), Some(&1));
 
         let node = GraphNode {
             id: NodeId::new("test_node"),
@@ -5588,6 +5755,13 @@ mod tests {
             ..Default::default()
         };
         store.replace_graph(&[node], &[]).unwrap();
+
+        // A rebuild clears the marker, so relationship reads stop reporting it.
+        assert!(!schema_meta_flag(
+            &store.connection.lock().unwrap(),
+            GRAPH_REBUILD_REQUIRED_FLAG
+        )
+        .unwrap());
 
         let count: i64 = store
             .connection
@@ -5624,13 +5798,14 @@ mod tests {
                      'idx_graph_edges_type',
                      'idx_graph_edges_from_type',
                      'idx_graph_edges_to_type',
-                     'idx_graph_edges_source_type'
+                     'idx_graph_edges_source_type',
+                     'idx_graph_strings_vhash'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(index_count, 8);
+        assert_eq!(index_count, 9);
     }
 
     #[test]
@@ -5880,6 +6055,179 @@ mod tests {
         let overall = store.graph_counts().unwrap();
         assert_eq!(overall.nodes, 2);
         assert_eq!(overall.edges, 1);
+    }
+
+    /// Every field of an edge must survive the columnar layout: the compact tables replaced a
+    /// self-describing JSON document, so a dropped field would now be silently lost rather
+    /// than merely unread.
+    #[test]
+    fn compact_edge_rows_round_trip_every_field() {
+        let store = make_store();
+        store
+            .replace_index(sample_index_data(&make_manifest()))
+            .unwrap();
+
+        let edge = GraphEdge {
+            id: EdgeId::new("edge:1"),
+            from: NodeId::new("file:src/lib.rs"),
+            to: NodeId::new("symbol:s1"),
+            edge_type: GraphEdgeType::DependsOn,
+            evidence: Evidence {
+                id: EvidenceId::new("ev-round-trip"),
+                source: "open-kioku-import-resolver/manifest-package".into(),
+                source_type: EvidenceSourceType::StaticAnalysis,
+                file_range: Some(FileRange {
+                    path: "src/lib.rs".into(),
+                    line_range: Some(LineRange { start: 7, end: 11 }),
+                }),
+                symbol_id: Some(SymbolId::new("s1")),
+                confidence: Confidence::Exact,
+                message: "resolved `serde` as an external package dependency".into(),
+                indexed_at: chrono::DateTime::parse_from_rfc3339("2026-09-07T03:41:26.594463Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                confidence_score: Some(0.75),
+                confidence_reason: Some("manifest match".into()),
+                freshness: Some("fresh".into()),
+            },
+            properties: BTreeMap::from([
+                ("target_kind".to_string(), serde_json::json!("Package")),
+                ("call_sites".to_string(), serde_json::json!([{ "line": 7 }])),
+            ]),
+            schema_version: Some("graph-v1".into()),
+            source_pass: Some("open-kioku-import-resolver/manifest-package".into()),
+            index_mode: Some("full".into()),
+            extractor_version: Some("1.2.3".into()),
+            ambiguity: vec!["two candidates".into()],
+            quality_notes: vec!["speculative".into()],
+        };
+        store
+            .replace_graph(&[], std::slice::from_ref(&edge))
+            .unwrap();
+
+        let read = store
+            .graph_edges_between("file:src/lib.rs", "symbol:s1", 10)
+            .unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&read[0]).unwrap(),
+            serde_json::to_value(&edge).unwrap()
+        );
+    }
+
+    /// An edge with no evidence range, no properties and no optional tail must not acquire
+    /// empty-but-present fields on the way through the columns.
+    #[test]
+    fn compact_edge_rows_round_trip_a_minimal_edge() {
+        let store = make_store();
+        store
+            .replace_index(sample_index_data(&make_manifest()))
+            .unwrap();
+        let edge = GraphEdge {
+            id: EdgeId::new("edge:minimal"),
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            edge_type: GraphEdgeType::Calls,
+            evidence: evidence(),
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[], std::slice::from_ref(&edge))
+            .unwrap();
+        let read = store.graph_edges_between("a", "b", 10).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&read[0]).unwrap(),
+            serde_json::to_value(&edge).unwrap()
+        );
+    }
+
+    /// Call sites are write-only today, so the columns that replaced their JSON document are
+    /// checked directly: nothing else would notice a field that stopped being persisted.
+    #[test]
+    fn compact_call_site_rows_round_trip_every_field() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let call_site = open_kioku_core::CallSite {
+            id: open_kioku_core::CallSiteId::new("src/lib.rs:call:33:16:33:80:singleton"),
+            file_id: FileId::new("f1"),
+            scope_id: open_kioku_core::ScopeId::new("src/lib.rs:scope:32:3"),
+            caller_symbol_id: Some(SymbolId::new("s1")),
+            callee_name: "singleton".into(),
+            receiver: Some("Collections".into()),
+            receiver_kind: open_kioku_core::ReceiverKind::Type,
+            range: open_kioku_core::SourceRange {
+                start_line: 33,
+                start_column: 16,
+                end_line: 33,
+                end_column: 80,
+            },
+        };
+        let mut data = sample_index_data(&manifest);
+        data.call_sites = std::slice::from_ref(&call_site);
+        store.replace_index(data).unwrap();
+
+        let conn = store.connection.lock().unwrap();
+        let mut stmt = conn.prepare(compact::CALL_SITE_SELECT).unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().expect("one call site row");
+        assert_eq!(
+            serde_json::to_value(compact::call_site_from_row(row).unwrap()).unwrap(),
+            serde_json::to_value(&call_site).unwrap()
+        );
+    }
+
+    /// The dictionary is owned by the rows that reference it; a re-index must not leave
+    /// entries behind that nothing points at.
+    #[test]
+    fn re_indexing_does_not_accumulate_dictionary_entries() {
+        let store = make_store();
+        store
+            .replace_index(sample_index_data(&make_manifest()))
+            .unwrap();
+        let edge = GraphEdge {
+            id: EdgeId::new("edge:1"),
+            from: NodeId::new("a"),
+            to: NodeId::new("b"),
+            edge_type: GraphEdgeType::Calls,
+            evidence: evidence(),
+            ..Default::default()
+        };
+        store
+            .replace_graph(&[], std::slice::from_ref(&edge))
+            .unwrap();
+        let first: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM graph_strings", [], |row| row.get(0))
+            .unwrap();
+        store
+            .replace_graph(&[], std::slice::from_ref(&edge))
+            .unwrap();
+        let second: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM graph_strings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(first, second);
+    }
+
+    fn sample_index_data<'a>(manifest: &'a IndexManifest) -> IndexData<'a> {
+        IndexData {
+            manifest,
+            files: &[],
+            symbols: &[],
+            chunks: &[],
+            tests: &[],
+            imports: &[],
+            occurrences: &[],
+            analysis_facts: &[],
+            scopes: &[],
+            bindings: &[],
+            call_sites: &[],
+        }
     }
 }
 
