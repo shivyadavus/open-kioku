@@ -1,4 +1,4 @@
-# Open Kioku 3.0.4 — anonymized large-Java validation
+# Open Kioku 3.0.4 — large-Java validation on a private 16.5k-file corpus
 
 This document records the public methodology and aggregate evidence behind the
 large-Java figures quoted in the README and on the product site. The canonical

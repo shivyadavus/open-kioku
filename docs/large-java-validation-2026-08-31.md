@@ -1,4 +1,4 @@
-# Open Kioku main (pre-release) — anonymized large-Java validation, 2026-08-31
+# Open Kioku main (pre-release) — large-Java validation on a private 16.5k-file corpus, 2026-08-31
 
 This document records the methodology and aggregate evidence for a validation
 run of Open Kioku `main` at

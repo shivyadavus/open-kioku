@@ -62,7 +62,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Existing stores gain the new symbol-lookup indexes and the one-time graph migration marker automatically on first open (a final full scan on large stores, then never again).
 
 ### Validated
-- Anonymized large-Java validation on a 16.5k-file corpus, same host and protocol as the 3.0.4 record: cold structural index 19m28s, exact class lookup 0.02–0.05s in a fresh process (previously 13.9s with an incorrect symbol-not-found), lexical search 0.24s, repeat totals identical, four parallel readers with zero lock failures, 495,606 semantic vectors with zero failures across both backends. Record: `docs/large-java-validation-2026-08-31.md`.
+- Large-Java validation on a private 16.5k-file corpus, same host and protocol as the 3.0.4 record: cold structural index 19m28s, exact class lookup 0.02–0.05s in a fresh process (previously 13.9s with an incorrect symbol-not-found), lexical search 0.24s, repeat totals identical, four parallel readers with zero lock failures, 495,606 semantic vectors with zero failures across both backends. Record: `docs/large-java-validation-2026-08-31.md`.
 - Full 50K→1M ANN scale evidence recorded with the measured recall ceiling documented and caveated at runtime.
 
 ### Artifacts
