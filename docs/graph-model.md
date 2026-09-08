@@ -22,24 +22,29 @@ qualified names, route names, relation kinds, package names, or resolver output.
 where a fact came from. `ambiguity` and `quality_notes` preserve uncertainty and
 quality caveats instead of flattening inferred facts into unsupported certainty.
 
-All of these fields are backward-compatible serde defaults. Older graph JSON
-without the fields still deserializes, and newer JSON keeps the original `id`,
-type, label, endpoint, and evidence fields unchanged.
+All of these fields are backward-compatible serde defaults on the wire: an MCP or
+`--json` consumer that has not seen a field still deserializes, and the serialized shape of
+a `GraphEdge` is unchanged by the 4.0 storage work.
 
 The graph builder creates file-to-symbol `DEFINES` edges from extracted symbols and `REFERENCES` edges from persisted exact symbol occurrences. Heuristic reference expansion is intentionally avoided for common repeated names; richer reference coverage should come from configured SCIP indexes or future language-specific resolvers. SQLite persists `graph_nodes` and `graph_edges`, and `open-kioku-storage::GraphStore` exposes neighborhood and shortest-path traversal to CLI and MCP callers.
 
-SQLite keeps the full graph fact JSON as the source of truth. Query columns are
-maintained only for common filters and traversal:
+`graph_nodes` keeps the full node JSON as the source of truth, with query columns
+maintained for common filters:
 
 - `graph_nodes.node_type`
 - `graph_nodes.file_id`
 - `graph_nodes.symbol_id`
-- `graph_edges.edge_type`
-- `graph_edges.from_id`
-- `graph_edges.to_id`
-- `graph_edges.confidence`
-- `graph_edges.source_type`
 
-Graph schema migrations are additive and idempotent. Existing databases can be
-opened without reindexing; `replace_graph` backfills query columns from the JSON
-domain model when graph facts are written.
+`graph_edges` does not. Since 4.0 an edge is stored as typed columns plus integer
+references into a per-table string dictionary, because the JSON document duplicated the
+columns beside it and re-stated a handful of distinct paths, pass names and messages once
+per edge. Endpoints and evidence strings are dictionary references (`from_sid`, `to_sid`,
+`source_sid`, `ev_path_sid`, `ev_symbol_sid`, `ev_message_sid`, `ev_indexed_at_sid`), the
+filterable types stay inline (`edge_type`, `confidence`, `source_type`, `freshness`), and
+only fields with no column of their own land in a residual document. See
+[Storage Model](storage-model.md#compact-graph-tables) for the layout, the measurements
+behind it, and how a pre-4.0 index is detected and rebuilt.
+
+Node schema migrations remain additive and idempotent. The edge layout is not
+forward-migratable: opening a pre-4.0 index discards its edge rows and reports that
+`ok index` must rebuild them, rather than reading them as an empty graph.

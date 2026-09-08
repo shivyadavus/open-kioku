@@ -15,7 +15,49 @@ SQLite stores metadata:
 - `graph_nodes`
 - `graph_edges`
 
-`replace_index` writes a complete metadata index inside one transaction for crash-safe replacement. Graph writes use a separate transactional `replace_graph` call. Each row stores query columns plus the full JSON domain object.
+`replace_index` writes a complete metadata index inside one transaction for crash-safe replacement. Graph writes use a separate transactional `replace_graph` call. Most tables store query columns plus the full JSON domain object; `graph_edges` and `call_sites` do not — see [Compact graph tables](#compact-graph-tables).
+
+## Compact graph tables
+
+`graph_edges` and `call_sites` are the two largest tables in a real index, and until
+4.0 each of their rows carried a self-contained JSON document *beside* the query columns
+holding the same values. Measured on a 1,751-file Java corpus, the edge document averaged
+1,288 bytes: 22% of it re-stated `id`, `from`, `to` and `edge_type`, another 30% was a
+`properties` map whose four commonest keys have three to eight distinct values across the
+whole corpus, and 48% was the edge's own `Evidence`.
+
+4.0 replaces that with two mechanisms.
+
+**Typed columns.** Every scalar field of a `GraphEdge` and a `CallSite` has its own
+column. `graph_edges` keeps `id`, `edge_type`, `confidence`, `source_type` and `freshness`
+as before, and adds `ev_id`, `ev_line_start`, `ev_line_end`. Only fields with no column of
+their own — `properties`, `ambiguity`, `quality_notes`, `schema_version`, `source_pass`,
+`index_mode`, `extractor_version` and the three optional `Evidence` tail fields — are
+serialized, into a residual document that is `NULL` for an edge that has none of them.
+
+**A string dictionary per table.** `graph_strings` and `call_site_strings` hold each
+distinct string once as `(sid, vhash, value)`; the row columns reference it by integer id.
+That is where the redundancy actually lives: on the measured corpus 153,856 edges cite
+2,388 distinct evidence paths, 156,515 edges carry 66,663 distinct messages, and a single
+index run stamps one distinct `indexed_at`. The `vhash` column is an FNV-1a of the value,
+so value lookups are an integer index probe plus an exact comparison rather than an index
+over full strings.
+
+Each dictionary is owned by the table that references it and is emptied with it —
+`replace_graph` clears `graph_strings`, `replace_index` clears `call_site_strings` — so a
+re-index cannot accumulate entries nothing points at. The incremental writers add to a
+dictionary rather than clearing it, which can leave unreferenced entries between full
+re-indexes; the next full index run removes them.
+
+Object-level deduplication of evidence was measured and rejected. Evidence objects are 1.0x
+distinct per edge — their `id` is a content hash and `indexed_at` is stamped per run — so a
+normalized evidence table keyed by evidence id would have added a join and a second
+64-character index for no saving. The redundancy is at field level, which is what the
+dictionary captures.
+
+`call_sites` rows are written by indexing and are not read back by any product path today;
+resolution consumes call sites from the in-memory snapshot. The columns are still the
+complete record, so nothing was dropped in the move.
 
 ## Historical Evidence
 
@@ -352,3 +394,27 @@ version fail explicitly.
 
 `IndexManifest.schema_version` remains the logical index payload version and is
 separate from SQLite migration state.
+
+### Opening a pre-4.0 index
+
+`user_version` 4 introduces the compact graph tables. Their rows cannot be read by the
+pre-4.0 statements or vice versa, so opening an older index does not attempt to reinterpret
+them:
+
+1. The presence of a `json` column on `graph_edges` or `call_sites` is an exact
+   discriminator for the old layout. It is checked with `PRAGMA table_info`, never a table
+   scan, so store open stays constant-time.
+2. Both tables are dropped and recreated in the compact shape, and the `schema_meta` key
+   `graph_rebuild_required_v4` is set. Because the discriminating column is then gone, the
+   detection cannot match again — the reset runs exactly once per store.
+3. While that marker is set, every relationship read fails with an instruction to run
+   `ok index`, rather than answering from an empty table. An empty answer would read as "no
+   such relationship exists", which is the failure this design exists to prevent.
+4. `replace_graph` clears the marker, so a rebuild restores normal reads.
+
+`IndexManifest.schema_version` is bumped to 2 in the same release, which marks every file
+stale and routes the next `ok index` to a full rebuild rather than a partial update.
+
+`ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
+version and names the fix, instead of importing a store whose graph would be discarded on
+first open.
