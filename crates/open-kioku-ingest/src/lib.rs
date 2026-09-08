@@ -1175,7 +1175,7 @@ impl Indexer {
             if is_supported_code(&language) {
                 source_like_files += 1;
             }
-            let secret_policy = is_secret_like_path(&rel);
+            let secret_policy = is_secret_like_path(&rel, is_supported_code(&language));
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
                 let reason = if secret_policy {
@@ -1369,18 +1369,11 @@ impl Indexer {
                 continue;
             }
             let content = String::from_utf8_lossy(&bytes);
+            // Generated source is indexed and flagged, never dropped: on a Python monorepo
+            // whose `modeling_*.py` files carry a "do not edit" banner, skipping them removed
+            // 394 files and a tenth of the files real commits went on to change. Ranking
+            // decides what a generated file is worth; the index must still know it exists.
             let is_generated = likely_generated(&content);
-            if is_generated {
-                push_skip(
-                    root,
-                    path,
-                    SkipReason::Generated,
-                    SkipSource::Detector,
-                    true,
-                    &mut skipped_paths,
-                );
-                continue;
-            }
             let content_hash = hash_bytes(&bytes);
             files.push(File {
                 id: FileId::new(stable_id(&rel.to_string_lossy())),
@@ -2649,17 +2642,31 @@ fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-fn is_secret_like_path(path: &Path) -> bool {
+/// Paths that hold key material or environment secrets are never read. A *source* file is
+/// only blocked by the strict list — key-material extensions and the `.aws`/`.ssh` directories —
+/// because a class named `RepositoryS3BasicCredentialsRestIT` or a module named `secrets.go` is
+/// code, not a secret (the loose rule silently dropped 25 Java files from one repository);
+/// secret-looking values inside source are handled by content redaction, not omission.
+fn is_secret_like_path(path: &Path, is_source: bool) -> bool {
     path.components().any(|component| {
         let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        value == ".env"
+        let strict = value == ".env"
             || value.starts_with(".env.")
-            || matches!(value.as_str(), ".aws" | ".ssh" | "secrets" | "secret")
-            || value.contains("secret")
-            || value.contains("credential")
-            || value.ends_with("_key")
+            || matches!(value.as_str(), ".aws" | ".ssh")
+            || value.starts_with("id_rsa")
+            || value.starts_with("id_ed25519")
             || value.ends_with(".pem")
             || value.ends_with(".key")
+            || value.ends_with(".p12")
+            || value.ends_with(".pfx")
+            || value.ends_with(".jks")
+            || value.ends_with(".keystore");
+        strict
+            || (!is_source
+                && (matches!(value.as_str(), "secrets" | "secret" | "credentials")
+                    || value.contains("secret")
+                    || value.contains("credential")
+                    || value.ends_with("_key")))
     })
 }
 
@@ -3170,14 +3177,20 @@ class Util {
             .index_repo_with_mode(root, &config, IndexMode::Fast)
             .unwrap();
         let quality = &snapshot.manifest.quality;
-        assert_eq!(snapshot.manifest.file_count, 1);
+        // src/lib.rs plus generated.rs: generated source is indexed and flagged, not skipped.
+        assert_eq!(snapshot.manifest.file_count, 2);
+        let generated = snapshot
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("generated.rs"))
+            .expect("generated source is indexed rather than skipped");
+        assert!(generated.is_generated);
         assert_skip(quality, SkipReason::Denied, SkipSource::SecurityPolicy);
         assert_skip(quality, SkipReason::Hidden, SkipSource::HiddenPolicy);
         assert_skip(quality, SkipReason::Ignored, SkipSource::GitIgnore);
         assert_skip(quality, SkipReason::Ignored, SkipSource::OkIgnore);
         assert_skip(quality, SkipReason::TooLarge, SkipSource::SizeLimit);
         assert_skip(quality, SkipReason::Binary, SkipSource::Detector);
-        assert_skip(quality, SkipReason::Generated, SkipSource::Detector);
         assert_skip(quality, SkipReason::Vendor, SkipSource::Detector);
         assert_skip(quality, SkipReason::FastMode, SkipSource::FastMode);
         #[cfg(unix)]
