@@ -15,6 +15,7 @@ use open_kioku_storage::{HistoryStore, OkStore, SearchIndex};
 use open_kioku_tests::TestSelector;
 
 pub mod candidates;
+mod lattice;
 pub mod routing;
 
 fn is_trusted_context_dependency_edge(edge: &GraphEdge) -> bool {
@@ -537,14 +538,15 @@ impl<'a> ContextPackBuilder<'a> {
         let files = self.store.list_files(usize::MAX, 0)?;
         let chunks = self.store.all_chunks()?;
         let symbols = self.store.list_symbols(None, usize::MAX, 0)?;
-        let intent = TaskSearchIntent::parse(task);
+        let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(&files, &symbols);
         let routing = routing::classify_task(task);
         let candidate_limit = routing.policy.request_limit(limit).clamp(20, 200);
         let (path_prefixes, scope_caveats) =
             validated_candidate_path_scope(&intent.path_anchors, &files);
         let request =
             candidates::CandidateRequest::new(task, intent.search_terms(task), candidate_limit)
-                .with_path_prefixes(path_prefixes);
+                .with_path_prefixes(path_prefixes)
+                .with_lattice_terms(intent.lattice_terms());
         let routed_external_sources = external_sources
             .iter()
             .copied()
@@ -598,6 +600,7 @@ impl<'a> ContextPackBuilder<'a> {
         let mut diagnostics = fused.diagnostics;
         diagnostics.routing = routing.diagnostics();
         diagnostics.caveats.extend(scope_caveats);
+        diagnostics.caveats.extend(intent.vocabulary_caveats());
         diagnostics.caveats.sort();
         diagnostics.caveats.dedup();
         let blocked = apply_required_evidence_policy(&routing.policy, &budget, &mut diagnostics);
@@ -2041,6 +2044,12 @@ struct TaskSearchIntent {
     /// which name the package or directory the change lives in.
     scope_anchors: Vec<String>,
     lexical_anchors: Vec<String>,
+    /// Repository identifiers the task's identifiers reach through the identifier lattice
+    /// (`CollectionsUtils` → `CollectionUtils`). Heuristic links to exact names: they rank and
+    /// tier like a primary anchor but never seed the exact-symbol stream.
+    lattice_anchors: Vec<lattice::LatticeTerm>,
+    /// Task identifiers that name nothing in the repository, exactly or through the lattice.
+    unreached_identifiers: Vec<String>,
     /// The task is about tests, so test files are legitimate primary context rather than
     /// lower-tier support material.
     wants_tests: bool,
@@ -2095,6 +2104,59 @@ impl TaskSearchIntent {
         intent
     }
 
+    /// Reach the repository's own spelling of the task's identifiers: symbol names and file
+    /// stems whose parts are the task identifier's parts under a light stem, or one edit from
+    /// a spelling the repository does not use anywhere. Built per query from the loaded symbol
+    /// and file lists; without it the intent only knows the task's literal vocabulary.
+    fn with_repository_vocabulary(mut self, files: &[File], symbols: &[Symbol]) -> Self {
+        let task_identifiers = self
+            .primary_anchors
+            .iter()
+            .chain(self.reference_anchors.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let expansion = lattice::expand(&task_identifiers, files, symbols);
+        self.lattice_anchors = expansion.identifiers;
+        self.unreached_identifiers = expansion.unreached_identifiers;
+        self
+    }
+
+    /// Terms for the lexical stream: the shared search terms plus lattice expansions. The
+    /// exact-symbol stream keeps using `search_terms`, so a lattice hop can never claim exact
+    /// authority for a symbol the task did not name.
+    fn lexical_search_terms(&self, task: &str) -> Vec<String> {
+        let mut terms = self.search_terms(task);
+        for term in &self.lattice_anchors {
+            if term.term.len() >= 3 && !terms.iter().any(|existing| existing == &term.term) {
+                terms.push(term.term.clone());
+            }
+        }
+        terms
+    }
+
+    fn lattice_terms(&self) -> Vec<lattice::LatticeTerm> {
+        self.lattice_anchors.clone()
+    }
+
+    fn lattice_term(&self, term: &str) -> Option<&lattice::LatticeTerm> {
+        self.lattice_anchors
+            .iter()
+            .find(|candidate| candidate.term == term)
+    }
+
+    /// Caveats for task identifiers the repository does not know in any spelling. Absence is
+    /// evidence: retrieval for such a task rests on its remaining words.
+    fn vocabulary_caveats(&self) -> Vec<String> {
+        self.unreached_identifiers
+            .iter()
+            .map(|identifier| {
+                format!(
+                    "task identifier `{identifier}` names no indexed symbol or file, and no identifier within a stem or one edit of its parts exists; retrieval relies on the task's other words"
+                )
+            })
+            .collect()
+    }
+
     fn search_terms(&self, task: &str) -> Vec<String> {
         let mut terms = vec![task.to_string()];
         let alias_terms = task_alias_terms(task);
@@ -2125,13 +2187,17 @@ fn search_candidates(
 ) -> Result<Vec<SearchResult>> {
     let mut merged = std::collections::BTreeMap::<String, SearchResult>::new();
     let per_anchor_limit = limit.clamp(8, 40);
-    for term in intent.search_terms(task) {
+    for term in intent.lexical_search_terms(task) {
+        let lattice_evidence = intent.lattice_term(&term).map(|hop| hop.evidence());
         for mut result in search_chunks(chunks, files, symbols, &term, per_anchor_limit)? {
             if term != task {
                 result
                     .evidence
                     .push(format!("task anchor `{term}` matched"));
                 result.match_reason = format!("{}; task anchor `{term}`", result.match_reason);
+            }
+            if let Some(evidence) = &lattice_evidence {
+                result.evidence.push(evidence.clone());
             }
             let key = result_key(&result);
             match merged.get_mut(&key) {
@@ -2256,6 +2322,26 @@ fn rerank_fused_for_task_with_files(
                 ));
             }
         }
+        // Only a file the reached identifier *names* is boosted. Applying this to any file
+        // that mentions it flattened whole directories into one tier: every file under a
+        // module mentions the module's main class, and the gold file lost its lead.
+        let identity = result_identity_text(result);
+        for hop in &intent.lattice_anchors {
+            if contains_anchor(&identity, &hop.term) {
+                result.score += LATTICE_ANCHOR_BOOST;
+                result.confidence = result.confidence.max(0.7);
+                result.evidence.push(hop.evidence());
+                result.add_score_component(ScoreComponent::adjustment(
+                    "identifier_lattice_anchor_boost",
+                    LATTICE_ANCHOR_BOOST,
+                    result.derived_evidence_ids(),
+                    format!(
+                        "repository identifier `{}` reached from task term `{}` matched result text",
+                        hop.term, hop.origin
+                    ),
+                ));
+            }
+        }
         for anchor in intent
             .ticket_anchors
             .iter()
@@ -2355,6 +2441,10 @@ fn rerank_fused_for_task_with_files(
 /// Relevance tier at which a file *is* the task's named target (its path or symbol names a
 /// primary anchor) and quality demotion no longer applies.
 const NAMED_TARGET_RELEVANCE_TIER: u8 = 4;
+/// Below the primary anchor's +0.65: the lattice link from task spelling to repository spelling
+/// is a heuristic, so a file that names the reached identifier must not outscore a file that
+/// names an identifier the task spelled exactly.
+const LATTICE_ANCHOR_BOOST: f32 = 0.45;
 /// The quality tier of ordinary source, which a named target is always treated as.
 const SOURCE_QUALITY_TIER: u8 = 2;
 
@@ -2453,6 +2543,10 @@ fn task_relevance_tier(
         .primary_anchors
         .iter()
         .any(|anchor| contains_anchor(&identity, anchor))
+        || intent
+            .lattice_anchors
+            .iter()
+            .any(|hop| contains_anchor(&identity, &hop.term))
     {
         4
     } else if intent
@@ -2686,6 +2780,26 @@ fn searchable_result_text(result: &SearchResult) -> String {
         "{} {} {} {}",
         result.path.display(),
         result.snippet,
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.qualified_name.as_str())
+            .unwrap_or_default(),
+        result
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.name.as_str())
+            .unwrap_or_default()
+    )
+    .to_ascii_lowercase()
+}
+
+/// Path and symbol names only. A file that *names* an identifier is the edit target; one that
+/// merely mentions it in a snippet is a reference.
+fn result_identity_text(result: &SearchResult) -> String {
+    format!(
+        "{} {} {}",
+        result.path.display(),
         result
             .symbol
             .as_ref()
@@ -4832,6 +4946,158 @@ mod tests {
                 .any(|result| result.path == Path::new("crates/open-kioku-config/src/lib.rs")),
             "config crate should stay in the planner-visible context: {results:#?}"
         );
+    }
+
+    fn lattice_fixture() -> (Vec<CodeChunk>, Vec<File>, Vec<Symbol>) {
+        let repo_id = RepositoryId::new("repo");
+        let file = |id: &str, path: &str| File {
+            id: FileId::new(id),
+            repository_id: repo_id.clone(),
+            path: path.into(),
+            language: Language::Java,
+            size_bytes: 100,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let symbol = |id: &str, name: &str| Symbol {
+            id: SymbolId::new(id),
+            name: name.into(),
+            qualified_name: format!("org.example.{name}"),
+            kind: SymbolKind::Class,
+            file_id: FileId::new(id),
+            range: Some(LineRange { start: 1, end: 20 }),
+            language: Language::Java,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        };
+        let chunk = |id: &str, text: &str| CodeChunk {
+            id: format!("{id}-chunk"),
+            file_id: FileId::new(id),
+            range: LineRange { start: 1, end: 10 },
+            language: Language::Java,
+            text: text.into(),
+            symbol_id: Some(SymbolId::new(id)),
+        };
+        let files = vec![
+            file(
+                "utils",
+                "server/src/main/java/org/example/util/CollectionUtils.java",
+            ),
+            file(
+                "utils-tests",
+                "server/src/test/java/org/example/util/CollectionUtilsTests.java",
+            ),
+            file(
+                "other",
+                "server/src/test/java/org/example/other/SomeOtherTests.java",
+            ),
+        ];
+        let symbols = vec![
+            symbol("utils", "CollectionUtils"),
+            symbol("utils-tests", "CollectionUtilsTests"),
+            symbol("other", "SomeOtherTests"),
+            symbol("utils-sort", "sortArray"),
+        ];
+        let chunks = vec![
+            chunk(
+                "utils",
+                "public class CollectionUtils { static int[] sort(int[] a) {} }",
+            ),
+            chunk(
+                "utils-tests",
+                "public class CollectionUtilsTests { public void testSort() {} }",
+            ),
+            chunk(
+                "other",
+                "public class SomeOtherTests { public void testSomething() {} } // tests",
+            ),
+        ];
+        (chunks, files, symbols)
+    }
+
+    #[test]
+    fn misinflected_task_identifier_reaches_the_file_that_names_it() {
+        let (chunks, files, symbols) = lattice_fixture();
+        let task = "CollectionsUtils Tests";
+        let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(&files, &symbols);
+        assert_eq!(intent.lattice_anchors.len(), 1);
+        assert_eq!(intent.lattice_anchors[0].term, "CollectionUtils");
+        let results = rerank_for_task(
+            search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
+            &intent,
+            &RankingOptions::default(),
+        );
+        let paths = results
+            .iter()
+            .map(|result| result.path.display().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            paths[0].ends_with("CollectionUtilsTests.java")
+                || paths[0].ends_with("CollectionUtils.java"),
+            "the reached identifier's files must lead: {paths:?}"
+        );
+        assert!(
+            paths.iter().take(2).all(|path| path.contains("CollectionUtils")),
+            "both files naming the reached identifier outrank the file that merely says tests: {paths:?}"
+        );
+        let first = &results[0];
+        assert!(
+            first
+                .evidence
+                .iter()
+                .any(|line| line.starts_with("identifier lattice:")
+                    && line.contains("`CollectionsUtils`")
+                    && line.contains("`CollectionUtils`")),
+            "a lattice hop must be visible in evidence: {:?}",
+            first.evidence
+        );
+        assert!(
+            first
+                .score_breakdown
+                .iter()
+                .any(|component| component.signal == "identifier_lattice_anchor_boost"),
+            "the boost must be a traceable score component: {:?}",
+            first.score_breakdown
+        );
+        // Without the repository vocabulary the misspelling reaches nothing: the same fixture
+        // ranks the file that merely mentions "tests" level with the real target.
+        let plain = TaskSearchIntent::parse(task);
+        assert!(plain.lattice_anchors.is_empty());
+    }
+
+    #[test]
+    fn lattice_hops_feed_lexical_terms_but_not_exact_symbol_terms() {
+        let (_, files, symbols) = lattice_fixture();
+        let task = "CollectionsUtils Tests";
+        let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(&files, &symbols);
+        let shared = intent.search_terms(task);
+        let lexical = intent.lexical_search_terms(task);
+        assert!(
+            !shared.iter().any(|term| term == "CollectionUtils"),
+            "shared terms seed exact-symbol anchors and must not carry lattice hops: {shared:?}"
+        );
+        assert!(
+            lexical.iter().any(|term| term == "CollectionUtils"),
+            "lexical terms carry the hop: {lexical:?}"
+        );
+        assert!(intent.vocabulary_caveats().is_empty());
+    }
+
+    #[test]
+    fn unknown_task_identifier_is_a_caveat_not_silence() {
+        let (_, files, symbols) = lattice_fixture();
+        let intent = TaskSearchIntent::parse("Guard cleanup in QuantumFluxCapacitor")
+            .with_repository_vocabulary(&files, &symbols);
+        assert!(intent.lattice_anchors.is_empty());
+        let caveats = intent.vocabulary_caveats();
+        assert_eq!(caveats.len(), 1, "{caveats:?}");
+        assert!(caveats[0].contains("`QuantumFluxCapacitor`"));
     }
 }
 

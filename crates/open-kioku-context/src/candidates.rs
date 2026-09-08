@@ -33,6 +33,11 @@ pub struct CandidateRequest {
     pub search_terms: Vec<String>,
     pub limit: usize,
     pub scope: CandidateScope,
+    /// Repository identifiers and parts the task's vocabulary reaches through the identifier
+    /// lattice. Kept apart from `search_terms` on purpose: lexical sources search them, weakest
+    /// last, but the exact-symbol stream never sees them, so a stem or one-edit hop cannot
+    /// claim exact authority for a symbol the task did not name.
+    pub(crate) lattice_terms: Vec<crate::lattice::LatticeTerm>,
 }
 
 impl CandidateRequest {
@@ -42,11 +47,20 @@ impl CandidateRequest {
             search_terms,
             limit: limit.clamp(1, 200),
             scope: CandidateScope::default(),
+            lattice_terms: Vec::new(),
         }
     }
 
     pub fn with_path_prefixes(mut self, path_prefixes: Vec<String>) -> Self {
         self.scope.path_prefixes = path_prefixes;
+        self
+    }
+
+    pub(crate) fn with_lattice_terms(
+        mut self,
+        lattice_terms: Vec<crate::lattice::LatticeTerm>,
+    ) -> Self {
+        self.lattice_terms = lattice_terms;
         self
     }
 }
@@ -78,11 +92,24 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
     }
 
     fn retrieve(&self, request: &CandidateRequest) -> Result<CandidateStream> {
-        let terms = if request.search_terms.is_empty() {
-            vec![request.task.as_str()]
+        let mut terms = if request.search_terms.is_empty() {
+            vec![(request.task.as_str(), None)]
         } else {
-            request.search_terms.iter().map(String::as_str).collect()
+            request
+                .search_terms
+                .iter()
+                .map(|term| (term.as_str(), None))
+                .collect()
         };
+        // Lattice hops are the repository's spelling of the task's words, reached by a stem or
+        // one edit; they rank after every term the task literally contains.
+        terms.extend(
+            request
+                .lattice_terms
+                .iter()
+                .filter(|hop| !request.search_terms.iter().any(|term| term == &hop.term))
+                .map(|hop| (hop.term.as_str(), Some(hop.evidence()))),
+        );
         // Terms arrive strongest first: the whole task, then ticket/path/identifier anchors,
         // then single prose words and word pairs. A rank from a one-word sub-query is not
         // comparable to a rank from the whole task, so ranks continue across terms instead of
@@ -91,7 +118,7 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
         // put the pack's lexical stream at less than half the recall of plain `ok search`.
         let mut by_path = BTreeMap::<String, (usize, SearchResult)>::new();
         let mut next_rank = 1usize;
-        for term in terms {
+        for (term, lattice_evidence) in terms {
             for mut result in self
                 .index
                 .search(term, request.limit)?
@@ -102,6 +129,11 @@ impl<T: SearchIndex> ContextCandidateSource for SearchIndexCandidateSource<T> {
                     let evidence = format!("expanded task query `{term}` matched indexed search");
                     if !result.evidence.contains(&evidence) {
                         result.evidence.push(evidence);
+                    }
+                }
+                if let Some(evidence) = &lattice_evidence {
+                    if !result.evidence.contains(evidence) {
+                        result.evidence.push(evidence.clone());
                     }
                 }
                 let key = normalize_candidate_path(&result.path.to_string_lossy());
@@ -1217,6 +1249,61 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.contains("expanded task query `case`")));
+    }
+
+    #[test]
+    fn lattice_terms_are_searched_last_and_carry_their_provenance() {
+        let task = "CollectionsUtils Tests";
+        let index = TermAwareIndex {
+            by_term: std::collections::BTreeMap::from([
+                (
+                    task.to_string(),
+                    vec![result("src/test/CircleUtilsTests.java", 3.0, None)],
+                ),
+                (
+                    "CollectionUtils".to_string(),
+                    vec![
+                        result(
+                            "src/main/CollectionUtils.java",
+                            9.0,
+                            Some("CollectionUtils"),
+                        ),
+                        result("src/test/CircleUtilsTests.java", 1.0, None),
+                    ],
+                ),
+            ]),
+        };
+        let source = SearchIndexCandidateSource::new(index);
+        let request = CandidateRequest::new(task, vec![task.into()], 10).with_lattice_terms(vec![
+            crate::lattice::LatticeTerm {
+                term: "CollectionUtils".into(),
+                origin: "CollectionsUtils".into(),
+                relation: crate::lattice::LatticeRelation::Stem,
+            },
+        ]);
+        let stream = source.retrieve(&request).unwrap();
+        let paths = stream
+            .candidates
+            .iter()
+            .map(|candidate| candidate.result.path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        // The hop reaches a file the literal task never could, ranked after the literal hits.
+        assert_eq!(
+            paths,
+            vec![
+                "src/test/CircleUtilsTests.java",
+                "src/main/CollectionUtils.java"
+            ]
+        );
+        let reached = &stream.candidates[1].result.evidence;
+        assert!(
+            reached.iter().any(|line| line
+                == "identifier lattice: task term `CollectionsUtils` reached repository term `CollectionUtils` (stem)"),
+            "{reached:?}"
+        );
+        assert!(reached
+            .iter()
+            .any(|line| line.contains("expanded task query `CollectionUtils`")));
     }
 
     #[test]
