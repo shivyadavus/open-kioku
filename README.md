@@ -83,10 +83,10 @@ Retrieval is measured on the production path (`ok context`, the same builder beh
 
 | Corpus | Holdout cases | R@5 | R@20 | MRR |
 |---|---:|---:|---:|---:|
-| Java, about 10k files | 113 | 0.549 | 0.681 | 0.482 |
-| Go application, ~800 files | 84 | 0.690 | 0.810 | 0.551 |
-| TypeScript, ~900 files | 166 | 0.753 | 0.801 | 0.621 |
-| Python library, ~4k files | 199 | 0.658 | 0.749 | 0.556 |
+| Java, about 10k files | 113 | 0.566 | 0.699 | 0.504 |
+| Go application, ~800 files | 84 | 0.679 | 0.809 | 0.535 |
+| TypeScript, ~900 files | 166 | 0.825 | 0.874 | 0.658 |
+| Python library, ~4k files | 199 | 0.663 | 0.759 | 0.545 |
 
 - **R@5** — the share of tasks for which at least one file the commit changed is in the first five results.
 - **R@20** — the same within the first twenty results, roughly the whole context pack.
@@ -94,7 +94,7 @@ Retrieval is measured on the production path (`ok context`, the same builder beh
 
 Read it plainly. On a Java repository of about ten thousand files, the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the floor the agent starts from before it has looked at anything, and it is the number to watch. Exact lookups (definitions, references, dependency paths) and the plan → edit → verify loop sit on top of it.
 
-These baselines were frozen from a hosted Linux runner matrix on 2026-09-07 and are re-derived nightly by `.github/workflows/commit-derived-bench.yml`; the job fails when a watched metric falls more than 0.03 below its frozen baseline. Queries are commit subjects, not issue text, so the numbers are not comparable with published benchmarks that use issue text. Corpus identities, both splits, the scripts, and the regression policy: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md); frozen baselines: [`benchmarks/commit-derived/`](benchmarks/commit-derived/).
+These baselines were frozen from a hosted Linux runner matrix on 2026-09-08 and are re-derived nightly by `.github/workflows/commit-derived-bench.yml`; the job fails when a watched metric falls more than 0.03 below its frozen baseline. Queries are commit subjects, not issue text, so the numbers are not comparable with published benchmarks that use issue text. Corpus identities, both splits, the scripts, and the regression policy: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md); frozen baselines: [`benchmarks/commit-derived/`](benchmarks/commit-derived/).
 
 Two more measured facts:
 

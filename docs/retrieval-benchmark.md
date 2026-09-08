@@ -166,20 +166,20 @@ a Python ML library (~4k files) — and fails when a watched metric falls more
 than 0.03 below its baseline. The repositories are not named here; the baseline files are keyed by
 language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.json`, and so on), and
 the workflow reads each repository URL from a repository variable. The baselines were frozen from a hosted-runner matrix run on
-2026-09-07 after the commit-scope anchors landed and repeated subjects were dropped from the
-derivation (each file records its run and commit under `provenance`); earlier freezes are in
-each file's git history:
+2026-09-08, after generated files began to be indexed and ranked below hand-written source and a
+commit scope's directory entry file became a candidate (each file records its run and commit under
+`provenance`); earlier freezes are in each file's git history:
 
 | Corpus | Split | Cases | R@5 | R@20 | MRR |
 |---|---|---|---|---|---|
-| Java (10k files) | dev | 262 | 0.576 | 0.744 | 0.460 |
-| Java (10k files) | holdout | 113 | 0.549 | 0.681 | 0.482 |
-| Go (~800 files) | dev | 196 | 0.571 | 0.765 | 0.395 |
-| Go (~800 files) | holdout | 84 | 0.690 | 0.810 | 0.551 |
-| TypeScript (~900 files) | dev | 385 | 0.797 | 0.893 | 0.636 |
-| TypeScript (~900 files) | holdout | 166 | 0.753 | 0.801 | 0.621 |
-| Python (~4k files) | dev | 462 | 0.606 | 0.732 | 0.512 |
-| Python (~4k files) | holdout | 199 | 0.658 | 0.749 | 0.556 |
+| Java (10k files) | dev | 262 | 0.599 | 0.759 | 0.478 |
+| Java (10k files) | holdout | 113 | 0.566 | 0.699 | 0.504 |
+| Go (~800 files) | dev | 196 | 0.561 | 0.765 | 0.396 |
+| Go (~800 files) | holdout | 84 | 0.679 | 0.809 | 0.535 |
+| TypeScript (~900 files) | dev | 385 | 0.810 | 0.946 | 0.645 |
+| TypeScript (~900 files) | holdout | 166 | 0.825 | 0.874 | 0.658 |
+| Python (~4k files) | dev | 462 | 0.600 | 0.725 | 0.490 |
+| Python (~4k files) | holdout | 199 | 0.663 | 0.759 | 0.545 |
 
 The Go application was the hardest of the four while a third of its holdout was one repeated release-bump
 commit; with one case per repeated subject it sits between the others. 21% of its gold files

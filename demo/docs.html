@@ -67,17 +67,17 @@ ok setup agent cursor --repo . --apply</code></pre><p class="docs-hint">Use <cod
 </div></section>
 <section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">What to expect</div><h2 class="section-title">Measured on four real repositories, re-run nightly.</h2><p class="section-copy">Holdout split of the commit-derived corpora on the production <code>ok context</code> path. Baselines frozen 2026-09-07 from a hosted Linux runner matrix; the nightly job fails when a watched metric drops more than 0.03 below its baseline.</p></div>
 <div class="expect-grid"><div class="readout"><table class="expect-table"><thead><tr><th>Corpus</th><th>Holdout cases</th><th>R@5</th><th>R@20</th><th>MRR</th></tr></thead><tbody>
-<tr><td>Java, about 10k files</td><td>113</td><td>0.549</td><td>0.681</td><td>0.482</td></tr>
-<tr><td>Go application, ~800 files</td><td>84</td><td>0.690</td><td>0.810</td><td>0.551</td></tr>
-<tr><td>TypeScript, ~900 files</td><td>166</td><td>0.753</td><td>0.801</td><td>0.621</td></tr>
-<tr><td>Python library, ~4k files</td><td>199</td><td>0.658</td><td>0.749</td><td>0.556</td></tr>
+<tr><td>Java, about 10k files</td><td>113</td><td>0.566</td><td>0.699</td><td>0.504</td></tr>
+<tr><td>Go application, ~800 files</td><td>84</td><td>0.679</td><td>0.809</td><td>0.535</td></tr>
+<tr><td>TypeScript, ~900 files</td><td>166</td><td>0.825</td><td>0.874</td><td>0.658</td></tr>
+<tr><td>Python library, ~4k files</td><td>199</td><td>0.663</td><td>0.759</td><td>0.545</td></tr>
 </tbody></table></div>
 <div class="readout-notes">
 <div><b>R@5</b> — the share of tasks for which at least one file the commit changed is in the first five results.</div>
 <div><b>R@20</b> — the same within the first twenty results, roughly the whole context pack.</div>
 <div><b>MRR</b> — the average of 1 / rank of the first correct file; 1.0 means it was always first, 0.5 is what you get if the first correct file were always second, or first half the time and never found the rest.</div>
 </div></div>
-<div class="dogfood-note"><b>Read it plainly:</b> on a Java repository of about ten thousand files the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. Queries are commit subjects, not issue text, so compare a change against the frozen baseline, not the literature. <a class="proof-link inline-proof" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Method, corpora, and scripts ↗</a></div>
+<div class="dogfood-note"><b>Read it plainly:</b> on a Java repository of about ten thousand files the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack nearly nine in ten and in the top five about four in five. Queries are commit subjects, not issue text, so compare a change against the frozen baseline, not the literature. <a class="proof-link inline-proof" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Method, corpora, and scripts ↗</a></div>
 </div></section>
 <section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">Evidence you can inspect</div><h2 class="section-title">Proof, methodology, and limitations.</h2><p class="section-copy">Performance claims are observations tied to a release and host—not universal guarantees.</p></div><div class="docs-proof-grid">
 <a class="docs-link" href="proof/large-java-2026-08-31-main.json"><span><b>Large-Java JSON evidence (v3.1.0 lineage)</b><small>Release, host, workload, measurements, quality checks, limitations</small></span><span>↗</span></a>
