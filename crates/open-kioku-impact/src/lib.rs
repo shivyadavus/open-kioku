@@ -944,10 +944,41 @@ fn relationship_impacts(
     let mut proven = Vec::new();
     let mut possible = Vec::new();
     for (node_id, source_label) in &seeds {
-        let Ok((nodes, edges)) = graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)
+        let Ok((nodes, mut edges)) =
+            graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)
         else {
             continue;
         };
+        // `neighbors` is an untyped, unordered window over every edge touching the node. A file
+        // node has one outgoing `DEFINES` edge per symbol, so on a 60-symbol source file the
+        // window is exhausted by its own definitions and the incoming derived edges never come
+        // back — measured on a real repository, where files with 61-65 symbols reported no
+        // derived impact at all while an 8-symbol file reported it correctly. Ask for those
+        // edges by type, which filters in SQL.
+        let mut nodes = nodes;
+        if let Ok(derived) = graph.edges_by_type_for_node(
+            GraphEdgeType::DerivedFrom,
+            &node_id.0,
+            false,
+            RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
+            0,
+        ) {
+            for edge in derived {
+                if edges.iter().any(|existing| existing.id == edge.id) {
+                    continue;
+                }
+                // `neighbors` returned nodes for its own window only. A derived edge's other
+                // endpoint is always a file node (`file:<path>`), so it is resolved from the
+                // indexed files rather than with a second graph query.
+                if !nodes.iter().any(|existing| existing.id == edge.from) {
+                    let Some(node) = file_node_for_id(&edge.from, &files_by_id) else {
+                        continue;
+                    };
+                    nodes.push(node);
+                }
+                edges.push(edge);
+            }
+        }
         let nodes_by_id = nodes
             .iter()
             .map(|node| (node.id.clone(), node))
@@ -979,6 +1010,22 @@ fn relationship_impacts(
         list.truncate(RELATIONSHIP_IMPACT_LIMIT);
     }
     Ok((proven, possible))
+}
+
+/// Rebuild the `GraphNode` for a `file:<path>` id from the indexed files. Used for edges fetched
+/// by type, whose endpoints are not in the `neighbors` window.
+fn file_node_for_id(node_id: &NodeId, files_by_id: &HashMap<FileId, File>) -> Option<GraphNode> {
+    let path = node_id.0.strip_prefix("file:")?;
+    let file = files_by_id
+        .values()
+        .find(|file| identity::normalize_repo_path(&file.path).is_ok_and(|value| value == path))?;
+    Some(GraphNode {
+        id: node_id.clone(),
+        node_type: GraphNodeType::File,
+        label: path.to_string(),
+        file_id: Some(file.id.clone()),
+        ..Default::default()
+    })
 }
 
 fn relationship_impact_entry(

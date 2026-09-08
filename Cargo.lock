@@ -2746,12 +2746,16 @@ name = "open-kioku-impact"
 version = "4.0.0"
 dependencies = [
  "chrono",
+ "open-kioku-config",
  "open-kioku-core",
  "open-kioku-errors",
  "open-kioku-evidence",
+ "open-kioku-graph",
+ "open-kioku-ingest",
  "open-kioku-search-regex",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
+ "tempfile",
 ]
 
 [[package]]

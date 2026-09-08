@@ -2987,8 +2987,15 @@ impl GraphStore for SqliteStore {
 
         // Prepare the statement once outside the BFS loop to avoid
         // O(N) statement recompilation on large graphs.
+        // `DERIVED_FROM` is a sibling relation, not a dependency: a test does not depend on the
+        // module it is named after, and a generated file does not depend on its banner's origin.
+        // It is the first file-to-file edge in the graph that is not a real dependency, so it is
+        // excluded here rather than becoming a traversable hop in a path a caller reads as one.
         let mut edge_stmt = conn
-            .prepare(&format!("{} WHERE e.from_sid = ?1", compact::EDGE_SELECT))
+            .prepare(&format!(
+                "{} WHERE e.from_sid = ?1 AND e.edge_type != 'DerivedFrom'",
+                compact::EDGE_SELECT
+            ))
             .map_err(storage_err)?;
 
         let mut queue = VecDeque::from([(from.to_string(), Vec::<GraphEdge>::new())]);

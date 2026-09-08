@@ -565,7 +565,12 @@ impl InMemoryGraph {
             if path.len() >= max_depth || !seen.insert(node.clone()) {
                 continue;
             }
-            for edge in self.edges.iter().filter(|edge| edge.from.0 == node) {
+            // A derived sibling is not a dependency hop; see the SQLite store for the rationale.
+            for edge in self
+                .edges
+                .iter()
+                .filter(|edge| edge.from.0 == node && edge.edge_type != GraphEdgeType::DerivedFrom)
+            {
                 let mut next_path = path.clone();
                 next_path.push(edge.clone());
                 queue.push_back((edge.to.0.clone(), next_path));

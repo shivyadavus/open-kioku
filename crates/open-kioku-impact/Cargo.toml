@@ -18,4 +18,8 @@ open-kioku-evidence = { version = "4.0.0", path = "../open-kioku-evidence" }
 open-kioku-search-regex = { version = "4.0.0", path = "../open-kioku-search-regex" }
 open-kioku-storage = { version = "4.0.0", path = "../open-kioku-storage" }
 [dev-dependencies]
+open-kioku-config = { version = "4.0.0", path = "../open-kioku-config" }
+open-kioku-graph = { version = "4.0.0", path = "../open-kioku-graph" }
+open-kioku-ingest = { version = "4.0.0", path = "../open-kioku-ingest" }
 open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }
+tempfile.workspace = true
