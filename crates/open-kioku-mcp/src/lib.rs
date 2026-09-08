@@ -25,7 +25,7 @@ use open_kioku_patch::{
     ChangeVerifier, ContractVerificationReport, ContractVerifier, PatchPlanner, VerifyChangeInput,
 };
 use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
-use open_kioku_search_regex::search_chunks;
+use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::disabled_response;
@@ -414,7 +414,7 @@ async fn dispatch(
             )?)
         }
         "search_code" | "search_files" => search_tool(repo, store, &params),
-        "regex_search" => search_tool(repo, store, &params),
+        "regex_search" => regex_search_tool(store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
             let pack = build_context_for_task(repo, store, config, task, limit(&params))?;
@@ -1134,6 +1134,35 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
     paged_bounded_slice_response("results", results, limit, offset)
 }
 
+/// Evaluates the caller's pattern over the indexed corpus instead of handing it
+/// to the ranked lexical path. An agent that asks for a regex gets exact
+/// single-line matches, and gets told when the bounded walk stopped early.
+fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
+    let pattern = params
+        .get("pattern")
+        .or_else(|| params.get("query"))
+        .and_then(Value::as_str)
+        .filter(|pattern| !pattern.is_empty())
+        .context("`regex_search` requires a non-empty `pattern`")?;
+    let limit = limit(params);
+    let offset = offset(params);
+    let scan = regex_search_index(store, pattern, search_fetch_limit(limit, offset))?;
+
+    let has_more = scan.results.len() > offset.saturating_add(limit);
+    let mut metadata = PageMetadata::new(limit, offset, has_more || scan.files_capped);
+    metadata.caveats.push(format!(
+        "the pattern was evaluated over indexed chunk text from {} file(s), not the working tree; regions the indexer did not chunk were not searched",
+        scan.files_scanned
+    ));
+    if scan.files_capped {
+        metadata.truncated = true;
+        metadata.warnings.push(format!(
+            "the regex scan stopped after {MAX_REGEX_SCAN_FILES} files; results are incomplete"
+        ));
+    }
+    paged_slice_response_with_metadata("results", scan.results, metadata)
+}
+
 fn search_results(
     repo: &Path,
     store: &dyn MetadataStore,
@@ -1417,7 +1446,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "architecture_policy_explain" => "Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
         "search_code" => "Use for lexical BM25 code search when exact identifiers, terms, routes, or config keys are known. Prefer semantic_search for conceptual queries, hybrid_search when both lexical and semantic evidence are needed, and regex_search for exact patterns. This is read-only.",
         "search_files" => "Use when the target is a file path, filename, or file-content keyword rather than a code symbol. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for code snippet search (use search_code), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
-        "regex_search" => "Use for exact regular-expression pattern matching against indexed source code lines. Best used after lexical or semantic search has narrowed the search area. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad lexical candidate discovery (use search_code, or structural_search for a structure-shaped phrase). This is read-only.",
+        "regex_search" => "Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
         "semantic_status" => "Use before calling semantic_search or hybrid_search to confirm that the local vector index exists, is ready, and is not stale. Do NOT use to build or rebuild the index (run `ok semantic index` via the CLI instead). This is read-only, inspects only local metadata, and never generates embeddings or contacts external services.",
         "semantic_search" => "Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
         "hybrid_search" => "Use as the default investigative search when both keyword precision and semantic recall are needed — merges candidates from the Tantivy BM25 index and the local semantic vector index, deduplicates by file path, and sorts by combined score. Do NOT use when only exact lexical matches are needed (use search_code), when only conceptual similarity matters (use semantic_search), or when regex patterns are required (use regex_search). Falls back to lexical-only results when the semantic index is not ready. This is read-only.",
@@ -1483,7 +1512,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
         ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("search_files", "Search indexed file names and contents for specific keywords or file path patterns, returning ranked file matches with path, size, and language metadata. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths and file contents. Accepts filenames, directory fragments, or content keywords."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. 'code' (default) searches file names and contents; 'graph' searches indexed graph-node documents including entity names and properties."},"limit":{"type":"integer","description":"Maximum number of file results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching file results to skip before returning. Defaults to 0."}}})),
-        ("regex_search", "Search indexed source code using a regular expression pattern, returning exact line-level matches with file path, line number, and matching line content for each hit.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) to match against indexed source code lines. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
+        ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
         ("semantic_status", "Report the current readiness, document count, staleness, and configured embedding provider of the local semantic vector index. Returns a status object indicating whether semantic_search and hybrid_search can produce vector results.", json!({"type":"object","properties":{}})),
         ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("hybrid_search", "Perform a hybrid search that merges ranked candidates from the Tantivy BM25 lexical index and the local semantic vector index, deduplicates by file path, and returns combined-score-sorted results with evidence spans. Falls back to lexical-only when the semantic index is unavailable.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural-language or keyword query to match both lexically (BM25) and semantically (vector similarity) against the indexed codebase. Supports identifiers, phrases, and conceptual descriptions."},"limit":{"type":"integer","description":"Maximum number of merged results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of merged results to skip before returning. Defaults to 0."}}})),
@@ -3196,6 +3225,14 @@ mod tests {
             (
                 "structural_search.json",
                 r#"{"jsonrpc":"2.0","id":"structural-search","method":"structural_search","params":{"query":"publish_invoice_event","limit":1}}"#,
+            ),
+            (
+                "regex_search.json",
+                r#"{"jsonrpc":"2.0","id":"regex-search","method":"regex_search","params":{"pattern":"pub fn publish_\\w+","limit":5}}"#,
+            ),
+            (
+                "regex_search_invalid_pattern.json",
+                r#"{"jsonrpc":"2.0","id":"regex-search-invalid","method":"regex_search","params":{"pattern":"pub fn (","limit":5}}"#,
             ),
             (
                 "get_implementations.json",

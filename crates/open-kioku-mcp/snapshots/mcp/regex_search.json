@@ -1,0 +1,48 @@
+{
+  "id": "regex-search",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [
+      "the pattern was evaluated over indexed chunk text from 2 file(s), not the working tree; regions the indexer did not chunk were not searched"
+    ],
+    "has_more": false,
+    "limit": 5,
+    "offset": 0,
+    "results": [
+      {
+        "confidence": "<score>",
+        "evidence": [
+          "regex match for `pub fn publish_\\w+`"
+        ],
+        "evidence_refs": [
+          "search:src/billing.rs:7-7:0"
+        ],
+        "line_range": {
+          "end": 7,
+          "start": 7
+        },
+        "match_reason": "regex match",
+        "path": "src/billing.rs",
+        "score": "<score>",
+        "score_breakdown": [
+          {
+            "contribution": "<score>",
+            "evidence_ids": [
+              "search:src/billing.rs:7-7:0"
+            ],
+            "normalized_value": "<score>",
+            "rationale": "direct regex line match",
+            "raw_value": "<score>",
+            "signal": "regex_match",
+            "weight": "<score>"
+          }
+        ],
+        "snippet": "pub fn publish_invoice_event() {}",
+        "symbol": null
+      }
+    ],
+    "returned": 1,
+    "truncated": false,
+    "warnings": []
+  }
+}

@@ -712,7 +712,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed source code using a regular expression pattern, returning exact line-level matches with file path, line number, and matching line content for each hit. Use for exact regular-expression pattern matching against indexed source code lines. Best used after lexical or semantic search has narrowed the search area. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad lexical candidate discovery (use search_code, or structural_search for a structure-shaped phrase). This is read-only.",
+        "description": "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early. Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -725,7 +725,7 @@
               "type": "integer"
             },
             "pattern": {
-              "description": "A valid regular expression pattern (Rust regex syntax) to match against indexed source code lines. Example: 'fn\\s+main' to find main function declarations.",
+              "description": "A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations.",
               "type": "string"
             }
           },
