@@ -27,6 +27,10 @@ pub struct OkConfig {
     #[serde(default)]
     pub ranking: RankingConfig,
     pub semantic: SemanticConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     pub mcp: McpConfig,
     pub security: SecurityConfig,
     pub commands: CommandsConfig,
@@ -121,6 +125,8 @@ impl Default for OkConfig {
                 index_memory: true,
                 external_provider_allowed: false,
             },
+            memory: MemoryConfig::default(),
+            runtime: RuntimeConfig::default(),
             mcp: McpConfig {
                 mode: "read-only".into(),
                 transport: "stdio".into(),
@@ -320,6 +326,33 @@ pub struct SemanticConfig {
     pub index_memory: bool,
     #[serde(default)]
     pub external_provider_allowed: bool,
+}
+
+/// Repository memory. The `.ok` memory store is always readable, so this does
+/// not gate recall; it gates whether the memory tools are advertised on the
+/// agent-facing MCP surface, which stays off until a repository opts in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Runtime error integration. The runtime tools answer with an explicit
+/// disabled response until a provider is configured, and advertising three
+/// permanently inert names taught agents to reach for evidence that is not
+/// there — so the surface stays quiet until this is configured.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: String,
+}
+
+impl RuntimeConfig {
+    pub fn configured(&self) -> bool {
+        self.enabled && !self.provider.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -624,6 +657,29 @@ paths = ["crates/api/**"]
         config.mcp.allow_write = true;
         config.security.allow_write = false;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn memory_and_runtime_default_to_unconfigured_and_survive_a_round_trip() {
+        // Both gates decide what the MCP surface advertises, so a default that
+        // drifted to `true` would silently re-add five tools.
+        let config = OkConfig::default();
+        assert!(!config.memory.enabled);
+        assert!(!config.runtime.configured());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        OkConfig::write_default(&path).unwrap();
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        assert!(!loaded.memory.enabled);
+        assert!(!loaded.runtime.configured());
+
+        // `enabled` without a provider is not a configured runtime integration.
+        let mut half = OkConfig::default();
+        half.runtime.enabled = true;
+        assert!(!half.runtime.configured());
+        half.runtime.provider = "sentry".into();
+        assert!(half.runtime.configured());
     }
 
     #[test]
