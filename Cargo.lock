@@ -2654,6 +2654,7 @@ name = "open-kioku-core"
 version = "3.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "open-kioku-errors",
  "schemars",
  "serde",
@@ -2676,6 +2677,7 @@ dependencies = [
  "candle-core",
  "fastembed",
  "hf-hub",
+ "open-kioku-core",
  "open-kioku-errors",
  "serde",
  "serde_json",
@@ -3107,6 +3109,7 @@ dependencies = [
 name = "open-kioku-vector"
 version = "3.1.0"
 dependencies = [
+ "open-kioku-core",
  "open-kioku-errors",
  "serde",
  "serde_json",

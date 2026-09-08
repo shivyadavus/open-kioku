@@ -1,3 +1,4 @@
+use open_kioku_core::process::process_peak_rss;
 use open_kioku_vector::{
     ExactFlatVectorIndex, VectorHit, VectorId, VectorRecord, VectorSearchOptions,
 };
@@ -37,6 +38,7 @@ struct Measurement {
     ann_index_bytes: u64,
     ann_memory_bytes: usize,
     process_peak_rss_bytes: Option<u64>,
+    process_peak_rss_instrument: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +221,7 @@ impl Fixture {
         let ann_query_mean_us = mean(&ann_latencies);
         let ann_query_p95_us = percentile(&ann_latencies, 0.95);
 
+        let peak_rss = process_peak_rss();
         Ok(Measurement {
             dimensions: self.dimensions,
             vector_count: self.vector_count,
@@ -237,7 +240,8 @@ impl Fixture {
             exact_index_bytes: self.exact_index_bytes,
             ann_index_bytes,
             ann_memory_bytes: ann.memory_usage(),
-            process_peak_rss_bytes: process_peak_rss_bytes(),
+            process_peak_rss_bytes: peak_rss.bytes,
+            process_peak_rss_instrument: peak_rss.instrument,
         })
     }
 }
@@ -433,20 +437,6 @@ fn linux_meminfo_kib(key: &str) -> Option<u64> {
             return None;
         }
         line.split_whitespace().nth(1)?.parse().ok()
-    })
-}
-
-fn process_peak_rss_bytes() -> Option<u64> {
-    let content = fs::read_to_string("/proc/self/status").ok()?;
-    content.lines().find_map(|line| {
-        if !line.starts_with("VmHWM:") {
-            return None;
-        }
-        line.split_whitespace()
-            .nth(1)?
-            .parse::<u64>()
-            .ok()
-            .map(|value| value * 1024)
     })
 }
 
