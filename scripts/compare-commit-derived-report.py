@@ -7,12 +7,39 @@ Both files are produced by `scripts/score-context-cases.py --out`. A metric may 
 more than `slack` (absolute) below the baseline; the 95% bootstrap interval is printed so
 a reader can tell a real regression from sampling noise. Missing baseline: prints the
 report and exits 0, so the first run of a new corpus freezes rather than fails.
+
+Gold yield at a token budget (`gold_file_yield@B`, `gold_line_yield@B`, median
+`tokens_to_first_gold`) is printed when the report carries it, informationally: it is not
+gated yet, and a baseline frozen before the metric existed compares without it.
 """
 import json
 import sys
 from pathlib import Path
 
 WATCHED = ("R@5", "R@20", "MRR", "gold_recall@20")
+INFORMATIONAL = (
+    "gold_file_yield@4000", "gold_file_yield@8000", "gold_file_yield@16000",
+    "gold_line_yield@4000", "gold_line_yield@8000", "gold_line_yield@16000",
+)
+
+
+def print_yield(report, baseline=None):
+    present = [k for k in INFORMATIONAL if k in report["metrics"]]
+    if not present:
+        return
+    print("  gold yield at a token budget (informational, not gated):")
+    for k in present:
+        lo, hi = report["ci"].get(k, (float("nan"), float("nan")))
+        line = f"  {k:22} {report['metrics'][k]:.4f}   95% CI [{lo:.4f}, {hi:.4f}]"
+        if baseline and k in baseline.get("metrics", {}):
+            line += f"   baseline {baseline['metrics'][k]:.4f} ({report['metrics'][k] - baseline['metrics'][k]:+.4f})"
+        print(line)
+    first = report["metrics"].get("tokens_to_first_gold_p50")
+    if first is not None:
+        line = f"  {'tokens_to_first_gold':22} median {first:.0f}"
+        if baseline and baseline.get("metrics", {}).get("tokens_to_first_gold_p50") is not None:
+            line += f"   baseline {baseline['metrics']['tokens_to_first_gold_p50']:.0f}"
+        print(line)
 
 
 def main():
@@ -26,9 +53,11 @@ def main():
         lo, hi = report["ci"][k]
         print(f"  {k:16} {report['metrics'][k]:.4f}   95% CI [{lo:.4f}, {hi:.4f}]")
     if len(args) < 2 or not Path(args[1]).exists():
+        print_yield(report)
         print("no baseline to compare against; freeze this report if it is the first run")
         return 0
     baseline = json.loads(Path(args[1]).read_text())
+    print_yield(report, baseline)
     failed = []
     for k in WATCHED:
         base = baseline["metrics"][k]
