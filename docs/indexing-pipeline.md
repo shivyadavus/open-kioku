@@ -8,7 +8,7 @@
 6. Skip binary, vendor, unsupported, ignored, denied, and over-limit files; index generated source files and flag them `is_generated` (they rank last unless the task names them).
 7. Fingerprint indexed files with SHA-256.
 8. Detect language from extension.
-9. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback.
+9. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback. A file that cannot be read (removed or permission-denied between discovery and parsing) or that crashes a grammar is dropped from the index, recorded as a `SkipReason::Error` entry in `skip_counts` / `skipped_paths` with source `filesystem` or `parser`, and surfaced as a phase warning. No single file aborts the index.
 10. Import configured SCIP indexes when present, merging SCIP symbols and occurrences with extracted facts.
 11. Store files, symbols, chunks, tests, imports, occurrences, and the index manifest in SQLite.
 12. Build and persist graph nodes and edges in SQLite.

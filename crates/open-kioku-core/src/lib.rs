@@ -2471,6 +2471,7 @@ pub enum SkipSource {
     SymlinkPolicy,
     LanguageSupport,
     Filesystem,
+    Parser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2582,6 +2583,28 @@ impl IndexCoverage {
             self.generated += 1;
             entry.generated += 1;
         }
+    }
+
+    /// A file discovery counted as indexed that a later phase dropped — an unreadable file or a
+    /// grammar that crashed on it. Moves it from `indexed` to `skipped[reason]` so
+    /// `discovered == indexed + sum(skipped)` still holds for the language.
+    pub fn record_indexed_dropped(
+        &mut self,
+        language: &Language,
+        generated: bool,
+        reason: SkipReason,
+    ) {
+        self.indexed = self.indexed.saturating_sub(1);
+        if generated {
+            self.generated = self.generated.saturating_sub(1);
+        }
+        if let Some(entry) = self.by_language.get_mut(language.key()) {
+            entry.indexed = entry.indexed.saturating_sub(1);
+            if generated {
+                entry.generated = entry.generated.saturating_sub(1);
+            }
+        }
+        self.record_skipped(language, reason);
     }
 
     pub fn record_skipped(&mut self, language: &Language, reason: SkipReason) {
