@@ -29,7 +29,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `ok context`, `ok plan`, and MCP `build_context_pack` on a 10k-file Java index: 78 s → ~5 s per query. Impact expansion now uses the Tantivy index instead of regex-scanning every chunk once per term; per-file fact lookups use the existing `file_id` index instead of scanning and sorting every fact of a source type; the relationship-semantics verdict is cached per store (keyed by SQLite `data_version`) instead of re-parsing a multi-megabyte manifest on every relationship query.
 
 ### Changed
-- The Tantivy index tokenizes code text and symbols identifier-aware: `FieldMapper` is indexed as `fieldmapper`, `field`, and `mapper`. Lexical MRR on a 490-case commit-derived the Java service benchmark: 0.235 → 0.393 (dev), 0.202 → 0.337 (holdout). Existing indexes keep working; run `ok index` to rebuild with the new tokenizer.
+- MCP tool responses no longer send rendered Markdown/TOON text twice: `content` carries the text once and `structuredContent` carries a small pointer (`rendered_in`, `bytes`, `truncated`) instead of a copy. A `build_context_pack` response that measured 122 KB on the wire is now about 61 KB; JSON results are unchanged.
+- The Tantivy index tokenizes code text and symbols identifier-aware: `FieldMapper` is indexed as `fieldmapper`, `field`, and `mapper`. Lexical MRR on a 490-case commit-derived Elasticsearch benchmark: 0.235 → 0.393 (dev), 0.202 → 0.337 (holdout). Existing indexes keep working; run `ok index` to rebuild with the new tokenizer.
 - Retrieval benchmark no-gold false positives count only results presented with confidence above Low (the product's abstention signal), for pack-less strategies via the same shared weak-relevance rule. Baseline and thresholds re-frozen; rationale in `docs/retrieval-benchmark.md`.
 
 ### Added
