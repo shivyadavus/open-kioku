@@ -101,6 +101,15 @@ fn render_status_markdown(
             "| Skipped paths | {} |\n",
             manifest.quality.skipped_paths.len()
         ));
+        out.push_str(&format!(
+            "| Coverage | {} |\n",
+            manifest
+                .quality
+                .coverage
+                .as_ref()
+                .map(IndexCoverage::summary_line)
+                .unwrap_or_else(|| "not recorded by this index".into())
+        ));
         out.push_str(&format!("| Tests | {} |\n", manifest.quality.test_count));
         out.push_str(&format!(
             "| Imports | {} |\n",
@@ -933,6 +942,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     let repo = absolutize(repo).unwrap_or_else(|_| repo.to_path_buf());
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
+    let mut coverage = None;
 
     // 1. Rust toolchain version
     match std::process::Command::new("rustc")
@@ -1162,6 +1172,11 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     "For better references, impact, tests, and planning: run `ok scip setup .`, then `ok index . --with-scip auto`.".into(),
                 );
                 }
+                let (check, step) =
+                    coverage_check(quality.coverage.as_ref(), manifest.index_mode);
+                checks.push(check);
+                next_steps.extend(step);
+                coverage = quality.coverage.clone();
             }
         }
     }
@@ -1292,8 +1307,159 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         ok,
         repo,
         checks,
+        coverage,
         next_steps,
     }
+}
+
+/// Coverage is a warning, never a failure: a low ratio is a fact about the repository
+/// that the reader must see, not a broken installation.
+fn coverage_check(
+    coverage: Option<&IndexCoverage>,
+    index_mode: IndexMode,
+) -> (DoctorCheck, Option<String>) {
+    let Some(coverage) = coverage else {
+        // Cross-project mode links already-indexed projects and parses no source, so
+        // there is nothing to record and re-indexing would not change that.
+        if index_mode == IndexMode::CrossProject {
+            return (
+                DoctorCheck {
+                    name: "coverage",
+                    status: CheckStatus::Warn,
+                    message: "not applicable in cross-project mode; see each linked project's own index".into(),
+                },
+                None,
+            );
+        }
+        return (
+            DoctorCheck {
+                name: "coverage",
+                status: CheckStatus::Warn,
+                message: "not recorded by this index; what discovery skipped is unknown".into(),
+            },
+            Some("Run `ok index .` to record which source files the index skipped and why.".into()),
+        );
+    };
+    if coverage.percent().is_none() {
+        return (
+            DoctorCheck {
+                name: "coverage",
+                status: CheckStatus::Warn,
+                message: "no source files discovered".into(),
+            },
+            None,
+        );
+    }
+    let mut message = coverage.headline();
+    let top = coverage.top_skip_reasons(3);
+    if !top.is_empty() {
+        message.push_str("; top skip reasons: ");
+        message.push_str(&format_skip_reasons(&top));
+    }
+    for caveat in coverage.blind_spot_caveats() {
+        message.push_str("; ");
+        message.push_str(&caveat);
+    }
+    let low = coverage.languages_below_warn_threshold();
+    if coverage.below_warn_threshold() || !low.is_empty() || coverage.walk_errors > 0 {
+        if !low.is_empty() {
+            message.push_str(&format!(
+                "; under {INDEX_COVERAGE_WARN_PERCENT:.0}%: {}",
+                low.iter()
+                    .take(3)
+                    .map(|(language, percent, _)| format!("{language} ({percent:.1}%)"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            if low.len() > 3 {
+                message.push_str(&format!(
+                    " and {} more (see the table)",
+                    low.len() - 3
+                ));
+            }
+        }
+        return (
+            DoctorCheck {
+                name: "coverage",
+                status: CheckStatus::Warn,
+                message,
+            },
+            Some(
+                "Review `ok --json status` `coverage.by_language` and the skip reasons; adjust `[index] exclude`, `.okignore`, or `max_file_size` if the omissions are unintended."
+                    .into(),
+            ),
+        );
+    }
+    (
+        DoctorCheck {
+            name: "coverage",
+            status: CheckStatus::Pass,
+            message,
+        },
+        None,
+    )
+}
+
+/// Fixed-width rows for the terminal; the same numbers `ok doctor --json` carries.
+fn coverage_table_lines(coverage: &IndexCoverage) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{:<12} {:>10} {:>9} {:>8} {:>9}  {}",
+        "language", "discovered", "indexed", "coverage", "generated", "skipped"
+    )];
+    for (language, entry) in &coverage.by_language {
+        let percent = entry
+            .percent()
+            .map(|percent| format!("{percent:.1}%"))
+            .unwrap_or_else(|| "-".into());
+        let flag = if entry
+            .percent()
+            .is_some_and(|percent| percent < INDEX_COVERAGE_WARN_PERCENT)
+        {
+            "!"
+        } else {
+            ""
+        };
+        let mut skipped = entry
+            .skipped
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(reason, count)| (*reason, *count))
+            .collect::<Vec<_>>();
+        skipped.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let skipped = if skipped.is_empty() {
+            "-".to_string()
+        } else {
+            format_skip_reasons(&skipped)
+        };
+        lines.push(format!(
+            "{:<12} {:>10} {:>9} {:>7}{flag:<1} {:>9}  {skipped}",
+            language,
+            group_thousands(entry.discovered),
+            group_thousands(entry.indexed),
+            percent,
+            group_thousands(entry.generated),
+        ));
+    }
+    lines.push(format!(
+        "{:<12} {:>10} {:>9} {:>8} {:>9}  {}",
+        "total",
+        group_thousands(coverage.discovered),
+        group_thousands(coverage.indexed),
+        coverage
+            .percent()
+            .map(|percent| format!("{percent:.1}%"))
+            .unwrap_or_else(|| "-".into()),
+        group_thousands(coverage.generated),
+        {
+            let all = coverage.top_skip_reasons(usize::MAX);
+            if all.is_empty() {
+                "-".to_string()
+            } else {
+                format_skip_reasons(&all)
+            }
+        }
+    ));
+    lines
 }
 
 fn scip_setup_report(repo: &Path, config: &OkConfig) -> ScipSetupReport {
