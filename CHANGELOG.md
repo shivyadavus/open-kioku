@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- Gold yield at a token budget on the commit-derived benchmarks (`docs/retrieval-benchmark.md`): `scripts/score-context-cases.py` walks the pack's selected units in order under 4,000 / 8,000 / 16,000-token budgets and reports `gold_file_yield@B`, `gold_line_yield@B` and the median `tokens_to_first_gold` next to R@k and MRR, each with a bootstrap interval. `scripts/commit-derived-cases.py` records the modified line ranges per gold file as a fifth TSV column (base side of `git diff -U0`, numbered on the commit's parent as a proxy for the indexed base) and can re-derive it for an existing file with `--annotate`; the scorer tolerates its absence. `scripts/compare-commit-derived-report.py` prints the yields informationally; nothing gates on them yet.
 - `gte-modernbert-base` (Apache-2.0, 149M parameters, int8 ONNX) as a local neural embedding profile and the default when `[semantic] provider = "fastembed"` names no model. It is pinned to a Hugging Face revision with a SHA-256 check on every file, so upstream cannot change or remove it silently. Chosen on commit-derived corpora against jina-v2-code and Qwen3-0.6B (`docs/embedding-providers.md`). ONNX and Qwen3 embedding now run one length-sorted batch at a time with bounded sequence lengths; the previous parallel, 8k-token batches were killed for memory on a 16 GB machine.
 
 ### Fixed
