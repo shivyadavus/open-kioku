@@ -139,8 +139,13 @@ The server advertises 16 tools. That number is derived from the tool table in
 by `scripts/validate-docs.sh`, so it cannot drift from the code.
 
 Each of the sixteen answers one question no other tool answers. Names that were
-retired in 4.0.0 are gone from `tools/list` and from the dispatch table together:
-a stale name returns `unknown MCP method or tool`, never a different shape.
+retired in 4.0.0 are gone from `tools/list` and from the dispatch table together,
+so a stale name never resolves to a different shape. It is not a bare refusal
+either: the error names where the capability went, for example ``` `get_callers`
+was retired from the MCP tool surface in 4.0.0: use `get_references` with
+`kind: "callers"` ``` or ``` `churn_analysis` was retired from the MCP tool
+surface in 4.0.0: moved to the CLI: `ok history churn --path`, `--module`, or
+`--symbol` ```.
 
 | Tool | Question it answers | Key parameters |
 | --- | --- | --- |
