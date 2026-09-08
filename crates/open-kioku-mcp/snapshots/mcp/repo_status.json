@@ -40,6 +40,7 @@
       "stored_fingerprint": "fb651687da3316012fd78973d8339ccf2e7307ad2a60880ad196c6d6c2598dfc"
     },
     "chunk_count": 1,
+    "coverage": null,
     "file_count": 2,
     "generation_id": null,
     "index_mode": "full",

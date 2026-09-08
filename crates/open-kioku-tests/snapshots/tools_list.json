@@ -32,7 +32,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
+        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, index coverage (source files discovered versus indexed per language, each discovered file's omission attributed to a skip reason, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
