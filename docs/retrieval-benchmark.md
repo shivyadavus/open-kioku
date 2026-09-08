@@ -161,22 +161,24 @@ reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live und
 corpora nightly as a matrix — Elasticsearch (Java, `libs/ modules/ server/`), hugo (Go),
 deno_std (TypeScript), and transformers (Python) — and fails when a watched metric falls more
 than 0.03 below its baseline. The baselines were frozen from a hosted-runner matrix run on
-2026-09-07 after the commit-scope anchors landed (each file records its run and commit under
-`provenance`); the run before that change is kept in each file's git history:
+2026-09-07 after the commit-scope anchors landed and repeated subjects were dropped from the
+derivation (each file records its run and commit under `provenance`); earlier freezes are in
+each file's git history:
 
 | Corpus | Split | Cases | R@5 | R@20 | MRR |
 |---|---|---|---|---|---|
-| elasticsearch-1e6d7960 | dev | 270 | 0.570 | 0.733 | 0.453 |
-| elasticsearch-1e6d7960 | holdout | 117 | 0.530 | 0.658 | 0.466 |
-| hugo-79da24a0 | dev | 336 | 0.321 | 0.431 | 0.227 |
-| hugo-79da24a0 | holdout | 145 | 0.428 | 0.517 | 0.338 |
-| deno_std-d93aa7c9 | dev | 390 | 0.797 | 0.892 | 0.633 |
-| deno_std-d93aa7c9 | holdout | 168 | 0.744 | 0.798 | 0.608 |
-| transformers-7cd9b985 | dev | 463 | 0.607 | 0.732 | 0.513 |
-| transformers-7cd9b985 | holdout | 199 | 0.653 | 0.744 | 0.552 |
+| elasticsearch-1e6d7960 | dev | 262 | 0.576 | 0.744 | 0.460 |
+| elasticsearch-1e6d7960 | holdout | 113 | 0.549 | 0.681 | 0.482 |
+| hugo-79da24a0 | dev | 196 | 0.571 | 0.765 | 0.395 |
+| hugo-79da24a0 | holdout | 84 | 0.691 | 0.809 | 0.551 |
+| deno_std-d93aa7c9 | dev | 385 | 0.797 | 0.893 | 0.636 |
+| deno_std-d93aa7c9 | holdout | 166 | 0.753 | 0.801 | 0.621 |
+| transformers-7cd9b985 | dev | 462 | 0.606 | 0.732 | 0.512 |
+| transformers-7cd9b985 | holdout | 199 | 0.658 | 0.749 | 0.556 |
 
-Hugo is the hardest of the four: 21% of its gold files are `_test.go` benchmarks for tasks
-that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
+Hugo was the hardest of the four while a third of its holdout was one repeated release-bump
+commit; with one case per repeated subject it sits between the others. 21% of its gold files
+are `_test.go` benchmarks for tasks that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
 an average; a change that helps Java and hurts Go is a regression on Go. The frozen baselines are what an accuracy change is judged
 against; a change that helps one language and hurts another shows up as one failing matrix
 entry rather than a blended average. Queries are commit subjects, so absolute numbers are not comparable with

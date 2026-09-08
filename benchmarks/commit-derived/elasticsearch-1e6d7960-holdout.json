@@ -13,45 +13,45 @@
    "modules/",
    "server/"
   ],
-  "frozen_from": "commit-derived-bench run 34157937971 (ubuntu-latest), main @ ffe649c",
+  "frozen_from": "commit-derived-bench run 34173575188 (ubuntu-latest), main after #375 (repeated subjects dropped)",
   "frozen_on": "2026-09-07",
-  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped"
+  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
  },
- "cases": 117,
+ "cases": 113,
  "label": "holdout",
- "median_secs": 3.9870965480804443,
+ "median_secs": 3.2498741149902344,
  "metrics": {
-  "R@1": 0.4103,
-  "R@5": 0.5299,
-  "R@10": 0.5897,
-  "R@20": 0.6581,
-  "MRR": 0.4655,
-  "gold_recall@20": 0.5094
+  "R@1": 0.4248,
+  "R@5": 0.5487,
+  "R@10": 0.6106,
+  "R@20": 0.6814,
+  "MRR": 0.482,
+  "gold_recall@20": 0.5274
  },
  "ci": {
   "R@1": [
-   0.3162,
-   0.4957
+   0.3451,
+   0.5133
   ],
   "R@5": [
-   0.4359,
-   0.6239
+   0.4602,
+   0.6372
   ],
   "R@10": [
-   0.4957,
-   0.6838
+   0.5133,
+   0.6991
   ],
   "R@20": [
-   0.5726,
-   0.735
+   0.5929,
+   0.7699
   ],
   "MRR": [
-   0.383,
-   0.5494
+   0.4002,
+   0.5603
   ],
   "gold_recall@20": [
-   0.4332,
-   0.5868
+   0.4459,
+   0.6043
   ]
  }
 }
