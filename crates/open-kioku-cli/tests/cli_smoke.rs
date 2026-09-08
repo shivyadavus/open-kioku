@@ -2046,6 +2046,72 @@ fn demo_creates_indexed_sample_repo() {
     assert!(explained_search.contains("ranking:"));
     assert!(explained_search.contains("text_relevance"));
 
+    // `--regex` must be exact matching, not the ranked lexical path wearing a
+    // different flag: every hit reports the regex match reason at confidence 1.
+    let regex_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--regex")
+            .arg(r"fn\s+issue_token");
+        command
+    });
+    assert!(regex_search.contains("src/auth.rs"));
+    assert!(regex_search.contains("\"match_reason\": \"regex match\""));
+    assert!(regex_search.contains("\"confidence\": 1.0"));
+
+    let regex_no_match = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--regex")
+            .arg("^struct NoSuchSymbolAnywhere");
+        command
+    });
+    assert_eq!(regex_no_match.trim(), "[]");
+
+    let (_, regex_invalid) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--regex")
+            .arg("fn (");
+        command
+    });
+    assert!(
+        regex_invalid.contains("search error"),
+        "invalid pattern should fail with a search error, got: {regex_invalid}"
+    );
+
+    let regex_bounded = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--regex")
+            .arg(".")
+            .arg("--limit")
+            .arg("2");
+        command
+    });
+    assert_eq!(
+        regex_bounded
+            .matches("\"match_reason\": \"regex match\"")
+            .count(),
+        2
+    );
+
     let semantic_status = run({
         let mut command = ok();
         command

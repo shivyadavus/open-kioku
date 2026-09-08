@@ -521,11 +521,16 @@ pub async fn run_cli() -> anyhow::Result<()> {
             limit,
             kind,
             explain_ranking,
+            regex,
             semantic,
             hybrid,
         } => {
             let store = open_store(&repo)?;
-            let results = if matches!(kind, SearchKind::Graph) {
+            // Exact pattern matching outranks the ranked paths, so `--regex`
+            // wins over the heuristic modes rather than being merged with them.
+            let results = if regex {
+                regex_search(&store, &query, limit)?
+            } else if matches!(kind, SearchKind::Graph) {
                 require_current_analysis_semantics(&store)?;
                 graph_search(&repo, &query, limit)?
             } else if semantic {
