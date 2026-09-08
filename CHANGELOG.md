@@ -62,6 +62,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Git history votes for the files that near-identical past commit subjects touched (numbers and PR references stripped, Jaccard ≥ 0.75, half the twins must agree on a file). On a Go repository whose holdout contains 50 release-bump commits with one gold file, holdout R@5 0.428 → 0.772 and MRR 0.338 → 0.511 with history present; a repository without repeated subjects is unchanged.
 - A commit scope's directory entry file (`mod.ts`, `index.ts`, `lib.rs`, `__init__.py`) is a candidate even without shared vocabulary, placed just below the scope's best hit when nothing in the directory knows the task's words and last otherwise. The TypeScript standard library holdout R@5 0.744 → 0.816, MRR 0.607 → 0.650; other corpora unchanged.
 - Commit-style scope prefixes (`docs(fs): …`, `pkg/render: …`, `[Scheduler] …`) now anchor retrieval on the package or directory they name, and document sections cast one vote per file instead of one per section (a documentation task on the TypeScript standard library had returned twenty sections of `Releases.md` and nothing else). Holdout MRR on the commit-derived corpora: the TypeScript standard library 0.510 → 0.607, the Go application 0.308 → 0.338, the Python ML library 0.539 → 0.565.
+- Context packs showed the right file but the wrong region: selection units are chunk-sized, and on commit-derived holdouts from four large public repositories the selected units covered 3–22% of the lines the real change touched even when the file was right, identical at 4k, 8k and 16k tokens (packs were 0.7–1.2k tokens; the budget was not the binding constraint). After selection, the first three primary files (`ContextBudget::region_files`) now have their selected regions widened — enclosing symbol, the file's other task-ranked units, adjacent chunks — up to 1,200 estimated tokens per file (`region_tokens_per_file`), spending only the budget selection left over, so ordering and lower-ranked files are untouched; each step is a `region:` evidence ref on the unit, and supporting files are costed in the selection ledger at their listing size. Measured on the holdouts (R@5, R@20 and MRR bit-identical in every corpus; `gold_line_yield@8k` is the share of changed lines the pack shows within 8k tokens):
+
+  | Corpus | line yield@8k before → after | file yield@8k before → after | pack tokens p50 / max before → after |
+  |---|---|---|---|
+  | Corpus | `gold_line_yield@8k` | `gold_file_yield@8k` | pack tokens p50 / p95 | pack JSON KB p50 / p95 |
+  |---|---|---|---|---|
+  | Java (10k files) | 0.216 → 0.248 | 0.537 → 0.548 | 1,152 → 3,730 / 2,178 → 4,924 | 647 → 700 / 825 → 876 |
+  | Go (~800 files) | 0.207 → 0.308 | 0.696 → 0.739 | 883 → 3,205 / 1,549 → 4,565 | 790 → 849 / 1,014 → 1,084 |
+  | TypeScript (~900 files) | 0.155 → 0.360 | 0.691 → 0.771 | 836 → 2,995 / 2,752 → 4,730 | 728 → 773 / 892 → 951 |
+  | Python (~4k files) | 0.130 → 0.216 | 0.608 → 0.679 | 934 → 3,913 / 5,600 → 7,977 | 732 → 765 / 907 → 948 |
+
+  Ranking is untouched: R@5, R@20, MRR and `gold_recall@20` are identical in every corpus, and no case out of 626 changed its rank, its top five, or its gold recall. The Java gain is within overlapping confidence intervals — that corpus is per-file-cap bound, with widened files pinned at ~1,190 of 1,200 tokens — so it is reported as measured, not as an improvement. Yield is averaged over every scored case, so a pack that selected nothing scores 0 rather than being dropped from the denominator.
+
 - A pack whose selected context contains fewer than a third of the task's terms is capped strictly below Medium confidence; previously the cap sat exactly on the Medium threshold and a nonsense query with one incidental word match reported Medium.
 
 ### Performance
