@@ -10,8 +10,16 @@ so a query cannot retrieve its own diff.
     scripts/commit-derived-cases.py REPO --base B --after 3800 \
         --out cases.tsv [--min-files 1] [--max-files 5] [--ext .java]
 
-Output is TSV: sha, author date, query, gold paths joined by '|'. Split it
-chronologically (older = dev, newer = holdout) before tuning anything.
+Output is TSV: sha, author date, query, gold paths joined by '|', and the modified
+line ranges per gold file ("26-33,36-44|1-1", one field per gold path in the same order,
+each "start-end" inclusive, from `git diff -U0 <parent> <sha>`; a pure insertion records
+its anchor line). Ranges are numbered on the commit's *parent*, the nearest thing to the
+indexed base B that the change is expressed against. Split the file chronologically
+(older = dev, newer = holdout) before tuning anything.
+
+    scripts/commit-derived-cases.py REPO --annotate cases.tsv --out cases-with-ranges.tsv
+
+re-derives the fifth column for an existing four-column file without changing its cases.
 """
 import argparse
 import re
@@ -19,6 +27,7 @@ import subprocess
 import sys
 
 PR_REF = re.compile(r"\(#\d+\)|#\d+")
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 NUMBERS = re.compile(r"\d+")
 PATHLIKE = re.compile(r"\S*/\S*")
 BACKTICKS = re.compile(r"`([^`]*)`")
@@ -30,6 +39,48 @@ def git(repo, *args):
     ).stdout
 
 
+def parse_hunk_ranges(diff_text):
+    """Base-side line ranges per path from a `git diff -U0 --src-prefix=a/` text.
+
+    Returns {path: [(start, end), ...]} with inclusive one-based ranges. A hunk that only
+    inserts (`-N,0`) has no base-side lines; it is recorded as the single anchor line N
+    (line 1 for an insertion at the top) so the region an editor has to look at still
+    counts, without inflating the line total.
+    """
+    ranges = {}
+    current = None
+    for line in diff_text.splitlines():
+        if line.startswith("--- a/"):
+            current = line[len("--- a/"):]
+            ranges.setdefault(current, [])
+        elif line.startswith("@@") and current is not None:
+            hunk = HUNK.match(line)
+            if not hunk:
+                continue
+            start = int(hunk.group(1))
+            count = 1 if hunk.group(2) is None else int(hunk.group(2))
+            if count == 0:
+                start = max(start, 1)
+                ranges[current].append((start, start))
+            else:
+                ranges[current].append((start, start + count - 1))
+    return ranges
+
+
+def changed_ranges(repo, sha, paths):
+    """Modified base-side line ranges of `sha` for each of `paths`, in that order."""
+    diff = git(
+        repo, "diff", "-U0", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+        f"{sha}^", sha, "--", *paths,
+    )
+    found = parse_hunk_ranges(diff)
+    return [found.get(path, []) for path in paths]
+
+
+def format_ranges(per_path):
+    return "|".join(",".join(f"{a}-{b}" for a, b in ranges) for ranges in per_path)
+
+
 def clean_query(subject):
     # Strip PR numbers. A subject that names a path is dropped by the caller: kept, the path
     # is the answer; stripped, what remains ("chore: fix regex in") is unanswerable.
@@ -38,10 +89,27 @@ def clean_query(subject):
     return " ".join(subject.split()).strip(" .:-")
 
 
+def annotate(repo, cases_path, out_path):
+    """Add (or refresh) the modified-line-range column on an existing cases TSV."""
+    written = 0
+    with open(cases_path) as src, open(out_path, "w") as out:
+        for line in src:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 4:
+                continue
+            sha, date, query, gold = fields[:4]
+            paths = gold.split("|")
+            ranges = format_ranges(changed_ranges(repo, sha, paths))
+            out.write(f"{sha}\t{date}\t{query}\t{gold}\t{ranges}\n")
+            written += 1
+    print(f"{written} cases annotated with modified line ranges -> {out_path}", file=sys.stderr)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("repo")
-    ap.add_argument("--base", required=True, help="base commit; the repository is indexed here")
+    ap.add_argument("--base", help="base commit; the repository is indexed here (required unless --annotate)")
     ap.add_argument("--after", type=int, default=3800, help="how many commits after base to consider; pick a count that exists on every machine that derives the corpus, the window is anchored at base")
     ap.add_argument("--min-files", type=int, default=1)
     ap.add_argument("--max-files", type=int, default=5)
@@ -59,8 +127,16 @@ def main():
         "--path-prefix", action="append", default=None,
         help="only count files under these prefixes as gold (repeatable); use it when only a subtree of the repository is indexed",
     )
+    ap.add_argument(
+        "--annotate", metavar="CASES_TSV",
+        help="re-derive the modified-line-range column for an existing cases file instead of deriving cases; every other selection flag is ignored",
+    )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.annotate:
+        return annotate(args.repo, args.annotate, args.out)
+    if not args.base:
+        ap.error("--base is required unless --annotate is given")
     exts = tuple(args.ext or [".java"])
     prefixes = tuple(args.path_prefix or [""])
 
@@ -97,10 +173,11 @@ def main():
                     dropped_repeats += 1
                     continue
                 seen_subjects.add(key)
-            out.write(f"{sha}\t{date}\t{query}\t{'|'.join(paths)}\n")
+            ranges = format_ranges(changed_ranges(args.repo, sha, paths))
+            out.write(f"{sha}\t{date}\t{query}\t{'|'.join(paths)}\t{ranges}\n")
             kept += 1
     print(f"{kept} cases written to {args.out} (base {args.base[:12]}, {args.after} commits scanned, {dropped_repeats} repeated subjects dropped)", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
