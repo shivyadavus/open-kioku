@@ -1,56 +1,96 @@
 {
- "corpus": "java-a",
- "split": "holdout",
- "provenance": {
-  "base": "1e6d79605440aa871287acacb604564d54ca7555",
-  "after": 3800,
-  "ext": [
-   ".java"
-  ],
-  "path_prefixes": [
-   "libs/",
-   "modules/",
-   "server/"
-  ],
-  "frozen_from": "commit-derived-bench run 34173575188 (ubuntu-latest), main after #375 (repeated subjects dropped)",
-  "frozen_on": "2026-09-07",
-  "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
- },
- "cases": 113,
- "label": "holdout",
- "median_secs": 3.2498741149902344,
- "metrics": {
-  "R@1": 0.4248,
-  "R@5": 0.5487,
-  "R@10": 0.6106,
-  "R@20": 0.6814,
-  "MRR": 0.482,
-  "gold_recall@20": 0.5274
- },
- "ci": {
-  "R@1": [
-   0.3451,
-   0.5133
-  ],
-  "R@5": [
-   0.4602,
-   0.6372
-  ],
-  "R@10": [
-   0.5133,
-   0.6991
-  ],
-  "R@20": [
-   0.5929,
-   0.7699
-  ],
-  "MRR": [
-   0.4002,
-   0.5603
-  ],
-  "gold_recall@20": [
-   0.4459,
-   0.6043
+  "corpus": "java-a",
+  "split": "holdout",
+  "provenance": {
+    "base": "1e6d79605440aa871287acacb604564d54ca7555",
+    "after": 3800,
+    "ext": [
+      ".java"
+    ],
+    "path_prefixes": [
+      "libs/",
+      "modules/",
+      "server/"
+    ],
+    "frozen_from": "commit-derived-bench run 34201235176 (ubuntu-latest), main after #390 (generated files indexed and ranked below hand-written source)",
+    "frozen_on": "2026-09-08",
+    "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
+  },
+  "cases": 113,
+  "label": "holdout",
+  "median_secs": 3.546581983566284,
+  "metrics": {
+    "R@1": 0.4513,
+    "R@5": 0.5664,
+    "R@10": 0.6283,
+    "R@20": 0.6991,
+    "MRR": 0.5039,
+    "gold_recall@20": 0.563,
+    "gold_file_yield@4000": 0.5512,
+    "gold_line_yield@4000": 0.2219,
+    "gold_file_yield@8000": 0.5512,
+    "gold_line_yield@8000": 0.2219,
+    "gold_file_yield@16000": 0.5512,
+    "gold_line_yield@16000": 0.2219,
+    "tokens_to_first_gold_p50": 0
+  },
+  "ci": {
+    "R@1": [
+      0.3717,
+      0.5398
+    ],
+    "R@5": [
+      0.4779,
+      0.6549
+    ],
+    "R@10": [
+      0.5398,
+      0.7168
+    ],
+    "R@20": [
+      0.6195,
+      0.7788
+    ],
+    "MRR": [
+      0.4195,
+      0.5847
+    ],
+    "gold_recall@20": [
+      0.4824,
+      0.6422
+    ],
+    "gold_file_yield@4000": [
+      0.4711,
+      0.6298
+    ],
+    "gold_line_yield@4000": [
+      0.1586,
+      0.2979
+    ],
+    "gold_file_yield@8000": [
+      0.4711,
+      0.6298
+    ],
+    "gold_line_yield@8000": [
+      0.1586,
+      0.2979
+    ],
+    "gold_file_yield@16000": [
+      0.4711,
+      0.6298
+    ],
+    "gold_line_yield@16000": [
+      0.1586,
+      0.2979
+    ],
+    "tokens_to_first_gold_p50": [
+      0.0,
+      0.0
+    ]
+  },
+  "yield_budgets": [
+    4000,
+    8000,
+    16000
   ]
- }
 }
