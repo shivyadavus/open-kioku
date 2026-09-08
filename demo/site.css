@@ -261,6 +261,7 @@ html:not(.js) .seg{display:none}
 .install-card b{display:block;font:700 14px var(--display)}
 .install-cmd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding:8px 10px;border-radius:6px;background:var(--con);border:1px solid var(--con-line)}
 .install-cmd code,.install-card>code{font:12px/1.6 var(--mono);color:var(--con-ink);word-break:break-word}
+.install-cmd code,.install-inline code,.console code,.workflow-terminal code{background:transparent;border:0;padding:0;border-radius:0}
 .install-cmd code{white-space:nowrap;overflow-x:auto;min-width:0}
 .install-card>code{display:block;margin-top:10px;padding:8px 10px;border-radius:6px;background:var(--con);border:1px solid var(--con-line)}
 .install-cmd .copy{background:transparent;color:var(--con-ink-2);border-color:var(--con-line)}
