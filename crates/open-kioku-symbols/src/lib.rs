@@ -150,10 +150,24 @@ impl<'a> SymbolEngine<'a> {
             "definition body recovered from indexed chunk `{}` covering {} lines {}-{}",
             covering.id, path_label, covering.range.start, covering.range.end
         ));
+        // A chunk's declared range can outrun the text it stores, and lines can
+        // fall between chunks. Rebuilding `body_range` from what came back would
+        // otherwise let a partial body read as a whole definition.
+        let sought = u32::from(body_end >= symbol_range.start)
+            * (body_end
+                .saturating_sub(symbol_range.start)
+                .saturating_add(1));
+        let missing = (sought as usize).saturating_sub(body.len());
+        if missing > 0 {
+            context.caveats.push(format!(
+                "the definition body is incomplete: {missing} of {sought} line(s) sought in {path_label}:{}-{} are outside every indexed chunk, so the returned body covers only {}-{}",
+                symbol_range.start, body_end, body_range.start, body_range.end
+            ));
+        }
         if derived_end {
             context.caveats.push(format!(
                 "the indexed range for `{}` is a single line, so the body extent comes from the chunk boundary at line {} and may include text that follows the definition",
-                context.symbol.qualified_name, body_range.end
+                context.symbol.qualified_name, covering.range.end
             ));
         }
         context.body = Some(join_lines(&body));
@@ -165,13 +179,13 @@ impl<'a> SymbolEngine<'a> {
                 body_range.start.saturating_sub(surrounding_lines).max(1),
                 body_range.start.saturating_sub(1),
             );
-            if leading.is_empty() {
+            if leading.is_empty() && body_range.start > 1 {
                 context.caveats.push(format!(
                     "no indexed lines precede {} line {}, so any documentation comment above the definition is outside the indexed corpus and is not reported",
                     path_label,
                     body_range.start
                 ));
-            } else {
+            } else if !leading.is_empty() {
                 context.leading_range = Some(LineRange {
                     start: leading[0].0,
                     end: leading[leading.len() - 1].0,
@@ -265,6 +279,11 @@ fn indexed_lines(chunks: &[CodeChunk], from: u32, to: u32) -> Vec<(u32, String)>
         }
         for (idx, text) in chunk.text.lines().enumerate() {
             let line = chunk.range.start.saturating_add(idx as u32);
+            // A chunk's stored text can outrun its declared range; trust the
+            // range, so a line is never attributed past the chunk that owns it.
+            if line > chunk.range.end {
+                break;
+            }
             if line >= from && line <= to {
                 lines.push((line, text.to_string()));
             }
@@ -627,6 +646,91 @@ mod tests {
                 .iter()
                 .any(|caveat| caveat.contains("no indexed chunk covers")),
             "missing body must be reported, got: {:?}",
+            context.caveats
+        );
+    }
+
+    /// The fixture that shipped with this feature is itself an instance: a chunk
+    /// declaring lines 7-9 but storing one line. Rebuilding `body_range` from what
+    /// came back would let that read as a whole definition.
+    #[test]
+    fn context_reports_a_body_recovered_only_in_part() {
+        let store = MemoryStore {
+            symbols: vec![ranged_symbol(
+                "symbol-sparse",
+                "sparse_symbol",
+                LineRange::single(7),
+            )],
+            files: vec![billing_file()],
+            chunks: vec![CodeChunk {
+                id: "chunk-sparse".into(),
+                file_id: FileId::new("file-billing"),
+                range: LineRange { start: 7, end: 9 },
+                language: Language::Rust,
+                text: "pub fn sparse_symbol() {}".into(),
+                symbol_id: Some(SymbolId::new("symbol-sparse")),
+            }],
+        };
+
+        let context = SymbolEngine::new(&store)
+            .context("sparse_symbol", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert_eq!(context.body.as_deref(), Some("pub fn sparse_symbol() {}"));
+        assert_eq!(context.body_range, Some(LineRange { start: 7, end: 7 }));
+        assert!(
+            context
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("body is incomplete") && caveat.contains("2 of 3")),
+            "a short body must name the lines it could not recover, got: {:?}",
+            context.caveats
+        );
+        // The boundary caveat names the chunk boundary, not the last line that
+        // happened to come back; the evidence string must agree with it.
+        assert!(
+            context
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("chunk boundary at line 9")),
+            "the boundary caveat must name the chunk boundary, got: {:?}",
+            context.caveats
+        );
+        assert!(context
+            .evidence
+            .iter()
+            .any(|entry| entry.contains("lines 7-9")));
+    }
+
+    /// A definition on line 1 has no preamble, so there is no gap to report.
+    #[test]
+    fn context_does_not_invent_a_missing_preamble_for_a_definition_on_line_one() {
+        let store = MemoryStore {
+            symbols: vec![ranged_symbol(
+                "symbol-first",
+                "first_symbol",
+                LineRange { start: 1, end: 2 },
+            )],
+            files: vec![billing_file()],
+            chunks: vec![chunk(
+                "chunk-first",
+                "symbol-first",
+                1,
+                "pub fn first_symbol() {}\nlet started = true;",
+            )],
+        };
+
+        let context = SymbolEngine::new(&store)
+            .context("first_symbol", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert!(context.leading_lines.is_empty());
+        assert!(
+            !context
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("documentation comment")),
+            "line 1 has no preamble to be missing, got: {:?}",
             context.caveats
         );
     }

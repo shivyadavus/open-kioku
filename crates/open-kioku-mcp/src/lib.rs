@@ -1146,26 +1146,30 @@ fn search_tool(repo: &Path, store: &dyn MetadataStore, params: &Value) -> anyhow
 fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
     let pattern = params
         .get("pattern")
-        .or_else(|| params.get("query"))
         .and_then(Value::as_str)
         .filter(|pattern| !pattern.is_empty())
         .context("`regex_search` requires a non-empty `pattern`")?;
     let limit = limit(params);
     let offset = offset(params);
-    let scan = regex_search_index(store, pattern, search_fetch_limit(limit, offset))?;
+    let fetched = search_fetch_limit(limit, offset);
+    let scan = regex_search_index(store, pattern, fetched)?;
 
     let has_more = scan.results.len() > offset.saturating_add(limit);
-    let mut metadata = PageMetadata::new(limit, offset, has_more || scan.files_capped);
+    let mut metadata = PageMetadata::new(limit, offset, has_more);
     metadata.caveats.push(format!(
         "the pattern was evaluated over indexed chunk text from {} file(s), not the working tree; regions the indexer did not chunk were not searched",
         scan.files_scanned
     ));
+    // Two independent ways this answer can be short of the truth: the walk gave
+    // up on the file budget, or the fetch window was clamped. Both have to show.
     if scan.files_capped {
+        metadata.has_more = true;
         metadata.truncated = true;
         metadata.warnings.push(format!(
             "the regex scan stopped after {MAX_REGEX_SCAN_FILES} files; results are incomplete"
         ));
     }
+    disclose_fetch_cap(&mut metadata, scan.results.len());
     paged_slice_response_with_metadata("results", scan.results, metadata)
 }
 
@@ -1451,7 +1455,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "architecture_policy_check" => "Use to enforce architecture policy against indexed import/reference/call edges. Use architecture_policy_validate first for policy syntax errors and architecture_policy_explain for why a specific file or symbol matched. This is read-only.",
         "architecture_policy_explain" => "Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
         "search_code" => "Use for lexical BM25 code search when exact identifiers, terms, routes, or config keys are known. Prefer semantic_search for conceptual queries, hybrid_search when both lexical and semantic evidence are needed, and regex_search for exact patterns. This is read-only.",
-        "search_files" => "Use when the target is a file path, filename, or file-content keyword rather than a code symbol. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for code snippet search (use search_code), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
+        "search_files" => "Use when the target is a file path or filename rather than a symbol; search_code is the same call under its primary name, so expect code hits rather than file records. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for file metadata such as size or language (use list_files or explain_file), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
         "regex_search" => "Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
         "semantic_status" => "Use before calling semantic_search or hybrid_search to confirm that the local vector index exists, is ready, and is not stale. Do NOT use to build or rebuild the index (run `ok semantic index` via the CLI instead). This is read-only, inspects only local metadata, and never generates embeddings or contacts external services.",
         "semantic_search" => "Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
@@ -1509,7 +1513,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("list_files", "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of files to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip. Defaults to 0."}}})),
         ("list_languages", "List all programming languages detected and indexed in the repository, alongside support status.", json!({"type":"object","properties":{}})),
         ("list_symbols", "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names by exact match. If omitted, returns all symbols ordered by name."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
-        ("search_symbols", "Alias of list_symbols with a query set. Filters indexed symbols by case-insensitive substring against name and qualified name, ordered by qualified name. This is not fuzzy matching and the results are not ranked, so an approximate name does not match. Returns symbol name, kind, file path, and line range.", json!({"type":"object","properties":{"query":{"type":"string","description":"Fuzzy or exact search query for symbol names. Supports partial names and approximate matches."},"limit":{"type":"integer","description":"Maximum number of ranked results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
+        ("search_symbols", "Alias of list_symbols with a query set. Filters indexed symbols by case-insensitive substring against name and qualified name, ordered by qualified name. This is not fuzzy matching and the results are not ranked, so an approximate name does not match. Returns symbol name, kind, file path, and line range.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return, in qualified-name order. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
         ("detect_architecture", "Infer high-level architectural components and layers from the repository directory structure and file layout. Returns detected component names, directory paths, and inferred layer assignments using heuristic analysis.", json!({"type":"object","properties":{}})),
         ("architecture_boundaries", "Return configured architecture-policy components, path mappings, dependency rules, and the evaluated policy report. Without a policy, returns heuristic components and an explicit caveat.", json!({"type":"object","properties":{}})),
         ("architecture_violations", "Alias of architecture_boundaries: returns the same repository architecture summary, whose violations field is copied from the evaluated policy_check when a policy is configured. Without a policy the components are heuristic and the response reports configured=false with an explicit caveat rather than inferring violations.", json!({"type":"object","properties":{}})),
@@ -1517,13 +1521,13 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
         ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
         ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
-        ("search_files", "Search indexed file names and contents for specific keywords or file path patterns, returning ranked file matches with path, size, and language metadata. Set mode=graph to search graph-node documents through the same index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query to match against file paths and file contents. Accepts filenames, directory fragments, or content keywords."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. 'code' (default) searches file names and contents; 'graph' searches indexed graph-node documents including entity names and properties."},"limit":{"type":"integer","description":"Maximum number of file results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching file results to skip before returning. Defaults to 0."}}})),
+        ("search_files", "Alias of search_code: the same lexical BM25 query over the same index, matching file paths as well as chunk text, and supporting the same mode=graph. Returns ranked hits with path, line range, snippet, score, and evidence — these are code results, not file records, and carry no size or language field.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query matched against file paths and file contents. Accepts filenames, directory fragments, or content keywords."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. 'code' (default) searches file names and contents; 'graph' searches indexed graph-node documents including entity names and properties."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching results to skip before returning. Defaults to 0."}}})),
         ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
         ("semantic_status", "Report the current readiness, document count, staleness, and configured embedding provider of the local semantic vector index. Returns a status object indicating whether semantic_search and hybrid_search can produce vector results.", json!({"type":"object","properties":{}})),
         ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("hybrid_search", "Perform a hybrid search that merges ranked candidates from the Tantivy BM25 lexical index and the local semantic vector index, deduplicates by file path, and returns combined-score-sorted results with evidence spans. Falls back to lexical-only when the semantic index is unavailable.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural-language or keyword query to match both lexically (BM25) and semantically (vector similarity) against the indexed codebase. Supports identifiers, phrases, and conceptual descriptions."},"limit":{"type":"integer","description":"Maximum number of merged results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of merged results to skip before returning. Defaults to 0."}}})),
         ("explain_search_result", "Alias of hybrid_search: runs the same query with the same parameters and returns an identical payload. The per-signal score_breakdown and evidence_refs it is named for are already carried by every search result; this tool adds no separate explanation step.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query whose results should be explained with full score breakdowns and evidence."},"limit":{"type":"integer","description":"Maximum number of explained results to return. Defaults to 20, capped at 100."}}})),
-        ("structural_search", "Alias of search_code: runs the same ranked lexical BM25 query over indexed chunks. No AST or structural matching exists in this workspace, so a structure-shaped query is treated as ordinary text; inspect match_reason on each result. Use regex_search when the pattern is literal.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Structure-shaped query used for lexical candidate discovery; this is not yet a guaranteed AST pattern."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
+        ("structural_search", "Alias of search_code: runs the same ranked lexical BM25 query over indexed chunks. No AST or structural matching exists in this workspace, so a structure-shaped query is treated as ordinary text; inspect match_reason on each result. Use regex_search when the pattern is literal.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Matched as ordinary text by the lexical BM25 index. Structural syntax carries no meaning here; there is no AST pattern language behind this parameter."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
         ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. This returns the record, not the source text; use get_symbol_context for the definition body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."}}})),
         ("get_references", "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to find references for."},"limit":{"type":"integer","description":"Maximum number of references to return. Defaults to 20, capped at 100."}}})),
         ("get_implementations", "Retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes parser provenance and confidence.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name of the interface, trait, abstract class, or protocol whose persisted implementation evidence is needed."},"limit":{"type":"integer","description":"Maximum number of verified implementation results to return. Defaults to 20, capped at 100."}}})),
@@ -1683,16 +1687,32 @@ where
     T: Serialize,
 {
     let has_more = values.len() > offset.saturating_add(limit);
-    let fetch_was_capped = offset.saturating_add(limit).saturating_add(1) > MAX_MCP_FETCH
-        && values.len() >= MAX_MCP_FETCH;
-    let mut metadata = PageMetadata::new(limit, offset, has_more || fetch_was_capped);
-    if fetch_was_capped {
-        metadata.truncated = true;
-        metadata.warnings.push(format!(
-            "search results were scanned up to {MAX_MCP_FETCH} candidates; narrow the query or use a lower offset"
-        ));
-    }
+    let mut metadata = PageMetadata::new(limit, offset, has_more);
+    disclose_fetch_cap(&mut metadata, values.len());
     paged_slice_response_with_metadata(key, values, metadata)
+}
+
+/// Reports the `search_fetch_limit` clamp on the response that the clamp shaped.
+///
+/// `search_fetch_limit` asks for `offset + limit + 1` but never more than
+/// `MAX_MCP_FETCH`, while `offset` alone accepts far more than that. Once the
+/// clamp bites, the `+1` sentinel `has_more` is derived from was never fetched,
+/// so a short page is indistinguishable from the end of the results. Every
+/// caller that fetches through `search_fetch_limit` must run its metadata
+/// through here, or it will quietly answer "that is all of them".
+fn disclose_fetch_cap(metadata: &mut PageMetadata, fetched: usize) {
+    let window = metadata
+        .offset
+        .saturating_add(metadata.limit)
+        .saturating_add(1);
+    if window <= MAX_MCP_FETCH || fetched < MAX_MCP_FETCH {
+        return;
+    }
+    metadata.has_more = true;
+    metadata.truncated = true;
+    metadata.warnings.push(format!(
+        "search results were scanned up to {MAX_MCP_FETCH} candidates; narrow the query or use a lower offset"
+    ));
 }
 
 fn paged_slice_response_with_metadata<T>(
@@ -3683,6 +3703,108 @@ paths = ["src/**"]
             }
             _ => {}
         }
+    }
+
+    /// `search_fetch_limit` clamps the fetch at `MAX_MCP_FETCH` while `offset`
+    /// accepts far more, so a deep page loses the `+1` sentinel `has_more` is
+    /// derived from. Without disclosure the response reads as the end of the
+    /// matches, and an agent paging a broad pattern concludes it has seen every
+    /// occurrence in the repository.
+    #[tokio::test]
+    async fn regex_search_reports_truncation_when_the_fetch_cap_swallows_the_page() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let file = File {
+            id: FileId::new("file-wide"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/wide.rs".into(),
+            language: Language::Rust,
+            size_bytes: 4096,
+            content_hash: "hash-wide".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        // Comfortably more matching lines than the fetch cap can return.
+        let line_count = MAX_MCP_FETCH + 200;
+        let text = (0..line_count)
+            .map(|i| format!("fn generated_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunk = CodeChunk {
+            id: "chunk-wide".into(),
+            file_id: file.id.clone(),
+            range: LineRange {
+                start: 1,
+                end: line_count as u32,
+            },
+            language: Language::Rust,
+            text,
+            symbol_id: None,
+        };
+        store
+            .replace_index(IndexData {
+                manifest: &fixture_manifest(),
+                files: &[file],
+                symbols: &[],
+                chunks: &[chunk],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+
+        let deep = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "regex_search",
+            json!({"pattern": "^fn generated_", "limit": 20, "offset": MAX_MCP_FETCH}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(deep["returned"], 0, "the clamped page returns nothing");
+        assert_eq!(
+            deep["truncated"], true,
+            "a page the fetch cap swallowed must say so: {deep}"
+        );
+        assert_eq!(
+            deep["has_more"], true,
+            "an empty clamped page must not read as the end of the matches: {deep}"
+        );
+        assert!(
+            deep["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("scanned up to")),
+            "the cap needs a warning naming it: {deep}"
+        );
+
+        // A page inside the cap keeps reporting honestly rather than warning always.
+        let shallow = dispatch(
+            Path::new("."),
+            &store,
+            &config,
+            "regex_search",
+            json!({"pattern": "^fn generated_", "limit": 5, "offset": 0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shallow["returned"], 5);
+        assert_eq!(shallow["has_more"], true);
+        assert_eq!(
+            shallow["truncated"], false,
+            "an unclamped page is not truncated: {shallow}"
+        );
+        assert!(shallow["warnings"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
