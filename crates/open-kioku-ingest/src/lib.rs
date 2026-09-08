@@ -6,9 +6,10 @@ use open_kioku_config::OkConfig;
 use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, DocumentSection, DocumentType, EvidenceSourceType, File,
     FileId, GitCochangeEdge, GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType,
-    HistoryRecordId, HistorySnapshot, Import, IndexManifest, IndexMode, IndexPhaseReport,
-    IndexQuality, Language, LineRange, Repository, RepositoryId, SkipReason, SkipSource,
-    SkippedPath, Symbol, SymbolId, SymbolOccurrence, TestTarget, HISTORY_SCHEMA_VERSION,
+    HistoryRecordId, HistorySnapshot, Import, IndexCoverage, IndexManifest, IndexMode,
+    IndexPhaseReport, IndexQuality, Language, LineRange, Repository, RepositoryId, SkipReason,
+    SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence, TestTarget,
+    HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -23,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 mod git_ignore;
@@ -412,6 +414,7 @@ impl Indexer {
                 mode,
                 phase_reports: &phase_reports,
                 skipped_paths: &[],
+                coverage: None,
             });
             let manifest = IndexManifest {
                 analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -1068,6 +1071,7 @@ impl Indexer {
             mode,
             phase_reports: &phase_reports,
             skipped_paths: &scan.skipped_paths,
+            coverage: Some(scan.coverage.clone()),
         });
         let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
             None
@@ -1137,12 +1141,27 @@ impl Indexer {
         builder.git_ignore(false).git_exclude(false).parents(false);
         builder.ignore(false);
         builder.follow_links(false);
-        builder.filter_entry(|entry| !is_heavy_discovery_dir(entry.path()));
+        // Pruned directories never reach the ledger, so count them: a real `build/`
+        // or `dist/` package would otherwise read as full coverage.
+        let pruned_dirs = Arc::new(AtomicUsize::new(0));
+        builder.filter_entry({
+            let pruned_dirs = Arc::clone(&pruned_dirs);
+            move |entry| {
+                let path = entry.path();
+                if !is_heavy_discovery_dir(path) {
+                    return true;
+                }
+                if entry.file_type().is_some_and(|kind| kind.is_dir()) && !is_tooling_dir(path) {
+                    pruned_dirs.fetch_add(1, Ordering::Relaxed);
+                }
+                false
+            }
+        });
         let mut files = Vec::new();
         let mut document_sections = Vec::new();
         let mut document_paths = BTreeSet::<PathBuf>::new();
         let mut document_elapsed_ms = 0u64;
-        let mut skipped_paths = Vec::new();
+        let mut ledger = ScanLedger::default();
         let mut warnings = Vec::new();
         let mut scanned_files = 0;
         let mut source_like_files = 0;
@@ -1151,12 +1170,13 @@ impl Indexer {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    skipped_paths.push(SkippedPath {
+                    ledger.skipped_paths.push(SkippedPath {
                         path: PathBuf::from("[walk-error]"),
                         reason: SkipReason::Error,
                         source: SkipSource::Filesystem,
                         safe_to_show: false,
                     });
+                    ledger.coverage.walk_errors += 1;
                     warnings.push(format!("discovery walk error: {err}"));
                     continue;
                 }
@@ -1175,6 +1195,7 @@ impl Indexer {
             if is_supported_code(&language) {
                 source_like_files += 1;
             }
+            ledger.discovered(&language);
             let secret_policy = is_secret_like_path(&rel, is_programming_language(&language));
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
@@ -1183,43 +1204,43 @@ impl Indexer {
                 } else {
                     SkipReason::Denied
                 };
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     reason,
                     SkipSource::SecurityPolicy,
                     safe_to_show,
-                    &mut skipped_paths,
                 );
                 if should_emit_progress(scanned_files, 0) {
                     progress.emit_transient(
                         ProgressEvent::new("scan")
                             .scanned(scanned_files)
                             .indexed(files.len())
-                            .skipped(skipped_paths.len()),
+                            .skipped(ledger.skipped_paths.len()),
                     );
                 }
                 continue;
             }
             if !config.security.allow_hidden_files && is_hidden_path(&rel) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Hidden,
                     SkipSource::HiddenPolicy,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             if excludes.is_match(&rel) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Ignored,
                     SkipSource::ConfigExclude,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
@@ -1230,46 +1251,46 @@ impl Indexer {
                     .as_ref()
                     .is_some_and(|matcher| matcher.is_ignored(path, false));
             if git_ignored {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Ignored,
                     SkipSource::GitIgnore,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             if ok_ignores.is_ignored(path, false) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Ignored,
                     SkipSource::OkIgnore,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::SymlinkPolicy,
                     SkipSource::SymlinkPolicy,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             if likely_vendor_path(&rel) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Vendor,
                     SkipSource::Detector,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
@@ -1277,13 +1298,13 @@ impl Indexer {
                 .metadata()
                 .map_err(|err| OkError::Index(err.to_string()))?;
             if metadata.len() > max_size {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::TooLarge,
                     SkipSource::SizeLimit,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
@@ -1296,13 +1317,13 @@ impl Indexer {
                             u64::try_from(document_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX),
                         );
-                        push_skip(
+                        ledger.skip(
                             root,
                             path,
+                            &language,
                             SkipReason::Binary,
                             SkipSource::Detector,
                             true,
-                            &mut skipped_paths,
                         );
                         continue;
                     }
@@ -1312,17 +1333,18 @@ impl Indexer {
                             u64::try_from(document_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX),
                         );
-                        push_skip(
+                        ledger.skip(
                             root,
                             path,
+                            &language,
                             SkipReason::Generated,
                             SkipSource::Detector,
                             true,
-                            &mut skipped_paths,
                         );
                         continue;
                     }
                     document_paths.insert(rel.clone());
+                    ledger.indexed(&language, false);
                     document_sections.extend(build_document_sections(
                         &rel,
                         &content,
@@ -1335,36 +1357,36 @@ impl Indexer {
                 }
             }
             if mode == IndexMode::Fast && fast_mode_skip_path(&rel) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::FastMode,
                     SkipSource::FastMode,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             if !is_supported_code(&language) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::UnsupportedLanguage,
                     SkipSource::LanguageSupport,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
             let bytes = fs::read(path)?;
             if bytes.contains(&0) {
-                push_skip(
+                ledger.skip(
                     root,
                     path,
+                    &language,
                     SkipReason::Binary,
                     SkipSource::Detector,
                     true,
-                    &mut skipped_paths,
                 );
                 continue;
             }
@@ -1375,6 +1397,7 @@ impl Indexer {
             // decides what a generated file is worth; the index must still know it exists.
             let is_generated = likely_generated(&content);
             let content_hash = hash_bytes(&bytes);
+            ledger.indexed(&language, is_generated);
             files.push(File {
                 id: FileId::new(stable_id(&rel.to_string_lossy())),
                 repository_id: repository_id.clone(),
@@ -1390,11 +1413,12 @@ impl Indexer {
                     ProgressEvent::new("scan")
                         .scanned(scanned_files)
                         .indexed(files.len())
-                        .skipped(skipped_paths.len()),
+                        .skipped(ledger.skipped_paths.len()),
                 );
             }
         }
-        let fast_skipped = skipped_paths
+        let fast_skipped = ledger
+            .skipped_paths
             .iter()
             .filter(|path| path.reason == SkipReason::FastMode)
             .count();
@@ -1404,7 +1428,8 @@ impl Indexer {
             ));
         }
         if files.is_empty() && source_like_files > 0 {
-            let git_ignored = skipped_paths
+            let git_ignored = ledger
+                .skipped_paths
                 .iter()
                 .filter(|path| path.source == SkipSource::GitIgnore)
                 .count();
@@ -1417,9 +1442,14 @@ impl Indexer {
                 .scanned(scanned_files)
                 .indexed(files.len())
                 .total(Some(files.len()))
-                .skipped(skipped_paths.len())
+                .skipped(ledger.skipped_paths.len())
                 .warnings(warnings.clone()),
         );
+        ledger.coverage.pruned_dirs = pruned_dirs.load(Ordering::Relaxed);
+        let ScanLedger {
+            skipped_paths,
+            coverage,
+        } = ledger;
         let skipped = skipped_paths.len();
         Ok(ScanResult {
             files,
@@ -1429,6 +1459,7 @@ impl Indexer {
             skipped,
             warnings,
             skipped_paths,
+            coverage,
         })
     }
 }
@@ -1442,6 +1473,51 @@ struct ScanResult {
     skipped: usize,
     warnings: Vec<String>,
     skipped_paths: Vec<SkippedPath>,
+    coverage: IndexCoverage,
+}
+
+/// Discovery's running record of what was left out and why. Coverage counts only
+/// recognised languages, so a skipped README or lockfile never dilutes the source ratio.
+#[derive(Default)]
+struct ScanLedger {
+    skipped_paths: Vec<SkippedPath>,
+    coverage: IndexCoverage,
+}
+
+impl ScanLedger {
+    fn discovered(&mut self, language: &Language) {
+        if is_supported_code(language) {
+            self.coverage.record_discovered(language);
+        }
+    }
+
+    fn indexed(&mut self, language: &Language, generated: bool) {
+        if is_supported_code(language) {
+            self.coverage.record_indexed(language, generated);
+        }
+    }
+
+    fn skip(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        language: &Language,
+        reason: SkipReason,
+        source: SkipSource,
+        safe_to_show: bool,
+    ) {
+        push_skip(
+            root,
+            path,
+            reason,
+            source,
+            safe_to_show,
+            &mut self.skipped_paths,
+        );
+        if is_supported_code(language) {
+            self.coverage.record_skipped(language, reason);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1605,6 +1681,7 @@ struct IndexQualityInput<'a> {
     mode: IndexMode,
     phase_reports: &'a [IndexPhaseReport],
     skipped_paths: &'a [SkippedPath],
+    coverage: Option<IndexCoverage>,
 }
 
 fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
@@ -1744,6 +1821,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
             resolution_quality: None,
+            coverage: input.coverage,
             quality_notes,
         }
     } else {
@@ -1774,6 +1852,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             architecture_facts: analysis.architecture_facts,
             semantic_provider_notes,
             resolution_quality: None,
+            coverage: input.coverage,
             quality_notes,
         }
     }
@@ -2598,6 +2677,13 @@ fn build_ignore_matcher(root: &Path, file_name: &str) -> Result<ScopedIgnoreMatc
     Ok(ScopedIgnoreMatcher { layers })
 }
 
+/// Pruned directories that are never user source and so are not counted as blind spots.
+fn is_tooling_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".git" | ".ok"))
+}
+
 fn is_heavy_discovery_dir(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -2646,16 +2732,7 @@ fn is_hidden_path(path: &Path) -> bool {
 /// also understands (YAML, JSON, TOML, Markdown, text). A `credentials.json` is a credential
 /// store; a `CredentialsProvider.java` is code.
 fn is_programming_language(language: &Language) -> bool {
-    matches!(
-        language,
-        Language::Rust
-            | Language::Java
-            | Language::TypeScript
-            | Language::JavaScript
-            | Language::Python
-            | Language::Go
-            | Language::Sql
-    )
+    language.is_programming()
 }
 
 /// Paths that hold key material or environment secrets are never read. A *programming-language*
