@@ -20,6 +20,11 @@ before that point is what an agent reading the pack top-down sees within B token
 `gold_line_yield@B` (only when the cases carry line ranges) is the fraction of modified
 lines that those units' line ranges cover; `tokens_to_first_gold` is what was spent before
 the first gold unit. See docs/retrieval-benchmark.md, "Gold yield at a token budget".
+
+The report also records the index's coverage (source files discovered versus indexed,
+per language, with every omission attributed to a skip reason) read from
+`ok --json status`, so a ranking number is never read without knowing how much of the
+corpus the index actually held.
 """
 import argparse
 import json
@@ -136,6 +141,50 @@ def yield_row(units, gold, ranges):
     }
 
 
+def index_coverage(ok, repo):
+    """(coverage, error): the `coverage` object from `ok --json status` (None when the index
+    predates it) and, separately, why the status could not be read at all."""
+    try:
+        out = subprocess.run([ok, "--repo", repo, "--json", "status"], capture_output=True, text=True, timeout=120).stdout
+        return json.loads(out).get("coverage"), None
+    except Exception as err:  # noqa: BLE001 - coverage is informational; the failure is reported, not hidden
+        return None, str(err)[:120]
+
+
+PROGRAMMING_LANGUAGES = ("rust", "java", "type_script", "java_script", "python", "go", "sql")
+
+
+def coverage_line(coverage, error=None):
+    """`921 of 922 programming-language files indexed (99.9%); 1,417 of 1,461 recognised files indexed (97.0%) overall; skipped: ...`
+
+    The programming-language ratio comes first because that is the one `ok doctor`
+    judges; config and prose files are reported in the overall figure beside it.
+    """
+    if error:
+        return f"status unavailable ({error})"
+    if not coverage or not coverage.get("discovered"):
+        return "not recorded"
+    discovered, indexed = coverage["discovered"], coverage["indexed"]
+    overall = f"{indexed:,} of {discovered:,} recognised files indexed ({100.0 * indexed / discovered:.1f}%)"
+    by_language = coverage.get("by_language", {})
+    source = [v for k, v in by_language.items() if k in PROGRAMMING_LANGUAGES]
+    src_discovered = sum(v.get("discovered", 0) for v in source)
+    src_indexed = sum(v.get("indexed", 0) for v in source)
+    if src_discovered:
+        line = (f"{src_indexed:,} of {src_discovered:,} programming-language files indexed "
+                f"({100.0 * src_indexed / src_discovered:.1f}%); {overall} overall")
+    else:
+        line = f"no programming-language files discovered; {overall}"
+    skipped = sorted(coverage.get("skipped", {}).items(), key=lambda kv: (-kv[1], kv[0]))
+    if skipped:
+        line += "; skipped: " + ", ".join(f"{n:,} {reason.replace('_', '-')}" for reason, n in skipped)
+    if coverage.get("pruned_dirs"):
+        line += f"; {coverage['pruned_dirs']:,} directories pruned by name"
+    if coverage.get("walk_errors"):
+        line += f"; {coverage['walk_errors']:,} walk errors"
+    return line
+
+
 def metrics(sample):
     def recall_at(k):
         return sum(1 for r in sample if r["rank"] and r["rank"] <= k) / len(sample)
@@ -234,6 +283,7 @@ def main():
         if len(values) >= 40:
             ci[k] = (values[int(len(values) * 0.025)], values[min(int(len(values) * 0.975), len(values) - 1)])
     median_secs = statistics.median(r["secs"] for r in rows)
+    coverage, coverage_error = index_coverage(args.ok, repo)
     print(f"\n== {args.label}: {len(scored)} cases scored ({len(rows) - len(scored)} errors), median {median_secs:.1f}s/query ==")
     for k in ("R@1", "R@5", "R@10", "R@20", "MRR", "gold_recall@20"):
         print(f"  {k:16} {summary[k]:.4f}   95% CI [{ci[k][0]:.4f}, {ci[k][1]:.4f}]")
@@ -254,9 +304,12 @@ def main():
             print(f"  {'tokens_to_first_gold':22} median {summary['tokens_to_first_gold_p50']:.0f}   "
                   f"95% CI [{ci['tokens_to_first_gold_p50'][0]:.0f}, {ci['tokens_to_first_gold_p50'][1]:.0f}]   "
                   f"({len(first)}/{len(with_units)} cases reach a gold unit)")
+    print(f"  {'coverage':16} {coverage_line(coverage, coverage_error)}")
     if args.out:
         json.dump({"label": args.label, "metrics": summary, "ci": ci, "median_secs": median_secs,
-                   "yield_budgets": list(BUDGETS), "rows": rows},
+                   "yield_budgets": list(BUDGETS), "coverage": coverage,
+                   "coverage_line": coverage_line(coverage, coverage_error),
+                   "coverage_error": coverage_error, "rows": rows},
                   open(args.out, "w"), indent=1)
     return 0
 
