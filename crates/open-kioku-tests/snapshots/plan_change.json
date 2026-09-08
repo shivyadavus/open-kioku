@@ -106,7 +106,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -122,7 +122,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -138,7 +138,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -154,7 +154,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -170,7 +170,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -186,7 +186,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -202,7 +202,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -218,7 +218,7 @@
         "file_range": {
           "line_range": {
             "end": 7,
-            "start": 5
+            "start": 1
           },
           "path": "src/main.rs"
         },
@@ -233,7 +233,23 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 7,
+            "start": 1
+          },
+          "path": "src/main.rs"
+        },
+        "id": "context:src/main.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "region extended to adjacent chunk (lines 1-4)",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -249,7 +265,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -265,7 +281,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -281,7 +297,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -297,7 +313,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -313,7 +329,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -329,7 +345,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -345,7 +361,7 @@
         "confidence": "medium",
         "file_range": {
           "line_range": {
-            "end": 3,
+            "end": 6,
             "start": 2
           },
           "path": "src/routes.rs"
@@ -353,6 +369,22 @@
         "id": "context:src/routes.rs",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `function next` matched indexed search",
+        "source": "open-kioku-search",
+        "source_type": "lexical",
+        "symbol_id": "<ID>"
+      },
+      {
+        "confidence": "medium",
+        "file_range": {
+          "line_range": {
+            "end": 6,
+            "start": 2
+          },
+          "path": "src/routes.rs"
+        },
+        "id": "context:src/routes.rs",
+        "indexed_at": "<TIMESTAMP>",
+        "message": "region extended to adjacent chunk (lines 4-6)",
         "source": "open-kioku-search",
         "source_type": "lexical",
         "symbol_id": "<ID>"
@@ -450,6 +482,8 @@
     ],
     "evidence_by_section": {
       "boundary": [
+        "region:adjacent-unit:1-4",
+        "region:adjacent-unit:4-6",
         "search:src/main.rs:1-4:0",
         "search:src/main.rs:1-4:1",
         "search:src/main.rs:5-7:0",
@@ -472,6 +506,8 @@
         "negative:validation:add-a-subtract-function-next-to-add-no"
       ],
       "primary_context": [
+        "region:adjacent-unit:1-4",
+        "region:adjacent-unit:4-6",
         "search:src/main.rs:1-4:0",
         "search:src/main.rs:1-4:1",
         "search:src/main.rs:5-7:0",
@@ -646,17 +682,19 @@
           "query variant `subtract OR function` matched local index",
           "expanded task query `subtract function` matched indexed search",
           "query variant `function OR next` matched local index",
-          "expanded task query `function next` matched indexed search"
+          "expanded task query `function next` matched indexed search",
+          "region extended to adjacent chunk (lines 1-4)"
         ],
         "evidence_refs": [
           "search:src/main.rs:1-4:0",
           "search:src/main.rs:1-4:1",
           "search:src/main.rs:5-7:0",
-          "search:src/main.rs:5-7:1"
+          "search:src/main.rs:5-7:1",
+          "region:adjacent-unit:1-4"
         ],
         "line_range": {
           "end": 7,
-          "start": 5
+          "start": 1
         },
         "match_reason": "tantivy hybrid lexical match",
         "path": "src/main.rs",
@@ -715,7 +753,7 @@
             "weight": 0.0
           }
         ],
-        "snippet": "pub fn add(a: i32, b: i32) -> i32 {",
+        "snippet": "fn main() {\n    println!(\"Hello from rust fixture\");\n}\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}",
         "symbol": {
           "confidence": "high",
           "file_id": "<ID>",
@@ -744,16 +782,18 @@
           "query variant `subtract OR function` matched local index",
           "expanded task query `subtract function` matched indexed search",
           "query variant `function OR next` matched local index",
-          "expanded task query `function next` matched indexed search"
+          "expanded task query `function next` matched indexed search",
+          "region extended to adjacent chunk (lines 4-6)"
         ],
         "evidence_refs": [
           "search:src/routes.rs:2-3:0",
           "search:src/routes.rs:2-3:1",
           "search:src/routes.rs:4-6:0",
-          "search:src/routes.rs:4-6:1"
+          "search:src/routes.rs:4-6:1",
+          "region:adjacent-unit:4-6"
         ],
         "line_range": {
-          "end": 3,
+          "end": 6,
           "start": 2
         },
         "match_reason": "tantivy hybrid lexical match",
@@ -813,7 +853,7 @@
             "weight": 0.0
           }
         ],
-        "snippet": "pub async fn orders_route() {}",
+        "snippet": "pub async fn orders_route() {}\n\npub async fn call_orders_route() {\n    let _ = reqwest::get(\"https://example.com/v1/orders\").await;\n}",
         "symbol": {
           "confidence": "high",
           "file_id": "<ID>",
@@ -841,6 +881,7 @@
       "allowed_rules": [
         {
           "evidence_refs": [
+            "region:adjacent-unit:1-4",
             "search:src/main.rs:1-4:0",
             "search:src/main.rs:1-4:1",
             "search:src/main.rs:5-7:0",
@@ -854,6 +895,7 @@
         },
         {
           "evidence_refs": [
+            "region:adjacent-unit:4-6",
             "search:src/routes.rs:2-3:0",
             "search:src/routes.rs:2-3:1",
             "search:src/routes.rs:4-6:0",
@@ -870,6 +912,8 @@
       "caution_files": [],
       "caution_rules": [],
       "evidence_refs": [
+        "region:adjacent-unit:1-4",
+        "region:adjacent-unit:4-6",
         "search:src/main.rs:1-4:0",
         "search:src/main.rs:1-4:1",
         "search:src/main.rs:5-7:0",
@@ -883,6 +927,8 @@
         {
           "reason": "Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.",
           "required_evidence_refs": [
+            "region:adjacent-unit:1-4",
+            "region:adjacent-unit:4-6",
             "search:src/main.rs:1-4:0",
             "search:src/main.rs:1-4:1",
             "search:src/main.rs:5-7:0",
