@@ -19,7 +19,7 @@ if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){document.query
 // ── Scroll reveal ────────────────────────────────────────────────────────────
 const reduceMotion=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 if(!reduceMotion&&'IntersectionObserver' in window){
-  const revealables=document.querySelectorAll('.section-head,.feature,.security-card,.big-proof,.proof-stack>div,.trustbar>div,.video-card,.architecture,.cta-box');
+  const revealables=document.querySelectorAll('.section-head,.feature,.security-card,.big-proof,.proof-stack>div,.trustbar,.video-card,.architecture,.cta-box,.tool,.step,.install-card,.readout,.readout-notes');
   const io=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');io.unobserve(e.target)}})},{threshold:.12,rootMargin:'0px 0px -8% 0px'});
   revealables.forEach((el,i)=>{el.classList.add('reveal');el.style.transitionDelay=`${Math.min((i%4)*60,180)}ms`;io.observe(el)});
 }
@@ -77,67 +77,54 @@ if(live){
   }
 }
 
-/* Code rain: quiet falling glyph columns behind the hero. Fades out below the
-   fold via the CSS mask; disabled for reduced motion and narrow screens. */
-(function () {
-  var canvas = document.getElementById('code-rain');
-  if (!canvas) return;
-  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
-  if (reduced.matches || window.innerWidth < 720) { canvas.remove(); return; }
-  var ctx = canvas.getContext('2d');
-  if (!ctx) { canvas.remove(); return; }
-
-  var GLYPHS = '{}[]()<>=;:./|&+-*#$_~fnokletifpubuse01';
-  var FONT_SIZE = 13;
-  var COL_GAP = 34;
-  var dpr, cols, drops;
-
-  function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(window.innerWidth * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.font = FONT_SIZE + 'px ' + '"JetBrains Mono",Menlo,monospace';
-    cols = Math.ceil(window.innerWidth / COL_GAP);
-    drops = [];
-    for (var i = 0; i < cols; i++) {
-      drops.push({
-        y: Math.random() * window.innerHeight * 1.2 - window.innerHeight * 0.2,
-        speed: 22 + Math.random() * 34,
-        mint: Math.random() < 0.22
-      });
+// ── Evidence console: type the commands, reveal the output, then stay static ─
+(function(){
+  const con=document.getElementById('console');
+  if(!con||reduceMotion)return;
+  const lines=[...con.querySelectorAll('.cl')];
+  if(!lines.length)return;
+  con.classList.add('play');
+  let i=0;
+  function next(){
+    if(i>=lines.length){con.classList.remove('play');con.classList.add('done');return}
+    const line=lines[i++];
+    const cmd=line.querySelector('.cmd-text');
+    if(cmd){
+      const text=cmd.textContent;let n=0;cmd.textContent='';
+      const caret=document.createElement('span');caret.className='caret';caret.setAttribute('aria-hidden','true');cmd.after(caret);
+      line.classList.add('on');
+      const t=setInterval(()=>{n++;cmd.textContent=text.slice(0,n);if(n>=text.length){clearInterval(t);caret.remove();setTimeout(next,260)}},34);
+    }else{
+      line.classList.add('on');
+      setTimeout(next,line.classList.contains('term-section')||line.classList.contains('evidence-card')?170:95);
     }
   }
+  setTimeout(next,420);
+})();
 
-  var last = 0;
-  function tick(now) {
-    if (now - last > 66) { // ~15fps is plenty for this density
-      last = now;
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.fillStyle = 'rgba(0,0,0,0.16)';
-      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
-      ctx.globalCompositeOperation = 'source-over';
-      for (var i = 0; i < cols; i++) {
-        var d = drops[i];
-        d.y += d.speed * 0.066;
-        if (d.y > window.innerHeight + 40) {
-          d.y = -20 - Math.random() * 300;
-          d.speed = 22 + Math.random() * 34;
-          d.mint = Math.random() < 0.22;
-        }
-        var ch = GLYPHS.charAt((Math.random() * GLYPHS.length) | 0);
-        ctx.fillStyle = d.mint ? 'rgba(87,230,196,0.5)' : 'rgba(160,175,195,0.28)';
-        ctx.fillText(ch, i * COL_GAP + 8, d.y);
-      }
-    }
-    raf = requestAnimationFrame(tick);
+// ── Pipeline rail: stroke-draw once when it scrolls into view ───────────────
+(function(){
+  const pipeline=document.querySelector('.pipeline');
+  if(!pipeline||reduceMotion||!('IntersectionObserver' in window))return;
+  pipeline.querySelectorAll('.pipe').forEach((p,i)=>p.style.setProperty('--i',i));
+  pipeline.classList.add('armed');
+  const io=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){pipeline.classList.add('lit');io.disconnect()}})},{threshold:.4});
+  io.observe(pipeline);
+})();
+
+// ── Install matrix: segmented control over the channel panels ───────────────
+(function(){
+  const seg=document.querySelector('.seg');
+  if(!seg)return;
+  const btns=[...seg.querySelectorAll('.seg-btn')];
+  const panels=btns.map(b=>document.getElementById(b.getAttribute('aria-controls')));
+  function pick(idx,{focus=false}={}){
+    btns.forEach((b,i)=>{const on=i===idx;b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1;if(panels[i])panels[i].hidden=!on});
+    if(focus)btns[idx].focus();
   }
-
-  var raf;
-  resize();
-  window.addEventListener('resize', resize);
-  reduced.addEventListener && reduced.addEventListener('change', function (e) {
-    if (e.matches) { cancelAnimationFrame(raf); canvas.remove(); }
+  btns.forEach((b,i)=>{
+    b.addEventListener('click',()=>pick(i));
+    b.addEventListener('keydown',e=>{let n=i;if(e.key==='ArrowRight')n=(i+1)%btns.length;else if(e.key==='ArrowLeft')n=(i-1+btns.length)%btns.length;else if(e.key==='Home')n=0;else if(e.key==='End')n=btns.length-1;else return;e.preventDefault();pick(n,{focus:true})});
   });
-  raf = requestAnimationFrame(tick);
+  pick(0);
 })();

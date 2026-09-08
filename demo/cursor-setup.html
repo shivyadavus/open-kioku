@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Set up the Open Kioku MCP server for Cursor. Give Cursor local code intelligence with search, symbol resolution, impact analysis, and evidence-backed edit plans — no cloud required.">
     <meta name="keywords" content="Cursor MCP server, Cursor code intelligence plugin, MCP code search for Cursor, Cursor local code intelligence, Open Kioku Cursor setup">
+    <meta name="theme-color" content="#07090b">
     <link rel="canonical" href="https://www.openkioku.com/cursor-setup.html">
     <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Cursor | openkioku.com">
     <meta property="og:description" content="Cursor shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
@@ -16,8 +17,13 @@
     <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Cursor | openkioku.com">
     <meta name="twitter:description" content="Cursor shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <title>How to Set Up Open Kioku MCP Server for Cursor | openkioku.com</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+    <link rel="stylesheet" href="site.css">
+    <script>document.documentElement.classList.add('js')</script>
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -63,870 +69,67 @@
       "url": "https://www.openkioku.com/cursor-setup.html"
     }
     </script>
-    <style>
-        @import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap");
-
-        :root {
-            color-scheme: dark;
-            --bg: #080a0d;
-            --bg-raised: rgba(16, 20, 24, 0.88);
-            --bg-panel: rgba(21, 26, 31, 0.82);
-            --bg-soft: rgba(255, 255, 255, 0.055);
-            --border: rgba(233, 240, 247, 0.12);
-            --border-strong: rgba(233, 240, 247, 0.22);
-            --text: #f5f7fa;
-            --muted: #a8b0ba;
-            --subtle: #737d89;
-            --green: #22c55e;
-            --cyan: #2dd4bf;
-            --amber: #f59e0b;
-            --rose: #fb7185;
-            --ink: #101418;
-            --terminal: rgba(5, 8, 12, 0.94);
-            --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        html {
-            scroll-behavior: smooth;
-        }
-
-        body {
-            min-height: 100vh;
-            background:
-                linear-gradient(180deg, rgba(8, 10, 13, 0.66), var(--bg) 58%),
-                var(--bg);
-            color: var(--text);
-            font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            line-height: 1.5;
-            overflow-x: hidden;
-        }
-
-        a {
-            color: inherit;
-        }
-
-        button, a {
-            -webkit-tap-highlight-color: transparent;
-        }
-
-        .hero-scene {
-            position: fixed;
-            inset: 0;
-            z-index: -2;
-            background:
-                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-                linear-gradient(135deg, rgba(45, 212, 191, 0.08), transparent 44%),
-                linear-gradient(315deg, rgba(245, 158, 11, 0.07), transparent 48%),
-                #080a0d;
-            background-size: 44px 44px, 44px 44px, auto, auto, auto;
-        }
-
-        .page {
-            width: min(1180px, calc(100% - 32px));
-            margin: 0 auto;
-        }
-
-        /* ── Nav ── */
-        .nav {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            min-height: 72px;
-            gap: 20px;
-        }
-
-        .brand {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            text-decoration: none;
-            font-weight: 800;
-            font-size: 1rem;
-        }
-
-        .brand-mark {
-            width: 32px;
-            height: 32px;
-            display: grid;
-            place-items: center;
-            border: 1px solid var(--border-strong);
-            background: rgba(255, 255, 255, 0.08);
-            border-radius: 8px;
-            color: var(--cyan);
-            font-family: "Fira Code", monospace;
-            font-weight: 700;
-        }
-
-        .nav-links {
-            display: flex;
-            align-items: center;
-            gap: 18px;
-            color: var(--muted);
-            font-size: 0.93rem;
-        }
-
-        .nav-links a {
-            text-decoration: none;
-        }
-
-        .nav-links a:hover {
-            color: var(--text);
-        }
-
-        /* ── Dropdown ── */
-        .dropdown {
-            position: relative;
-        }
-
-        .dropdown-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            background: none;
-            border: none;
-            color: var(--muted);
-            font-family: inherit;
-            font-size: 0.93rem;
-            cursor: pointer;
-            padding: 0;
-        }
-
-        .dropdown-toggle:hover {
-            color: var(--text);
-        }
-
-        .dropdown-arrow {
-            font-size: 0.65rem;
-            transition: transform 200ms ease;
-        }
-
-        .dropdown:hover .dropdown-arrow,
-        .dropdown:focus-within .dropdown-arrow {
-            transform: rotate(180deg);
-        }
-
-        .dropdown-menu {
-            display: none;
-            position: absolute;
-            top: calc(100% + 8px);
-            left: 50%;
-            transform: translateX(-50%);
-            min-width: 180px;
-            background: var(--bg-raised);
-            border: 1px solid var(--border-strong);
-            border-radius: 8px;
-            padding: 6px;
-            z-index: 100;
-            box-shadow: var(--shadow);
-        }
-
-        .dropdown:hover .dropdown-menu,
-        .dropdown:focus-within .dropdown-menu {
-            display: block;
-        }
-
-        .dropdown-menu a {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 9px 12px;
-            border-radius: 6px;
-            font-size: 0.9rem;
-            color: var(--muted);
-            text-decoration: none;
-            transition: background 120ms ease, color 120ms ease;
-        }
-
-        .dropdown-menu a:hover {
-            background: var(--bg-soft);
-            color: var(--text);
-        }
-
-        .dropdown-menu a.active {
-            color: var(--cyan);
-            background: rgba(45, 212, 191, 0.08);
-        }
-
-        .dropdown-menu a .guide-badge {
-            margin-left: auto;
-            font-size: 0.72rem;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background: rgba(45, 212, 191, 0.14);
-            color: var(--cyan);
-        }
-
-        /* ── Hero ── */
-        .hero {
-            padding: 80px 0 60px;
-            text-align: center;
-        }
-
-        .eyebrow {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            width: max-content;
-            padding: 7px 14px;
-            border: 1px solid rgba(45, 212, 191, 0.32);
-            background: rgba(45, 212, 191, 0.08);
-            border-radius: 999px;
-            color: #99f6e4;
-            font-size: 0.84rem;
-            font-weight: 700;
-            margin: 0 auto 22px;
-        }
-
-        .eyebrow-icon {
-            font-size: 1.1rem;
-        }
-
-        h1 {
-            max-width: 820px;
-            margin: 0 auto;
-            font-size: 3.6rem;
-            line-height: 1.06;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-        }
-
-        h1 .accent {
-            color: var(--cyan);
-        }
-
-        .hero-copy {
-            max-width: 640px;
-            margin: 22px auto 0;
-            color: #c8d0d8;
-            font-size: 1.18rem;
-        }
-
-        .hero-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-top: 32px;
-            justify-content: center;
-        }
-
-        /* ── Buttons ── */
-        .button {
-            min-height: 46px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 9px;
-            padding: 0 18px;
-            border: 1px solid transparent;
-            border-radius: 8px;
-            font-weight: 700;
-            text-decoration: none;
-            cursor: pointer;
-            transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
-            font-size: 0.95rem;
-        }
-
-        .button:hover {
-            transform: translateY(-1px);
-        }
-
-        .button-primary {
-            background: #f5f7fa;
-            color: #0b0f13;
-        }
-
-        .button-secondary {
-            background: rgba(255, 255, 255, 0.075);
-            border-color: var(--border);
-            color: var(--text);
-        }
-
-        .button-secondary:hover {
-            border-color: var(--border-strong);
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        /* ── Sections ── */
-        section {
-            padding: 72px 0;
-        }
-
-        .section-heading {
-            max-width: 760px;
-            margin-bottom: 32px;
-        }
-
-        .section-heading.center {
-            margin-left: auto;
-            margin-right: auto;
-            text-align: center;
-        }
-
-        .section-kicker {
-            color: var(--cyan);
-            font-weight: 800;
-            font-size: 0.82rem;
-            text-transform: uppercase;
-        }
-
-        h2 {
-            margin-top: 8px;
-            font-size: 2.45rem;
-            line-height: 1.08;
-            letter-spacing: 0;
-        }
-
-        .section-copy {
-            margin-top: 12px;
-            color: var(--muted);
-            font-size: 1.03rem;
-        }
-
-        /* ── Step Cards ── */
-        .steps-grid {
-            display: grid;
-            gap: 28px;
-        }
-
-        .step-card {
-            display: grid;
-            grid-template-columns: 56px 1fr;
-            gap: 24px;
-            border: 1px solid var(--border);
-            background: var(--bg-panel);
-            border-radius: 12px;
-            padding: 28px;
-        }
-
-        .step-number {
-            width: 48px;
-            height: 48px;
-            display: grid;
-            place-items: center;
-            border-radius: 10px;
-            color: #06110b;
-            background: var(--green);
-            font-weight: 800;
-            font-size: 1.2rem;
-            flex-shrink: 0;
-        }
-
-        .step-content h3 {
-            font-size: 1.2rem;
-            font-weight: 800;
-            letter-spacing: 0;
-        }
-
-        .step-content p {
-            margin-top: 8px;
-            color: var(--muted);
-            font-size: 0.96rem;
-        }
-
-        /* ── Terminal / Code Blocks ── */
-        pre, code {
-            font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        }
-
-        .terminal-card {
-            margin-top: 18px;
-            border: 1px solid var(--border-strong);
-            background: var(--terminal);
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: var(--shadow);
-        }
-
-        .terminal-header {
-            min-height: 46px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 14px;
-            border-bottom: 1px solid var(--border);
-            background: rgba(255, 255, 255, 0.045);
-        }
-
-        .window-controls {
-            display: flex;
-            gap: 7px;
-        }
-
-        .window-controls span {
-            width: 10px;
-            height: 10px;
-            border-radius: 999px;
-        }
-
-        .control-red { background: #ff5f57; }
-        .control-amber { background: #ffbd2e; }
-        .control-green { background: #28c840; }
-
-        .terminal-title {
-            color: var(--muted);
-            font-family: "Fira Code", monospace;
-            font-size: 0.82rem;
-        }
-
-        .copy-button {
-            min-width: 62px;
-            min-height: 34px;
-            padding: 0 10px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            border: 1px solid var(--border);
-            background: rgba(255, 255, 255, 0.06);
-            color: var(--text);
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 0.78rem;
-            font-weight: 700;
-            font-family: inherit;
-        }
-
-        .copy-button:hover {
-            border-color: var(--border-strong);
-        }
-
-        .terminal-body {
-            padding: 18px;
-            overflow-x: auto;
-        }
-
-        .terminal-body pre {
-            color: #e7edf4;
-            font-size: 0.9rem;
-            white-space: pre-wrap;
-            word-break: break-word;
-            line-height: 1.6;
-        }
-
-        .shell-prompt {
-            color: var(--green);
-            margin-right: 9px;
-        }
-
-        .code-comment {
-            color: var(--subtle);
-        }
-
-        /* ── JSON code block ── */
-        .json-block {
-            margin-top: 18px;
-            border: 1px solid var(--border-strong);
-            background: var(--terminal);
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: var(--shadow);
-        }
-
-        .json-block .terminal-body pre {
-            color: #dbeafe;
-            font-size: 0.88rem;
-            line-height: 1.6;
-        }
-
-        .json-key { color: #93c5fd; }
-        .json-string { color: #86efac; }
-
-        /* ── Setup blocks (prompt card) ── */
-        .setup-block {
-            border: 1px solid var(--border);
-            background: var(--bg-panel);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-
-        .setup-block-header {
-            min-height: 48px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 0 14px;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .setup-block-title {
-            font-weight: 800;
-        }
-
-        .setup-block pre {
-            padding: 18px;
-            overflow-x: auto;
-            color: #dbeafe;
-            font-size: 0.9rem;
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-        }
-
-        .setup-block pre code {
-            white-space: inherit;
-            overflow-wrap: anywhere;
-        }
-
-        /* ── Instruction callout ── */
-        .instruction-callout {
-            margin-top: 14px;
-            padding: 14px 16px;
-            border: 1px solid rgba(245, 158, 11, 0.24);
-            background: rgba(245, 158, 11, 0.06);
-            border-radius: 8px;
-            color: #fde68a;
-            font-size: 0.92rem;
-            line-height: 1.5;
-        }
-
-        .instruction-callout strong {
-            color: #fbbf24;
-        }
-
-        /* ── Tool grid ── */
-        .tools-section {
-            padding: 72px 0;
-        }
-
-        .tool-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 14px;
-        }
-
-        .tool-card {
-            border: 1px solid var(--border);
-            background: var(--bg-panel);
-            border-radius: 8px;
-            padding: 20px;
-        }
-
-        .tool-card h3 {
-            font-family: "Fira Code", monospace;
-            font-size: 0.92rem;
-            color: var(--cyan);
-            font-weight: 600;
-        }
-
-        .tool-card p {
-            margin-top: 8px;
-            color: var(--muted);
-            font-size: 0.9rem;
-        }
-
-        .tool-card-accent {
-            border-color: rgba(45, 212, 191, 0.28);
-            background: rgba(45, 212, 191, 0.05);
-        }
-
-        /* ── Back link ── */
-        .back-link-section {
-            padding: 32px 0 0;
-            text-align: center;
-        }
-
-        .back-link {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--cyan);
-            text-decoration: none;
-            font-weight: 700;
-            font-size: 1rem;
-            transition: color 160ms ease;
-        }
-
-        .back-link:hover {
-            color: var(--text);
-        }
-
-        /* ── Footer ── */
-        footer {
-            padding: 34px 0 56px;
-            color: var(--subtle);
-            font-size: 0.92rem;
-        }
-
-        .footer-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 20px;
-            border-top: 1px solid var(--border);
-            padding-top: 22px;
-        }
-
-        .footer-links {
-            display: flex;
-            gap: 16px;
-        }
-
-        .footer-links a {
-            text-decoration: none;
-        }
-
-        /* ── Trust Row ── */
-        .trust-row {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 10px;
-            margin-top: 42px;
-        }
-
-        .trust-chip {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 14px;
-            background: var(--bg-panel);
-            color: var(--muted);
-            font-size: 0.9rem;
-        }
-
-        .trust-check {
-            color: var(--green);
-            font-weight: 800;
-            font-size: 1rem;
-            flex-shrink: 0;
-        }
-
-        /* ── Responsive ── */
-        @media (max-width: 980px) {
-            h1 {
-                font-size: 2.8rem;
-            }
-
-            .tool-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-
-            .trust-row {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-        }
-
-        @media (max-width: 680px) {
-            .page {
-                width: min(100% - 22px, 1180px);
-            }
-
-            .nav {
-                min-height: 64px;
-            }
-
-            .nav-links {
-                display: none;
-            }
-
-            h1 {
-                font-size: 2.1rem;
-            }
-
-            h2 {
-                font-size: 1.9rem;
-            }
-
-            .hero {
-                padding: 56px 0 40px;
-            }
-
-            .hero-copy, .section-copy {
-                font-size: 1rem;
-            }
-
-            .step-card {
-                grid-template-columns: 1fr;
-                gap: 16px;
-            }
-
-            .tool-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .trust-row {
-                grid-template-columns: 1fr;
-            }
-
-            .button {
-                width: 100%;
-            }
-
-            section {
-                padding: 52px 0;
-            }
-
-            .footer-row {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            .terminal-body pre {
-                font-size: 0.82rem;
-            }
-        }
-    </style>
 </head>
 <body>
-    <div class="hero-scene" aria-hidden="true"></div>
+<a class="skip" href="#main">Skip to content</a>
+<div class="field" aria-hidden="true"></div>
+<header class="nav-wrap"><div class="wrap"><nav aria-label="Primary navigation">
+<a href="https://www.openkioku.com/" class="brand" aria-label="Open Kioku home">
+<svg viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="currentColor" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="currentColor"/></svg>
+<span>Open Kioku</span></a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav"><span class="sr-only">Open navigation</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></button>
+<div class="nav-links" id="primary-nav">
+<details class="nav-menu"><summary>Setup Guides <span class="chev" aria-hidden="true">▼</span></summary><div class="nav-menu-list">
+<a href="https://www.openkioku.com/claude-code-setup.html">Claude Code</a>
+<a href="https://www.openkioku.com/cursor-setup.html" aria-current="page">Cursor <span class="guide-badge">Current</span></a>
+<a href="https://www.openkioku.com/codex-setup.html">Codex</a>
+<a href="https://www.openkioku.com/gemini-cli-setup.html">Gemini CLI</a>
+</div></details>
+<a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+</div>
+</nav></div></header>
 
-    <main class="page">
-        <nav class="nav" aria-label="Primary navigation">
-            <a class="brand" href="https://www.openkioku.com/">
-                <span class="brand-mark">ok</span>
-                <span>Open Kioku</span>
-            </a>
-            <div class="nav-links">
-                <div class="dropdown">
-                    <button class="dropdown-toggle" aria-haspopup="true" aria-expanded="false">
-                        Setup Guides <span class="dropdown-arrow" aria-hidden="true">▼</span>
-                    </button>
-                    <div class="dropdown-menu" role="menu">
-                        <a href="https://www.openkioku.com/claude-code-setup.html" role="menuitem">Claude Code</a>
-                        <a href="https://www.openkioku.com/cursor-setup.html" role="menuitem" class="active">Cursor <span class="guide-badge">Current</span></a>
-                        <a href="https://www.openkioku.com/codex-setup.html" role="menuitem">Codex</a>
-                        <a href="https://www.openkioku.com/gemini-cli-setup.html" role="menuitem">Gemini CLI</a>
-                    </div>
-                </div>
-                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
-            </div>
-        </nav>
+<main id="main" class="guide"><div class="wrap">
+<section class="guide-hero" aria-label="Page introduction">
+<div class="pill"><span class="dot"></span> <span aria-hidden="true">⎈</span> Cursor + Open Kioku MCP</div>
+<h1>Give Cursor an <span class="accent-text">evidence layer</span> before it edits your codebase</h1>
+<p class="lead">Open Kioku is a local MCP server Cursor reads before it edits: it shows its evidence — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
+<div class="actions">
+<a class="btn btn-primary" href="#step-1" aria-label="Jump to setup steps"><span>Start setup</span><span aria-hidden="true">↓</span></a>
+<a class="btn btn-secondary" href="https://github.com/shivyadavus/open-kioku" aria-label="View Open Kioku on GitHub"><span>View on GitHub</span><span aria-hidden="true">→</span></a>
+</div>
+</section>
 
-        <!-- ════ Hero ════ -->
-        <section class="hero">
-            <div class="eyebrow">
-                <span class="eyebrow-icon" aria-hidden="true">⎈</span> Cursor + Open Kioku MCP
-            </div>
-            <h1>Give Cursor an <span class="accent">evidence layer</span> before it edits your codebase</h1>
-            <p class="hero-copy">Open Kioku is a local MCP server Cursor reads before it edits: it shows its evidence — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
-            <div class="hero-actions">
-                <a class="button button-primary" href="#step-1" aria-label="Jump to setup steps">
-                    <span>Start setup</span>
-                    <span aria-hidden="true">↓</span>
-                </a>
-                <a class="button button-secondary" href="https://github.com/shivyadavus/open-kioku" aria-label="View Open Kioku on GitHub">
-                    <span>View on GitHub</span>
-                    <span aria-hidden="true">→</span>
-                </a>
-            </div>
-        </section>
+<section aria-label="Setup steps">
+<div class="section-head">
+<div class="kicker">4-Step Setup</div>
+<h2 class="section-title">From zero to evidence-backed edits in four local steps.</h2>
+<p class="section-copy">Install the CLI, index your repo, connect MCP to Cursor, and paste the golden prompt. The Open Kioku commands run locally.</p>
+</div>
+<ol class="steps">
+<li class="step" id="step-1"><div class="step-n">1</div><div class="step-body">
+<h3>Install Open Kioku</h3>
+<p>Install the CLI globally with npm. The wrapper pulls the native binary for your OS automatically (macOS, Linux, Windows).</p>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="npm install -g open-kioku" aria-label="Copy install command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span>npm install -g open-kioku</pre></figure>
+<p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
+</div></li>
 
-        <!-- ════ Steps ════ -->
-        <section aria-label="Setup steps">
-            <div class="section-heading">
-                <div class="section-kicker">4-Step Setup</div>
-                <h2>From zero to evidence-backed edits in four local steps.</h2>
-                <p class="section-copy">Install the CLI, index your repo, connect MCP to Cursor, and paste the golden prompt. The Open Kioku commands run locally.</p>
-            </div>
+<li class="step" id="step-2"><div class="step-n">2</div><div class="step-body">
+<h3>Index your repo</h3>
+<p>Build the local index — files, symbols, imports, tests, and graph edges — all stored under <code>.ok/</code> in your repo. Open Kioku does not send the index to a hosted service.</p>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok index ." aria-label="Copy index command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span>ok index .
+<span class="comment"># Scans files → parses symbols → builds graph → indexes for search</span>
+<span class="comment"># Local indexes: .ok/index.sqlite + .ok/search/tantivy</span></pre></figure>
+</div></li>
 
-            <div class="steps-grid">
-                <!-- Step 1 -->
-                <article class="step-card" id="step-1">
-                    <div class="step-number">1</div>
-                    <div class="step-content">
-                        <h3>Install Open Kioku</h3>
-                        <p>Install the CLI globally with npm. The wrapper pulls the native binary for your OS automatically (macOS, Linux, Windows).</p>
-                        <div class="terminal-card">
-                            <div class="terminal-header">
-                                <div class="window-controls" aria-hidden="true">
-                                    <span class="control-red"></span>
-                                    <span class="control-amber"></span>
-                                    <span class="control-green"></span>
-                                </div>
-                                <div class="terminal-title">terminal</div>
-                                <button class="copy-button" type="button" data-copy="npm install -g open-kioku" aria-label="Copy install command">Copy</button>
-                            </div>
-                            <div class="terminal-body">
-                                <pre><span class="shell-prompt">$</span>npm install -g open-kioku</pre>
-                            </div>
-                        </div>
-                        <p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
-                    </div>
-                </article>
-
-                <!-- Step 2 -->
-                <article class="step-card" id="step-2">
-                    <div class="step-number">2</div>
-                    <div class="step-content">
-                        <h3>Index your repo</h3>
-                        <p>Build the local index — files, symbols, imports, tests, and graph edges — all stored under <code>.ok/</code> in your repo. Open Kioku does not send the index to a hosted service.</p>
-                        <div class="terminal-card">
-                            <div class="terminal-header">
-                                <div class="window-controls" aria-hidden="true">
-                                    <span class="control-red"></span>
-                                    <span class="control-amber"></span>
-                                    <span class="control-green"></span>
-                                </div>
-                                <div class="terminal-title">terminal</div>
-                                <button class="copy-button" type="button" data-copy="ok index ." aria-label="Copy index command">Copy</button>
-                            </div>
-                            <div class="terminal-body">
-                                <pre><span class="shell-prompt">$</span>ok index .
-<span class="code-comment"># Scans files → parses symbols → builds graph → indexes for search</span>
-<span class="code-comment"># Local indexes: .ok/index.sqlite + .ok/search/tantivy</span></pre>
-                            </div>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Step 3 -->
-                <article class="step-card" id="step-3">
-                    <div class="step-number">3</div>
-                    <div class="step-content">
-                        <h3>Connect MCP to Cursor</h3>
-                        <p>Shortcut: one command indexes the repository, writes a repository-scoped <code>.cursor/mcp.json</code> plus managed guidance, and checks that the local server answers an MCP initialize request (run without <code>--apply</code> to preview; nothing is written).</p>
-                        <div class="terminal-card">
-                            <div class="terminal-header">
-                                <div class="window-controls" aria-hidden="true">
-                                    <span class="control-red"></span>
-                                    <span class="control-amber"></span>
-                                    <span class="control-green"></span>
-                                </div>
-                                <div class="terminal-title">terminal</div>
-                                <button class="copy-button" type="button" data-copy="ok setup agent cursor --repo . --apply" aria-label="Copy setup command">Copy</button>
-                            </div>
-                            <div class="terminal-body">
-                                <pre><span class="shell-prompt">$</span> ok setup agent cursor --repo . --apply</pre>
-                            </div>
-                        </div>
-                        <p>Or generate the MCP server entry for Cursor manually and paste it into your Cursor MCP settings:</p>
-                        <div class="terminal-card">
-                            <div class="terminal-header">
-                                <div class="window-controls" aria-hidden="true">
-                                    <span class="control-red"></span>
-                                    <span class="control-amber"></span>
-                                    <span class="control-green"></span>
-                                </div>
-                                <div class="terminal-title">terminal</div>
-                                <button class="copy-button" type="button" data-copy="ok mcp install cursor --repo ." aria-label="Copy MCP install command">Copy</button>
-                            </div>
-                            <div class="terminal-body">
-                                <pre><span class="shell-prompt">$</span>ok mcp install cursor --repo .</pre>
-                            </div>
-                        </div>
-                        <div class="instruction-callout">
-                            <strong>How to paste:</strong> Open Cursor → Settings (⌘ ,) → search "MCP" → click "Edit in mcp.json" → paste the JSON below and save.
-                        </div>
-                        <div class="json-block">
-                            <div class="terminal-header">
-                                <div class="window-controls" aria-hidden="true">
-                                    <span class="control-red"></span>
-                                    <span class="control-amber"></span>
-                                    <span class="control-green"></span>
-                                </div>
-                                <div class="terminal-title">mcp.json</div>
-                                <button class="copy-button" type="button" data-copy='{"open-kioku":{"command":"ok","args":["mcp","serve","--repo","/absolute/path/to/repo","--read-only"]}}' aria-label="Copy MCP JSON config">Copy</button>
-                            </div>
-                            <div class="terminal-body">
-                                <pre>{
+<li class="step" id="step-3"><div class="step-n">3</div><div class="step-body">
+<h3>Connect MCP to Cursor</h3>
+<p>Shortcut: one command indexes the repository, writes a repository-scoped <code>.cursor/mcp.json</code> plus managed guidance, and checks that the local server answers an MCP initialize request (run without <code>--apply</code> to preview; nothing is written).</p>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok setup agent cursor --repo . --apply" aria-label="Copy setup command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span> ok setup agent cursor --repo . --apply</pre></figure>
+<p>Or generate the MCP server entry for Cursor manually and paste it into your Cursor MCP settings:</p>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">terminal</span><button class="copy" type="button" data-copy="ok mcp install cursor --repo ." aria-label="Copy MCP install command">Copy</button></figcaption><pre class="term-body"><span class="prompt">$</span>ok mcp install cursor --repo .</pre></figure>
+<div class="callout"><strong>How to paste:</strong> Open Cursor → Settings (⌘ ,) → search "MCP" → click "Edit in mcp.json" → paste the JSON below and save.</div>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">mcp.json</span><button class="copy" type="button" data-copy='{"open-kioku":{"command":"ok","args":["mcp","serve","--repo","/absolute/path/to/repo","--read-only"]}}' aria-label="Copy MCP JSON config">Copy</button></figcaption><pre class="term-body">{
   <span class="json-key">"open-kioku"</span>: {
     <span class="json-key">"command"</span>: <span class="json-string">"ok"</span>,
     <span class="json-key">"args"</span>: [
@@ -937,134 +140,65 @@
       <span class="json-string">"--read-only"</span>
     ]
   }
-}</pre>
-                            </div>
-                        </div>
-                    </div>
-                </article>
+}</pre></figure>
+</div></li>
 
-                <!-- Step 4 -->
-                <article class="step-card" id="step-4">
-                    <div class="step-number">4</div>
-                    <div class="step-content">
-                        <h3>Paste the golden prompt</h3>
-                        <p>Add this prompt to your Cursor chat or <code>.cursorrules</code> file. It tells the agent to use Open Kioku's plan-before-edit workflow every time.</p>
-                        <div class="setup-block" style="margin-top: 18px;">
-                            <div class="setup-block-header">
-                                <div class="setup-block-title">.cursorrules</div>
-                                <button class="copy-button" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change." aria-label="Copy golden agent prompt">Copy</button>
-                            </div>
-                            <pre><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
+<li class="step" id="step-4"><div class="step-n">4</div><div class="step-body">
+<h3>Paste the golden prompt</h3>
+<p>Add this prompt to your Cursor chat or <code>.cursorrules</code> file. It tells the agent to use Open Kioku's plan-before-edit workflow every time.</p>
+<figure class="term"><figcaption class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title">.cursorrules</span><button class="copy" type="button" data-copy="Use Open Kioku before editing. Check repo_status, search_code, get_definition, get_references, impact_analysis, and find_tests_for_change. Build a plan with plan_change first, then edit, and verify after the edit with verify_change." aria-label="Copy golden agent prompt">Copy</button></figcaption><pre class="term-body"><code>Use Open Kioku before editing. Check repo_status, search_code, get_definition,
 get_references, impact_analysis, and find_tests_for_change. Build a plan with
-plan_change first, then edit, and verify after the edit with verify_change.</code></pre>
-                        </div>
-                    </div>
-                </article>
-            </div>
-        </section>
+plan_change first, then edit, and verify after the edit with verify_change.</code></pre></figure>
+</div></li>
+</ol>
+</section>
 
-        <!-- ════ What You Get ════ -->
-        <section class="tools-section" aria-label="Available MCP tools">
-            <div class="section-heading center">
-                <div class="section-kicker">What You Get</div>
-                <h2>MCP tools Cursor can call after setup.</h2>
-                <p class="section-copy">Every tool runs locally against the index you built in Step 2. Read-only by default. No hosted index or embeddings service required.</p>
+<section aria-label="Available MCP tools">
+<div class="section-head center">
+<div class="kicker">What You Get</div>
+<h2 class="section-title">MCP tools Cursor can call after setup.</h2>
+<p class="section-copy">Every tool runs locally against the index you built in Step 2. Read-only by default. No hosted index or embeddings service required.</p>
 <p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
-            </div>
+</div>
+<div class="tools">
+<article class="tool tool-accent"><h3>plan_change</h3><p>Build an evidence-backed edit plan with primary context, impact candidates, validation targets, and boundary policy.</p></article>
+<article class="tool tool-accent"><h3>verify_change</h3><p>After the edit, verify that changes stayed inside the plan boundaries and flag any drift or unintended side effects.</p></article>
+<article class="tool"><h3>search_code</h3><p>BM25 full-text search over your codebase. Returns ranked snippets with file paths, line ranges, and confidence scores.</p></article>
+<article class="tool"><h3>impact_analysis</h3><p>Trace callers, dependents, and affected modules using the local symbol graph. Know what breaks before you touch it.</p></article>
+<article class="tool"><h3>get_definition</h3><p>Jump to the definition of any symbol — function, class, type, or constant — from the indexed symbol table.</p></article>
+<article class="tool"><h3>get_references</h3><p>Find every reference to a symbol across the codebase. Uses persisted graph edges, not text grep.</p></article>
+<article class="tool"><h3>find_tests_for_change</h3><p>Surface the test files and test functions most relevant to a planned change, before the agent starts editing.</p></article>
+<article class="tool"><h3>repo_status</h3><p>Get a snapshot of the indexed repository — file counts, symbol counts, index freshness, and health signals.</p></article>
+<article class="tool"><h3>build_context_pack</h3><p>Assemble a focused context bundle from search results, symbols, and graph data for the agent's next edit.</p></article>
+</div>
+</section>
 
-            <div class="tool-grid">
-                <div class="tool-card tool-card-accent">
-                    <h3>plan_change</h3>
-                    <p>Build an evidence-backed edit plan with primary context, impact candidates, validation targets, and boundary policy.</p>
-                </div>
-                <div class="tool-card tool-card-accent">
-                    <h3>verify_change</h3>
-                    <p>After the edit, verify that changes stayed inside the plan boundaries and flag any drift or unintended side effects.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>search_code</h3>
-                    <p>BM25 full-text search over your codebase. Returns ranked snippets with file paths, line ranges, and confidence scores.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>impact_analysis</h3>
-                    <p>Trace callers, dependents, and affected modules using the local symbol graph. Know what breaks before you touch it.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>get_definition</h3>
-                    <p>Jump to the definition of any symbol — function, class, type, or constant — from the indexed symbol table.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>get_references</h3>
-                    <p>Find every reference to a symbol across the codebase. Uses persisted graph edges, not text grep.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>find_tests_for_change</h3>
-                    <p>Surface the test files and test functions most relevant to a planned change, before the agent starts editing.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>repo_status</h3>
-                    <p>Get a snapshot of the indexed repository — file counts, symbol counts, index freshness, and health signals.</p>
-                </div>
-                <div class="tool-card">
-                    <h3>build_context_pack</h3>
-                    <p>Assemble a focused context bundle from search results, symbols, and graph data for the agent's next edit.</p>
-                </div>
-            </div>
-        </section>
+<section aria-label="Trust signals">
+<div class="section-head center">
+<div class="kicker">Local &amp; Private</div>
+<h2 class="section-title">Built for codebases people cannot upload.</h2>
+</div>
+<ul class="trust-strip">
+<li><span class="check">✓</span> <span>All indexes stored locally under .ok/</span></li>
+<li><span class="check">✓</span> <span>No cloud API or embeddings service</span></li>
+<li><span class="check">✓</span> <span>MCP stdio transport — no open ports</span></li>
+<li><span class="check">✓</span> <span>Read-only by default</span></li>
+<li><span class="check">✓</span> <span>Source edits stay in your normal editor</span></li>
+<li><span class="check">✓</span> <span>No source upload by Open Kioku</span></li>
+</ul>
+</section>
 
-        <!-- ════ Trust ════ -->
-        <section aria-label="Trust signals">
-            <div class="section-heading center">
-                <div class="section-kicker">Local &amp; Private</div>
-                <h2>Built for codebases people cannot upload.</h2>
-            </div>
-            <div class="trust-row">
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>All indexes stored locally under .ok/</span></div>
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>No cloud API or embeddings service</span></div>
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>MCP stdio transport — no open ports</span></div>
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>Read-only by default</span></div>
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>Source edits stay in your normal editor</span></div>
-                <div class="trust-chip"><span class="trust-check">✓</span> <span>No source upload by Open Kioku</span></div>
-            </div>
-        </section>
+<p class="back-row"><a class="back-link" href="https://www.openkioku.com/"><span aria-hidden="true">←</span><span>Back to openkioku.com</span></a></p>
+</div></main>
 
-        <!-- ════ Back link ════ -->
-        <div class="back-link-section">
-            <a class="back-link" href="https://www.openkioku.com/">
-                <span aria-hidden="true">←</span>
-                <span>Back to openkioku.com</span>
-            </a>
-        </div>
-    </main>
-
-    <footer class="page">
-        <div class="footer-row">
-            <div>Open Kioku — Plan before edit. Verify after edit.</div>
-            <div class="footer-links">
-                <a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
-                <a href="https://www.npmjs.com/package/open-kioku">npm</a>
-                <a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
-                <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
-                <a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
-                <a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
-            </div>
-        </div>
-    </footer>
-
-    <script>
-        document.querySelectorAll("[data-copy]").forEach(button => {
-            button.addEventListener("click", async () => {
-                const value = button.getAttribute("data-copy");
-                try {
-                    await navigator.clipboard.writeText(value);
-                    button.textContent = "Done";
-                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
-                } catch {
-                    button.textContent = "!";
-                    window.setTimeout(() => { button.textContent = "Copy"; }, 1100);
-                }
-            });
-        });
-    </script>
+<footer><div class="wrap foot"><div>Open Kioku — Plan before edit. Verify after edit.</div><div class="foot-links">
+<a href="https://github.com/shivyadavus/open-kioku">GitHub</a>
+<a href="https://www.npmjs.com/package/open-kioku">npm</a>
+<a href="https://github.com/shivyadavus/open-kioku/releases">Releases</a>
+<a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/license-faq.md">License (ELv2)</a>
+<a href="https://github.com/shivyadavus/open-kioku/blob/main/CONTRIBUTING.md">Contribute</a>
+<a href="https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md">Security</a>
+</div></div></footer>
+<script src="site.js"></script>
 </body>
 </html>
