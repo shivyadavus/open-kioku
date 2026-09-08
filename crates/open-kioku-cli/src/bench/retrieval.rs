@@ -1141,6 +1141,9 @@ fn run_routed_contextpack_retrieval_case(
                 reserve_for_validation: 0,
                 max_per_file: 2,
                 max_primary_files: limit,
+                region_files: open_kioku_core::ContextBudget::DEFAULT_REGION_FILES,
+                region_tokens_per_file:
+                    open_kioku_core::ContextBudget::DEFAULT_REGION_TOKENS_PER_FILE,
             },
         )?;
         let selected = pack

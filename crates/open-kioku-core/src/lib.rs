@@ -3247,9 +3247,21 @@ pub struct ContextBudget {
     pub reserve_for_validation: usize,
     pub max_per_file: usize,
     pub max_primary_files: usize,
+    /// How many of the top-ranked distinct primary files have their selected regions widened
+    /// (enclosing symbol, the file's other ranked units, adjacent chunks) after selection.
+    /// Widening never reorders selection or displaces another file's first unit.
+    #[serde(default = "ContextBudget::default_region_files")]
+    pub region_files: usize,
+    /// Estimated-token ceiling a widened file may reach, including its originally selected
+    /// units. Zero disables widening.
+    #[serde(default = "ContextBudget::default_region_tokens_per_file")]
+    pub region_tokens_per_file: usize,
 }
 
 impl ContextBudget {
+    pub const DEFAULT_REGION_FILES: usize = 3;
+    pub const DEFAULT_REGION_TOKENS_PER_FILE: usize = 1_200;
+
     pub fn available_context_tokens(&self) -> usize {
         self.max_tokens
             .saturating_sub(self.reserve_for_instructions)
@@ -3263,7 +3275,17 @@ impl ContextBudget {
             reserve_for_validation: 0,
             max_per_file: usize::MAX / 4,
             max_primary_files: limit,
+            region_files: Self::DEFAULT_REGION_FILES,
+            region_tokens_per_file: Self::DEFAULT_REGION_TOKENS_PER_FILE,
         }
+    }
+
+    fn default_region_files() -> usize {
+        Self::DEFAULT_REGION_FILES
+    }
+
+    fn default_region_tokens_per_file() -> usize {
+        Self::DEFAULT_REGION_TOKENS_PER_FILE
     }
 }
 
@@ -3275,6 +3297,8 @@ impl Default for ContextBudget {
             reserve_for_validation: 1_000,
             max_per_file: 2,
             max_primary_files: 8,
+            region_files: Self::DEFAULT_REGION_FILES,
+            region_tokens_per_file: Self::DEFAULT_REGION_TOKENS_PER_FILE,
         }
     }
 }
@@ -3339,6 +3363,8 @@ impl Default for ContextSelectionDiagnostics {
                 reserve_for_validation: 0,
                 max_per_file: 0,
                 max_primary_files: 0,
+                region_files: 0,
+                region_tokens_per_file: 0,
             },
             available_context_tokens: 0,
             estimated_tokens_selected: 0,
