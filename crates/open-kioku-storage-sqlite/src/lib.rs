@@ -6083,7 +6083,10 @@ mod tests {
                 symbol_id: Some(SymbolId::new("s1")),
                 confidence: Confidence::Exact,
                 message: "resolved `serde` as an external package dependency".into(),
-                indexed_at: chrono::DateTime::parse_from_rfc3339("2026-09-07T03:41:26.594463Z")
+                // Nanosecond precision on purpose: `Utc::now()` resolves to nanoseconds on
+                // Linux and to microseconds on macOS, so a truncating storage format looks
+                // correct on one host and rounds every evidence timestamp on the other.
+                indexed_at: chrono::DateTime::parse_from_rfc3339("2026-09-07T03:41:26.594463123Z")
                     .unwrap()
                     .with_timezone(&Utc),
                 confidence_score: Some(0.75),

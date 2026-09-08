@@ -315,12 +315,14 @@ pub(crate) fn encode_edge(
             .intern_opt(tx, evidence.symbol_id.as_ref().map(|id| id.0.as_str()))?,
         ev_message_sid: strings.intern_opt(tx, Some(evidence.message.as_str()))?,
         // One distinct value per index run, so this reference costs 8 bytes per edge and
-        // keeps the sub-second precision a unix `freshness` timestamp would drop.
+        // keeps the sub-second precision a unix `freshness` timestamp would drop. Nanoseconds,
+        // not microseconds: `Utc::now()` resolves to nanoseconds on Linux, and truncating here
+        // would silently round every edge's evidence timestamp on the way through the store.
         ev_indexed_at_sid: strings.intern(
             tx,
             &evidence
                 .indexed_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         )?,
         extra_sid,
     })
