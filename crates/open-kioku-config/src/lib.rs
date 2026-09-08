@@ -341,18 +341,42 @@ pub struct MemoryConfig {
 /// disabled response until a provider is configured, and advertising three
 /// permanently inert names taught agents to reach for evidence that is not
 /// there — so the surface stays quiet until this is configured.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// The fields mirror what the provider itself requires; whether they add up to
+/// a usable provider is the provider's judgement, not a flag set here, so that
+/// `enabled = true` alone can never advertise a tool that cannot answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_runtime_provider")]
     pub provider: String,
+    #[serde(default)]
+    pub organization: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default = "default_runtime_auth_token_env")]
+    pub auth_token_env: String,
 }
 
-impl RuntimeConfig {
-    pub fn configured(&self) -> bool {
-        self.enabled && !self.provider.trim().is_empty()
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_runtime_provider(),
+            organization: None,
+            project: None,
+            auth_token_env: default_runtime_auth_token_env(),
+        }
     }
+}
+
+fn default_runtime_provider() -> String {
+    "sentry".into()
+}
+
+fn default_runtime_auth_token_env() -> String {
+    "SENTRY_AUTH_TOKEN".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,21 +689,18 @@ paths = ["crates/api/**"]
         // drifted to `true` would silently re-add five tools.
         let config = OkConfig::default();
         assert!(!config.memory.enabled);
-        assert!(!config.runtime.configured());
+        assert!(!config.runtime.enabled);
+        assert!(config.runtime.organization.is_none());
+        assert!(config.runtime.project.is_none());
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ok.toml");
         OkConfig::write_default(&path).unwrap();
         let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
         assert!(!loaded.memory.enabled);
-        assert!(!loaded.runtime.configured());
-
-        // `enabled` without a provider is not a configured runtime integration.
-        let mut half = OkConfig::default();
-        half.runtime.enabled = true;
-        assert!(!half.runtime.configured());
-        half.runtime.provider = "sentry".into();
-        assert!(half.runtime.configured());
+        assert!(!loaded.runtime.enabled);
+        assert_eq!(loaded.runtime.provider, "sentry");
+        assert_eq!(loaded.runtime.auth_token_env, "SENTRY_AUTH_TOKEN");
     }
 
     #[test]

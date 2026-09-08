@@ -523,3 +523,24 @@ fn architecture_summary_report(
         caveats: Vec::new(),
     })
 }
+
+/// The violations view of the architecture summary, with the evidence that says
+/// whether an empty list is an answer or an abstention.
+#[derive(Debug, Serialize)]
+struct ArchitectureViolationsOutput<'a> {
+    configured: bool,
+    violations: &'a [PolicyViolation],
+    uncertainty: &'a [String],
+    caveats: &'a [String],
+}
+
+fn architecture_violations_output(
+    report: &ArchitectureSummaryReport,
+) -> ArchitectureViolationsOutput<'_> {
+    ArchitectureViolationsOutput {
+        configured: report.configured,
+        violations: &report.summary.violations,
+        uncertainty: &report.policy_check.uncertainty,
+        caveats: &report.caveats,
+    }
+}
