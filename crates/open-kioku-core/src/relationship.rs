@@ -37,6 +37,9 @@ pub enum RelationshipProofKind {
     InheritanceBinding,
     ModuleOrPackageBinding,
     ExternalExactIndex,
+    /// The derived file's own header names its origin (`generated from <path>`) and that path
+    /// resolved to exactly one indexed file. Repository truth, not a naming guess.
+    DeclaredOrigin,
 }
 
 /// Whether a relationship may be consumed as structural truth.
@@ -72,7 +75,8 @@ impl RelationshipProofKind {
             Self::ExactOccurrence
             | Self::ExactReference
             | Self::ExactCallSite
-            | Self::ExternalExactIndex => RelationshipAuthority::Authoritative,
+            | Self::ExternalExactIndex
+            | Self::DeclaredOrigin => RelationshipAuthority::Authoritative,
             Self::ImportBinding
             | Self::QualifiedName
             | Self::SameScopeDefinition
@@ -225,6 +229,7 @@ pub fn relationship_authority(
     let inheritance_binding = has_unique(proofs, RelationshipProofKind::InheritanceBinding);
     let module_binding = has_unique(proofs, RelationshipProofKind::ModuleOrPackageBinding);
     let external_exact = has_unique(proofs, RelationshipProofKind::ExternalExactIndex);
+    let declared_origin = has_unique(proofs, RelationshipProofKind::DeclaredOrigin);
 
     let authoritative = match edge_type {
         GraphEdgeType::References => {
@@ -254,6 +259,8 @@ pub fn relationship_authority(
         }
         GraphEdgeType::Imports => import_binding || module_binding || external_exact,
         GraphEdgeType::DependsOn => module_binding || import_binding || external_exact,
+        // A naming-convention pairing carries no proof and stays heuristic by construction.
+        GraphEdgeType::DerivedFrom => declared_origin,
         _ => false,
     };
 
@@ -441,6 +448,29 @@ mod tests {
             relationship_authority(&GraphEdgeType::Calls, &proofs),
             RelationshipAuthority::Authoritative
         );
+    }
+
+    #[test]
+    fn derived_from_is_authoritative_only_with_a_unique_declared_origin() {
+        let declared = vec![proof(RelationshipProofKind::DeclaredOrigin, 1)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::DerivedFrom, &declared),
+            RelationshipAuthority::Authoritative
+        );
+        assert!(edge(GraphEdgeType::DerivedFrom, declared).is_authoritative_relationship());
+
+        // Two files could have been meant: the header is a hint, not a fact.
+        let ambiguous = vec![proof(RelationshipProofKind::DeclaredOrigin, 2)];
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::DerivedFrom, &ambiguous),
+            RelationshipAuthority::Heuristic
+        );
+        // A naming-convention pairing carries no proof at all.
+        assert_eq!(
+            relationship_authority(&GraphEdgeType::DerivedFrom, &[]),
+            RelationshipAuthority::Heuristic
+        );
+        assert!(!edge(GraphEdgeType::DerivedFrom, vec![]).is_authoritative_relationship());
     }
 
     #[test]
