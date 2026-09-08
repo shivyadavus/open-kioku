@@ -1,4 +1,3 @@
-use chrono::Utc;
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, File, GraphEdgeType,
     GraphNodeType, Import, Language, LineRange, ScoreComponent, Symbol, SymbolId, SymbolKind,
@@ -1242,10 +1241,6 @@ fn recommended_command(
         _ if path.contains("test") => Some("run repository test command".into()),
         _ => None,
     }
-}
-
-pub fn evidence_timestamp() -> chrono::DateTime<Utc> {
-    Utc::now()
 }
 
 #[cfg(test)]
