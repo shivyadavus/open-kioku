@@ -357,7 +357,7 @@ fn preflight_has_cli_mcp_parity() {
             command.arg("mcp").arg("serve").arg("--repo").arg(repo);
             command
         },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preflight_change","arguments":{"task":"add token expiration"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"add token expiration","detail":"preflight"}}}"#,
     );
     let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
     let mcp = &mcp["result"]["structuredContent"];
@@ -666,37 +666,40 @@ reason = "domain code must use the api facade"
     assert!(explain_markdown.contains("# Architecture Policy Explanation"));
     assert!(explain_markdown.contains("api-public-boundary"));
 
-    let mcp_validate = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"architecture_policy_validate","arguments":{}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_validate.trim()).unwrap();
-    assert_eq!(response["result"]["structuredContent"]["configured"], true);
-    assert_eq!(
-        response["result"]["structuredContent"]["source"],
-        "canonical"
-    );
+    // `architecture_policy_validate` and `architecture_policy_explain` left the
+    // MCP surface in 4.0.0; the CLI paths asserted above are what ships. The
+    // summary is the CLI replacement for the retired `summarize_architecture`,
+    // and `violations` now reports the evaluated policy rather than heuristics.
+    let summary = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("summary");
+        command
+    });
+    let summary: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["configured"], true);
+    assert_eq!(summary["policy_source"], "canonical");
+    assert_eq!(summary["policy_check"]["configured"], true);
+    assert_eq!(summary["violations"][0]["rule_id"], "api-public-boundary");
 
-    let mcp_explain = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"architecture_policy_explain","arguments":{"scope":"repo"}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_explain.trim()).unwrap();
+    let violations = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("architecture")
+            .arg("violations");
+        command
+    });
+    let violations: serde_json::Value = serde_json::from_str(&violations).unwrap();
     assert_eq!(
-        response["result"]["structuredContent"]["query_kind"],
-        "repo"
-    );
-    assert_eq!(
-        response["result"]["structuredContent"]["violations"][0]["rule_id"],
-        "api-public-boundary"
+        violations[0]["rule_id"], "api-public-boundary",
+        "violations must come from the evaluated policy, not heuristic detection"
     );
 
     let mcp_plan = run_with_stdin(
@@ -2267,8 +2270,8 @@ fn demo_creates_indexed_sample_repo() {
         "id": 24,
         "method": "tools/call",
         "params": {
-            "name": "hybrid_search",
-            "arguments": {"query": "session token", "limit": 5}
+            "name": "search_code",
+            "arguments": {"query": "session token", "mode": "hybrid", "limit": 5}
         }
     })
     .to_string();
@@ -2695,7 +2698,7 @@ fn contract_cli_and_mcp_round_trip() {
             command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
             command
         },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_change_contract","arguments":{"task":"token","limit":5}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan_change","arguments":{"task":"token","limit":5,"persist":true}}}"#,
     );
     let mcp_create: serde_json::Value = serde_json::from_str(mcp_create.trim()).unwrap();
     let mcp_contract_id = mcp_create["result"]["structuredContent"]["contract_id"]
@@ -2703,44 +2706,28 @@ fn contract_cli_and_mcp_round_trip() {
         .unwrap()
         .to_string();
 
-    let mcp_get_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "get_change_contract",
-            "arguments": {
-                "contract_id": mcp_contract_id,
-                "format": "markdown"
-            }
-        }
-    })
-    .to_string();
-    let mcp_get = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("--repo").arg(&repo).arg("mcp").arg("serve");
-            command
-        },
-        &(mcp_get_req + "\n"),
-    );
-    let mcp_get: serde_json::Value = serde_json::from_str(mcp_get.trim()).unwrap();
-    // A Markdown rendering is sent once, in `content`; `structuredContent` only points at it.
-    assert!(mcp_get["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("# Change Contract"));
-    assert_eq!(
-        mcp_get["result"]["structuredContent"]["rendered_in"],
-        "content"
-    );
+    // `get_change_contract` moved to the CLI in 4.0.0; a stored contract is
+    // fetched with `ok contract show`, not over MCP.
+    let cli_get = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("contract")
+            .arg("show")
+            .arg(&mcp_contract_id)
+            .arg("--format")
+            .arg("markdown");
+        command
+    });
+    assert!(cli_get.contains("# Change Contract"));
 
     let mcp_verify_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
         "params": {
-            "name": "verify_change_contract",
+            "name": "verify_change",
             "arguments": {
                 "contract_id": mcp_contract_id,
                 "changed_files": ["src/auth.rs"]
@@ -2765,7 +2752,7 @@ fn contract_cli_and_mcp_round_trip() {
         "id": 4,
         "method": "tools/call",
         "params": {
-            "name": "explain_verification",
+            "name": "verify_change",
             "arguments": {
                 "verification": mcp_report,
                 "format": "markdown"
@@ -3184,7 +3171,92 @@ fn index_captures_git_history() {
     let symbol_by_id: serde_json::Value = serde_json::from_str(&symbol_by_id).unwrap();
     assert_eq!(symbol_by_id["symbol_id"], symbol_id.0);
 
-    let mcp = run_with_stdin(
+    // The history family moved to the CLI in 4.0.0. The reads below are the
+    // shipped surface for the same evidence; MCP no longer answers them.
+    let churn = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("churn")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let churn: serde_json::Value = serde_json::from_str(&churn).unwrap();
+    assert_eq!(churn["stats"]["all_time"], 1);
+    assert_eq!(churn["confidence"], "exact");
+
+    let similar = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("similar")
+            .arg("--task")
+            .arg("first commit")
+            .arg("--path")
+            .arg("src/a.rs")
+            .arg("--limit")
+            .arg("5");
+        command
+    });
+    let similar: serde_json::Value = serde_json::from_str(&similar).unwrap();
+    assert_eq!(
+        similar["hits"][0]["change"]["commit"]["summary"],
+        "first commit"
+    );
+
+    let ownership = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("ownership")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let ownership: serde_json::Value = serde_json::from_str(&ownership).unwrap();
+    assert_eq!(ownership["owners"][0]["owner"]["email"], "dev@example.com");
+    assert!(ownership["owners"][0]["source_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source == "repo_memory"));
+
+    let reviewers = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("history")
+            .arg("reviewers")
+            .arg("--path")
+            .arg("src/a.rs");
+        command
+    });
+    let reviewers: serde_json::Value = serde_json::from_str(&reviewers).unwrap();
+    assert_eq!(
+        reviewers["availability"],
+        "inferred_from_ownership_and_authors"
+    );
+    assert_eq!(
+        reviewers["suggestions"][0]["reviewer"]["email"],
+        "dev@example.com"
+    );
+    assert_eq!(reviewers["suggestions"][0]["actual_review_evidence"], false);
+    assert_eq!(reviewers["suggestions"][0]["inferred_from_authors"], true);
+
+    // A retired name must fail loudly rather than resolve to something else.
+    let retired = run_with_stdin(
         {
             let mut command = ok();
             command.arg("mcp").arg("serve").arg("--repo").arg(repo);
@@ -3192,107 +3264,11 @@ fn index_captures_git_history() {
         },
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"history_provenance_lookup","arguments":{"path":"src/a.rs","limit":5}}}"#,
     );
-    let response: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["first_seen"]["commit"]["summary"],
-        "first commit"
-    );
-
-    let mcp_churn = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"churn_analysis","arguments":{"path":"src/a.rs"}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_churn.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["stats"]["all_time"],
-        1
-    );
-    assert_eq!(
-        response["result"]["structuredContent"]["confidence"],
-        "exact"
-    );
-
-    let mcp_similar = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"history_similar_changes","arguments":{"task":"first commit","path":"src/a.rs","limit":5}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_similar.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["hits"][0]["change"]["commit"]["summary"],
-        "first commit"
-    );
-
-    let mcp_ownership = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ownership_lookup","arguments":{"path":"src/a.rs"}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_ownership.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["owners"][0]["owner"]["email"],
-        "dev@example.com"
-    );
-    assert!(
-        response["result"]["structuredContent"]["owners"][0]["source_types"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source == "repo_memory")
-    );
-
-    let mcp_reviewers = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"reviewer_suggestions","arguments":{"path":"src/a.rs"}}}"#,
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_reviewers.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["availability"],
-        "inferred_from_ownership_and_authors"
-    );
-    assert_eq!(
-        response["result"]["structuredContent"]["suggestions"][0]["reviewer"]["email"],
-        "dev@example.com"
-    );
-    assert_eq!(
-        response["result"]["structuredContent"]["suggestions"][0]["actual_review_evidence"],
-        false
-    );
-    assert_eq!(
-        response["result"]["structuredContent"]["suggestions"][0]["inferred_from_authors"],
-        true
-    );
-
-    let mcp_symbol = run_with_stdin(
-        {
-            let mut command = ok();
-            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
-            command
-        },
-        &format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"history_provenance_lookup","arguments":{{"symbol":"{}","limit":5}}}}}}"#,
-            symbol_id.0
-        ),
-    );
-    let response: serde_json::Value = serde_json::from_str(mcp_symbol.trim()).unwrap();
-    assert_eq!(
-        response["result"]["structuredContent"]["symbol_id"],
-        symbol_id.0
-    );
+    let retired: serde_json::Value = serde_json::from_str(retired.trim()).unwrap();
+    assert!(retired["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("history_provenance_lookup"));
 }
 
 #[test]

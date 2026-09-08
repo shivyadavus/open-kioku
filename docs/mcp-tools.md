@@ -50,31 +50,37 @@ ok mcp serve --repo /absolute/path/to/repo --read-only --approval-required --all
 
 ## Recommended Agent Routine
 
-Open Kioku is intended to give Claude Code, Cursor, and other MCP clients a repeatable pre-edit routine. Ask the agent to use Open Kioku before changing files:
+Open Kioku exists to give Claude Code, Cursor, and other MCP clients a repeatable
+pre-edit routine. This is the one routine the project ships; `skills/open-kioku/SKILL.md`
+and `.cursor-plugin/skills/open-kioku/SKILL.md` carry the same eight steps for the
+client-facing skill.
 
 ```text
-Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, ownership_lookup, reviewer_suggestions,
-search_memory, and find_tests_for_change.
-Build a plan first, then edit only after the indexed evidence is clear.
+Use Open Kioku before editing. Check repo_status, then search_code and
+get_definition to locate the code, get_references and impact_analysis to see what
+else it touches, find_tests_for_change to pick validation, and plan_change before
+you edit. After editing, verify_change against that plan.
 ```
 
-A good default tool sequence is:
+The eight steps, in order:
 
-1. `repo_status`: confirm the repository is indexed.
-2. `search_code` and `search_symbols`: locate candidate files and symbols.
-3. `get_definition`, `get_references`, and `get_symbol_context`: resolve the important code facts.
-4. `impact_analysis`: identify direct and indirect dependents.
-5. `ownership_lookup`: resolve CODEOWNERS, local git-history, and secondary repo-memory ownership signals for files where edit responsibility matters.
-6. `reviewer_suggestions`: rank reviewer candidates from stored review evidence when present, otherwise explicit ownership and author-history inference.
-7. `search_memory`: recall prior repo facts, then verify them against indexed code before relying on them.
-8. `find_tests_for_change` or `recommend_validation_plan`: select validation targets.
-9. `preflight_change`: get the short, evidence-backed start decision for a multi-file or risky edit. Use `plan_change` or `build_context_pack` when the agent needs the complete grounding detail. Use `format: "json"` when another tool needs structured data.
-10. `create_change_contract`: turn the plan into a stored, versioned contract when the workflow needs a durable pre-edit artifact.
-11. `build_compressed_context` and `retrieve_context`: use handles when the agent needs compact context with reversible access to originals.
-12. `verify_change_contract` or `verify_change`: verify the final changed files or diff against the stored contract or legacy saved plan.
+1. `repo_status` — confirm the repository is indexed, see its coverage and languages, and check whether the semantic index is ready. Everything below reads that index; an absence means nothing until you know what it covers.
+2. `search_code` — find where the thing is handled. `mode` picks the evidence: `code` (lexical, the default), `graph`, `semantic`, `hybrid`. `regex_search` when the target is a literal pattern, `search_symbols` when you already have a name, `list_files` with a `path` for one file's indexed detail.
+3. `get_definition` — resolve the symbol. Add `include_body: true` when the definition text and the lines around it are what the task needs.
+4. `get_references` — see what else touches it. `kind` picks the evidence: `references` (occurrences, the default), `callers`, `callees`, `implementations`, or `all`. Read each section's own `evidence_source` and `caveats`: an empty occurrence list and an empty IMPLEMENTS list are different claims.
+5. `impact_analysis` — the file-level blast radius, with dependents split into structurally proven and heuristic. `dependency_path` explains how two nodes connect, or lists one node's neighbours when `to` is omitted; `explain_flow` traces indexed endpoints to their call paths.
+6. `find_tests_for_change` — pick the validation targets for the changed path.
+7. `plan_change` — the evidence-backed pre-edit plan, with edit boundaries. `detail: "preflight"` for a short start decision, `detail: "patch"` for a patch plan, `persist: true` to store a versioned change contract. `build_context_pack` when the task needs the grounding bundle rather than the plan; `compress: true` returns handles that `retrieve_context` expands.
+8. `verify_change` — hold the actual edit to what was declared. Pass the saved plan, or a `contract_id`. Exit code 0 from a test runner is not proof the right files changed; this is.
 
-Open Kioku MCP tools do not edit source files. Memory and compressed-context tools may write local `.ok/` artifacts so facts and handles can be recalled later. Agents should apply approved source edits with their normal editor tools, then use Open Kioku to verify the result.
+`query_evidence_graph` is the escape hatch for a question none of those answer;
+call it with no `query` first to get the evidence schema.
+
+Open Kioku MCP tools do not edit source files. `build_context_pack` with
+`compress: true` and `plan_change` with `persist: true` write local `.ok/`
+artifacts so handles and contracts can be recalled later; everything else is
+read-only. Agents should apply approved source edits with their normal editor
+tools, then use Open Kioku to verify the result.
 
 ## Protocol Hardening
 
@@ -99,10 +105,11 @@ List/search/query responses include standard pagination metadata:
 }
 ```
 
-For `list_files`, `list_symbols`, `search_symbols`, `search_code`,
-`search_files`, `regex_search`, `semantic_search`, and `hybrid_search`, the
-items are returned under `files`, `symbols`, or `results` alongside that
-metadata. `query_evidence_graph` returns `columns` and `rows` with the same
+For `list_files`, `search_symbols`, `search_code` in every mode, and
+`regex_search`, the items are returned under `files`, `symbols`, or `results`
+alongside that metadata. `get_references` pages each evidence section
+independently, so `returned`, `limit`, and `has_more` sit inside the section
+rather than at the top level. `query_evidence_graph` returns `columns` and `rows` with the same
 metadata. When graph query results have more rows, the response also includes
 an opaque local `continuation`, an `expires_at` Unix timestamp, and a `next`
 object with the safe follow-up `offset`.
@@ -125,228 +132,105 @@ tool and `tools_call_rendered_tool.json` for a Markdown rendering, alongside the
 `tool_error.json` failure envelope. Changing the wire shape of a tool response
 moves one of those files.
 
-## Source-Read Tools
+## The Advertised Tools
 
-The server advertises 58 tools. That number is derived from the tool table in
+The server advertises 16 tools. That number is derived from the tool table in
 `crates/open-kioku-mcp/src/lib.rs` and checked against this file and `README.md`
 by `scripts/validate-docs.sh`, so it cannot drift from the code.
 
-The source-read tools allow language-agnostic code exploration and AI-ready context aggregation. Some highlighted tools:
+Each of the sixteen answers one question no other tool answers. Names that were
+retired in 4.0.0 are gone from `tools/list` and from the dispatch table together:
+a stale name returns `unknown MCP method or tool`, never a different shape.
 
-- `build_context_pack`: Combines primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries for an AI task into a single compressed `ContextPack`.
-- `build_compressed_context`: Stores original context snippets locally and returns compact handles that can be expanded with `retrieve_context`. Supports `format: "toon"` for compact prompt handoff.
-- `plan_change`: Builds an evidence-backed pre-edit plan with primary context, architecture policy when configured, evidence quality, impact candidates, validation candidates, edit boundaries, and recommended MCP tool calls. Supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
-- `preflight_change`: Builds a concise, schema-stable pre-edit decision from the same planning evidence. It reports a verdict, confidence, confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality. Supports `format: "json"`, `format: "markdown"`, `format: "html"`, and `format: "text"`.
-- `create_change_contract`: Builds a `ChangeContractV1` from a task, inline `PlanReport`, or `plan_json`. It stores the contract in `.ok/contracts` by default, preserves source-plan `evidence_quality`, and supports `format: "json"`, `format: "markdown"`, and `format: "toon"`.
-- `get_change_contract`: Retrieves a stored contract by `contract_id` and can export JSON, Markdown, or TOON.
-- `verify_change_contract`: Verifies changed files, a diff, or a git range against a stored contract id, inline contract object, or `contract_json`. Stored contract ids append verification records under `.ok/contracts`; stale evidence quality warns by default and fails under strict traceability, while missing validation attestations warn as pending validation.
-- `explain_verification`: Summarizes a `ContractVerificationReport` decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.
-- `remember_fact` and `search_memory`: Maintain append-only repo memory facts with extracted entity links and provenance.
-- `impact_analysis`: Evaluates a file's impact based on lexical references and symbol usage, providing direct and indirect dependent files, active architecture policy when configured, and an overall risk score.
-- `ownership_lookup`: Resolves ranked owner suggestions for a path from CODEOWNERS, persisted local git author/touch history, and secondary repo memory facts. The result includes source breakdown, confidence, staleness, component matches, and uncertainty.
-- `reviewer_suggestions`: Suggests ranked reviewer candidates for a path. Actual PR-review certainty is used only when stored review/approval evidence exists; normal local clones return explicit inferred or unavailable availability from ownership and git-author signals.
-- `search_code` and `search_files`: the same lexical BM25 query over the same index, sharing one dispatch arm. `search_files` matches file paths as well as chunk text and reads better for a path-shaped query, but it returns code hits — path, line range, snippet, score, evidence — not file records, and carries no size or language field. Use `list_files` or `explain_file` for file metadata.
-- `repo_status`: Returns the index manifest plus `analysis_semantics_status`, `generation_id`, `semantic_lifecycle`, and `coverage`. `coverage` is the same object as `ok --json status` exposes: source files `discovered` versus `indexed`, `generated`, `skipped` counts per skip reason, `by_language` with the same fields per language, and two blind-spot counts the ratio cannot include: `pruned_dirs` (directories cut from the walk by name, such as `build` or `dist`) and `walk_errors` (directory reads that failed). An agent can see how much of the repository the evidence covers before trusting an absence. It is `null` when the index predates coverage recording; re-run `ok index` to record it. Definitions of what is counted: `docs/indexing-pipeline.md`, "Coverage".
-- `search_symbols`: an alias of `list_symbols` with a query set. It filters indexed symbols by case-insensitive substring against name and qualified name, ordered by qualified name. It is not fuzzy matching and the results are not ranked.
-- `recommend_validation_plan`: an alias of `find_tests_for_change`. It returns the same ranked test targets for one changed path and, despite the name, produces no static checks and no coverage actions; `plan_change` and `preflight_change` are the evidence-backed pre-edit plans.
-- `get_definition` and `explain_symbol`: the same indexed definition record for one symbol — file, line range, kind, qualified name, confidence, and provenance. Neither returns source text; `get_symbol_context` does.
-- `get_symbol_context`: Resolves one symbol and joins it back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below, verbatim. Documentation comments appear in `leading_lines` only when the indexer chunked them — which is the usual case for a definition that follows another one, and never the case for the first symbol in a file, whose preamble falls outside every chunk. Nothing is parsed out or reconstructed. A body that cannot be recovered at all, and a body recovered only in part because some lines fall outside every chunk, both come back with an explicit caveat naming the gap rather than as a short bundle that reads like a complete definition. `ok symbol context <name>` is the equivalent CLI surface.
-- `regex_search`: Compiles the caller's pattern once and evaluates it line by line over indexed chunk text, file by file in path order, returning exact single-line hits at confidence 1.0 with `regex match` as the match reason. Results are not ranked and the walk stops at `limit`. Only indexed chunk text is searched, so regions the indexer never chunked cannot match; every response carries that caveat with the number of files scanned. Two separate limits are disclosed as `truncated` with a warning: the 20,000-file walk budget, and the shared `MAX_MCP_FETCH` candidate cap that a deep `offset` runs into. An unparseable pattern is returned as a tool error rather than an empty result. `ok search <pattern> --regex` is the equivalent CLI surface and returns the same `results`, `truncated`, `warnings`, and `caveats` fields, so the caveat survives `--json`.
-- `architecture_violations`: an alias of `architecture_boundaries`. It returns the same repository architecture summary, whose `violations` come from the evaluated `policy_check` and are present only when a policy is configured; without one the components are heuristic and the response reports `configured: false` with a caveat rather than inferring violations.
-- `architecture_policy_validate`: Validates the resolved repository architecture policy or an explicit policy TOML path.
-- `architecture_policy_check`: Evaluates repository-owned architecture policy dependency rules against indexed imports, references, and calls.
-- `architecture_policy_explain`: Explains component matches, public API boundary findings, and exemptions for one indexed file, symbol, or repository scope.
+| Tool | Question it answers | Key parameters |
+| --- | --- | --- |
+| `repo_status` | Is this repository indexed, how much does the index cover, and what is in it? | — |
+| `list_files` | What files does the index hold, and what does it hold about one of them? | `path` for one file's record and chunks |
+| `search_code` | Where is this handled? | `mode`: `code`, `graph`, `semantic`, `hybrid` |
+| `regex_search` | Where does this literal pattern appear? | `pattern` |
+| `search_symbols` | Which indexed symbols match this substring? | `query` (optional) |
+| `get_definition` | Where is this symbol defined, and what does it say? | `include_body` |
+| `get_references` | What else touches this symbol? | `kind`: `references`, `callers`, `callees`, `implementations`, `all` |
+| `dependency_path` | How are these two connected, or what is next to this one? | `from`, optional `to` |
+| `impact_analysis` | What breaks if I change this file? | `path` |
+| `explain_flow` | Which call paths start at an indexed endpoint? | `limit` |
+| `build_context_pack` | What do I need in context for this task? | `compress` |
+| `retrieve_context` | What was behind this handle? | `handle` |
+| `plan_change` | What should I change, and within what boundary? | `detail`, `persist`, `store` |
+| `verify_change` | Did the change do what the plan or contract said? | `plan`, `contract_id`, `verification`, `explain` |
+| `find_tests_for_change` | What should I run now? | `path` (optional) |
+| `query_evidence_graph` | Anything the fifteen above do not answer. | `query` (omit for the schema) |
 
-Architecture policy tool schemas:
+Notes on the ones whose behaviour is not obvious from the name:
 
-- `architecture_policy_validate`
-  - Request: `{}` or `{"path": ".open-kioku/architecture.toml"}`.
-  - Response: `{valid, configured, source, paths, policy, message}`. `source` is `canonical`, `compatibility`, `explicit`, or `null`.
-- `architecture_policy_check`
-  - Request: `{}`.
-  - Response: the stable `PolicyCheckReport` shape with `configured`, edge counts, `violations`, `exemptions`, bounded `unknown_edges`, and `uncertainty`.
-- `architecture_policy_explain`
-  - Request: exactly one of `{"file": "src/api/internal/session.rs"}`, `{"symbol": "crate::api::handler"}`, or `{"scope": "repo"}`.
-  - Response: `{configured, query_kind, query, file_path, symbol, components, violations, exemptions, uncertainty, message}`.
+- `repo_status` returns the index manifest plus `analysis_semantics_status`, `generation_id`, `semantic_lifecycle`, `languages`, and `coverage`. `coverage` is the same object `ok --json status` exposes: source files `discovered` versus `indexed`, `generated`, `skipped` counts per skip reason, `by_language` with the same fields per language, and two blind-spot counts the ratio cannot include — `pruned_dirs` (directories cut from the walk by name, such as `build` or `dist`) and `walk_errors` (directory reads that failed). An agent can see how much of the repository the evidence covers before trusting an absence. It is `null` when the index predates coverage recording; re-run `ok index` to record it. `languages` is taken from `coverage.by_language` when it exists and from a file scan otherwise. Definitions of what is counted: `docs/indexing-pipeline.md`, "Coverage".
+- `list_files` without `path` is a paginated inventory of what the index holds. With one `path` it returns `{path, file, chunks, caveats}` — the indexed file record and every code chunk covering it, with line ranges. A path the index does not hold returns a null `file` and a caveat naming that, never an empty success.
+- `search_code` is the single entry point for "find where X is handled". `mode=code` is lexical BM25 over indexed chunks and file paths; `mode=graph` searches indexed graph-node documents; `mode=semantic` searches the local vector index; `mode=hybrid` merges lexical and semantic candidates, deduplicates by path, and re-sorts by combined score. Semantic and hybrid report `semantic_status` and fall back to lexical-only results when the vector index is not ready, so their extra recall is never assumed. Every result already carries `score_breakdown` and `evidence_refs`; there is no separate explanation step, and none of the modes performs AST or structural matching. An unknown `mode` is a tool error.
+- `regex_search` compiles the caller's pattern once and evaluates it line by line over indexed chunk text, file by file in path order, returning exact single-line hits at confidence 1.0 with `regex match` as the match reason. Results are not ranked and the walk stops at `limit`. Only indexed chunk text is searched, so regions the indexer never chunked cannot match; every response carries that caveat with the number of files scanned. Two separate limits are disclosed as `truncated` with a warning: the 20,000-file walk budget, and the shared `MAX_MCP_FETCH` candidate cap that a deep `offset` runs into. An unparseable pattern is a tool error rather than an empty result. `ok search <pattern> --regex` is the equivalent CLI surface and returns the same `results`, `truncated`, `warnings`, and `caveats` fields.
+- `search_symbols` filters the indexed symbol table by case-insensitive substring against name and qualified name, ordered by qualified name, and pages through everything when `query` is omitted. It is not fuzzy matching and the results are not ranked, so a name sharing no substring with the query does not match.
+- `get_definition` returns the indexed definition record: file, line range, kind, qualified name, confidence, provenance. With `include_body: true` it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below, verbatim. Documentation comments appear in `leading_lines` only when the indexer chunked them — the usual case for a definition that follows another, never the case for the first symbol in a file, whose preamble falls outside every chunk. Nothing is parsed out or reconstructed. A body that cannot be recovered at all, and one recovered only in part, both come back with an explicit caveat naming the gap. `ok symbol context <name>` is the equivalent CLI surface.
+- `get_references` carries three kinds of evidence in one response and keeps them apart. `references` returns indexed occurrences under `occurrences`, each with its own `provenance` and `confidence` — a `lexical` occurrence at low confidence is the name-match fallback used when the index holds no resolved occurrence. `callers` and `callees` return persisted CALLS graph edges under `nodes` and `edges`, with `direction`. `implementations` returns verified implementation sites from persisted IMPLEMENTS facts under `implementations`, with parser provenance. `kind: "all"` returns every section at once. Each section names its own `evidence_source` (`symbol_occurrences`, `sqlite_graph_store`, `persisted_implements_facts`) and carries its own caveats, because absence does not mean the same thing in each: no occurrence is a different claim from no persisted IMPLEMENTS fact. `kind: "implementations"` does not require the target symbol to be indexed, since IMPLEMENTS facts are keyed by target name; the other kinds do, and an unresolvable name is an error for them. An unknown `kind` is a tool error.
+- `dependency_path` traces the shortest dependency or reference path between two nodes from the persisted graph. Omit `to` and it returns `from`'s direct dependency neighbours instead of a route. Both shapes report `evidence_source: "sqlite_graph_store"`.
+- `build_context_pack` assembles primary files, extracted symbols, dependency edges, tests, architecture policy when configured, and patch boundaries into one `ContextPack`, rendered as Markdown by default. With `compress: true` it stores the original snippets under `.ok` and returns compact handles instead; `retrieve_context` expands one. That is the only path that writes, and `format` then defaults to `json` (`toon` is also produced; `markdown` is not).
+- `plan_change` builds the evidence-backed pre-edit plan: primary context, architecture policy when configured, evidence quality, impact candidates, validation candidates, edit boundaries, and recommended tool calls. `detail: "preflight"` returns instead a concise, schema-stable start decision — verdict, confidence, confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality — in `json` (default), `markdown`, `html`, or `text`. `detail: "patch"` returns a patch plan that writes no files. `persist: true` builds a `ChangeContractV1` from the plan and stores it under `.ok/contracts` (set `store: false` for a transient one); it accepts an inline `plan` or `plan_json` so a plan you already hold becomes a contract without re-planning. An unknown `detail` is a tool error.
+- `verify_change` has three inputs and one verb. With `plan` or `plan_json` it checks the actual diff or changed file list against the saved plan's boundary, expected files, API surface, and dependency policy. With `contract_id`, `contract`, or `contract_json` it verifies against a change contract; a stored id appends a verification record under `.ok/contracts`, stale evidence quality warns by default and fails under strict traceability, and missing validation attestations warn as pending. Add `explain: true` to get the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests instead of the raw report. With `verification` or `verification_json` it explains a report you already hold and verifies nothing. `run_commands: true` executes the plan's or contract's validation commands on the local machine; `write_attestation: true` persists timestamped records. With all flags false it is read-only.
+- `find_tests_for_change` returns ranked test file paths with relevance scores from naming conventions, import relationships, and co-change history. Omit `path` for the repository-wide stored test evidence. It executes nothing, and a ranked test is a candidate, not proof of coverage.
+- `query_evidence_graph` executes a read-only query in a constrained Cypher-like DSL — not full Cypher — returning `columns` and `rows` with the usual pagination metadata, plus an opaque local `continuation`, an `expires_at` Unix timestamp, and a `next` object when more rows exist. Called with no `query`, it returns the versioned evidence schema instead: node types, edge types, property specs, feature flags, evidence source types, query features, optional evidence, and the Tier-1 relationship-semantic capability matrix.
 
-Each tool returned by `tools/list` includes a `maturity` field. Stable tools are intended for default agent use. Experimental tools are exposed for early workflows but may rely on heuristic or fallback behavior.
+`build_context_pack`, `plan_change`, and `impact_analysis` include an
+`architecture_policy` report when a repository policy is configured.
+`verify_change` loads configured policy automatically and checks dependency
+deltas against it by default; `check_dependency_delta` remains available for
+explicit checks in repositories without policy. Plans and generated contracts
+preserve `evidence_quality` so agents can distinguish fresh exact-reference
+evidence from fast-mode, stale, skipped-path, unresolved-import, ambiguous-edge,
+missing-runtime, missing-history, or missing-coverage caveats.
 
-`build_context_pack`, `build_compressed_context`, `plan_change`, `preflight_change`, and
-`impact_analysis` include an `architecture_policy` report when a repository
-policy is configured. `verify_change` loads configured policy automatically and
-checks dependency deltas against it by default; `check_dependency_delta` remains
-available for explicit dependency-delta checks in repositories without policy.
-`create_change_contract` preserves policy evidence from the source plan, and
-`verify_change_contract` applies the same configured-policy dependency-delta
-default. Plans and generated contracts also preserve `evidence_quality` so
-agents can distinguish fresh exact-reference evidence from fast-mode, stale,
-skipped-path, unresolved-import, ambiguous-edge, missing-runtime, missing-history,
-or missing-coverage caveats.
+Every tool returned by `tools/list` includes a `maturity` field. The sixteen are
+stable. Where a tool folds in a capability that rests on heuristic or fallback
+evidence — `search_code`'s semantic and hybrid modes, `get_references`'s call and
+implementation sections — the response itself says so, in `semantic_status` and
+in each section's `evidence_source` and `caveats`, rather than in a tool-level
+label the caller would have to remember.
 
-Stable source-read tools:
+## Config-Gated Tools
 
-- `repo_status`, `list_files`, `list_languages`, `list_symbols`
-- `detect_architecture`, `architecture_boundaries`, `architecture_violations`, `architecture_policy_validate`, `architecture_policy_check`, `architecture_policy_explain`, `summarize_architecture`
-- `search_code`, `search_files`, `search_symbols`, `regex_search`
-- `get_definition`, `get_references`, `get_symbol_context`
-- `dependency_path`, `impact_analysis`, `module_dependencies`
-- `build_context_pack`, `build_compressed_context`, `retrieve_context`, `plan_change`, `preflight_change`, `create_change_contract`, `get_change_contract`, `explain_file`, `explain_symbol`
-- `remember_fact`, `search_memory`
-- `find_tests_for_change`, `recommend_validation_plan`, `explain_test_coverage`
-- `propose_patch`, `verify_change`, `verify_change_contract`, `explain_verification`
+Five tools are advertised only where the repository has configured the feature
+behind them. They stay dispatchable either way; what the gate removes is a name
+an agent would otherwise be taught to reach for and get nothing from.
 
-Experimental tools:
+- `remember_fact` and `search_memory` — advertised when `[memory] enabled = true`. They maintain append-only repo memory facts with extracted entity links and provenance. `ok memory` is the CLI surface.
+- `map_stacktrace_to_code`, `find_errors_for_symbol`, and `find_recent_failures` — advertised when `[runtime]` names an enabled provider (`enabled = true` and a non-empty `provider`). Without one they return a structured low-confidence disabled response, which is the honest answer and also the reason they are not advertised by default. They are marked `experimental`.
 
-- `history_provenance_lookup`: returns bounded first-seen, last-touched, and recent commit provenance for exactly one `path` or `symbol`, including confidence and uncertainty. `symbol` accepts an exact name, qualified name, or symbol ID.
-- `churn_analysis`: returns materialized all-time, 30-day, 90-day, recency-weighted, and hotspot stats for exactly one `path`, `module`, or `symbol`, including confidence and uncertainty. Lookups read persisted summaries instead of scanning raw commit history.
-- `history_similar_changes`: returns ranked similar historical commits from task text, paths, symbols, co-change neighborhoods, churn, and commit metadata, with evidence and confidence on every hit.
-- `ownership_lookup`: returns ranked owner suggestions for one `path` from CODEOWNERS, local git author/touch history, and secondary repo memory facts. Memory-only suggestions are marked low-confidence and uncorroborated.
-- `reviewer_suggestions`: returns ranked reviewer suggestions for one `path` with source type, rationale, confidence, availability, `actual_review_evidence`, and `inferred_from_authors`. It does not call remote PR APIs; absent stored review evidence is reported as inferred or unavailable.
+## Capabilities That Moved to the CLI
 
-History API examples:
+Thirteen capabilities left the MCP surface in 4.0.0 and ship on the CLI. The
+trade is deliberate and is not free: a coding agent with a shell can still reach
+them through `ok`, but a pure MCP client with no shell cannot.
 
-`history_similar_changes` request:
+| Retired MCP tool | CLI equivalent |
+| --- | --- |
+| `detect_architecture` | `ok architecture detect` |
+| `architecture_boundaries` | `ok architecture boundaries`, `ok architecture summary` |
+| `architecture_violations` | `ok architecture violations` |
+| `summarize_architecture` | `ok architecture summary` |
+| `architecture_policy_validate` | `ok architecture policy validate` |
+| `architecture_policy_check` | `ok architecture policy check` |
+| `architecture_policy_explain` | `ok architecture policy explain` |
+| `history_provenance_lookup` | `ok history provenance --path` / `--symbol` |
+| `churn_analysis` | `ok history churn --path` / `--module` / `--symbol` |
+| `history_similar_changes` | `ok history similar --task` / `--path` / `--symbol` |
+| `ownership_lookup` | `ok history ownership --path` |
+| `reviewer_suggestions` | `ok history reviewers --path` |
+| `get_change_contract` | `ok contract show <id>` |
 
-```json
-{"task":"fix token expiration","paths":["src/auth/session.rs"],"symbols":["validate_session"],"limit":5}
-```
-
-Response shape:
-
-```json
-{
-  "query": {"task": "fix token expiration", "paths": ["src/auth/session.rs"], "symbols": ["validate_session"]},
-  "hits": [
-    {
-      "change": {
-        "commit": {"id": "auth-expiry-fix", "summary": "Fix token expiration in login flow"},
-        "touched_paths": ["src/auth/session.rs", "tests/auth_session.rs"],
-        "touched_symbols": ["crate::auth::validate_session"],
-        "cochange_paths": ["tests/auth_session.rs"],
-        "churn_hotspot_score": 0.42
-      },
-      "score": 1.0,
-      "confidence": "high",
-      "evidence": [{"source_type": "path", "score": 0.35, "message": "query path matched historical touch"}],
-      "uncertainty": []
-    }
-  ],
-  "truncated": false,
-  "uncertainty": []
-}
-```
-
-`ownership_lookup` request:
-
-```json
-{"path":"src/auth/session.rs"}
-```
-
-Response shape:
-
-```json
-{
-  "path": "src/auth/session.rs",
-  "owners": [
-    {
-      "owner": {"name": "auth-owner@example.com", "email": "auth-owner@example.com"},
-      "source_types": ["codeowners", "git_history"],
-      "confidence": "high",
-      "score": 0.91,
-      "stale": false,
-      "evidence": [{"source_type": "codeowners", "source": ".github/CODEOWNERS:1 `src/auth/*`"}]
-    }
-  ],
-  "uncertainty": []
-}
-```
-
-`reviewer_suggestions` request:
-
-```json
-{"path":"src/auth/session.rs"}
-```
-
-Response shape:
-
-```json
-{
-  "path": "src/auth/session.rs",
-  "availability": "actual_review_evidence",
-  "suggestions": [
-    {
-      "reviewer": {"name": "reviewer@example.com", "email": "reviewer@example.com"},
-      "availability": "actual_review_evidence",
-      "source_types": ["review_evidence"],
-      "actual_review_evidence": true,
-      "inferred_from_authors": false,
-      "confidence": "high",
-      "score": 0.92
-    }
-  ],
-  "uncertainty": []
-}
-```
-
-`churn_analysis` request:
-
-```json
-{"path":"src/auth/session.rs"}
-```
-
-Response shape:
-
-```json
-{
-  "entity_kind": "file",
-  "key": "src/auth/session.rs",
-  "path": "src/auth/session.rs",
-  "stats": {
-    "all_time": 3,
-    "last_30d": 3,
-    "last_90d": 3,
-    "recency_weighted": 2.8,
-    "touch_count": 3,
-    "hotspot_score": 0.42
-  },
-  "confidence": "high",
-  "uncertainty": []
-}
-```
-
-`history_provenance_lookup` request:
-
-```json
-{"path":"src/auth/session.rs","limit":5}
-```
-
-Response shape:
-
-```json
-{
-  "path": "src/auth/session.rs",
-  "first_seen": {"commit": {"id": "auth-intro"}, "change_kind": "added"},
-  "last_touched": {"commit": {"id": "auth-hardening"}, "change_kind": "modified"},
-  "recent_touches": [
-    {"commit": {"id": "auth-hardening"}, "path": "src/auth/session.rs"},
-    {"commit": {"id": "auth-expiry-fix"}, "path": "src/auth/session.rs"}
-  ],
-  "confidence": "exact",
-  "truncated": false,
-  "uncertainty": []
-}
-```
-- `semantic_status`: reports whether `.ok/vectors/current` is disabled, missing, stale, corrupt, or ready.
-- `semantic_search`: searches the local semantic vector index and returns explicit semantic status metadata.
-- `hybrid_search`: combines lexical and semantic candidates while preserving evidence and ranking signals.
-- `explain_search_result`: an alias of `hybrid_search`. It runs the same query with the same parameters and returns an identical payload; the per-signal `score_breakdown` and `evidence_refs` the name suggests already ship on every search result.
-- `structural_search`: an alias of `search_code`. No AST or structural matching exists in the workspace, so a structure-shaped query is matched as ordinary ranked lexical text.
-- `get_implementations`, `get_callers`, `get_callees`: graph-backed heuristics until language-specific call resolution is stronger.
-- `explain_flow`: returns graph-backed endpoint-to-call flow evidence when indexed endpoint and call data are available.
-- `map_stacktrace_to_code`, `find_errors_for_symbol`, `find_recent_failures`: return a structured low-confidence disabled response unless a runtime provider such as Sentry is explicitly configured.
+`ok architecture summary` is new in 4.0.0 and returns what the retired
+`summarize_architecture` returned: detected components, the configured policy,
+the evaluated `policy_check`, and its violations. `ok architecture violations`
+now reports those evaluated violations rather than heuristic detection output.
 
 ## Source Edits
 
-Open Kioku intentionally exposes no MCP source-editing tool. Use `propose_patch` to prepare an evidence-backed edit, apply the approved change with the normal editor, then run `verify_change` or `verify_change_contract`.
+Open Kioku intentionally exposes no MCP source-editing tool. Use `plan_change` (with `detail: "patch"` for a patch plan) to prepare an evidence-backed edit, apply the approved change with the normal editor, then run `verify_change`.
 
 Every response is JSON and includes evidence where indexed facts are available. Result limits are capped to avoid unbounded responses.
