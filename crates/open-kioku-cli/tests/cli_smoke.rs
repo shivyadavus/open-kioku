@@ -2562,10 +2562,15 @@ fn contract_cli_and_mcp_round_trip() {
         &(mcp_get_req + "\n"),
     );
     let mcp_get: serde_json::Value = serde_json::from_str(mcp_get.trim()).unwrap();
-    assert!(mcp_get["result"]["structuredContent"]["value"]
+    // A Markdown rendering is sent once, in `content`; `structuredContent` only points at it.
+    assert!(mcp_get["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
         .contains("# Change Contract"));
+    assert_eq!(
+        mcp_get["result"]["structuredContent"]["rendered_in"],
+        "content"
+    );
 
     let mcp_verify_req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -2614,10 +2619,14 @@ fn contract_cli_and_mcp_round_trip() {
         &(mcp_explain_req + "\n"),
     );
     let mcp_explain: serde_json::Value = serde_json::from_str(mcp_explain.trim()).unwrap();
-    assert!(mcp_explain["result"]["structuredContent"]["value"]
+    assert!(mcp_explain["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
         .contains("# Verification Explanation"));
+    assert_eq!(
+        mcp_explain["result"]["structuredContent"]["rendered_in"],
+        "content"
+    );
 }
 
 #[test]

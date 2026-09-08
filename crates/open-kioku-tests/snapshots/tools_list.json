@@ -42,10 +42,22 @@
         "name": "repo_status",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -82,10 +94,22 @@
         "name": "list_files",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -113,10 +137,22 @@
         "name": "list_languages",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -157,10 +193,22 @@
         "name": "list_symbols",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -201,10 +249,22 @@
         "name": "search_symbols",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -232,10 +292,22 @@
         "name": "detect_architecture",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -263,10 +335,22 @@
         "name": "architecture_boundaries",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -294,10 +378,22 @@
         "name": "architecture_violations",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -330,10 +426,22 @@
         "name": "architecture_policy_validate",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -361,10 +469,22 @@
         "name": "architecture_policy_check",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -425,10 +545,22 @@
         "name": "architecture_policy_explain",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -480,10 +612,22 @@
         "name": "search_code",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -535,10 +679,22 @@
         "name": "search_files",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -582,10 +738,22 @@
         "name": "regex_search",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -613,10 +781,22 @@
         "name": "semantic_status",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -660,10 +840,22 @@
         "name": "semantic_search",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -707,10 +899,22 @@
         "name": "hybrid_search",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -750,10 +954,22 @@
         "name": "explain_search_result",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -793,10 +1009,22 @@
         "name": "structural_search",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -832,10 +1060,22 @@
         "name": "get_definition",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -875,10 +1115,22 @@
         "name": "get_references",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -918,10 +1170,22 @@
         "name": "get_implementations",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -961,10 +1225,22 @@
         "name": "get_callers",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1004,10 +1280,22 @@
         "name": "get_callees",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1043,10 +1331,22 @@
         "name": "get_symbol_context",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1087,10 +1387,22 @@
         "name": "dependency_path",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1126,10 +1438,22 @@
         "name": "impact_analysis",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1182,10 +1506,22 @@
         "name": "history_provenance_lookup",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1243,10 +1579,22 @@
         "name": "churn_analysis",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1305,10 +1653,22 @@
         "name": "history_similar_changes",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1344,10 +1704,22 @@
         "name": "ownership_lookup",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1383,10 +1755,22 @@
         "name": "reviewer_suggestions",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1426,10 +1810,22 @@
         "name": "module_dependencies",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1478,10 +1874,22 @@
         "name": "build_context_pack",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1529,10 +1937,22 @@
         "name": "build_compressed_context",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1568,10 +1988,22 @@
         "name": "retrieve_context",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1624,10 +2056,22 @@
         "name": "plan_change",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1681,10 +2125,22 @@
         "name": "preflight_change",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1763,10 +2219,22 @@
         "name": "create_change_contract",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1811,10 +2279,22 @@
         "name": "get_change_contract",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1864,10 +2344,22 @@
         "name": "remember_fact",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1907,10 +2399,22 @@
         "name": "search_memory",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1946,10 +2450,22 @@
         "name": "explain_file",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -1985,10 +2501,22 @@
         "name": "explain_symbol",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2021,10 +2549,22 @@
         "name": "explain_flow",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2052,10 +2592,22 @@
         "name": "summarize_architecture",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2095,10 +2647,22 @@
         "name": "find_tests_for_change",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2138,10 +2702,22 @@
         "name": "recommend_validation_plan",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2178,10 +2754,22 @@
         "name": "explain_test_coverage",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2217,10 +2805,22 @@
         "name": "propose_patch",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2299,10 +2899,22 @@
         "name": "verify_change",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2418,10 +3030,22 @@
         "name": "verify_change_contract",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2479,10 +3103,22 @@
         "name": "explain_verification",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2515,10 +3151,22 @@
         "name": "map_stacktrace_to_code",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2554,10 +3202,22 @@
         "name": "find_errors_for_symbol",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2590,10 +3250,22 @@
         "name": "find_recent_failures",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2621,10 +3293,22 @@
         "name": "get_evidence_schema",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
@@ -2668,10 +3352,22 @@
         "name": "query_evidence_graph",
         "outputSchema": {
           "additionalProperties": true,
-          "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+          "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
           "properties": {
+            "bytes": {
+              "description": "Byte length of the rendered text placed in content.",
+              "type": "integer"
+            },
+            "rendered_in": {
+              "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the rendered text in content was truncated to the response cap.",
+              "type": "boolean"
+            },
             "value": {
-              "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses."
+              "description": "Wrapped scalar (non-string, non-object) output."
             }
           },
           "type": "object"
