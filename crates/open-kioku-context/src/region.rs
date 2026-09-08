@@ -9,8 +9,11 @@
 //! `ContextBudget::region_files` distinct files in selection order it grows each selected unit
 //! to its enclosing symbol, re-admits the file's other task-ranked units, then absorbs
 //! physically adjacent chunks, until the file reaches `region_tokens_per_file` or the context
-//! budget selection left over is spent. Because it only spends leftover budget, a lower-ranked
-//! file's first unit is never displaced. Every step is recorded as a `region:` evidence ref on
+//! budget selection left over is spent. Nothing selection chose is removed or reordered, because
+//! widening runs after it and only grows or appends units - that, not the budget guard, is what
+//! keeps a lower-ranked file's first unit in the pack; on the file-limit budget the CLI and MCP
+//! use, the leftover budget is effectively unbounded and `region_tokens_per_file` is the only
+//! bound that binds. Every step is recorded as a `region:` evidence ref on
 //! the unit so the pack stays explainable, and the retrieval trace keyed on the unit follows
 //! its new identity so source attribution survives.
 
