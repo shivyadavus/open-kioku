@@ -404,13 +404,25 @@ them:
 1. The presence of a `json` column on `graph_edges` or `call_sites` is an exact
    discriminator for the old layout. It is checked with `PRAGMA table_info`, never a table
    scan, so store open stays constant-time.
-2. Both tables are dropped and recreated in the compact shape, and the `schema_meta` key
-   `graph_rebuild_required_v4` is set. Because the discriminating column is then gone, the
-   detection cannot match again — the reset runs exactly once per store.
+2. Both tables are dropped and the `schema_meta` key `graph_rebuild_required_v4` is set, **in
+   one transaction**. Writing the marker separately would leave a window in which the edges
+   are gone and nothing records it: the discriminating column would be gone too, so the next
+   open would create an empty compact table and answer relationship questions with a
+   confident zero indefinitely. As a second layer, an index that has a manifest but no
+   `graph_edges` table is treated the same way, whatever removed it.
 3. While that marker is set, every relationship read fails with an instruction to run
    `ok index`, rather than answering from an empty table. An empty answer would read as "no
-   such relationship exists", which is the failure this design exists to prevent.
-4. `replace_graph` clears the marker, so a rebuild restores normal reads.
+   such relationship exists", which is the failure this design exists to prevent. That covers
+   the `GraphStore` reads, the per-edge-type statistics, and the read-only readers used by the
+   cross-project workspace linker, which open member indexes directly and so never run this
+   gate through a store — they carry it themselves, and `ok workspace link` refuses a member
+   project awaiting a rebuild rather than reporting that it has no cross-project edges.
+4. `replace_graph` clears the marker, so a full rebuild restores normal reads.
+
+`ok watch` does **not** clear the marker: it persists snapshots through
+`replace_index_with_documents`, which does not rewrite the graph. That is the safe direction —
+watch never fabricates a graph — but it means watching a repository alone never recovers it.
+Run `ok index` once.
 
 `IndexManifest.schema_version` is bumped to 2 in the same release, which marks every file
 stale and routes the next `ok index` to a full rebuild rather than a partial update.
