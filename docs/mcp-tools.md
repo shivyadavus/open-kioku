@@ -110,9 +110,13 @@ Search tools use a bounded candidate scan for high offsets and mark the response
 with `truncated` plus a warning when callers should narrow the query.
 
 Large `tools/call` text content is truncated before it is placed into the
-human-readable `content` field. The full structured result remains available in
-`structuredContent`; the response includes a warning when text truncation
-occurs.
+human-readable `content` field; the response includes a warning when that
+happens. JSON results are also returned in `structuredContent` (the declared
+`outputSchema`), where they are not capped. Rendered text results (Markdown,
+TOON) are sent once, in `content`: `structuredContent` then carries only
+`{"rendered_in": "content", "bytes": N, "truncated": bool}`, because repeating
+the rendering doubled the size of every such response and the most common
+client reads `content` only.
 
 ## Source-Read Tools
 

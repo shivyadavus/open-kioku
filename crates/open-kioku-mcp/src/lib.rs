@@ -1074,13 +1074,16 @@ fn call_tool<'a>(
                 let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
                 let structured_content = match value {
                     Value::Object(_) => value,
-                    // A string output is the same payload as `content`, so it
-                    // carries the truncated text rather than the original. It
-                    // previously carried the untruncated value, which meant the
-                    // two halves of a response disagreed and the uncapped half
-                    // was the larger one - a client reading `structuredContent`
-                    // got bytes the cap was supposed to have removed.
-                    Value::String(_) => json!({ "value": text.clone() }),
+                    // A rendered string (Markdown, TOON) is not structured output; repeating
+                    // it here doubled every byte of the most common responses, and the client
+                    // that matters most reads `content` and ignores `structuredContent`
+                    // (anthropics/claude-code#4427). `structuredContent` stays, because the
+                    // tool declares an `outputSchema`, but carries a pointer, not the text.
+                    Value::String(_) => json!({
+                        "rendered_in": "content",
+                        "bytes": text.len(),
+                        "truncated": text_truncated
+                    }),
                     other => json!({ "value": other }),
                 };
                 let mut response = json!({
@@ -1297,11 +1300,23 @@ fn tool_annotations(name: &str) -> Value {
 fn tool_output_schema() -> Value {
     json!({
         "type": "object",
-        "description": "The MCP structuredContent object returned by this Open Kioku tool. Most tools expose their JSON fields directly; string or scalar tool outputs are wrapped as {\"value\": ...}.",
+        "description": "The MCP structuredContent object returned by this Open Kioku tool. JSON tool outputs expose their fields directly. Rendered text outputs (Markdown, TOON) live only in `content` and are described here by {\"rendered_in\": \"content\", \"bytes\": N, \"truncated\": bool} rather than repeated; other scalar outputs are wrapped as {\"value\": ...}.",
         "additionalProperties": true,
         "properties": {
             "value": {
-                "description": "Wrapped non-object output, used for Markdown, TOON, or scalar responses.",
+                "description": "Wrapped scalar (non-string, non-object) output.",
+            },
+            "rendered_in": {
+                "type": "string",
+                "description": "Where a rendered text output lives (\"content\"); the text is not duplicated into structuredContent.",
+            },
+            "bytes": {
+                "type": "integer",
+                "description": "Byte length of the rendered text placed in content.",
+            },
+            "truncated": {
+                "type": "boolean",
+                "description": "Whether the rendered text in content was truncated to the response cap.",
             }
         }
     })
@@ -2888,31 +2903,36 @@ fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyh
 mod tests {
 
     #[tokio::test]
-    async fn a_truncated_string_payload_is_truncated_in_both_halves() {
-        // `content` is capped at MAX_TOOL_TEXT_BYTES. `structuredContent` used to
-        // carry the original, so the two halves of one response disagreed and the
-        // uncapped half was the bigger one.
+    async fn a_rendered_string_payload_is_not_duplicated_into_structured_content() {
+        // A Markdown or TOON rendering used to be sent twice: once in `content`, once
+        // wrapped as {"value": ...} in `structuredContent`, so every byte was paid twice
+        // and, when the text was capped, the uncapped copy was the larger one.
         let oversized = "x".repeat(MAX_TOOL_TEXT_BYTES + 5_000);
         let value = json!(oversized);
 
         let mut text = value.as_str().unwrap().to_string();
-        let truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
-        assert!(truncated, "the fixture must actually exceed the cap");
+        let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
+        assert!(text_truncated, "the fixture must actually exceed the cap");
         let structured = match value {
             Value::Object(_) => unreachable!(),
-            Value::String(_) => json!({ "value": text.clone() }),
+            Value::String(_) => json!({
+                "rendered_in": "content",
+                "bytes": text.len(),
+                "truncated": text_truncated
+            }),
             other => json!({ "value": other }),
         };
 
-        let carried = structured["value"].as_str().unwrap();
-        assert_eq!(
-            carried.len(),
-            text.len(),
-            "structuredContent must carry the same bytes as content"
-        );
+        assert_eq!(structured["rendered_in"], "content");
+        assert_eq!(structured["bytes"], text.len());
         assert!(
-            carried.len() <= MAX_TOOL_TEXT_BYTES + 32,
-            "structuredContent must respect the cap, not exceed it by 5KB"
+            text.len() <= MAX_TOOL_TEXT_BYTES + 32,
+            "content respects the cap"
+        );
+        assert_eq!(structured["truncated"], true);
+        assert!(
+            serde_json::to_string(&structured).unwrap().len() < 128,
+            "structuredContent must be a pointer, not a copy of the text"
         );
     }
     use super::*;
