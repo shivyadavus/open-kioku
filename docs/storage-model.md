@@ -424,9 +424,12 @@ them:
 watch never fabricates a graph — but it means watching a repository alone never recovers it.
 Run `ok index` once.
 
-`IndexManifest.schema_version` is bumped to 2 in the same release, which marks every file
-stale and routes the next `ok index` to a full rebuild rather than a partial update.
+`IndexManifest.schema_version` is bumped to 2 in the same release. A stored manifest whose
+version differs from the current one is not partially indexable, so the incremental path
+(`ok watch`) falls back to a full index rather than updating rows the current reader cannot
+interpret; `ok index` is already a full rebuild.
 
 `ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
 version and names the fix, instead of importing a store whose graph would be discarded on
-first open.
+first open. `ok snapshot export` likewise refuses a store awaiting a rebuild, rather than
+writing `graph_edge_count: 0` into the artifact metadata as though it were a measurement.

@@ -1263,6 +1263,42 @@ fn snapshot_fixture_repo() -> tempfile::TempDir {
     temp
 }
 
+/// A store whose edges were discarded still has an edge table, so the export would happily
+/// count it and publish `graph_edge_count: 0` as though the repository had been measured.
+#[test]
+fn snapshot_export_refuses_a_store_whose_graph_awaits_a_rebuild() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    {
+        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('graph_rebuild_required_v4', '1')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg("fast");
+        command
+    });
+    assert!(
+        stderr.contains("older index format") && stderr.contains("ok index"),
+        "expected a rebuild instruction, got: {stderr}"
+    );
+    assert!(
+        !repo.join(".ok/artifacts/index.snapshot.json").exists(),
+        "metadata must not be written for a store that cannot be measured"
+    );
+}
+
 #[test]
 fn snapshot_export_import_round_trip_rebuilds_search_and_bootstraps_index() {
     let temp = snapshot_fixture_repo();
