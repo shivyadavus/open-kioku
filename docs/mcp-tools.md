@@ -116,7 +116,14 @@ happens. JSON results are also returned in `structuredContent` (the declared
 TOON) are sent once, in `content`: `structuredContent` then carries only
 `{"rendered_in": "content", "bytes": N, "truncated": bool}`, because repeating
 the rendering doubled the size of every such response and the most common
-client reads `content` only.
+client reads `content` only. A successful `tools/call` result also carries
+`"isError": false` explicitly rather than leaving the optional field absent.
+
+Both success envelopes are pinned by golden snapshots in
+`crates/open-kioku-mcp/snapshots/mcp/`: `tools_call_json_tool.json` for a JSON
+tool and `tools_call_rendered_tool.json` for a Markdown rendering, alongside the
+`tool_error.json` failure envelope. Changing the wire shape of a tool response
+moves one of those files.
 
 ## Source-Read Tools
 
