@@ -59,6 +59,13 @@ id_type!(ModuleId);
 
 pub const HISTORY_SCHEMA_VERSION: u32 = 1;
 
+/// Version of the on-disk index layout an [`IndexManifest`] was written for.
+///
+/// A manifest whose version differs from this one marks every file stale, which is how a
+/// storage-format change forces a full re-index rather than a partial update onto rows the
+/// current reader cannot interpret. Bumped to 2 in 4.0.0 for the compact graph tables.
+pub const INDEX_MANIFEST_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
