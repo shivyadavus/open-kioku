@@ -40,12 +40,12 @@ and it costs a small fraction of the JSON rendering of the same result.
 - `get_references` — find every place a symbol is used before renaming or deleting it
 - `get_callers` / `get_callees` — trace call graphs for debugging or refactoring
 - `get_implementations` — find all concrete implementations of an interface or trait
-- `explain_symbol` — get full context (file, line range, surrounding code)
+- `explain_symbol` — an alias of `get_definition`; the same record, no source text
 
 ### Change analysis
 - `impact_analysis` — measure the blast radius before modifying a file; shows all direct and transitive dependants
 - `find_tests_for_change` — identify which tests cover a file before pushing
-- `recommend_validation_plan` — get a structured validation checklist for a change
+- `recommend_validation_plan` — an alias of `find_tests_for_change`; the same test targets, no static checks
 - `dependency_path` — find how two files or symbols are connected
 
 ### Refactoring and patch planning
