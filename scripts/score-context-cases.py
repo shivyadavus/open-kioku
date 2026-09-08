@@ -116,6 +116,11 @@ def yield_at(units, gold, ranges, budget):
     return file_yield, covered / total if total else None
 
 
+def percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[min(int(len(ordered) * fraction), len(ordered) - 1)]
+
+
 def tokens_to_first_gold(units, gold):
     consumed = 0
     for path, _, _, tokens in units:
@@ -280,6 +285,7 @@ def main():
             "secs": time.time() - started,
         }
         row.update(yield_row(selected_units(pack, repo), gold_set, ranges))
+        row["pack_bytes"] = len(out.encode("utf-8"))
         return row
 
     t0 = time.time()
@@ -313,10 +319,16 @@ def main():
     if not with_units:
         print("  (no selected units in the pack output; gold yield not scored)")
     else:
-        pack_tokens = statistics.median(r["pack_tokens"] for r in with_units)
+        pack_tokens = [r["pack_tokens"] for r in with_units]
+        pack_bytes = [r["pack_bytes"] for r in scored if r.get("pack_bytes")]
+        # A pack's payload can be large for reasons unrelated to the code it selects
+        # (evidence and diagnostics dominate), so report the ledger and the payload.
         print(f"  -- gold yield at a token budget: averaged over all {len(scored)} scored cases "
               f"({len(with_units)} selected units, the rest score 0), "
-              f"{len(with_lines)} with modified line ranges, median pack {pack_tokens:.0f} estimated tokens --")
+              f"{len(with_lines)} with modified line ranges, pack estimated tokens p50 "
+              f"{statistics.median(pack_tokens):.0f} p95 {percentile(pack_tokens, 0.95):.0f} "
+              f"max {max(pack_tokens)}, JSON bytes p50 {statistics.median(pack_bytes):.0f} "
+              f"p95 {percentile(pack_bytes, 0.95):.0f} --")
         for k in YIELD_KEYS:
             if k in summary:
                 print(f"  {k:22} {summary[k]:.4f}   95% CI [{ci[k][0]:.4f}, {ci[k][1]:.4f}]")
