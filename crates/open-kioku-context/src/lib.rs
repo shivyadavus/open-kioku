@@ -586,8 +586,8 @@ impl<'a> ContextPackBuilder<'a> {
         // Generated files go to the back of every stream before the cap is applied: they are
         // indexed so an agent can read them, but a `modeling_*.py` regenerated from its modular
         // twin matches the same vocabulary and, competing for the lexical stream's slots, pushed
-        // the real module out of the pool before fusion ever ranked it (transformers holdout
-        // MRR 0.565 -> 0.552 with generated files admitted to the streams unranked).
+        // the real module out of the pool before fusion ever ranked it (the Python ML library
+        // holdout read MRR 0.565 -> 0.552 with generated files admitted to the streams unranked).
         let generated: std::collections::BTreeSet<String> = files
             .iter()
             .filter(|file| file.is_generated)
