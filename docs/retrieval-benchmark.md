@@ -139,7 +139,9 @@ repository's own history, after the Agent Retrieval Bench methodology:
 2. Every case is a later commit: the query is its subject with PR numbers stripped; the gold
    set is the source files it modified that already existed at `B`. Commits whose subject
    names a path are dropped (kept, the path is the answer; stripped, the subject no longer
-   describes the change).
+   describes the change), and a subject that repeats an earlier one up to numbers keeps only
+   its first instance: hugo's "releaser: Bump versions for release of X" was a third of its
+   holdout with the same gold file every time, so one pattern decided the corpus.
    The change lives in the future, never in the index, so a query cannot retrieve its
    own diff.
 3. Split chronologically — older cases are the development set, newer ones the holdout.

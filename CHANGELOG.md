@@ -29,6 +29,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Retrieval benchmark no-gold false positives count only results presented with confidence above Low (the product's abstention signal), for pack-less strategies via the same shared weak-relevance rule. Baseline and thresholds re-frozen; rationale in `docs/retrieval-benchmark.md`.
 
 ### Added
+- `scripts/commit-derived-cases.py` keeps one instance of a subject that repeats up to numbers (`--keep-repeated-subjects` restores the old behaviour); hugo's corpus shrinks from 481 to 280 cases because 201 were release-bump commits with one gold file.
 - `scripts/commit-derived-cases.py` and `scripts/score-context-cases.py`: derive leakage-safe retrieval cases from a repository's own history (index at a base commit, gold = files a later commit modified that already existed at base) and score the production `ok context` path against them with bootstrap confidence intervals.
 
 ---

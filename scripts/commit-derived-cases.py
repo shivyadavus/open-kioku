@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 PR_REF = re.compile(r"\(#\d+\)|#\d+")
+NUMBERS = re.compile(r"\d+")
 PATHLIKE = re.compile(r"\S*/\S*")
 BACKTICKS = re.compile(r"`([^`]*)`")
 
@@ -51,6 +52,10 @@ def main():
         help="keep commits whose subject contains a path-like token (default: drop them; the path is either the answer or, once stripped, the subject no longer describes the change)",
     )
     ap.add_argument(
+        "--keep-repeated-subjects", action="store_true",
+        help="keep every commit whose subject repeats an earlier one up to numbers (default: keep the first only; hugo's 'releaser: Bump versions for release of X' was a third of its holdout and every instance has the same gold file, so one pattern decided the corpus)",
+    )
+    ap.add_argument(
         "--path-prefix", action="append", default=None,
         help="only count files under these prefixes as gold (repeatable); use it when only a subtree of the repository is indexed",
     )
@@ -68,6 +73,8 @@ def main():
         "--format=%x00%H%x1f%as%x1f%s", "--name-only", "--diff-filter=M",
     )
     kept = 0
+    dropped_repeats = 0
+    seen_subjects = set()
     with open(args.out, "w") as out:
         for block in log.split("\x00")[1 : args.after + 1]:
             header, _, files = block.partition("\n")
@@ -84,9 +91,15 @@ def main():
             query = clean_query(subject)
             if len(query.split()) < args.min_query_words:
                 continue
+            if not args.keep_repeated_subjects:
+                key = " ".join(NUMBERS.sub("#", query).lower().split())
+                if key in seen_subjects:
+                    dropped_repeats += 1
+                    continue
+                seen_subjects.add(key)
             out.write(f"{sha}\t{date}\t{query}\t{'|'.join(paths)}\n")
             kept += 1
-    print(f"{kept} cases written to {args.out} (base {args.base[:12]}, {args.after} commits scanned)", file=sys.stderr)
+    print(f"{kept} cases written to {args.out} (base {args.base[:12]}, {args.after} commits scanned, {dropped_repeats} repeated subjects dropped)", file=sys.stderr)
 
 
 if __name__ == "__main__":
