@@ -3063,7 +3063,17 @@ pub enum GraphEdgeType {
     RelatedToTicket,
     SimilarTo,
     SemanticallyRelated,
+    /// `from` is produced from, or exists to exercise or describe, `to`: a generated file and the
+    /// source its header names, a test and the module it tests, a `.d.ts` and its implementation.
+    /// The two are siblings of one edit; the edge's proof (declared origin) or its absence
+    /// (naming convention) says how much that can be trusted.
+    DerivedFrom,
 }
+
+/// Source label of a `DERIVED_FROM` fact whose origin the derived file's own header declares.
+/// Shared between the ingest pass that emits the fact and the graph builder that attaches the
+/// declared-origin proof to it.
+pub const DERIVED_FILE_DECLARED_ORIGIN_SOURCE: &str = "open-kioku-derived/declared-origin";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GraphNode {
@@ -4293,6 +4303,14 @@ mod tests {
         assert_eq!(json, "\"USES_TYPE\"");
         let decoded: GraphEdgeType = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, GraphEdgeType::UsesType);
+    }
+
+    #[test]
+    fn derived_from_edge_type_has_stable_json_contract() {
+        let json = serde_json::to_string(&GraphEdgeType::DerivedFrom).unwrap();
+        assert_eq!(json, "\"DERIVED_FROM\"");
+        let decoded: GraphEdgeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, GraphEdgeType::DerivedFrom);
     }
 
     #[test]

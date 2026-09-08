@@ -1516,6 +1516,7 @@ fn proof_kind_name(kind: &open_kioku_core::RelationshipProofKind) -> &'static st
         RelationshipProofKind::InheritanceBinding => "inheritance_binding",
         RelationshipProofKind::ModuleOrPackageBinding => "module_or_package_binding",
         RelationshipProofKind::ExternalExactIndex => "external_exact_index",
+        RelationshipProofKind::DeclaredOrigin => "declared_origin",
     }
 }
 
