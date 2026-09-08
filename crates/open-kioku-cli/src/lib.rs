@@ -48,7 +48,7 @@ use open_kioku_storage::{
     GraphStore, HistoryStore, IndexData, MetadataStore, OkStore, SearchIndex,
 };
 use open_kioku_storage_sqlite::{SqliteStore, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION};
-use open_kioku_symbols::SymbolEngine;
+use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
 use open_kioku_tests::TestSelector;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};

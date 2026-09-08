@@ -36,6 +36,15 @@ pub trait MetadataStore: Send + Sync {
     }
     fn list_files(&self, limit: usize, offset: usize) -> Result<Vec<File>>;
     fn get_file_by_path(&self, path: &Path) -> Result<Option<File>>;
+    /// Resolves the file a `FileId` refers to. Backends without an indexed
+    /// lookup scan the file list, so every caller that only needs a path can
+    /// stop reimplementing that scan.
+    fn file_by_id(&self, id: &FileId) -> Result<Option<File>> {
+        Ok(self
+            .list_files(usize::MAX, 0)?
+            .into_iter()
+            .find(|file| file.id == *id))
+    }
     fn list_symbols(&self, query: Option<&str>, limit: usize, offset: usize)
         -> Result<Vec<Symbol>>;
     /// Indexed exact-name lookup: symbols whose short name (case-insensitive) or qualified name

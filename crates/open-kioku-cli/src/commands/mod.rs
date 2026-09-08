@@ -641,6 +641,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 SymbolCommand::Definition { name } => {
                     output(cli.json, &engine.definition(&name)?, || {})?
                 }
+                SymbolCommand::Context { name } => output(
+                    cli.json,
+                    &engine.context(&name, SYMBOL_CONTEXT_SURROUNDING_LINES)?,
+                    || {},
+                )?,
                 SymbolCommand::Refs { name } => {
                     output(cli.json, &engine.references(&name, 50)?, || {})?
                 }

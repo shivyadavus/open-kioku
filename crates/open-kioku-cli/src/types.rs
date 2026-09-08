@@ -857,6 +857,8 @@ enum DoctorFormat {
 enum SymbolCommand {
     Find { name: String },
     Definition { name: String },
+    /// Print the definition body and surrounding indexed lines for a symbol.
+    Context { name: String },
     Refs { name: String },
 }
 

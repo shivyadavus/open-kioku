@@ -2112,6 +2112,43 @@ fn demo_creates_indexed_sample_repo() {
         2
     );
 
+    // `symbol context` promises the definition body, so it has to produce one —
+    // and say plainly when part of the bundle is outside the indexed corpus.
+    // `issue_token` is the first symbol in its file, so nothing above it was
+    // chunked and the doc-comment caveat is the honest answer.
+    let first_symbol_context = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("symbol")
+            .arg("context")
+            .arg("issue_token");
+        command
+    });
+    assert!(first_symbol_context.contains("pub fn issue_token"));
+    assert!(first_symbol_context.contains("format!(\\\"token:"));
+    assert!(first_symbol_context.contains("\"body_range\""));
+    assert!(first_symbol_context.contains("outside the indexed corpus"));
+
+    // `validate_token` follows another definition, so the lines above it were
+    // chunked and come back verbatim.
+    let later_symbol_context = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("symbol")
+            .arg("context")
+            .arg("validate_token");
+        command
+    });
+    assert!(later_symbol_context.contains("pub fn validate_token"));
+    assert!(later_symbol_context.contains("pub fn issue_token"));
+    assert!(!later_symbol_context.contains("outside the indexed corpus"));
+
     let semantic_status = run({
         let mut command = ok();
         command

@@ -707,6 +707,23 @@ impl MetadataStore for SqliteStore {
             .transpose()
     }
 
+    fn file_by_id(&self, id: &FileId) -> Result<Option<File>> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT json FROM files WHERE id = ?1",
+                params![&id.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        raw.map(|json| serde_json::from_str(&json).map_err(Into::into))
+            .transpose()
+    }
+
     fn list_symbols(
         &self,
         query: Option<&str>,

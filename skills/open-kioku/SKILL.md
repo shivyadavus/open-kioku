@@ -36,6 +36,7 @@ and it costs a small fraction of the JSON rendering of the same result.
 
 ### Symbol navigation
 - `get_definition` — find where a symbol is defined before editing it
+- `get_symbol_context` — read the definition body and the indexed lines around it; `caveats` names anything the index could not recover
 - `get_references` — find every place a symbol is used before renaming or deleting it
 - `get_callers` / `get_callees` — trace call graphs for debugging or refactoring
 - `get_implementations` — find all concrete implementations of an interface or trait

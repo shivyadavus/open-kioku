@@ -1,8 +1,16 @@
 use open_kioku_core::{
-    Confidence, EvidenceSourceType, Symbol, SymbolId, SymbolKind, SymbolOccurrence,
+    CodeChunk, Confidence, EvidenceSourceType, LineRange, Symbol, SymbolContext, SymbolId,
+    SymbolKind, SymbolOccurrence,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::MetadataStore;
+
+/// Lines of already-indexed context returned on each side of a definition.
+pub const SYMBOL_CONTEXT_SURROUNDING_LINES: u32 = 10;
+
+/// Cap on the definition lines one context bundle returns. A definition longer
+/// than this is cut and marked `truncated` rather than silently trimmed.
+pub const SYMBOL_CONTEXT_MAX_BODY_LINES: u32 = 400;
 
 pub struct SymbolEngine<'a> {
     store: &'a dyn MetadataStore,
@@ -42,6 +50,154 @@ impl<'a> SymbolEngine<'a> {
 
     pub fn by_id(&self, id: &SymbolId) -> Result<Option<Symbol>> {
         self.store.symbol_by_id(id)
+    }
+
+    /// Joins a definition back to the indexed chunk text that covers it, so a
+    /// caller gets the body and its surrounding lines rather than just the
+    /// symbol record.
+    ///
+    /// The corpus is the index, not the working tree. Whatever cannot be
+    /// recovered from it comes back as a caveat rather than as a shorter answer
+    /// that reads like a complete one.
+    pub fn context(&self, query: &str, surrounding_lines: u32) -> Result<SymbolContext> {
+        let symbol = self.definition(query)?;
+        let mut context = SymbolContext {
+            symbol,
+            path: None,
+            body: None,
+            body_range: None,
+            leading_lines: Vec::new(),
+            leading_range: None,
+            trailing_lines: Vec::new(),
+            trailing_range: None,
+            truncated: false,
+            evidence: Vec::new(),
+            caveats: Vec::new(),
+        };
+
+        match self.store.file_by_id(&context.symbol.file_id)? {
+            Some(file) => context.path = Some(file.path),
+            None => {
+                let caveat = format!(
+                    "indexed symbol `{}` references file id `{}`, which is no longer indexed; its path and body could not be resolved",
+                    context.symbol.qualified_name, context.symbol.file_id.0
+                );
+                context.caveats.push(caveat);
+            }
+        }
+        let path_label = display_path(&context);
+
+        let Some(symbol_range) = context.symbol.range.clone() else {
+            context.caveats.push(format!(
+                "indexed symbol `{}` carries no line range, so its definition body could not be located",
+                context.symbol.qualified_name
+            ));
+            return Ok(context);
+        };
+
+        let mut chunks = self.store.chunks_for_file(&context.symbol.file_id)?;
+        chunks.sort_by_key(|chunk| chunk.range.start);
+        let Some(covering) = chunks.iter().find(|chunk| {
+            chunk.range.start <= symbol_range.start && symbol_range.start <= chunk.range.end
+        }) else {
+            context.caveats.push(format!(
+                "no indexed chunk covers {} line {}, so the definition body could not be recovered; re-index the repository to restore it",
+                path_label,
+                symbol_range.start
+            ));
+            return Ok(context);
+        };
+
+        // A symbol whose recorded range is a single line does not tell us where
+        // its body ends, so the covering chunk's extent stands in. Chunks are
+        // cut at the next symbol's first line, which usually overshoots by the
+        // following definition's doc comment — say so rather than presenting a
+        // chunk boundary as a parsed end of definition.
+        let derived_end =
+            symbol_range.end <= symbol_range.start && covering.range.end > symbol_range.start;
+        let mut body_end = if derived_end {
+            covering.range.end
+        } else {
+            symbol_range.end.max(symbol_range.start)
+        };
+        let max_end = symbol_range
+            .start
+            .saturating_add(SYMBOL_CONTEXT_MAX_BODY_LINES.saturating_sub(1));
+        if body_end > max_end {
+            body_end = max_end;
+            context.truncated = true;
+            context.caveats.push(format!(
+                "the definition body was cut at {SYMBOL_CONTEXT_MAX_BODY_LINES} lines; the remainder is not included"
+            ));
+        }
+
+        let body = indexed_lines(&chunks, symbol_range.start, body_end);
+        if body.is_empty() {
+            context.caveats.push(format!(
+                "the chunk covering {} line {} holds no text for the definition",
+                path_label, symbol_range.start
+            ));
+            return Ok(context);
+        }
+        let body_range = LineRange {
+            start: body
+                .first()
+                .map(|(line, _)| *line)
+                .unwrap_or(symbol_range.start),
+            end: body.last().map(|(line, _)| *line).unwrap_or(body_end),
+        };
+        context.evidence.push(format!(
+            "definition body recovered from indexed chunk `{}` covering {} lines {}-{}",
+            covering.id, path_label, covering.range.start, covering.range.end
+        ));
+        if derived_end {
+            context.caveats.push(format!(
+                "the indexed range for `{}` is a single line, so the body extent comes from the chunk boundary at line {} and may include text that follows the definition",
+                context.symbol.qualified_name, body_range.end
+            ));
+        }
+        context.body = Some(join_lines(&body));
+        context.body_range = Some(body_range.clone());
+
+        if surrounding_lines > 0 {
+            let leading = indexed_lines(
+                &chunks,
+                body_range.start.saturating_sub(surrounding_lines).max(1),
+                body_range.start.saturating_sub(1),
+            );
+            if leading.is_empty() {
+                context.caveats.push(format!(
+                    "no indexed lines precede {} line {}, so any documentation comment above the definition is outside the indexed corpus and is not reported",
+                    path_label,
+                    body_range.start
+                ));
+            } else {
+                context.leading_range = Some(LineRange {
+                    start: leading[0].0,
+                    end: leading[leading.len() - 1].0,
+                });
+                context.evidence.push(format!(
+                    "{} indexed line(s) above the definition were returned verbatim; documentation comments appear here only when the indexer chunked them",
+                    leading.len()
+                ));
+                context.leading_lines = leading.into_iter().map(|(_, text)| text).collect();
+            }
+
+            let trailing = indexed_lines(
+                &chunks,
+                body_range.end.saturating_add(1),
+                body_range.end.saturating_add(surrounding_lines),
+            );
+            if !trailing.is_empty() {
+                context.trailing_range = Some(LineRange {
+                    start: trailing[0].0,
+                    end: trailing[trailing.len() - 1].0,
+                });
+                context.trailing_lines = trailing.into_iter().map(|(_, text)| text).collect();
+            }
+        }
+
+        Ok(context)
     }
 
     pub fn references(&self, query: &str, limit: usize) -> Result<Vec<SymbolOccurrence>> {
@@ -87,6 +243,46 @@ impl<'a> SymbolEngine<'a> {
     }
 }
 
+fn display_path(context: &SymbolContext) -> String {
+    context
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| format!("file:{}", context.symbol.file_id.0))
+}
+
+/// Collects the indexed text for lines `from..=to`, in order. Chunks tile the
+/// file without overlapping, so a line missing from the result is a line the
+/// indexer never captured — it is skipped, never padded with a blank.
+fn indexed_lines(chunks: &[CodeChunk], from: u32, to: u32) -> Vec<(u32, String)> {
+    if to < from {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for chunk in chunks {
+        if chunk.range.end < from || chunk.range.start > to {
+            continue;
+        }
+        for (idx, text) in chunk.text.lines().enumerate() {
+            let line = chunk.range.start.saturating_add(idx as u32);
+            if line >= from && line <= to {
+                lines.push((line, text.to_string()));
+            }
+        }
+    }
+    lines.sort_by_key(|(line, _)| *line);
+    lines.dedup_by_key(|(line, _)| *line);
+    lines
+}
+
+fn join_lines(lines: &[(u32, String)]) -> String {
+    lines
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn definition_rank(symbol: &Symbol, query: &str) -> (u8, u8, usize) {
     let exactness = if symbol.name == query {
         0
@@ -114,10 +310,10 @@ fn symbol_kind_rank(kind: &SymbolKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::SymbolEngine;
+    use super::{SymbolEngine, SYMBOL_CONTEXT_MAX_BODY_LINES, SYMBOL_CONTEXT_SURROUNDING_LINES};
     use open_kioku_core::{
-        CodeChunk, File, FileId, Import, IndexManifest, Language, LineRange, Symbol, SymbolId,
-        SymbolKind, SymbolOccurrence, TestTarget,
+        CodeChunk, File, FileId, Import, IndexManifest, Language, LineRange, RepositoryId, Symbol,
+        SymbolId, SymbolKind, SymbolOccurrence, TestTarget,
     };
     use open_kioku_errors::Result;
     use open_kioku_storage::{IndexData, MetadataStore};
@@ -126,6 +322,8 @@ mod tests {
     #[derive(Default)]
     struct MemoryStore {
         symbols: Vec<Symbol>,
+        files: Vec<File>,
+        chunks: Vec<CodeChunk>,
     }
 
     impl MetadataStore for MemoryStore {
@@ -145,12 +343,18 @@ mod tests {
             Ok(())
         }
 
-        fn list_files(&self, _limit: usize, _offset: usize) -> Result<Vec<File>> {
-            Ok(Vec::new())
+        fn list_files(&self, limit: usize, offset: usize) -> Result<Vec<File>> {
+            Ok(self
+                .files
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect())
         }
 
-        fn get_file_by_path(&self, _path: &Path) -> Result<Option<File>> {
-            Ok(None)
+        fn get_file_by_path(&self, path: &Path) -> Result<Option<File>> {
+            Ok(self.files.iter().find(|file| file.path == path).cloned())
         }
 
         fn list_symbols(
@@ -176,12 +380,17 @@ mod tests {
             Ok(self.symbols.iter().find(|symbol| symbol.id == *id).cloned())
         }
 
-        fn chunks_for_file(&self, _file_id: &FileId) -> Result<Vec<CodeChunk>> {
-            Ok(Vec::new())
+        fn chunks_for_file(&self, file_id: &FileId) -> Result<Vec<CodeChunk>> {
+            Ok(self
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.file_id == *file_id)
+                .cloned()
+                .collect())
         }
 
         fn all_chunks(&self) -> Result<Vec<CodeChunk>> {
-            Ok(Vec::new())
+            Ok(self.chunks.clone())
         }
 
         fn tests(&self) -> Result<Vec<TestTarget>> {
@@ -253,6 +462,7 @@ mod tests {
                     SymbolKind::Method,
                 ),
             ],
+            ..Default::default()
         };
 
         let definition = SymbolEngine::new(&store)
@@ -260,5 +470,196 @@ mod tests {
             .unwrap();
 
         assert_eq!(definition.id.0, "class");
+    }
+
+    fn ranged_symbol(id: &str, name: &str, range: LineRange) -> Symbol {
+        let mut symbol = symbol(id, name, &format!("billing::{name}"), SymbolKind::Function);
+        symbol.file_id = FileId::new("file-billing");
+        symbol.range = Some(range);
+        symbol
+    }
+
+    fn billing_file() -> File {
+        File {
+            id: FileId::new("file-billing"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/billing.rs".into(),
+            language: Language::Rust,
+            size_bytes: 128,
+            content_hash: "hash-billing".into(),
+            is_generated: false,
+            is_vendor: false,
+        }
+    }
+
+    fn chunk(id: &str, symbol_id: &str, start: u32, text: &str) -> CodeChunk {
+        let end = start + text.lines().count().saturating_sub(1) as u32;
+        CodeChunk {
+            id: id.into(),
+            file_id: FileId::new("file-billing"),
+            range: LineRange { start, end },
+            language: Language::Rust,
+            text: text.into(),
+            symbol_id: Some(SymbolId::new(symbol_id)),
+        }
+    }
+
+    /// Two definitions, the second carrying a doc comment. The indexer cuts the
+    /// first chunk at the second symbol's line, so that doc comment sits at the
+    /// tail of the *previous* chunk and is recoverable as leading context.
+    fn documented_store() -> MemoryStore {
+        MemoryStore {
+            symbols: vec![
+                ranged_symbol("symbol-publish", "publish_invoice", LineRange::single(3)),
+                ranged_symbol(
+                    "symbol-archive",
+                    "archive_invoice",
+                    LineRange { start: 9, end: 11 },
+                ),
+            ],
+            files: vec![billing_file()],
+            chunks: vec![
+                chunk(
+                    "chunk-publish",
+                    "symbol-publish",
+                    3,
+                    "pub fn publish_invoice() {\n    emit();\n}\n\n/// Archives a published invoice.\n/// Returns the archived id.",
+                ),
+                chunk(
+                    "chunk-archive",
+                    "symbol-archive",
+                    9,
+                    "pub fn archive_invoice() -> u64 {\n    0\n}",
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn context_returns_the_definition_body_at_absolute_line_numbers() {
+        let store = documented_store();
+
+        let context = SymbolEngine::new(&store)
+            .context("archive_invoice", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert_eq!(context.path.as_deref(), Some(Path::new("src/billing.rs")));
+        assert_eq!(
+            context.body.as_deref(),
+            Some("pub fn archive_invoice() -> u64 {\n    0\n}")
+        );
+        assert_eq!(context.body_range, Some(LineRange { start: 9, end: 11 }));
+        assert!(!context.truncated);
+        assert!(context
+            .evidence
+            .iter()
+            .any(|entry| entry.contains("chunk-archive")));
+    }
+
+    #[test]
+    fn context_returns_doc_comment_lines_when_the_index_captured_them() {
+        let store = documented_store();
+
+        let context = SymbolEngine::new(&store)
+            .context("archive_invoice", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert_eq!(
+            context.leading_lines,
+            vec![
+                "pub fn publish_invoice() {".to_string(),
+                "    emit();".to_string(),
+                "}".to_string(),
+                String::new(),
+                "/// Archives a published invoice.".to_string(),
+                "/// Returns the archived id.".to_string(),
+            ]
+        );
+        assert_eq!(context.leading_range, Some(LineRange { start: 3, end: 8 }));
+    }
+
+    #[test]
+    fn context_reports_that_lines_above_the_first_indexed_symbol_are_not_in_the_corpus() {
+        let store = documented_store();
+
+        let context = SymbolEngine::new(&store)
+            .context("publish_invoice", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert!(context.leading_lines.is_empty());
+        assert!(
+            context
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("documentation comment")),
+            "absent leading context must be reported, got: {:?}",
+            context.caveats
+        );
+        // The symbol's own range is one line, so the extent is a chunk boundary
+        // and the bundle has to say so.
+        assert!(context
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("chunk boundary")));
+    }
+
+    #[test]
+    fn context_reports_an_unrecoverable_body_instead_of_returning_less_than_promised() {
+        let store = MemoryStore {
+            symbols: vec![ranged_symbol(
+                "symbol-orphan",
+                "orphan_symbol",
+                LineRange::single(42),
+            )],
+            files: vec![billing_file()],
+            chunks: Vec::new(),
+        };
+
+        let context = SymbolEngine::new(&store)
+            .context("orphan_symbol", SYMBOL_CONTEXT_SURROUNDING_LINES)
+            .unwrap();
+
+        assert!(context.body.is_none());
+        assert!(context.body_range.is_none());
+        assert!(
+            context
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("no indexed chunk covers")),
+            "missing body must be reported, got: {:?}",
+            context.caveats
+        );
+    }
+
+    #[test]
+    fn context_bounds_the_body_and_says_that_it_was_cut() {
+        let long_body = (0..(SYMBOL_CONTEXT_MAX_BODY_LINES + 50))
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let store = MemoryStore {
+            symbols: vec![ranged_symbol(
+                "symbol-long",
+                "long_symbol",
+                LineRange::single(1),
+            )],
+            files: vec![billing_file()],
+            chunks: vec![chunk("chunk-long", "symbol-long", 1, &long_body)],
+        };
+
+        let context = SymbolEngine::new(&store).context("long_symbol", 0).unwrap();
+
+        assert!(context.truncated);
+        assert_eq!(
+            context.body_range,
+            Some(LineRange {
+                start: 1,
+                end: SYMBOL_CONTEXT_MAX_BODY_LINES
+            })
+        );
+        assert!(context
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("was cut at")));
     }
 }

@@ -1313,12 +1313,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve a comprehensive context bundle for one symbol, including its full definition body, file location and range, enclosing scope, documentation comments, and surrounding code context from the local index. Use to retrieve a comprehensive context bundle for one symbol, including its definition body, file location, enclosing scope, documentation comments, and surrounding code context when indexed. Returns more detail than get_definition. Do NOT use for simple definition lookup only (use get_definition), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
+        "description": "Resolve one symbol and join it back to the indexed chunk text that covers it: the definition body with the line range it spans, plus up to ten indexed lines above and below it verbatim. Documentation comments appear in the leading lines only when the indexer chunked them; they are never parsed out or reconstructed. Anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body. Use when the definition text itself is needed, not just where it lives. Do NOT use for the symbol record alone (use get_definition), for symbol discovery (use search_symbols), or for cross-reference tracing (use get_references). Read `caveats` before relying on the body: it names anything the index could not recover. This is read-only and reads from the local index.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "query": {
-              "description": "The exact or partial name of the symbol to retrieve comprehensive context for.",
+              "description": "The exact or partial name of the symbol to retrieve context for.",
               "type": "string"
             }
           },
