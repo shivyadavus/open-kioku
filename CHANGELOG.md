@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Breaking
+- The index storage format changed: SQLite `user_version` 3 -> 4 and `IndexManifest.schema_version` 1 -> 2. `graph_edges` and `call_sites` no longer carry a JSON document per row beside the query columns holding the same values; every field now has a typed column and every repeated string is written once into a per-table dictionary (`graph_strings`, `call_site_strings`) and referenced by integer id. Opening a pre-4.0 index detects the old layout by the `json` column (a `PRAGMA table_info` check, not a scan), drops those two tables, and makes every relationship read report `run \`ok index\` to rebuild them` rather than answering from an empty table — an empty answer would read as "no such relationship exists". The detection cannot fire twice, because the column it keys on is gone afterwards. `ok snapshot import` now also refuses an artifact exported from a pre-4.0 index and names the fix instead of importing a store whose graph would be discarded on first open. (#363)
 - `open_kioku_parse::evidence_timestamp()` is removed. It had no callers anywhere in the workspace and was vestigial (#335); the next release is a major, so the removal rides it.
 
 ### Added
