@@ -207,10 +207,14 @@ unit would overflow the budget `B`. Everything before that point is what an agen
 the pack sees within `B` tokens. Over that prefix:
 
 - `gold_file_yield@B` — the fraction of the case's gold files that have at least one
-  selected unit inside the budget; averaged over cases.
+  selected unit inside the budget, averaged over **every scored case**. A pack that selects
+  no units delivered no gold lines, so it scores 0 rather than dropping out of the
+  denominator; excluding those cases would inflate the mean and would not be comparable with
+  `gold_recall@20`, which averages over every case.
 - `gold_line_yield@B` — where the case carries modified line ranges, the fraction of those
-  lines that the in-budget units' `line_range`s cover; averaged over the cases that have
-  ranges.
+  lines that the in-budget units' `line_range`s cover, averaged over the cases that have
+  ranges to measure against. Whether a case has ranges is a property of the case file; a case
+  that has them and selects nothing still scores 0.
 - `tokens_to_first_gold` — the tokens consumed before the first gold unit appears, stored
   per case and reported as a median over the cases that reach a gold unit at all.
 

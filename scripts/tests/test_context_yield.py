@@ -102,5 +102,37 @@ class RangeColumn(unittest.TestCase):
                          "26-33,52-52,70-70|1-1")
 
 
+
+
+class AbstainingCasesCountAsZeroYield(unittest.TestCase):
+    """A pack that selects nothing delivered no gold lines; excluding it inflates the mean."""
+
+    def test_file_yield_averages_over_every_scored_case(self):
+        sample = [
+            {"rank": 1, "gold_recall": 1.0, "gold_file_yield": {"4000": 1.0, "8000": 1.0, "16000": 1.0}, "gold_line_yield": None,
+             "line_yield_measurable": False, "tokens_to_first_gold": 10, "pack_tokens": 100},
+            {"rank": None, "gold_recall": 0.0, "gold_file_yield": None, "gold_line_yield": None,
+             "line_yield_measurable": False, "tokens_to_first_gold": None, "pack_tokens": 0},
+        ]
+        out = score.metrics(sample)
+        self.assertAlmostEqual(out["gold_file_yield@4000"], 0.5)
+
+    def test_line_yield_denominator_is_cases_with_ranges_not_cases_with_units(self):
+        sample = [
+            {"rank": 1, "gold_recall": 1.0, "gold_file_yield": {"4000": 1.0, "8000": 1.0, "16000": 1.0},
+             "gold_line_yield": {"4000": 0.8, "8000": 0.8, "16000": 0.8}, "line_yield_measurable": True,
+             "tokens_to_first_gold": 10, "pack_tokens": 100},
+            # abstained, but its case carries line ranges, so it is measurable and scores 0
+            {"rank": None, "gold_recall": 0.0, "gold_file_yield": None, "gold_line_yield": None,
+             "line_yield_measurable": True, "tokens_to_first_gold": None, "pack_tokens": 0},
+            # no ranges annotated: not measurable, must not enter the denominator
+            {"rank": 1, "gold_recall": 1.0, "gold_file_yield": {"4000": 1.0, "8000": 1.0, "16000": 1.0},
+             "gold_line_yield": None, "line_yield_measurable": False,
+             "tokens_to_first_gold": 10, "pack_tokens": 100},
+        ]
+        out = score.metrics(sample)
+        self.assertAlmostEqual(out["gold_line_yield@4000"], 0.4)
+
+
 if __name__ == "__main__":
     unittest.main()
