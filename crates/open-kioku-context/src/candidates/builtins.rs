@@ -91,8 +91,10 @@ impl<'a> BuiltinCandidateContext<'a> {
     }
 
     fn lexical_stream(&self, request: &CandidateRequest) -> CandidateStream {
+        // The lattice was already built once for this request; rebuilding it here scanned the
+        // whole symbol table a second time for the same answer.
         let intent = TaskSearchIntent::parse(&request.task)
-            .with_repository_vocabulary(self.files, self.symbols);
+            .with_lattice_terms(request.lattice_terms.clone());
         match search_candidates(
             self.chunks,
             self.files,
