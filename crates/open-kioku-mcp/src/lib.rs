@@ -465,7 +465,7 @@ async fn dispatch(
             // to. It accepts a plan the caller already holds so a saved plan
             // becomes a contract without re-planning.
             if bool_arg(&params, "persist") {
-                let plan = contract_plan_from_params(repo, store, &params)?;
+                let plan = contract_plan_from_params(repo, store, config, &params)?;
                 let contract = ContractBuilder::from_plan(&plan)?;
                 let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
                 let should_store = params.get("store").and_then(Value::as_bool).unwrap_or(true);
@@ -510,6 +510,7 @@ async fn dispatch(
             let report = PlanEngine::new(store as &dyn OkStore)
                 .with_history_store(Some(store))
                 .with_memory_facts(memory_facts)
+                .with_memory_enabled(config.memory.enabled)
                 .plan_from_context(&task, limit, context)?;
 
             if detail == "preflight" {
@@ -906,7 +907,12 @@ async fn dispatch(
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
             Ok(json!(disabled_response(method)))
         }
-        other => anyhow::bail!("unknown MCP method or tool `{other}`"),
+        other => match retired_tool_guidance(other) {
+            Some(guidance) => anyhow::bail!(
+                "`{other}` was retired from the MCP tool surface in 4.0.0: {guidance}"
+            ),
+            None => anyhow::bail!("unknown MCP method or tool `{other}`"),
+        },
     }
 }
 
@@ -1161,57 +1167,156 @@ fn tool_title(name: &str) -> String {
     format!("Open Kioku {words}")
 }
 
-/// Names that left the advertised surface and the dispatch table together.
+/// Names that left the advertised surface and the dispatch table together, each
+/// paired with where its capability went.
+///
 /// Nothing here may come back as a hidden alias: an agent holding a stale name
 /// must get a clear error rather than a response whose shape no longer matches
-/// the description that name was chosen from.
-#[cfg(test)]
-const RETIRED_TOOLS: &[&str] = &[
+/// the description that name was chosen from. But a bare refusal makes the
+/// agent guess, and the mapping is already known here, so the error carries it.
+const RETIRED_TOOLS: &[(&str, &str)] = &[
     // Removed before 4.0.0.
-    "apply_patch",
-    "review_patch",
-    "validate_patch",
+    (
+        "apply_patch",
+        "Open Kioku does not edit source files; apply the edit with your editor, then call `verify_change`",
+    ),
+    (
+        "review_patch",
+        "use `plan_change` with `detail: \"patch\"` before the edit and `verify_change` after it",
+    ),
+    (
+        "validate_patch",
+        "use `verify_change` with the saved plan or a `contract_id`",
+    ),
     // Folded into one of the sixteen in 4.0.0 (#406).
-    "list_languages",
-    "list_symbols",
-    "search_files",
-    "semantic_status",
-    "semantic_search",
-    "hybrid_search",
-    "explain_search_result",
-    "explain_file",
-    "explain_symbol",
-    "get_symbol_context",
-    "get_callers",
-    "get_callees",
-    "get_implementations",
-    "module_dependencies",
-    "build_compressed_context",
-    "preflight_change",
-    "create_change_contract",
-    "propose_patch",
-    "verify_change_contract",
-    "explain_verification",
-    "recommend_validation_plan",
-    "explain_test_coverage",
-    "get_evidence_schema",
+    (
+        "list_languages",
+        "use `repo_status`; its `languages` field carries the same inventory",
+    ),
+    ("list_symbols", "use `search_symbols`; `query` is optional"),
+    (
+        "search_files",
+        "use `search_code`; it was the same call under another name",
+    ),
+    (
+        "semantic_status",
+        "use `repo_status`; its `semantic_lifecycle` field carries the same status",
+    ),
+    ("semantic_search", "use `search_code` with `mode: \"semantic\"`"),
+    ("hybrid_search", "use `search_code` with `mode: \"hybrid\"`"),
+    (
+        "explain_search_result",
+        "use `search_code` with `mode: \"hybrid\"`; every result already carries `score_breakdown` and `evidence_refs`",
+    ),
+    ("explain_file", "use `list_files` with a `path`"),
+    (
+        "explain_symbol",
+        "use `get_definition`; it was the same call under another name",
+    ),
+    (
+        "get_symbol_context",
+        "use `get_definition` with `include_body: true`",
+    ),
+    ("get_callers", "use `get_references` with `kind: \"callers\"`"),
+    ("get_callees", "use `get_references` with `kind: \"callees\"`"),
+    (
+        "get_implementations",
+        "use `get_references` with `kind: \"implementations\"`",
+    ),
+    (
+        "module_dependencies",
+        "use `dependency_path` with `from` and no `to`",
+    ),
+    (
+        "build_compressed_context",
+        "use `build_context_pack` with `compress: true`",
+    ),
+    ("preflight_change", "use `plan_change` with `detail: \"preflight\"`"),
+    (
+        "create_change_contract",
+        "use `plan_change` with `persist: true` (add `store: false` for a transient contract)",
+    ),
+    ("propose_patch", "use `plan_change` with `detail: \"patch\"`"),
+    (
+        "verify_change_contract",
+        "use `verify_change` with `contract_id`, `contract`, or `contract_json`",
+    ),
+    (
+        "explain_verification",
+        "use `verify_change` with `verification` or `verification_json`, or `explain: true` on a contract verification",
+    ),
+    (
+        "recommend_validation_plan",
+        "use `find_tests_for_change`; it was the same call under another name",
+    ),
+    (
+        "explain_test_coverage",
+        "use `find_tests_for_change`; omit `path` for the repository-wide evidence",
+    ),
+    (
+        "get_evidence_schema",
+        "call `query_evidence_graph` with no `query`",
+    ),
     // Removed with nothing lost: no structural or AST matching exists here.
-    "structural_search",
+    (
+        "structural_search",
+        "use `regex_search` for a literal pattern or `search_code` for ranked lexical search; no structural or AST matching exists in this workspace",
+    ),
     // Moved to the CLI in 4.0.0; the capability ships, the MCP name does not.
-    "detect_architecture",
-    "architecture_boundaries",
-    "architecture_violations",
-    "architecture_policy_validate",
-    "architecture_policy_check",
-    "architecture_policy_explain",
-    "summarize_architecture",
-    "history_provenance_lookup",
-    "churn_analysis",
-    "history_similar_changes",
-    "ownership_lookup",
-    "reviewer_suggestions",
-    "get_change_contract",
+    ("detect_architecture", "moved to the CLI: `ok architecture detect`"),
+    (
+        "architecture_boundaries",
+        "moved to the CLI: `ok architecture boundaries` or `ok architecture summary`",
+    ),
+    (
+        "architecture_violations",
+        "moved to the CLI: `ok architecture violations`",
+    ),
+    (
+        "architecture_policy_validate",
+        "moved to the CLI: `ok architecture policy validate`",
+    ),
+    (
+        "architecture_policy_check",
+        "moved to the CLI: `ok architecture policy check`",
+    ),
+    (
+        "architecture_policy_explain",
+        "moved to the CLI: `ok architecture policy explain`",
+    ),
+    (
+        "summarize_architecture",
+        "moved to the CLI: `ok architecture summary`",
+    ),
+    (
+        "history_provenance_lookup",
+        "moved to the CLI: `ok history provenance --path` or `--symbol`",
+    ),
+    (
+        "churn_analysis",
+        "moved to the CLI: `ok history churn --path`, `--module`, or `--symbol`",
+    ),
+    (
+        "history_similar_changes",
+        "moved to the CLI: `ok history similar --task`, `--path`, or `--symbol`",
+    ),
+    (
+        "ownership_lookup",
+        "moved to the CLI: `ok history ownership --path`",
+    ),
+    (
+        "reviewer_suggestions",
+        "moved to the CLI: `ok history reviewers --path`",
+    ),
+    ("get_change_contract", "moved to the CLI: `ok contract show <id>`"),
 ];
+
+fn retired_tool_guidance(name: &str) -> Option<&'static str> {
+    RETIRED_TOOLS
+        .iter()
+        .find(|(retired, _)| *retired == name)
+        .map(|(_, guidance)| *guidance)
+}
 
 fn tool_annotations(name: &str) -> Value {
     let mut read_only = true;
@@ -1779,6 +1884,7 @@ struct VerificationExplanationOutput {
 fn contract_plan_from_params(
     repo: &Path,
     store: &SqliteStore,
+    config: &OkConfig,
     params: &Value,
 ) -> anyhow::Result<PlanReport> {
     let task = params.get("task").and_then(Value::as_str);
@@ -1810,6 +1916,7 @@ fn contract_plan_from_params(
     Ok(PlanEngine::new(store as &dyn OkStore)
         .with_history_store(Some(store))
         .with_memory_facts(memory_facts)
+        .with_memory_enabled(config.memory.enabled)
         .plan_from_context(&task, limit, context)?)
 }
 
@@ -3529,7 +3636,7 @@ mod tests {
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
         assert_eq!(tools_ro.len(), 16, "the documented MCP inventory changed");
-        for retired_tool in RETIRED_TOOLS {
+        for (retired_tool, _) in RETIRED_TOOLS {
             assert!(
                 tools_ro.iter().all(|tool| tool["name"] != *retired_tool),
                 "{retired_tool} must not be advertised"
@@ -3658,7 +3765,7 @@ mod tests {
         .await
         .unwrap();
         let tools_write_enabled = result_write_enabled["tools"].as_array().unwrap();
-        for retired_tool in RETIRED_TOOLS {
+        for (retired_tool, _) in RETIRED_TOOLS {
             assert!(
                 tools_write_enabled
                     .iter()
@@ -3760,13 +3867,20 @@ mod tests {
     async fn retired_tool_names_fail_loudly_instead_of_resolving() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
-        for retired_tool in RETIRED_TOOLS {
+        for (retired_tool, guidance) in RETIRED_TOOLS {
             let error = dispatch(Path::new("."), &store, &config, retired_tool, json!({}))
                 .await
                 .expect_err("a retired tool name must not dispatch");
+            let message = error.to_string();
             assert!(
-                error.to_string().contains(*retired_tool),
-                "the error for `{retired_tool}` must name it: {error}"
+                message.contains(retired_tool),
+                "the error for `{retired_tool}` must name it: {message}"
+            );
+            // A bare refusal makes the agent guess. The mapping is known here,
+            // so the error is a migration instruction, not just a rejection.
+            assert!(
+                message.contains(guidance),
+                "the error for `{retired_tool}` must say where the capability went: {message}"
             );
         }
     }
