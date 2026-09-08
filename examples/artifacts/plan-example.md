@@ -172,7 +172,7 @@ Boundary expansion:
   - required evidence refs: `search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
 
 Signal hooks:
-- architecture: `architecture_boundaries, architecture_violations`
+- architecture: `ok architecture summary, ok architecture violations`
 - ownership: `CODEOWNERS, git_history`
 - co-change: `git_cochange, historical_prs`
 

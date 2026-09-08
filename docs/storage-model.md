@@ -120,7 +120,7 @@ summaries into `history_hotspots`. The table is keyed by entity kind and entity
 key, stores query columns for hotspot ordering, and keeps the full typed
 `ChurnSummary` JSON payload. Churn lookups read that cached table, so
 `churn_for_file`, `churn_for_module`, `churn_for_symbol`, CLI `history churn`,
-and MCP `churn_analysis` do not scan raw commit history on every request.
+and `ok history churn` do not scan raw commit history on every request.
 
 Each `ChurnSummary` includes:
 
@@ -155,7 +155,7 @@ Query an indexed symbol by exact name, qualified name, or stable symbol ID:
 ok --repo /path/to/repo history churn --symbol PolicyGate
 ```
 
-The experimental MCP tool `churn_analysis` accepts exactly one of:
+`ok history churn` accepts exactly one of:
 
 ```json
 {"path":"crates/open-kioku-core/src/lib.rs"}
@@ -202,7 +202,7 @@ candidate qualified names and IDs instead of selecting one silently. Overloaded
 symbols can share a qualified name, so use the reported symbol ID to select one
 exactly.
 
-The experimental MCP tool `history_provenance_lookup` accepts exactly one of:
+`ok history provenance` accepts exactly one of:
 
 ```json
 {"path":"crates/open-kioku-core/src/lib.rs","limit":20}
@@ -304,7 +304,7 @@ ok --repo /path/to/repo history ownership \
   --path crates/open-kioku-core/src/lib.rs
 ```
 
-The experimental MCP tool `ownership_lookup` accepts:
+`ok history ownership` accepts:
 
 ```json
 {"path":"crates/open-kioku-core/src/lib.rs"}
@@ -339,7 +339,7 @@ ok --repo /path/to/repo history reviewers \
   --path crates/open-kioku-core/src/lib.rs
 ```
 
-The experimental MCP tool `reviewer_suggestions` accepts:
+`ok history reviewers` accepts:
 
 ```json
 {"path":"crates/open-kioku-core/src/lib.rs"}
