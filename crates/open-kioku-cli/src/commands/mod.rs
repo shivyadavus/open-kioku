@@ -889,6 +889,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(&store))
                 .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
+                .with_memory_enabled(OkConfig::load_from_repo(&repo)?.memory.enabled)
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
             let governed_adrs = governing_adrs_for_plan(&report, &load_adrs(&repo)?);
@@ -921,6 +922,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(&store))
                 .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
+                .with_memory_enabled(OkConfig::load_from_repo(&repo)?.memory.enabled)
                 .plan_from_context(&task, limit, context)?;
             let report = PreflightReport::from_plan(&plan);
             let format = if cli.json { PreflightFormat::Json } else { format };

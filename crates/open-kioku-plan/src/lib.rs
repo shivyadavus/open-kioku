@@ -340,6 +340,7 @@ pub struct PlanEngine<'a> {
     search_index: Option<&'a dyn SearchIndex>,
     history_store: Option<&'a dyn HistoryStore>,
     memory_facts: Vec<MemorySearchResult>,
+    memory_enabled: bool,
 }
 
 impl<'a> PlanEngine<'a> {
@@ -349,6 +350,7 @@ impl<'a> PlanEngine<'a> {
             search_index: None,
             history_store: None,
             memory_facts: Vec::new(),
+            memory_enabled: false,
         }
     }
 
@@ -364,6 +366,16 @@ impl<'a> PlanEngine<'a> {
 
     pub fn with_memory_facts(mut self, memory_facts: Vec<MemorySearchResult>) -> Self {
         self.memory_facts = memory_facts;
+        self
+    }
+
+    /// Whether the repository has enabled memory (`[memory] enabled`). A plan
+    /// only recommends a tool call the caller can actually see in its tool
+    /// inventory: memory facts stay readable either way, but a recommendation
+    /// naming a tool absent from `tools/list` gives an agent no way to tell a
+    /// gated name from a stale one.
+    pub fn with_memory_enabled(mut self, memory_enabled: bool) -> Self {
+        self.memory_enabled = memory_enabled;
         self
     }
 
@@ -425,7 +437,12 @@ impl<'a> PlanEngine<'a> {
         );
         let recommended_next_steps =
             next_steps(&primary_context, &impact, &validation, &self.memory_facts);
-        let tool_calls = tool_calls(task, impact_target, !self.memory_facts.is_empty());
+        let tool_calls = tool_calls(
+            task,
+            impact_target,
+            !self.memory_facts.is_empty(),
+            self.memory_enabled,
+        );
         let evidence = context
             .evidence
             .iter()
@@ -1662,6 +1679,7 @@ fn tool_calls(
     task: &str,
     impact_target: Option<&SearchResult>,
     has_memory_facts: bool,
+    memory_enabled: bool,
 ) -> Vec<ToolCallRecommendation> {
     let mut calls = vec![
         ToolCallRecommendation {
@@ -1692,15 +1710,20 @@ fn tool_calls(
         });
     }
 
-    calls.push(ToolCallRecommendation {
-        tool: "search_memory".into(),
-        purpose: if has_memory_facts {
-            "Review matched repo memory facts and their provenance.".into()
-        } else {
-            "Check whether prior repo facts exist for this task.".into()
-        },
-        arguments: json!({"query": task, "limit": 8}),
-    });
+    // `search_memory` is advertised only where memory is enabled, so a plan
+    // that recommends it elsewhere names a tool the client cannot see. The
+    // facts themselves are already in the plan's memory section either way.
+    if memory_enabled {
+        calls.push(ToolCallRecommendation {
+            tool: "search_memory".into(),
+            purpose: if has_memory_facts {
+                "Review matched repo memory facts and their provenance.".into()
+            } else {
+                "Check whether prior repo facts exist for this task.".into()
+            },
+            arguments: json!({"query": task, "limit": 8}),
+        });
+    }
 
     calls
 }

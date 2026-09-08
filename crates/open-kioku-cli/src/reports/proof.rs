@@ -46,7 +46,8 @@ fn run_proof(args: ProveArgs) -> anyhow::Result<ProofReport> {
     };
     let planner = PlanEngine::new(&store as &dyn OkStore)
         .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
-        .with_history_store(Some(&store));
+        .with_history_store(Some(&store))
+        .with_memory_enabled(OkConfig::load_from_repo(&repo)?.memory.enabled);
     let mut task_reports = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let plan = planner.plan(task, limit)?;
