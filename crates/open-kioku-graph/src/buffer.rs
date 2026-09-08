@@ -18,8 +18,6 @@ pub struct GraphBuffer {
     node_by_id: HashMap<NodeId, usize>,
     node_by_key: HashMap<String, NodeId>,
     edges_by_key: HashMap<(NodeId, NodeId, GraphEdgeType), usize>,
-    edges_by_source_type: HashMap<(NodeId, GraphEdgeType), Vec<usize>>,
-    edges_by_target_type: HashMap<(NodeId, GraphEdgeType), Vec<usize>>,
 }
 
 pub struct WorkerGraphBuffer {
@@ -309,14 +307,6 @@ impl GraphBuffer {
         } else {
             let index = self.edges.len();
             self.edges_by_key.insert(key.clone(), index);
-            self.edges_by_source_type
-                .entry((edge.from.clone(), edge.edge_type.clone()))
-                .or_default()
-                .push(index);
-            self.edges_by_target_type
-                .entry((edge.to.clone(), edge.edge_type.clone()))
-                .or_default()
-                .push(index);
             let id = edge.id.clone();
             self.edges.push(edge);
             id
