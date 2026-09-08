@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub mod abstention;
 pub mod analysis_semantics;
 pub mod identity;
+pub mod process;
 pub mod relationship;
 
 pub use analysis_semantics::*;

@@ -1,3 +1,4 @@
+use open_kioku_core::process::process_peak_rss;
 use open_kioku_vector::{
     AnnScalarKind, ExactFlatVectorIndex, HnswParameters, UsearchHnswVectorIndex, VectorHit,
     VectorId, VectorRecord, VectorSearchOptions, PRODUCTION_HNSW_PARAMETERS,
@@ -59,6 +60,7 @@ struct Measurement {
     ann_memory_bytes: usize,
     process_rss_bytes: Option<u64>,
     process_peak_rss_bytes: Option<u64>,
+    process_peak_rss_instrument: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +244,7 @@ impl ExactFixture {
         }
 
         let denominator = self.query_count.max(1) as f64;
+        let peak_rss = process_peak_rss();
         Ok(Measurement {
             dimensions: self.dimensions,
             vector_count: self.vector_count,
@@ -265,7 +268,8 @@ impl ExactFixture {
             ann_metadata_bytes,
             ann_memory_bytes: loaded.memory_usage_bytes(),
             process_rss_bytes: process_rss_bytes(),
-            process_peak_rss_bytes: process_peak_rss_bytes(),
+            process_peak_rss_bytes: peak_rss.bytes,
+            process_peak_rss_instrument: peak_rss.instrument,
         })
     }
 }
@@ -444,10 +448,6 @@ fn linux_meminfo_kib(key: &str) -> Option<u64> {
 
 fn process_rss_bytes() -> Option<u64> {
     linux_status_kib("VmRSS:").map(|value| value * 1024)
-}
-
-fn process_peak_rss_bytes() -> Option<u64> {
-    linux_status_kib("VmHWM:").map(|value| value * 1024)
 }
 
 fn linux_status_kib(key: &str) -> Option<u64> {
