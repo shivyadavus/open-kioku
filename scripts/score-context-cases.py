@@ -16,7 +16,9 @@ Reports Recall@k and MRR (first gold hit) plus gold recall in the returned set, 
 Gold yield at a token budget: the pack's selected units are walked in order, each costing the
 builder's own `estimated_tokens`, until the next unit would overflow the budget. Everything
 before that point is what an agent reading the pack top-down sees within B tokens.
-`gold_file_yield@B` is the fraction of gold files with a selected unit inside the budget;
+`gold_file_yield@B` is the fraction of gold files with a selected unit inside the budget, averaged
+over every scored case -- a pack that selects nothing scores 0 rather than being excluded, so the
+mean matches what a caller receives and stays comparable with `gold_recall@20`;
 `gold_line_yield@B` (only when the cases carry line ranges) is the fraction of modified
 lines that those units' line ranges cover; `tokens_to_first_gold` is what was spent before
 the first gold unit. See docs/retrieval-benchmark.md, "Gold yield at a token budget".
@@ -126,7 +128,13 @@ def tokens_to_first_gold(units, gold):
 def yield_row(units, gold, ranges):
     """Per-case yield fields; None when the binary exposes no selected units."""
     if not units:
-        return {"gold_file_yield": None, "gold_line_yield": None, "tokens_to_first_gold": None, "pack_tokens": None}
+        return {
+            "gold_file_yield": None,
+            "gold_line_yield": None,
+            "line_yield_measurable": bool(ranges),
+            "tokens_to_first_gold": None,
+            "pack_tokens": 0,
+        }
     file_yield = {}
     line_yield = {}
     for budget in BUDGETS:
@@ -136,6 +144,7 @@ def yield_row(units, gold, ranges):
     return {
         "gold_file_yield": file_yield,
         "gold_line_yield": line_yield if ranges else None,
+        "line_yield_measurable": bool(ranges),
         "tokens_to_first_gold": tokens_to_first_gold(units, gold),
         "pack_tokens": sum(tokens for _, _, _, tokens in units),
     }
@@ -197,14 +206,25 @@ def metrics(sample):
         "MRR": sum(1 / r["rank"] for r in sample if r["rank"]) / len(sample),
         "gold_recall@20": statistics.mean(r["gold_recall"] for r in sample),
     }
+    # Yield is averaged over every scored case, not only the cases whose pack selected units.
+    # A pack that selects nothing delivered no gold lines, so its yield is 0, not undefined;
+    # dropping those cases from the denominator inflates the mean and makes yield read better
+    # than what the caller actually receives. gold_recall@20 above already averages over every
+    # case, so a conditional yield mean would not be comparable with it.
+    # Line yield is averaged over the cases where line ranges exist to measure against
+    # (`line_yield_measurable`), which is a property of the case file, not of the run.
     with_units = [r for r in sample if r.get("gold_file_yield")]
-    with_lines = [r for r in with_units if r.get("gold_line_yield")]
+    line_measurable = [r for r in sample if r.get("line_yield_measurable")]
     for budget in BUDGETS:
         key = str(budget)
         if with_units:
-            out[f"gold_file_yield@{budget}"] = statistics.mean(r["gold_file_yield"][key] for r in with_units)
-        if with_lines:
-            out[f"gold_line_yield@{budget}"] = statistics.mean(r["gold_line_yield"][key] for r in with_lines)
+            out[f"gold_file_yield@{budget}"] = statistics.mean(
+                (r["gold_file_yield"][key] if r.get("gold_file_yield") else 0.0) for r in sample
+            )
+        if line_measurable and any(r.get("gold_line_yield") for r in line_measurable):
+            out[f"gold_line_yield@{budget}"] = statistics.mean(
+                (r["gold_line_yield"][key] if r.get("gold_line_yield") else 0.0) for r in line_measurable
+            )
     first = [r["tokens_to_first_gold"] for r in with_units if r["tokens_to_first_gold"] is not None]
     if first:
         out["tokens_to_first_gold_p50"] = statistics.median(first)
@@ -294,7 +314,8 @@ def main():
         print("  (no selected units in the pack output; gold yield not scored)")
     else:
         pack_tokens = statistics.median(r["pack_tokens"] for r in with_units)
-        print(f"  -- gold yield at a token budget: {len(with_units)} cases with selected units, "
+        print(f"  -- gold yield at a token budget: averaged over all {len(scored)} scored cases "
+              f"({len(with_units)} selected units, the rest score 0), "
               f"{len(with_lines)} with modified line ranges, median pack {pack_tokens:.0f} estimated tokens --")
         for k in YIELD_KEYS:
             if k in summary:
