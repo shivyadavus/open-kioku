@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>How to Set Up Open Kioku MCP Server for OpenAI Codex | openkioku.com</title>
-    <meta name="description" content="Step-by-step guide to connect Open Kioku as an MCP plugin for OpenAI Codex. Give Codex local code intelligence with search, impact analysis, and edit verification — no cloud required.">
-    <meta name="keywords" content="OpenAI Codex MCP plugin, Codex code intelligence, Codex MCP server setup, Codex local code search, Open Kioku Codex, MCP server Codex, Codex plugin marketplace">
+    <title>How to Set Up Open Kioku MCP Server for Codex | openkioku.com</title>
+    <meta name="description" content="Step-by-step guide to connect Open Kioku as an MCP plugin for Codex. Give Codex local code intelligence with search, impact analysis, and edit verification — no cloud required.">
+    <meta name="keywords" content="Codex MCP plugin, Codex code intelligence, Codex MCP server setup, Codex local code search, Open Kioku Codex, MCP server Codex, Codex plugin marketplace">
     <link rel="canonical" href="https://www.openkioku.com/codex-setup.html">
 
     <!-- OpenGraph -->
-    <meta property="og:title" content="How to Set Up Open Kioku MCP Server for OpenAI Codex">
-    <meta property="og:description" content="Give Codex an evidence layer before it edits your codebase. Install Open Kioku, index your repo, and connect via plugin marketplace or manual MCP.">
+    <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Codex">
+    <meta property="og:description" content="Codex shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://www.openkioku.com/codex-setup.html">
     <meta property="og:image" content="https://www.openkioku.com/og-image.png">
@@ -18,7 +18,7 @@
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for OpenAI Codex">
+    <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Codex">
     <meta name="twitter:description" content="Give Codex local code intelligence with search, impact analysis, and edit verification — no cloud required.">
     <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
 
@@ -29,15 +29,15 @@
     {
       "@context": "https://schema.org",
       "@type": "HowTo",
-      "name": "How to Set Up Open Kioku MCP Server for OpenAI Codex",
-      "description": "Step-by-step guide to connect Open Kioku as an MCP plugin for OpenAI Codex. Give Codex local code intelligence with search, symbols, impact analysis, and edit verification.",
+      "name": "How to Set Up Open Kioku MCP Server for Codex",
+      "description": "Step-by-step guide to connect Open Kioku as an MCP plugin for Codex. Give Codex local code intelligence with search, symbols, impact analysis, and edit verification.",
       "url": "https://www.openkioku.com/codex-setup.html",
       "image": "https://www.openkioku.com/og-image.png",
       "totalTime": "PT2M",
       "tool": [
         { "@type": "HowToTool", "name": "Node.js (v18+)" },
         { "@type": "HowToTool", "name": "npm" },
-        { "@type": "HowToTool", "name": "OpenAI Codex CLI" }
+        { "@type": "HowToTool", "name": "Codex CLI" }
       ],
       "step": [
         {
@@ -65,7 +65,7 @@
           "@type": "HowToStep",
           "position": 4,
           "name": "Paste the golden agent prompt",
-          "text": "Add the recommended system prompt so Codex always checks evidence before editing code.",
+          "text": "Add the recommended system prompt so Codex checks evidence before editing code.",
           "url": "https://www.openkioku.com/codex-setup.html#step-4"
         }
       ]
@@ -838,7 +838,7 @@
                 Codex + Open Kioku Setup Guide
             </div>
             <h1>Give Codex an <span class="highlight">evidence&nbsp;layer</span> before it edits your codebase</h1>
-            <p class="hero-copy">Open Kioku is a local-first MCP server that gives Codex indexed code search, symbol resolution, impact analysis, and edit verification, so it plans from evidence instead of guessing from context.</p>
+            <p class="hero-copy">Open Kioku is a local MCP server Codex reads before it edits: it shows its evidence — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
             <div class="hero-actions">
                 <a class="button button-primary" href="#step-1" aria-label="Jump to step 1 of the setup guide">
                     <span>Start setup</span>
@@ -872,6 +872,7 @@
                 <div class="install-body">
                     <code class="code-line"><span class="shell-prompt">$</span>npm install -g open-kioku</code>
                     <p class="mini-note">Requires Node.js v18 or later. The native binary handles indexing and search.</p>
+                    <p class="mini-note">Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
                 </div>
             </div>
         </section>
@@ -933,7 +934,7 @@
                         </div>
                         <div class="install-body">
                             <code class="code-line"><span class="shell-prompt">$</span>ok mcp install codex --repo .</code>
-                            <p class="mini-note">This prints the Codex TOML config for the current repository.</p>
+                            <p class="mini-note">This prints the Codex TOML config for the current repository. <code>ok setup agent --apply</code> is wired for Claude Code and Cursor today; for Codex the manual entry below is the supported path.</p>
                         </div>
                     </div>
                 </div>
@@ -994,6 +995,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 <div class="section-kicker">What You Get</div>
                 <h2>Tools Codex can call after setup</h2>
                 <p class="section-copy">Once connected, these MCP tools are available to Codex in every session. All tools are read-only by default and operate on local indexes.</p>
+<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
             </div>
 
             <div class="tool-grid">

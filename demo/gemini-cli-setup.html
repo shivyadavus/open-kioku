@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>How to Set Up Open Kioku MCP Server for Gemini CLI | openkioku.com</title>
-    <meta name="description" content="Step-by-step guide to connect Open Kioku MCP server with Google Gemini CLI. Get local code intelligence, impact analysis, and evidence-backed plans before Gemini edits your codebase.">
-    <meta name="keywords" content="Gemini CLI MCP server, Gemini CLI code intelligence, Google Gemini CLI MCP setup, Gemini CLI local code search, Open Kioku Gemini, MCP server setup">
+    <meta name="description" content="Step-by-step guide to connect Open Kioku MCP server with Gemini CLI. Get local code intelligence, impact analysis, and evidence-backed plans before Gemini edits your codebase.">
+    <meta name="keywords" content="Gemini CLI MCP server, Gemini CLI code intelligence, Gemini CLI MCP setup, Gemini CLI local code search, Open Kioku Gemini, MCP server setup">
     <link rel="canonical" href="https://www.openkioku.com/gemini-cli-setup.html">
     <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Gemini CLI">
-    <meta property="og:description" content="Give Gemini CLI an evidence layer before it edits your codebase. Local code intelligence with plan-before-edit and verify-after-edit workflow.">
+    <meta property="og:description" content="Gemini CLI shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://www.openkioku.com/gemini-cli-setup.html">
     <meta property="og:image" content="https://www.openkioku.com/og-image.png">
@@ -23,7 +23,7 @@
       "@context": "https://schema.org",
       "@type": "HowTo",
       "name": "How to Set Up Open Kioku MCP Server for Gemini CLI",
-      "description": "Connect Open Kioku local code intelligence to Google Gemini CLI via MCP. Index your repo, configure the MCP server, and give Gemini an evidence layer before it edits your codebase.",
+      "description": "Connect Open Kioku local code intelligence to Gemini CLI via MCP. Index your repo, configure the MCP server, and give Gemini an evidence layer before it edits your codebase.",
       "totalTime": "PT3M",
       "tool": [
         { "@type": "HowToTool", "name": "Node.js (v18+)" },
@@ -784,7 +784,7 @@
             <div class="hero-inner">
                 <div class="eyebrow"><span class="status-dot"></span> Gemini CLI + Open Kioku MCP</div>
                 <h1>Give Gemini CLI an evidence layer before it edits your codebase</h1>
-                <p class="hero-copy">Connect Open Kioku as an MCP server for Gemini CLI. Index your repo locally, then let Gemini search code, trace impact, build plans, and verify edits from the local index. Open Kioku does not upload source.</p>
+                <p class="hero-copy">Connect Open Kioku as a local MCP server so Gemini CLI shows its evidence before it edits — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
                 <div class="hero-actions">
                     <a class="button button-primary" href="#step-install">
                         <span>Start setup</span>
@@ -840,6 +840,7 @@
                                 <code class="code-line"><span class="shell-prompt">$</span>npm install -g open-kioku</code>
                             </div>
                         </div>
+                        <p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
                     </div>
                 </article>
 
@@ -891,6 +892,7 @@ ok index ." aria-label="Copy index commands">Copy</button>
                                 <code class="code-line"><span class="shell-prompt">$</span>ok mcp install gemini --repo .</code>
                             </div>
                         </div>
+                        <p><code>ok setup agent --apply</code> is wired for Claude Code and Cursor today; for Gemini CLI the manual entry below is the supported path.</p>
 
                         <div class="setup-block" style="margin-top: 16px;">
                             <div class="setup-block-header">
@@ -943,6 +945,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 <div class="section-kicker">What You Get</div>
                 <h2>MCP tools available to Gemini CLI after setup.</h2>
                 <p class="section-copy">Once connected, Gemini CLI can call these tools over MCP stdio. Every Open Kioku tool reads from the local index and does not upload source.</p>
+<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
             </div>
 
             <div class="tools-grid">
@@ -1004,7 +1007,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 </div>
                 <div class="security-card">
                     <h3>Source edits stay local</h3>
-                    <p>Patch and command paths are opt-in, policy-controlled, and separate from read-only context tools.</p>
+                    <p>Source edits stay in your normal editor; command execution and model downloads are policy-gated, and network denial fails closed.</p>
                 </div>
             </div>
         </section>

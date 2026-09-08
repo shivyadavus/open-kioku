@@ -182,6 +182,29 @@ footer{padding:36px 0 52px;color:#5d6774;border-top:1px solid var(--line);font-s
 .foot{display:flex;align-items:center;justify-content:space-between;gap:20px}
 .foot-links{display:flex;gap:18px}.foot a{text-decoration:none;transition:color .16s}.foot a:hover{color:#c6d0da}
 
+/* What to expect: measured accuracy table + metric notes */
+.expect-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;align-items:stretch}
+.expect-table-wrap,.expect-notes{border:1px solid var(--line);background:linear-gradient(180deg,rgba(255,255,255,.02),transparent),var(--panel);border-radius:var(--radius)}
+.expect-table-wrap{padding:8px 10px;overflow-x:auto}
+.expect-table{width:100%;border-collapse:collapse;font:13px/1.5 var(--mono);color:#c3ccd6}
+.expect-table th,.expect-table td{padding:13px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+.expect-table th{color:var(--soft);font-weight:600;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.expect-table th:first-child,.expect-table td:first-child{text-align:left;font-family:var(--sans);color:var(--text)}
+.expect-table tbody tr:last-child td{border-bottom:0}
+.expect-notes{display:grid;align-content:center;gap:14px;padding:22px 24px;color:var(--muted);font-size:13.5px;line-height:1.6}
+.expect-notes b{color:var(--mint);font-family:var(--mono)}
+.section-copy code,.dogfood-note code{font:12px var(--mono);color:#dce5ef}
+
+/* Install matrix */
+.install-grid{margin-top:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.install-card{border:1px solid var(--line);background:linear-gradient(180deg,rgba(255,255,255,.02),transparent),var(--panel);border-radius:var(--radius);padding:20px;transition:border-color .2s}
+.install-card:hover{border-color:rgba(87,230,196,.28)}
+.install-card b{display:block;font-family:var(--display);font-size:14px}
+.install-card>code{display:block;margin-top:10px;font:12px/1.6 var(--mono);color:#dce5ef;word-break:break-word}
+.install-card p{margin:8px 0 0;color:var(--soft);font-size:12px;line-height:1.55}
+.install-card p code{font:11px var(--mono);color:#b9c8dc}
+.install-card a{color:#b9c8dc}
+
 /* Docs pages */
 .docs-hero{padding:96px 0 56px}.docs-hero h1{max-width:900px;font-size:clamp(42px,4.8vw,72px)}
 .docs-section{padding:56px 0}
@@ -204,7 +227,8 @@ footer{padding:36px 0 52px;color:#5d6774;border-top:1px solid var(--line);font-s
 .reveal.visible{opacity:1;transform:none}
 
 @media(max-width:1000px){
-  .hero-grid,.proof-grid,.workflow,.motion-grid,.docs-grid{grid-template-columns:1fr}
+  .hero-grid,.proof-grid,.workflow,.motion-grid,.docs-grid,.expect-grid{grid-template-columns:1fr}
+  .install-grid{grid-template-columns:1fr 1fr}
   .hero{padding-top:72px}.hero-card{max-width:740px}
   .pipeline{grid-template-columns:1fr 1fr}.pipe:after{display:none}
   .features{grid-template-columns:1fr 1fr}
@@ -226,7 +250,7 @@ footer{padding:36px 0 52px;color:#5d6774;border-top:1px solid var(--line);font-s
   .terminal{padding:16px 14px;font-size:11px;min-height:380px}
   .term-row{grid-template-columns:65px 1fr}
   .trustbar{margin-top:44px;grid-template-columns:1fr 1fr}.trustbar>div{padding:18px 14px}.trustbar strong{font-size:26px}
-  .proof-stack,.features,.security-grid,.tabs,.docs-proof-grid{grid-template-columns:1fr}
+  .proof-stack,.features,.security-grid,.tabs,.docs-proof-grid,.install-grid{grid-template-columns:1fr}
   .proof-number{font-size:64px}
   .pipeline{grid-template-columns:1fr}
   .section-title{font-size:32px}.section-copy{font-size:15px}

@@ -1,96 +1,67 @@
-Output demo.gif
+# Renders assets/demo.gif with VHS (https://github.com/charmbracelet/vhs):
+#
+#   vhs demo.tape
+#
+# Run from the repository root with `ok` (release build or an installed
+# package) and `jq` on PATH. The session runs against a throwaway copy of the
+# 39-file retrieval fixture so the whole recording stays under 45 seconds:
+# setup -> context (evidence + confidence) -> plan (boundary) -> an edit
+# inside the boundary plus one outside it -> verify fails on the outside file.
 
-Require cargo
-Require target/release/ok
+Output assets/demo.gif
 
-Set FontSize 16
-Set FontFamily "JetBrains Mono"
-Set Width 1200
-Set Height 800
-Set Padding 40
+Require ok
+Require jq
+
+Set FontSize 15
+Set FontFamily "JetBrains Mono, SF Mono, Menlo, DejaVu Sans Mono, Liberation Mono, monospace"
+Set Width 1180
+Set Height 700
+Set Padding 28
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
-Set TypingSpeed 60ms
+Set TypingSpeed 35ms
 Set PlaybackSpeed 1.0
 
-# Initial setup
+# Throwaway working copy (hidden): the fixture with a single base commit.
 Hide
-Type "cargo build --release -p open-kioku-cli"
+Type `export OK_DEMO="${TMPDIR:-/tmp}/ok-demo" && rm -rf "$OK_DEMO" && cp -R benchmarks/retrieval-fixture "$OK_DEMO" && cd "$OK_DEMO" && git init -q && git add -A && git -c user.name=demo -c user.email=demo@example.com commit -qm base && export PS1='$ ' && clear`
 Enter
-Sleep 3s
-Type "export PATH=$PWD/target/release:$PATH"
-Enter
-Type "clear"
-Enter
+Sleep 2s
 Show
 
+# 1. One command: index, install repo-scoped MCP config + guidance, probe the server.
+Type "ok setup agent claude --repo . --apply"
+Enter
+Sleep 4s
+
+# 2. Evidence before edits: streams attempted vs. succeeded, confidence, caveats, files.
+Type "clear"
+Enter
+Type `ok context "add token expiry to TokenStore saveDigest" --format markdown | grep -vE 'weight|budget|Routing|family|Components|^$' | head -n 22`
+Enter
+Sleep 6s
+
+# 3. The plan declares an edit boundary.
+Type "clear"
+Enter
+Type 'ok plan "add token expiry to TokenStore saveDigest" --format json > plan.json'
+Enter
+Sleep 2s
+Type "jq '.recommended_change_boundary.allowed_files' plan.json"
+Enter
+Sleep 4s
+
+# 4. One edit inside the boundary, one drive-by outside it.
+Type "clear"
+Enter
+Type 'echo "// expiry: TODO" >> java/src/com/acme/auth/TokenStore.java'
+Enter
+Type 'echo "// drive-by" >> go/shipping/carrier.go'
+Enter
 Sleep 1s
-Type "# Welcome to Open Kioku - The Local-First Code Intelligence MCP"
-Enter
-Sleep 1s
 
-# 1. Initialization
-Type "clear"
+# 5. Verify the real diff against the declared boundary.
+Type "ok verify --plan plan.json --git --format json | jq '{verdict, changed_files, boundary_violations}'"
 Enter
-Type "# 1. Lightning fast local indexing"
-Enter
-Sleep 500ms
-Type "ok init ."
-Enter
-Sleep 3s
-
-# 2. Doctor Check
-Type "clear"
-Enter
-Type "# 2. Built-in environment & health verification"
-Enter
-Sleep 500ms
-Type "ok doctor"
-Enter
-Sleep 4s
-
-# 3. Context Packs
-Type "clear"
-Enter
-Type "# 3. Generate high-quality context packs for LLMs"
-Enter
-Sleep 500ms
-Type "ok context 'Add a new JSON export format for tools' --format markdown | head -n 30"
-Enter
-Sleep 4s
-
-# 4. Search with Evidence
-Type "clear"
-Enter
-Type "# 4. Powerful structural and regex search with evidence"
-Enter
-Sleep 500ms
-Type "ok search 'ContextPackFormat'"
-Enter
-Sleep 4s
-
-# 5. Benchmarks
-Type "clear"
-Enter
-Type "# 5. Blazing fast speeds (built in Rust)"
-Enter
-Sleep 500ms
-Type "ok bench ."
-Enter
-Sleep 4s
-
-# 6. MCP Tools list
-Type "clear"
-Enter
-Type "# 6. Rich Model Context Protocol (MCP) tool integration"
-Enter
-Sleep 500ms
-Type "ok mcp tools/list --hide-experimental"
-Enter
-Sleep 5s
-
-Type "clear"
-Enter
-Type "# Try it out today!"
-Enter
-Sleep 3s
+Sleep 7s
