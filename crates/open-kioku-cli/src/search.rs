@@ -24,21 +24,44 @@ fn search(
     search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
 }
 
+/// `ok search --regex` answers with the caveats attached, not alongside them.
+///
+/// The other search modes print a bare `Vec<SearchResult>`, but under `--json`
+/// stdout is the whole answer: a note on stderr is not part of it, and an empty
+/// array would read as "this pattern is absent from the repository" rather than
+/// "absent from the part of it that is indexed". These are the same fields the
+/// MCP `regex_search` response carries, so both surfaces disclose the same thing.
+#[derive(serde::Serialize)]
+struct RegexSearchReport {
+    results: Vec<open_kioku_core::SearchResult>,
+    truncated: bool,
+    warnings: Vec<String>,
+    caveats: Vec<String>,
+}
+
 /// Exact regex matching over the indexed corpus, the same call the MCP
 /// `regex_search` tool makes, so the two surfaces answer identically.
 fn regex_search(
     store: &dyn MetadataStore,
     pattern: &str,
     limit: usize,
-) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+) -> anyhow::Result<RegexSearchReport> {
     let scan = regex_search_index(store, pattern, limit)?;
-    if scan.files_capped {
-        eprintln!(
-            "note: the regex scan stopped after {} files; results are incomplete",
+    let mut report = RegexSearchReport {
+        results: scan.results,
+        truncated: scan.files_capped,
+        warnings: Vec::new(),
+        caveats: vec![format!(
+            "the pattern was evaluated over indexed chunk text from {} file(s), not the working tree; regions the indexer did not chunk were not searched",
             scan.files_scanned
-        );
+        )],
+    };
+    if scan.files_capped {
+        report.warnings.push(format!(
+            "the regex scan stopped after {MAX_REGEX_SCAN_FILES} files; results are incomplete"
+        ));
     }
-    Ok(scan.results)
+    Ok(report)
 }
 
 fn graph_search(

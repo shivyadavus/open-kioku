@@ -231,7 +231,7 @@
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of ranked results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of symbols to return, in qualified-name order. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "offset": {
@@ -239,7 +239,7 @@
               "type": "integer"
             },
             "query": {
-              "description": "Fuzzy or exact search query for symbol names. Supports partial names and approximate matches.",
+              "description": "Substring matched case-insensitively against symbol names and qualified names. Not fuzzy: a name that shares no substring with the query does not match.",
               "type": "string"
             }
           },
@@ -645,12 +645,12 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed file names and contents for specific keywords or file path patterns, returning ranked file matches with path, size, and language metadata. Set mode=graph to search graph-node documents through the same index. Use when the target is a file path, filename, or file-content keyword rather than a code symbol. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for code snippet search (use search_code), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
+        "description": "Alias of search_code: the same lexical BM25 query over the same index, matching file paths as well as chunk text, and supporting the same mode=graph. Returns ranked hits with path, line range, snippet, score, and evidence — these are code results, not file records, and carry no size or language field. Use when the target is a file path or filename rather than a symbol; search_code is the same call under its primary name, so expect code hits rather than file records. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for file metadata such as size or language (use list_files or explain_file), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
             "limit": {
-              "description": "Maximum number of file results to return. Defaults to 20, capped at 100.",
+              "description": "Maximum number of results to return. Defaults to 20, capped at 100.",
               "type": "integer"
             },
             "mode": {
@@ -662,11 +662,11 @@
               "type": "string"
             },
             "offset": {
-              "description": "Number of matching file results to skip before returning. Defaults to 0.",
+              "description": "Number of matching results to skip before returning. Defaults to 0.",
               "type": "integer"
             },
             "query": {
-              "description": "The search query to match against file paths and file contents. Accepts filenames, directory fragments, or content keywords.",
+              "description": "The search query matched against file paths and file contents. Accepts filenames, directory fragments, or content keywords.",
               "type": "string"
             }
           },
@@ -996,7 +996,7 @@
               "type": "integer"
             },
             "query": {
-              "description": "Structure-shaped query used for lexical candidate discovery; this is not yet a guaranteed AST pattern.",
+              "description": "Matched as ordinary text by the lexical BM25 index. Structural syntax carries no meaning here; there is no AST pattern language behind this parameter.",
               "type": "string"
             }
           },

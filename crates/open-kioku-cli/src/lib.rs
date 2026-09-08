@@ -39,7 +39,7 @@ use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
     RankingSignal, RankingWeights,
 };
-use open_kioku_search_regex::{regex_search_index, search_chunks};
+use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{
     default_index_dir, rebuild_disk_index_with_graph, TantivySearchIndex,
 };

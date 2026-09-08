@@ -526,11 +526,31 @@ pub async fn run_cli() -> anyhow::Result<()> {
             hybrid,
         } => {
             let store = open_store(&repo)?;
-            // Exact pattern matching outranks the ranked paths, so `--regex`
-            // wins over the heuristic modes rather than being merged with them.
-            let results = if regex {
-                regex_search(&store, &query, limit)?
-            } else if matches!(kind, SearchKind::Graph) {
+            // Exact matching answers in its own shape: the corpus caveat has to
+            // survive `--json`, where stdout is the whole answer and an empty
+            // array would otherwise read as "absent from the repository".
+            if regex {
+                let report = regex_search(&store, &query, limit)?;
+                output(cli.json, &report, || {
+                    for result in &report.results {
+                        println!(
+                            "{}:{}  {:.2}  {}",
+                            result.path.display(),
+                            result.line_range.as_ref().map(|r| r.start).unwrap_or(0),
+                            result.score,
+                            result.snippet
+                        );
+                    }
+                    for warning in &report.warnings {
+                        println!("warning: {warning}");
+                    }
+                    for caveat in &report.caveats {
+                        println!("note: {caveat}");
+                    }
+                })?;
+                return Ok(());
+            }
+            let results = if matches!(kind, SearchKind::Graph) {
                 require_current_analysis_semantics(&store)?;
                 graph_search(&repo, &query, limit)?
             } else if semantic {
