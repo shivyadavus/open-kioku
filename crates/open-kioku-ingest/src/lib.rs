@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+pub mod derived;
 mod git_ignore;
 
 /// Trim a freshly formatted evidence message to its exact length.
@@ -1014,6 +1015,9 @@ impl Indexer {
         );
         let relationship_fact_count = relationship_facts.len();
         analysis_facts.extend(relationship_facts);
+        let derived_facts = derived::collect_derived_file_facts(&root, &files);
+        let derived_fact_count = derived_facts.len();
+        analysis_facts.extend(derived_facts);
         let static_analysis_facts = analysis_facts.len();
         emit_progress(
             &on_progress,
@@ -1132,6 +1136,7 @@ impl Indexer {
                 resolver_facts: resolver_fact_count,
                 registry_facts: registry_fact_count,
                 relationship_facts: relationship_fact_count,
+                derived_facts: derived_fact_count,
                 runtime_facts: runtime_analysis_facts,
                 validation_facts: validation_analysis_facts,
                 git_history_facts: git_history_fact_count,
@@ -1771,6 +1776,7 @@ struct AnalysisCounts {
     resolver_facts: usize,
     registry_facts: usize,
     relationship_facts: usize,
+    derived_facts: usize,
     runtime_facts: usize,
     validation_facts: usize,
     git_history_facts: usize,
@@ -1856,6 +1862,12 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         semantic_provider_notes.push(format!(
             "complexity/similarity relationship facts detected: {}",
             analysis.relationship_facts
+        ));
+    }
+    if analysis.derived_facts > 0 {
+        semantic_provider_notes.push(format!(
+            "derived-file facts detected: {}",
+            analysis.derived_facts
         ));
     }
     if analysis.runtime_facts > 0 {
