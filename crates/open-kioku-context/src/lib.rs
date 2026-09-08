@@ -586,8 +586,10 @@ impl<'a> ContextPackBuilder<'a> {
         let primary = if blocked {
             Vec::new()
         } else {
+            let mut results = fused.results;
+            append_scope_entry_points(&mut results, &files, &chunks, &intent);
             let primary = rerank_fused_for_task_with_options(
-                fused.results,
+                results,
                 &intent,
                 &diagnostics,
                 &self.ranking_options,
@@ -2448,6 +2450,108 @@ fn commit_scope_tokens(task: &str) -> Vec<String> {
     tokens
 }
 
+/// File names that are a module's public entry point, the file a repository convention edits
+/// when a module gains, loses, or stabilises an export.
+const MODULE_ENTRY_FILE_NAMES: &[&str] = &[
+    "mod.ts",
+    "mod.js",
+    "mod.rs",
+    "lib.rs",
+    "index.ts",
+    "index.tsx",
+    "index.js",
+    "__init__.py",
+];
+
+/// When a commit scope names a directory, that directory's entry file is a candidate even if
+/// it shares no vocabulary with the task: `feat(async): stabilize Channel` edits `async/mod.ts`,
+/// which does not mention Channel until the commit lands. Injected at a low score so a file
+/// that actually matches the task still outranks it inside the scope tier.
+fn append_scope_entry_points(
+    results: &mut Vec<SearchResult>,
+    files: &[File],
+    chunks: &[CodeChunk],
+    intent: &TaskSearchIntent,
+) {
+    if intent.scope_anchors.is_empty() {
+        return;
+    }
+    let present: std::collections::BTreeSet<String> = results
+        .iter()
+        .map(|result| normalize_path(&result.path))
+        .collect();
+    // Where the entry point sits among the files the scope already matched depends on whether
+    // any of them matched the task's own words. `feat(async): stabilize Channel` matches
+    // async/ files on "async" alone — nothing in the directory knows "Channel" yet — so the
+    // barrel is the best guess and goes just below the group's best. `[Whisper] Fix speculative
+    // decoding` matches real modules on "speculative" and "decoding", so the barrel goes last:
+    // as runner-up it pushed rank-2 modules to rank 3 on a Python monorepo (MRR -0.011), and
+    // at the floor it never surfaced on deno_std at all (gain 0.000).
+    let scope_group: Vec<&SearchResult> = results
+        .iter()
+        .filter(|result| path_matches_scope(&normalize_path(&result.path), &intent.scope_anchors))
+        .collect();
+    let task_words: Vec<&String> = intent
+        .lexical_anchors
+        .iter()
+        .filter(|word| !intent.scope_anchors.iter().any(|scope| scope == *word))
+        .collect();
+    let group_knows_task = scope_group.iter().any(|result| {
+        let text = searchable_result_text(result).to_ascii_lowercase();
+        task_words.iter().any(|word| text.contains(word.as_str()))
+    });
+    let scores = scope_group.iter().map(|result| result.score);
+    let runner_up = if group_knows_task {
+        scores
+            .fold(None, |worst: Option<f32>, score| {
+                Some(worst.map_or(score, |w| w.min(score)))
+            })
+            .map(|worst| (worst - f32::EPSILON).max(0.0))
+            .unwrap_or(SCOPE_ENTRY_POINT_SCORE)
+    } else {
+        scores
+            .fold(None, |best: Option<f32>, score| {
+                Some(best.map_or(score, |b| b.max(score)))
+            })
+            .map(|best| best - f32::EPSILON)
+            .unwrap_or(SCOPE_ENTRY_POINT_SCORE)
+    };
+    for file in files {
+        let path = normalize_path(&file.path);
+        let Some((dir, name)) = path.rsplit_once('/') else {
+            continue;
+        };
+        if !MODULE_ENTRY_FILE_NAMES.contains(&name)
+            || !path_matches_scope(dir, &intent.scope_anchors)
+            || present.contains(&path)
+            || file.size_bytes < MODULE_ENTRY_MIN_BYTES
+        {
+            continue;
+        }
+        let chunk = chunks.iter().find(|chunk| chunk.file_id == file.id);
+        let scope = intent.scope_anchors.join("/");
+        results.push(SearchResult {
+            path: file.path.clone(),
+            line_range: chunk.map(|chunk| chunk.range.clone()),
+            snippet: chunk.map(|chunk| chunk.text.clone()).unwrap_or_default(),
+            symbol: None,
+            score: runner_up,
+            match_reason: format!("module entry point of commit scope `{scope}`"),
+            evidence: vec![format!(
+                "commit scope `{scope}` names this directory; `{name}` is its public entry point"
+            )],
+            evidence_refs: vec![format!("scope:entry-point:{path}")],
+            confidence: 0.6,
+            score_breakdown: Vec::new(),
+        });
+    }
+}
+
+/// Score for an entry point when nothing in its scope matched at all.
+const SCOPE_ENTRY_POINT_SCORE: f32 = 0.05;
+/// An empty `__init__.py` marks a package; it is not where a module's public surface lives.
+const MODULE_ENTRY_MIN_BYTES: u64 = 64;
+
 /// Every scope token names a path segment (a directory, or a file stem without its extension).
 fn path_matches_scope(path: &str, scope_tokens: &[String]) -> bool {
     if scope_tokens.is_empty() {
@@ -3127,6 +3231,45 @@ mod tests {
             &RetrievalDiagnostics::default(),
         );
         assert!(ranked[0].path.ends_with("Reindexer.java"));
+    }
+
+    #[test]
+    fn scope_entry_points_are_injected_once_and_only_for_matching_directories() {
+        let intent = TaskSearchIntent::parse("feat(async): stabilize Channel");
+        let file = |path: &str, id: &str| File {
+            id: FileId::new(id),
+            repository_id: RepositoryId::new("repo"),
+            path: path.into(),
+            language: Language::TypeScript,
+            size_bytes: 200,
+            content_hash: id.into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let files = vec![
+            file("async/mod.ts", "f1"),
+            file("async/tee.ts", "f2"),
+            file("streams/mod.ts", "f3"),
+        ];
+        let mut results = Vec::new();
+        append_scope_entry_points(&mut results, &files, &[], &intent);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, std::path::PathBuf::from("async/mod.ts"));
+        assert!(results[0].evidence_refs[0].starts_with("scope:entry-point:"));
+        append_scope_entry_points(&mut results, &files, &[], &intent);
+        assert_eq!(
+            results.len(),
+            1,
+            "already-present entry points are not duplicated"
+        );
+        let mut none = Vec::new();
+        append_scope_entry_points(
+            &mut none,
+            &files,
+            &[],
+            &TaskSearchIntent::parse("Fix panic"),
+        );
+        assert!(none.is_empty());
     }
 
     #[test]
