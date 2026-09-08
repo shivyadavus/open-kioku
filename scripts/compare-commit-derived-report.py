@@ -11,6 +11,10 @@ report and exits 0, so the first run of a new corpus freezes rather than fails.
 Gold yield at a token budget (`gold_file_yield@B`, `gold_line_yield@B`, median
 `tokens_to_first_gold`) is printed when the report carries it, informationally: it is not
 gated yet, and a baseline frozen before the metric existed compares without it.
+
+Index coverage (source files discovered versus indexed) is printed for both sides so a
+metric shift can be read against how much of the corpus each index held. It is
+informational: a coverage change is not a gate yet.
 """
 import json
 import sys
@@ -52,12 +56,14 @@ def main():
     for k in WATCHED:
         lo, hi = report["ci"][k]
         print(f"  {k:16} {report['metrics'][k]:.4f}   95% CI [{lo:.4f}, {hi:.4f}]")
+    print(f"  {'coverage':16} {report.get('coverage_line', 'not recorded')}")
     if len(args) < 2 or not Path(args[1]).exists():
         print_yield(report)
         print("no baseline to compare against; freeze this report if it is the first run")
         return 0
     baseline = json.loads(Path(args[1]).read_text())
     print_yield(report, baseline)
+    print(f"  {'coverage':16} baseline {baseline.get('coverage_line', 'not recorded')} -> {report.get('coverage_line', 'not recorded')} (informational)")
     failed = []
     for k in WATCHED:
         base = baseline["metrics"][k]
