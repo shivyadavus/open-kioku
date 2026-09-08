@@ -2,8 +2,9 @@ use chrono::Utc;
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, Evidence, EvidenceId, EvidenceSourceType, File,
     FileRange, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType, Import, LineRange, NodeId,
-    PathInterner, RelationshipProof, RelationshipProofKind, ResolvedRelationship, SharedPath,
-    SharedStr, Symbol, SymbolOccurrence,
+    PathInterner, RelationshipAuthority, RelationshipProof, RelationshipProofKind,
+    ResolvedRelationship, SharedPath, SharedStr, Symbol, SymbolOccurrence,
+    DERIVED_FILE_DECLARED_ORIGIN_SOURCE,
 };
 use open_kioku_errors::Result;
 use serde_json::json;
@@ -471,6 +472,41 @@ impl InMemoryGraph {
                 edge.set_relationship_proofs(vec![proof])
                     .expect("resolved import binding proof must serialize to JSON");
             }
+            if fact.edge_type == GraphEdgeType::DerivedFrom
+                && fact.target_kind == GraphNodeType::File
+            {
+                edge.properties.insert(
+                    "derivation".into(),
+                    json!(fact
+                        .source
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(fact.source.as_str())),
+                );
+                // Only a banner that names its origin is proof. A naming-convention pairing
+                // stays proof-less so `relationship_authority` keeps it heuristic.
+                if fact.source.as_str() == DERIVED_FILE_DECLARED_ORIGIN_SOURCE
+                    && matches!(fact.confidence, Confidence::High | Confidence::Exact)
+                {
+                    let mut proof = RelationshipProof::new(
+                        RelationshipProofKind::DeclaredOrigin,
+                        fact.source.clone(),
+                        1,
+                    );
+                    proof.authority = RelationshipAuthority::Authoritative;
+                    proof.source_range = fact.range.as_ref().map(|range| FileRange {
+                        path: paths.intern(&file.path),
+                        line_range: Some(range.clone()),
+                    });
+                    proof.evidence_ids.push(evidence_id.clone());
+                    proof
+                        .details
+                        .insert("target_path".into(), json!(fact.target));
+                    edge.set_relationship_proofs(vec![proof])
+                        .expect("declared origin proof must serialize to JSON");
+                }
+            }
             if fact.edge_type == GraphEdgeType::DependsOn
                 && fact.target_kind == GraphNodeType::Package
                 && fact.source.starts_with("open-kioku-import-resolver/")
@@ -905,6 +941,92 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("/orders")
         );
+    }
+
+    #[test]
+    fn derived_from_facts_link_file_nodes_and_only_a_declared_origin_carries_proof() {
+        let py_file = |path: &str| File {
+            path: path.into(),
+            language: Language::Python,
+            ..make_file(path)
+        };
+        let generated = py_file("src/models/orbit/modeling_orbit.py");
+        let modular = py_file("src/models/orbit/modular_orbit.py");
+        let test = py_file("tests/models/orbit/test_modeling_orbit.py");
+        let fact = |file: &File, target: &str, source: &str, confidence: Confidence| AnalysisFact {
+            id: format!("derived:{}", file.path.display()),
+            file_id: file.id.clone(),
+            symbol_id: None,
+            target: target.into(),
+            target_kind: GraphNodeType::File,
+            edge_type: GraphEdgeType::DerivedFrom,
+            range: Some(LineRange::single(2)),
+            confidence,
+            source: source.into(),
+            source_type: EvidenceSourceType::StaticAnalysis,
+            message: "fixture".into(),
+        };
+        let facts = vec![
+            fact(
+                &generated,
+                "src/models/orbit/modular_orbit.py",
+                DERIVED_FILE_DECLARED_ORIGIN_SOURCE,
+                Confidence::High,
+            ),
+            fact(
+                &test,
+                "src/models/orbit/modeling_orbit.py",
+                "open-kioku-derived/test-pairing",
+                Confidence::Medium,
+            ),
+        ];
+        let graph = InMemoryGraph::from_index_with_analysis(
+            &[generated.clone(), modular.clone(), test.clone()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &facts,
+        );
+        let edges = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == GraphEdgeType::DerivedFrom)
+            .collect::<Vec<_>>();
+        assert_eq!(edges.len(), 2);
+        for edge in &edges {
+            // Both endpoints are the real file nodes, so a neighbour walk from either file
+            // lands on an indexed file rather than a synthetic analysis node.
+            for endpoint in [&edge.from, &edge.to] {
+                let node = graph.nodes.get(&endpoint.0).expect("file node");
+                assert_eq!(node.node_type, GraphNodeType::File);
+                assert!(node.file_id.is_some(), "{endpoint:?} lost its file id");
+            }
+        }
+        let declared = edges
+            .iter()
+            .find(|edge| edge.from == identity::file_node_id(&generated.path))
+            .unwrap();
+        assert_eq!(declared.to, identity::file_node_id(&modular.path));
+        assert_eq!(
+            declared
+                .properties
+                .get("derivation")
+                .and_then(|v| v.as_str()),
+            Some("declared-origin")
+        );
+        assert!(declared.is_authoritative_relationship());
+        assert!(declared.has_relationship_proof_kind(RelationshipProofKind::DeclaredOrigin));
+        let paired = edges
+            .iter()
+            .find(|edge| edge.from == identity::file_node_id(&test.path))
+            .unwrap();
+        assert_eq!(
+            paired.properties.get("derivation").and_then(|v| v.as_str()),
+            Some("test-pairing")
+        );
+        assert!(!paired.is_authoritative_relationship());
+        assert!(paired.try_relationship_proofs().unwrap().is_empty());
     }
 
     fn call_relationship_proofs(
