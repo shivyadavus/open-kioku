@@ -616,10 +616,24 @@ impl<'a> BuiltinCandidateContext<'a> {
         // votes removed, monotonically across weights 1.0 / 0.5 / 0.25 / 0, and the scan cost
         // ~5 s per query. Symbol and path anchors are what co-change history can actually
         // speak to.
+        // Loose prose similarity is noise, but a *near-identical* past subject is not: the
+        // 24th "releaser: Bump versions for release of 0.158.0" touches the file the other 23
+        // touched, and "feat(async): stabilize Lazy" edits the same barrel every stabilize
+        // commit did. Twins are matched on the subject after numbers and PR references are
+        // stripped, with a high Jaccard bar, and vote for the files most of them touched.
+        let twin_votes = self.subject_twin_votes(request, history_store);
         if anchor_symbols.is_empty() && request.scope.path_prefixes.is_empty() {
-            return CandidateStream::unavailable(
+            if twin_votes.is_empty() {
+                return CandidateStream::unavailable(
+                    RetrievalSourceKind::GitHistory,
+                    "git-history candidates need an exact symbol or path anchor or a near-identical past commit subject; loose commit-message similarity is not a retrieval signal",
+                );
+            }
+            let mut candidates = twin_votes.into_values().collect::<Vec<_>>();
+            sort_history_candidates(&mut candidates);
+            return CandidateStream::success(
                 RetrievalSourceKind::GitHistory,
-                "git-history candidates need an exact symbol or path anchor; commit-message similarity alone is not a retrieval signal",
+                candidates.into_iter().take(request.limit).collect(),
             );
         }
         let query = open_kioku_core::SimilarChangeQuery {
@@ -649,7 +663,7 @@ impl<'a> BuiltinCandidateContext<'a> {
             .iter()
             .map(|file| (normalized_path(&file.path), file))
             .collect::<BTreeMap<_, _>>();
-        let mut by_path = BTreeMap::<String, StreamCandidate>::new();
+        let mut by_path = twin_votes;
         for hit in report.hits {
             for changed_file in &hit.change.touched_paths {
                 let key = normalized_path(changed_file);
@@ -678,18 +692,139 @@ impl<'a> BuiltinCandidateContext<'a> {
             }
         }
         let mut candidates = by_path.into_values().collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            right
-                .raw_score
-                .unwrap_or_default()
-                .total_cmp(&left.raw_score.unwrap_or_default())
-                .then_with(|| left.result.path.cmp(&right.result.path))
-        });
+        sort_history_candidates(&mut candidates);
         CandidateStream::success(
             RetrievalSourceKind::GitHistory,
             candidates.into_iter().take(request.limit).collect(),
         )
     }
+
+    /// Files touched by past commits whose subject is near-identical to the task, keyed by
+    /// path and scored by the share of twins that touched them. Empty when the task is too
+    /// short to be a subject or no twin exists.
+    fn subject_twin_votes(
+        &self,
+        request: &CandidateRequest,
+        history_store: &dyn HistoryStore,
+    ) -> BTreeMap<String, StreamCandidate> {
+        let task_tokens = subject_tokens(&request.task);
+        if task_tokens.len() < SUBJECT_TWIN_MIN_TOKENS {
+            return BTreeMap::new();
+        }
+        let query = open_kioku_core::SimilarChangeQuery {
+            task: Some(request.task.clone()),
+            paths: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let Ok(report) = history_store.similar_changes(&query, SUBJECT_TWIN_SCAN) else {
+            return BTreeMap::new();
+        };
+        let twins: Vec<_> = report
+            .hits
+            .iter()
+            .filter(|hit| {
+                subject_similarity(&task_tokens, &subject_tokens(&hit.change.commit.summary))
+                    >= SUBJECT_TWIN_MIN_SIMILARITY
+            })
+            .collect();
+        if twins.is_empty() {
+            return BTreeMap::new();
+        }
+        let files_by_path = self
+            .files
+            .iter()
+            .map(|file| (normalized_path(&file.path), file))
+            .collect::<BTreeMap<_, _>>();
+        let mut touches = BTreeMap::<String, (usize, String, String)>::new();
+        for twin in &twins {
+            for changed_file in &twin.change.touched_paths {
+                let key = normalized_path(changed_file);
+                if !files_by_path.contains_key(&key) {
+                    continue;
+                }
+                let entry = touches.entry(key).or_insert_with(|| {
+                    (
+                        0,
+                        twin.change.commit.summary.clone(),
+                        twin.change.commit.id.0.clone(),
+                    )
+                });
+                entry.0 += 1;
+            }
+        }
+        let mut votes = BTreeMap::new();
+        for (key, (count, summary, commit)) in touches {
+            // A file most twins touched is what this subject means in this repository; a file
+            // one twin happened to touch alongside is not.
+            let share = count as f32 / twins.len() as f32;
+            if share < SUBJECT_TWIN_MIN_FILE_SHARE {
+                continue;
+            }
+            let file = files_by_path[&key];
+            let result = result_for_file(
+                file,
+                None,
+                self.chunks,
+                share,
+                format!(
+                    "{count} of {} past commits with a near-identical subject (`{summary}`) touched this file",
+                    twins.len()
+                ),
+                vec![format!("history:subject-twin:{commit}")],
+                0.8,
+            );
+            votes.insert(
+                key,
+                StreamCandidate::from_result(
+                    result,
+                    RetrievalAuthority::Heuristic,
+                    "file is what near-identical past commits changed",
+                ),
+            );
+        }
+        votes
+    }
+}
+
+/// Minimum subject tokens before a task can have twins ("Bump versions" alone is too generic).
+const SUBJECT_TWIN_MIN_TOKENS: usize = 3;
+/// Jaccard similarity of subject tokens (numbers and PR references stripped) for a twin.
+const SUBJECT_TWIN_MIN_SIMILARITY: f32 = 0.75;
+/// A file must appear in at least this share of twins to be voted for.
+const SUBJECT_TWIN_MIN_FILE_SHARE: f32 = 0.5;
+/// How many similar-change hits to inspect for twins.
+const SUBJECT_TWIN_SCAN: usize = 40;
+
+/// Subject vocabulary with version numbers, PR references, and punctuation removed, so
+/// "releaser: Bump versions for release of 0.158.0" and "... of 0.161.1" are the same subject.
+fn subject_tokens(subject: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = subject
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty() && !token.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn subject_similarity(left: &[String], right: &[String]) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.iter().filter(|token| right.contains(token)).count();
+    let union = left.len() + right.len() - intersection;
+    intersection as f32 / union as f32
+}
+
+fn sort_history_candidates(candidates: &mut [StreamCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .raw_score
+            .unwrap_or_default()
+            .total_cmp(&left.raw_score.unwrap_or_default())
+            .then_with(|| left.result.path.cmp(&right.result.path))
+    });
 }
 
 fn indexed_document_stream(
@@ -1410,6 +1545,19 @@ mod indexed_document_stream_tests {
     use super::*;
     use open_kioku_core::{DocumentType, LineRange};
     use std::path::PathBuf;
+
+    #[test]
+    fn subject_twins_ignore_numbers_and_pr_references() {
+        let a = subject_tokens("releaser: Bump versions for release of 0.158.0");
+        let b = subject_tokens("releaser: Bump versions for release of 0.161.1 (#12345)");
+        assert!(subject_similarity(&a, &b) >= SUBJECT_TWIN_MIN_SIMILARITY);
+        let c = subject_tokens("releaser: Prepare repository for 0.164.0-DEV");
+        assert!(subject_similarity(&a, &c) < SUBJECT_TWIN_MIN_SIMILARITY);
+        let d = subject_tokens("feat(async): stabilize Lazy");
+        let e = subject_tokens("feat(async): stabilize Channel");
+        assert!(subject_similarity(&d, &e) < SUBJECT_TWIN_MIN_SIMILARITY);
+        assert!(subject_tokens("0.1.2").is_empty());
+    }
 
     #[test]
     fn indexed_document_stream_preserves_heading_range_and_heuristic_authority() {
