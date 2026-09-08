@@ -16,22 +16,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Git history no longer votes for primary context from commit-message similarity to task prose: on a 10k-file repository with history those votes cost 0.075 MRR (monotonically across weights) and ~5 s per query. The history stream now anchors on exact symbols or paths only, and per-file history annotation queries churn and co-change for the file rather than the task text. Similar-change statics (co-change edges, hotspots) are cached per store instead of re-read per result.
 - Function words and commit verbs ("for", "fix", "add") no longer count as task vocabulary for test/runtime name overlap, and the fusion profile `rrf_measured_v1` votes the validation stream at half weight (neutral on the 490-case corpus; restores a strong lexical hit that two weak test-name votes had outranked).
 - Reciprocal-rank fusion uses k=10 instead of 60: with one full-text ranker and several name-overlap hint streams, k=60 made lexical rank 2 indistinguishable from rank 13, so any file with two weak votes outranked a single strong one. Neutral on the 490-case corpus (dev MRR 0.386 → 0.384, holdout 0.345 → 0.348); restores the workflow benchmark's `test-selector` case.
-- Measured on Go (hugo) and TypeScript (deno_std) commit-derived corpora, six further ranking defects: routing keywords matched substrings ("docshelper" routed a code task to the documentation family); a task that merely says "panic" was routed to trace-to-code and *blocked* outright on repositories that have never ingested a runtime trace (a required source that cannot run is now a caveat, not a blocker); benchmarks were not test intent although in Go they live in `_test.go`; an anchor *mentioned* in a snippet or a docs page shared the top relevance tier with the file that names it and outranked the best full-task hit (tiers are now definition > explicit path/ticket > mention, and the docs/tests quality tier is applied first); documentation tasks ran no lexical stream although doc comments live in source files; and the corpus extractor now drops commits whose subject names a path.
+- Measured on the Go application and the TypeScript standard library commit-derived corpora, six further ranking defects: routing keywords matched substrings ("docstool" routed a code task to the documentation family); a task that merely says "panic" was routed to trace-to-code and *blocked* outright on repositories that have never ingested a runtime trace (a required source that cannot run is now a caveat, not a blocker); benchmarks were not test intent although in Go they live in `_test.go`; an anchor *mentioned* in a snippet or a docs page shared the top relevance tier with the file that names it and outranked the best full-task hit (tiers are now definition > explicit path/ticket > mention, and the docs/tests quality tier is applied first); documentation tasks ran no lexical stream although doc comments live in source files; and the corpus extractor now drops commits whose subject names a path.
 - A directory merely named after tests (`crates/open-kioku-tests/`, `packages/e2e-tests-runner/`) is not a test path; only exact test directory names, CamelCase test source sets, and test file names are.
 - Git history votes for the files that near-identical past commit subjects touched (numbers and PR references stripped, Jaccard ≥ 0.75, half the twins must agree on a file). On a Go repository whose holdout contains 50 release-bump commits with one gold file, holdout R@5 0.428 → 0.772 and MRR 0.338 → 0.511 with history present; a repository without repeated subjects is unchanged.
-- A commit scope's directory entry file (`mod.ts`, `index.ts`, `lib.rs`, `__init__.py`) is a candidate even without shared vocabulary, placed just below the scope's best hit when nothing in the directory knows the task's words and last otherwise. deno_std holdout R@5 0.744 → 0.816, MRR 0.607 → 0.650; other corpora unchanged.
-- Commit-style scope prefixes (`docs(fs): …`, `tpl/tplimpl: …`, `[Whisper] …`) now anchor retrieval on the package or directory they name, and document sections cast one vote per file instead of one per section (a documentation task on deno_std had returned twenty sections of `Releases.md` and nothing else). Holdout MRR on the commit-derived corpora: deno_std 0.510 → 0.607, hugo 0.308 → 0.338, transformers 0.539 → 0.565.
+- A commit scope's directory entry file (`mod.ts`, `index.ts`, `lib.rs`, `__init__.py`) is a candidate even without shared vocabulary, placed just below the scope's best hit when nothing in the directory knows the task's words and last otherwise. the TypeScript standard library holdout R@5 0.744 → 0.816, MRR 0.607 → 0.650; other corpora unchanged.
+- Commit-style scope prefixes (`docs(fs): …`, `pkg/render: …`, `[Scheduler] …`) now anchor retrieval on the package or directory they name, and document sections cast one vote per file instead of one per section (a documentation task on the TypeScript standard library had returned twenty sections of `Releases.md` and nothing else). Holdout MRR on the commit-derived corpora: the TypeScript standard library 0.510 → 0.607, the Go application 0.308 → 0.338, the Python ML library 0.539 → 0.565.
 - A pack whose selected context contains fewer than a third of the task's terms is capped strictly below Medium confidence; previously the cap sat exactly on the Medium threshold and a nonsense query with one incidental word match reported Medium.
 
 ### Performance
 - `ok context`, `ok plan`, and MCP `build_context_pack` on a 10k-file Java index: 78 s → ~5 s per query. Impact expansion now uses the Tantivy index instead of regex-scanning every chunk once per term; per-file fact lookups use the existing `file_id` index instead of scanning and sorting every fact of a source type; the relationship-semantics verdict is cached per store (keyed by SQLite `data_version`) instead of re-parsing a multi-megabyte manifest on every relationship query.
 
 ### Changed
-- The Tantivy index tokenizes code text and symbols identifier-aware: `FieldMapper` is indexed as `fieldmapper`, `field`, and `mapper`. Lexical MRR on a 490-case commit-derived Elasticsearch benchmark: 0.235 → 0.393 (dev), 0.202 → 0.337 (holdout). Existing indexes keep working; run `ok index` to rebuild with the new tokenizer.
+- The Tantivy index tokenizes code text and symbols identifier-aware: `FieldMapper` is indexed as `fieldmapper`, `field`, and `mapper`. Lexical MRR on a 490-case commit-derived the Java service benchmark: 0.235 → 0.393 (dev), 0.202 → 0.337 (holdout). Existing indexes keep working; run `ok index` to rebuild with the new tokenizer.
 - Retrieval benchmark no-gold false positives count only results presented with confidence above Low (the product's abstention signal), for pack-less strategies via the same shared weak-relevance rule. Baseline and thresholds re-frozen; rationale in `docs/retrieval-benchmark.md`.
 
 ### Added
-- `scripts/commit-derived-cases.py` keeps one instance of a subject that repeats up to numbers (`--keep-repeated-subjects` restores the old behaviour); hugo's corpus shrinks from 481 to 280 cases because 201 were release-bump commits with one gold file.
+- `scripts/commit-derived-cases.py` keeps one instance of a subject that repeats up to numbers (`--keep-repeated-subjects` restores the old behaviour); the Go application's corpus shrinks from 481 to 280 cases because 201 were release-bump commits with one gold file.
 - `scripts/commit-derived-cases.py` and `scripts/score-context-cases.py`: derive leakage-safe retrieval cases from a repository's own history (index at a base commit, gold = files a later commit modified that already existed at base) and score the production `ok context` path against them with bootstrap confidence intervals.
 
 ---
@@ -318,7 +318,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 - **SQLite Ingestion & Backfill Performance**:
-  - Wrapped SQLite node and edge backfill updates (`backfill_graph_query_columns`) inside transactions. This critical performance fix reduces backfill time on large codebases (such as Elasticsearch with 269k stale edges) from several hours to under 25 seconds.
+  - Wrapped SQLite node and edge backfill updates (`backfill_graph_query_columns`) inside transactions. This critical performance fix reduces backfill time on large codebases (such as a 10k-file Java service with 269k stale edges) from several hours to under 25 seconds.
 
 ### Artifacts
 - `ok-linux-x86_64`
@@ -418,7 +418,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 - Bumped all crates and workspace packages to version 2.0.0.
-- Evolved homepage to highlight plan-before-edit paradigm and show real Elasticsearch proof numbers.
+- Evolved homepage to highlight plan-before-edit paradigm and show real large-Java proof numbers.
 - Upgraded domain routing for openkioku.com.
 
 ### Artifacts
@@ -464,7 +464,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Added language-specific static analysis facts for imports, inheritance, implementations, routes, config reads, and table mappings.
 - Added optional local runtime evidence ingestion from repository-owned JSONL artifacts under `.ok/runtime/` or `.ok/analysis/runtime/`.
 - Added release-readiness smoke coverage for status, setup audit, TOON planning, proof reports, and MCP installer output.
-- Added large-repo proof documentation for a local Elasticsearch validation run.
+- Added large-repo proof documentation for a local large-Java validation run.
 
 ### Changed
 - Improved task-anchor planning, impact evidence, test selection, and low-confidence risk reporting.
