@@ -1304,6 +1304,43 @@ pub enum Language {
     Unknown,
 }
 
+impl Language {
+    /// Languages whose files are program source, as opposed to data, config, or prose.
+    /// Coverage warnings are judged on these; the table still shows every language.
+    pub fn is_programming(&self) -> bool {
+        matches!(
+            self,
+            Self::Rust
+                | Self::Java
+                | Self::TypeScript
+                | Self::JavaScript
+                | Self::Python
+                | Self::Go
+                | Self::Sql
+        )
+    }
+
+    /// The serialized (snake_case) name, used as the key of every per-language map so
+    /// JSON consumers see one spelling everywhere.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Java => "java",
+            Self::TypeScript => "type_script",
+            Self::JavaScript => "java_script",
+            Self::Python => "python",
+            Self::Go => "go",
+            Self::Yaml => "yaml",
+            Self::Json => "json",
+            Self::Toml => "toml",
+            Self::Sql => "sql",
+            Self::Markdown => "markdown",
+            Self::Text => "text",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct File {
     pub id: FileId,
@@ -2444,6 +2481,293 @@ pub struct SkippedPath {
     pub safe_to_show: bool,
 }
 
+impl SkipReason {
+    /// Human-readable label for summaries (`secret-policy`, `too-large`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ignored => "ignored",
+            Self::Denied => "denied",
+            Self::Hidden => "hidden",
+            Self::UnsupportedLanguage => "unsupported-language",
+            Self::Binary => "binary",
+            Self::TooLarge => "too-large",
+            Self::Generated => "generated",
+            Self::Vendor => "vendor",
+            Self::FastMode => "fast-mode",
+            Self::SecretPolicy => "secret-policy",
+            Self::SymlinkPolicy => "symlink-policy",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Coverage of one recognised language: files discovery saw on disk versus files the
+/// index holds, with every omission attributed to a skip reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LanguageCoverage {
+    pub discovered: usize,
+    pub indexed: usize,
+    /// Indexed files flagged `is_generated`. Generated source is indexed and flagged so
+    /// it stays in coverage; only document-corpus files are skipped as `generated`.
+    #[serde(default)]
+    pub generated: usize,
+    #[serde(default)]
+    pub skipped: BTreeMap<SkipReason, usize>,
+}
+
+impl LanguageCoverage {
+    pub fn percent(&self) -> Option<f64> {
+        (self.discovered > 0).then(|| self.indexed as f64 * 100.0 / self.discovered as f64)
+    }
+}
+
+/// Coverage below this fraction is reported as a warning: a tenth of a corpus vanishing
+/// behind an ingest rule is exactly the failure this summary exists to expose.
+pub const INDEX_COVERAGE_WARN_PERCENT: f64 = 98.0;
+
+/// A programming language is judged by percentage only once it has this many
+/// discovered files; below it one hidden file swings the ratio without meaning.
+pub const INDEX_COVERAGE_LANGUAGE_FLOOR: usize = 50;
+
+/// A programming language missing at least this many files warns regardless of
+/// percentage: 25 of 10,012 Java files is 99.75% and still a dropped package.
+pub const INDEX_COVERAGE_MISSING_FILES_WARN: usize = 20;
+
+/// What discovery found versus what the index holds, for every recognised language.
+///
+/// `discovered` counts only files the walker visited. Two things it cannot see are
+/// counted beside it so the ratio is never read as more than it is: `pruned_dirs`,
+/// directories cut from the walk by name (`target`, `node_modules`, `dist`, `build`,
+/// `.venv`; `.git` and `.ok` are not counted, they are never user source), whose
+/// contents are unknown; and `walk_errors`, directory reads that failed, whose files
+/// were never discovered. Files whose language is unknown are not source files and
+/// are not counted; their skips remain in `skip_counts`. Files admitted to the
+/// document corpus count as indexed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexCoverage {
+    pub discovered: usize,
+    pub indexed: usize,
+    #[serde(default)]
+    pub generated: usize,
+    #[serde(default)]
+    pub skipped: BTreeMap<SkipReason, usize>,
+    #[serde(default)]
+    pub by_language: BTreeMap<String, LanguageCoverage>,
+    /// Directories pruned by name before discovery; a real package named `build`
+    /// lands here, not in `discovered`.
+    #[serde(default)]
+    pub pruned_dirs: usize,
+    /// Directory reads that failed (`skip_counts.error`); their files are unknown.
+    #[serde(default)]
+    pub walk_errors: usize,
+}
+
+impl IndexCoverage {
+    pub fn record_discovered(&mut self, language: &Language) {
+        self.discovered += 1;
+        self.by_language
+            .entry(language.key().to_owned())
+            .or_default()
+            .discovered += 1;
+    }
+
+    pub fn record_indexed(&mut self, language: &Language, generated: bool) {
+        self.indexed += 1;
+        let entry = self
+            .by_language
+            .entry(language.key().to_owned())
+            .or_default();
+        entry.indexed += 1;
+        if generated {
+            self.generated += 1;
+            entry.generated += 1;
+        }
+    }
+
+    pub fn record_skipped(&mut self, language: &Language, reason: SkipReason) {
+        *self.skipped.entry(reason).or_default() += 1;
+        *self
+            .by_language
+            .entry(language.key().to_owned())
+            .or_default()
+            .skipped
+            .entry(reason)
+            .or_default() += 1;
+    }
+
+    /// The all-languages ratio, reported everywhere. `None` when nothing was
+    /// discovered: a ratio over zero files is not evidence.
+    pub fn percent(&self) -> Option<f64> {
+        (self.discovered > 0).then(|| self.indexed as f64 * 100.0 / self.discovered as f64)
+    }
+
+    /// `(discovered, indexed)` over programming languages only.
+    pub fn programming_totals(&self) -> (usize, usize) {
+        self.by_language
+            .iter()
+            .filter(|(language, _)| language_key_is_programming(language))
+            .fold((0, 0), |(discovered, indexed), (_, coverage)| {
+                (discovered + coverage.discovered, indexed + coverage.indexed)
+            })
+    }
+
+    /// The ratio the warning is judged on. Hidden `.github/*.yml` and `.vscode/*.json`
+    /// drag the all-languages ratio under the threshold on almost every repository; a
+    /// warning that always fires stops being read, so the verdict follows the source.
+    pub fn programming_percent(&self) -> Option<f64> {
+        let (discovered, indexed) = self.programming_totals();
+        (discovered > 0).then(|| indexed as f64 * 100.0 / discovered as f64)
+    }
+
+    pub fn below_warn_threshold(&self) -> bool {
+        self.programming_percent()
+            .is_some_and(|percent| percent < INDEX_COVERAGE_WARN_PERCENT)
+    }
+
+    /// Something the ratio cannot account for: unreadable or pruned directories.
+    pub fn has_blind_spots(&self) -> bool {
+        self.walk_errors > 0 || self.pruned_dirs > 0
+    }
+
+    /// Skip reasons by descending count, ties broken by reason order, at most `limit`.
+    pub fn top_skip_reasons(&self, limit: usize) -> Vec<(SkipReason, usize)> {
+        let mut reasons = self
+            .skipped
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(reason, count)| (*reason, *count))
+            .collect::<Vec<_>>();
+        reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        reasons.truncate(limit);
+        reasons
+    }
+
+    /// Programming languages that warrant a warning, as `(language, percent, files
+    /// missing)`, most missing files first. A language qualifies when it is under the
+    /// percentage threshold with at least `INDEX_COVERAGE_LANGUAGE_FLOOR` files
+    /// discovered, or is missing `INDEX_COVERAGE_MISSING_FILES_WARN` files regardless
+    /// of percentage. Config and prose languages never qualify: hidden `.github/*.yml`
+    /// files drag yaml under 98% on almost every repository and say nothing about the
+    /// source; they stay visible in the table.
+    pub fn languages_below_warn_threshold(&self) -> Vec<(&str, f64, usize)> {
+        let mut languages = self
+            .by_language
+            .iter()
+            .filter(|(language, _)| language_key_is_programming(language))
+            .filter_map(|(language, coverage)| {
+                let percent = coverage.percent()?;
+                let missing = coverage.discovered.saturating_sub(coverage.indexed);
+                let by_ratio = coverage.discovered >= INDEX_COVERAGE_LANGUAGE_FLOOR
+                    && percent < INDEX_COVERAGE_WARN_PERCENT;
+                let by_count = missing >= INDEX_COVERAGE_MISSING_FILES_WARN;
+                (by_ratio || by_count).then_some((language.as_str(), percent, missing))
+            })
+            .collect::<Vec<_>>();
+        languages.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+        languages
+    }
+
+    /// The counts, judged ratio first: `921 of 922 programming-language files indexed
+    /// (99.9%); 1,417 of 1,461 recognised files overall`. Shared by the index summary
+    /// line and the doctor check so the two can never disagree.
+    pub fn headline(&self) -> String {
+        let Some(overall) = self.percent() else {
+            return "no source files discovered".into();
+        };
+        let overall = format!(
+            "{} of {} recognised files indexed ({overall:.1}%)",
+            group_thousands(self.indexed),
+            group_thousands(self.discovered)
+        );
+        let (discovered, indexed) = self.programming_totals();
+        match self.programming_percent() {
+            Some(percent) => format!(
+                "{} of {} programming-language files indexed ({percent:.1}%); {overall} overall",
+                group_thousands(indexed),
+                group_thousands(discovered)
+            ),
+            None => format!("no programming-language files discovered; {overall}"),
+        }
+    }
+
+    /// One line: the headline plus what was skipped and what the ratio cannot see.
+    pub fn summary_line(&self) -> String {
+        if self.percent().is_none() {
+            return "no source files discovered".into();
+        }
+        let mut line = self.headline();
+        let skipped = self.top_skip_reasons(usize::MAX);
+        if !skipped.is_empty() {
+            line.push_str("; skipped: ");
+            line.push_str(&format_skip_reasons(&skipped));
+        }
+        for caveat in self.blind_spot_caveats() {
+            line.push_str("; ");
+            line.push_str(&caveat);
+        }
+        line
+    }
+
+    /// What the ratio does not cover, phrased for a summary line or a doctor check.
+    pub fn blind_spot_caveats(&self) -> Vec<String> {
+        let mut caveats = Vec::new();
+        if self.pruned_dirs > 0 {
+            caveats.push(format!(
+                "{} {} pruned by name (contents not counted)",
+                group_thousands(self.pruned_dirs),
+                if self.pruned_dirs == 1 {
+                    "directory"
+                } else {
+                    "directories"
+                }
+            ));
+        }
+        if self.walk_errors > 0 {
+            caveats.push(format!(
+                "{} walk {} (files under unreadable directories were never discovered)",
+                group_thousands(self.walk_errors),
+                if self.walk_errors == 1 {
+                    "error"
+                } else {
+                    "errors"
+                }
+            ));
+        }
+        caveats
+    }
+}
+
+/// `by_language` keys are `Language::key()` values; this is the inverse for the one
+/// property the warning rule needs.
+fn language_key_is_programming(key: &str) -> bool {
+    matches!(
+        key,
+        "rust" | "java" | "type_script" | "java_script" | "python" | "go" | "sql"
+    )
+}
+
+/// `25 secret-policy, 5 too-large`
+pub fn format_skip_reasons(reasons: &[(SkipReason, usize)]) -> String {
+    reasons
+        .iter()
+        .map(|(reason, count)| format!("{} {}", group_thousands(*count), reason.label()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `10012` -> `10,012`
+pub fn group_thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RelationshipResolutionQuality {
     pub candidates_considered: usize,
@@ -2527,6 +2851,10 @@ pub struct IndexQuality {
     pub skipped_paths: Vec<SkippedPath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_quality: Option<ResolutionQualityReport>,
+    /// Absent on manifests written before coverage was recorded; readers must say so
+    /// rather than treat absence as full coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<IndexCoverage>,
     pub quality_notes: Vec<String>,
 }
 
@@ -4042,6 +4370,228 @@ mod ri3_resolution_quality_core_tests {
 
         let decoded: IndexQuality = serde_json::from_str(&first).unwrap();
         assert_eq!(decoded.resolution_quality, Some(report));
+    }
+}
+
+#[cfg(test)]
+mod index_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_without_coverage_loads_as_unrecorded() {
+        let encoded = serde_json::to_value(IndexQuality::default()).unwrap();
+        assert!(encoded.get("coverage").is_none());
+        let decoded: IndexQuality = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.coverage.is_none());
+    }
+
+    #[test]
+    fn coverage_tallies_per_language_and_round_trips() {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..3 {
+            coverage.record_discovered(&Language::Java);
+        }
+        coverage.record_indexed(&Language::Java, false);
+        coverage.record_indexed(&Language::Java, true);
+        coverage.record_skipped(&Language::Java, SkipReason::SecretPolicy);
+        coverage.record_discovered(&Language::Python);
+        coverage.record_skipped(&Language::Python, SkipReason::TooLarge);
+
+        assert_eq!(coverage.discovered, 4);
+        assert_eq!(coverage.indexed, 2);
+        assert_eq!(coverage.generated, 1);
+        assert_eq!(coverage.by_language["java"].indexed, 2);
+        assert_eq!(coverage.by_language["java"].generated, 1);
+        assert_eq!(coverage.by_language["python"].percent(), Some(0.0));
+        // Ties fall back to declaration order, so the output is deterministic.
+        assert_eq!(
+            coverage.top_skip_reasons(3),
+            vec![(SkipReason::TooLarge, 1), (SkipReason::SecretPolicy, 1)]
+        );
+        // Every file here is a programming-language file, so both ratios agree.
+        assert_eq!(coverage.programming_totals(), (4, 2));
+        assert!(coverage.below_warn_threshold());
+        // Four files are under the per-language floor: the overall ratio warns, the
+        // per-language rule does not.
+        assert!(coverage.languages_below_warn_threshold().is_empty());
+        assert_eq!(
+            coverage.summary_line(),
+            "2 of 4 programming-language files indexed (50.0%); 2 of 4 recognised files indexed (50.0%) overall; skipped: 1 too-large, 1 secret-policy"
+        );
+
+        let quality = IndexQuality {
+            coverage: Some(coverage.clone()),
+            ..IndexQuality::default()
+        };
+        let decoded: IndexQuality =
+            serde_json::from_str(&serde_json::to_string(&quality).unwrap()).unwrap();
+        assert_eq!(decoded.coverage, Some(coverage));
+    }
+
+    #[test]
+    fn language_warning_targets_programming_languages_and_absolute_losses() {
+        let mut coverage = IndexCoverage::default();
+        let mut add = |language: &Language, discovered: usize, indexed: usize| {
+            for _ in 0..discovered {
+                coverage.record_discovered(language);
+            }
+            for _ in 0..indexed {
+                coverage.record_indexed(language, false);
+            }
+            for _ in indexed..discovered {
+                coverage.record_skipped(language, SkipReason::Hidden);
+            }
+        };
+        // The motivating incident: 25 of 10,012 is 99.75% and still a dropped package.
+        add(&Language::Java, 10_012, 9_987);
+        // Under the ratio with enough files to mean it.
+        add(&Language::Python, 100, 90);
+        // Under the floor: one hidden file, no verdict.
+        add(&Language::Rust, 4, 1);
+        // Config formats never qualify however low they sit.
+        add(&Language::Yaml, 900, 100);
+
+        assert_eq!(
+            coverage.languages_below_warn_threshold(),
+            vec![
+                ("java", 9_987.0 * 100.0 / 10_012.0, 25),
+                ("python", 90.0, 10)
+            ]
+        );
+    }
+
+    #[test]
+    fn blind_spots_are_named_in_the_summary() {
+        let mut coverage = IndexCoverage::default();
+        coverage.record_discovered(&Language::Go);
+        coverage.record_indexed(&Language::Go, false);
+        coverage.pruned_dirs = 2;
+        coverage.walk_errors = 1;
+        assert!(coverage.has_blind_spots());
+        assert_eq!(
+            coverage.summary_line(),
+            "1 of 1 programming-language files indexed (100.0%); 1 of 1 recognised files indexed (100.0%) overall; 2 directories pruned by name (contents not counted); 1 walk error (files under unreadable directories were never discovered)"
+        );
+    }
+
+    /// The motivating shape of a real repository: every source file indexed, while
+    /// hidden `.github/*.yml` and `.vscode/*.json` sink the all-languages ratio. The
+    /// verdict follows the source; the reported counts still show both.
+    #[test]
+    fn config_files_drag_the_overall_ratio_without_causing_a_warning() {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..900 {
+            coverage.record_discovered(&Language::TypeScript);
+            coverage.record_indexed(&Language::TypeScript, false);
+        }
+        for _ in 0..100 {
+            coverage.record_discovered(&Language::Yaml);
+        }
+        for _ in 0..100 {
+            coverage.record_skipped(&Language::Yaml, SkipReason::Hidden);
+        }
+
+        assert_eq!(coverage.percent(), Some(90.0));
+        assert_eq!(coverage.programming_percent(), Some(100.0));
+        assert!(!coverage.below_warn_threshold());
+        assert!(coverage.languages_below_warn_threshold().is_empty());
+        assert_eq!(
+            coverage.summary_line(),
+            "900 of 900 programming-language files indexed (100.0%); 900 of 1,000 recognised files indexed (90.0%) overall; skipped: 100 hidden"
+        );
+
+        // A source file going missing still warns, at the same overall ratio.
+        coverage.record_discovered(&Language::TypeScript);
+        coverage.record_skipped(&Language::TypeScript, SkipReason::SecretPolicy);
+        for _ in 0..19 {
+            coverage.record_discovered(&Language::TypeScript);
+            coverage.record_indexed(&Language::TypeScript, false);
+        }
+        assert!(coverage.programming_percent().unwrap() > 99.8);
+        assert!(!coverage.below_warn_threshold());
+        // Under the ratio rule it is invisible; the absolute rule is what catches it.
+        assert_eq!(coverage.languages_below_warn_threshold(), vec![]);
+    }
+
+    /// A repository with no recognised programming source at all: the ratio has no
+    /// verdict to give, and the headline says so instead of implying one.
+    #[test]
+    fn a_docs_only_repository_has_no_programming_ratio() {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..10 {
+            coverage.record_discovered(&Language::Markdown);
+            coverage.record_indexed(&Language::Markdown, false);
+        }
+        assert_eq!(coverage.programming_percent(), None);
+        assert!(!coverage.below_warn_threshold());
+        assert_eq!(
+            coverage.summary_line(),
+            "no programming-language files discovered; 10 of 10 recognised files indexed (100.0%)"
+        );
+    }
+
+    #[test]
+    fn language_key_programming_flag_matches_the_enum() {
+        for language in [
+            Language::Rust,
+            Language::Java,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Go,
+            Language::Yaml,
+            Language::Json,
+            Language::Toml,
+            Language::Sql,
+            Language::Markdown,
+            Language::Text,
+            Language::Unknown,
+        ] {
+            assert_eq!(
+                language_key_is_programming(language.key()),
+                language.is_programming(),
+                "{language:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_coverage_is_not_a_ratio() {
+        let coverage = IndexCoverage::default();
+        assert_eq!(coverage.percent(), None);
+        assert!(!coverage.below_warn_threshold());
+        assert_eq!(coverage.summary_line(), "no source files discovered");
+    }
+
+    #[test]
+    fn language_key_matches_serialized_name() {
+        for language in [
+            Language::Rust,
+            Language::Java,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Go,
+            Language::Yaml,
+            Language::Json,
+            Language::Toml,
+            Language::Sql,
+            Language::Markdown,
+            Language::Text,
+            Language::Unknown,
+        ] {
+            let serialized = serde_json::to_value(&language).unwrap();
+            assert_eq!(serialized.as_str(), Some(language.key()));
+        }
+    }
+
+    #[test]
+    fn thousands_are_grouped() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(10012), "10,012");
+        assert_eq!(group_thousands(1234567), "1,234,567");
     }
 }
 
