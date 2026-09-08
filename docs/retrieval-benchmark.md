@@ -249,6 +249,12 @@ Two caveats travel with the numbers:
 `scripts/compare-commit-derived-report.py` prints the yields as informational and does not
 gate on them; a baseline frozen before the metric existed compares without it.
 
+Every report also carries the index's coverage line (`coverage_line`, from
+`ok --json status` after indexing: source files discovered versus indexed, with skip
+reasons), the job summary shows it next to R@5, R@20, and MRR for each corpus, and the
+baseline compare prints both sides. It is informational, not a gate: a ranking number
+read without knowing that a tenth of the corpus was never indexed is not a number.
+
 ## Reproduce locally
 
 From the repository root:
