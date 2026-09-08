@@ -1,0 +1,63 @@
+{
+  "id": "get-references-callers",
+  "jsonrpc": "2.0",
+  "result": {
+    "callers": {
+      "caveats": [
+        "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+      ],
+      "direction": "inbound",
+      "edges": [
+        {
+          "edge_type": "CALLS",
+          "evidence": {
+            "confidence": "low",
+            "file_range": null,
+            "id": "",
+            "indexed_at": "<indexed_at>",
+            "message": "",
+            "source": "",
+            "source_type": "lexical",
+            "symbol_id": null
+          },
+          "from": "symbol:symbol-publish",
+          "id": "edge-publish-calls-archive",
+          "to": "symbol:symbol-archive"
+        }
+      ],
+      "evidence_source": "sqlite_graph_store",
+      "has_more": false,
+      "limit": 1,
+      "nodes": [
+        {
+          "file_id": "file-billing",
+          "id": "symbol:symbol-publish",
+          "label": "publish_invoice_event",
+          "node_type": "function",
+          "properties": {
+            "qualified_name": "billing::routes::publish_invoice_event"
+          },
+          "symbol_id": "symbol-publish"
+        }
+      ],
+      "returned": 1
+    },
+    "kind": "callers",
+    "query": "archive_invoice_event",
+    "symbol": {
+      "confidence": "high",
+      "file_id": "file-billing",
+      "id": "symbol-archive",
+      "kind": "function",
+      "language": "rust",
+      "name": "archive_invoice_event",
+      "provenance": "tree_sitter",
+      "qualified_name": "billing::routes::archive_invoice_event",
+      "range": {
+        "end": 12,
+        "start": 12
+      },
+      "visibility": "unknown"
+    }
+  }
+}

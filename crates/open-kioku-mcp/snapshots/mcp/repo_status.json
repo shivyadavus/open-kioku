@@ -45,6 +45,9 @@
     "generation_id": null,
     "index_mode": "full",
     "indexed_at": "<indexed_at>",
+    "languages": [
+      "rust"
+    ],
     "phase_reports": [],
     "quality": {
       "architecture_facts": 0,

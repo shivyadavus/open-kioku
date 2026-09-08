@@ -144,7 +144,7 @@ ok mcp install codex  --repo .            # Codex: prints the TOML server entry
 ok mcp install gemini --repo .            # Gemini CLI: prints the JSON server entry
 ```
 
-`ok setup agent --apply` is wired for `claude` and `cursor`; every other client listed by `ok mcp install --help` gets a read-only configuration snippet from `ok mcp install <client>`. The MCP server is local, read-only, and speaks stdio. Its 58 tools carry usage guidance, input/output schemas, safety annotations, and routing categories, and a metadata regression test rejects new tools that omit any of it.
+`ok setup agent --apply` is wired for `claude` and `cursor`; every other client listed by `ok mcp install --help` gets a read-only configuration snippet from `ok mcp install <client>`. The MCP server is local, read-only, and speaks stdio. It advertises 16 tools — one per question nothing else answers — each carrying usage guidance, input/output schemas, safety annotations, and routing categories, and a metadata regression test rejects new tools that omit any of it. Memory and runtime-error tools appear only once those features are configured; the architecture, history and ownership capabilities ship on the CLI (`ok architecture …`, `ok history …`, `ok contract show`).
 
 Step-by-step guides: [Claude Code](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html) · CI: [`open-kioku-action`](https://github.com/shivyadavus/open-kioku-action) ([`docs/github-action.md`](docs/github-action.md))
 
