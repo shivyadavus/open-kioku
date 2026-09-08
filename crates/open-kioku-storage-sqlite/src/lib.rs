@@ -2860,6 +2860,10 @@ impl GraphStore for SqliteStore {
             tx.commit().map_err(storage_err)?;
             Ok(())
         })();
+        // The verdict cache is keyed on `data_version`, which this connection's own writes do
+        // not advance, so a long-lived process would keep reporting "run `ok index`" after the
+        // rebuild that cleared the marker. `replace_files_index` already invalidates here.
+        self.invalidate_semantics_verdict();
         let _ = conn.pragma_update(None, "cache_size", -2_000);
         result
     }
@@ -2900,6 +2904,10 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        // Zero of every edge type with `evidence_available: false` reads as a measurement.
+        // On a store awaiting a rebuild it is a missing-evidence state, and the callers that
+        // treat a failure as "unknown" render it as absent rather than as a counted zero.
+        require_rebuilt_graph(&conn, "graph edge statistics")?;
         let mut stmt = conn
             // Every edge carries evidence by construction — `GraphEdge.evidence` is not an
             // `Option` — so the column this used to aggregate was a stored constant.
@@ -3160,6 +3168,7 @@ impl GraphStore for SqliteStore {
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        require_rebuilt_graph(&conn, "graph schema counts")?;
 
         let mut node_types = std::collections::BTreeMap::new();
         let mut stmt = conn
@@ -3228,24 +3237,77 @@ fn collect_edges(rows: &mut rusqlite::Rows<'_>) -> Result<Vec<GraphEdge>> {
     Ok(edges)
 }
 
+/// Whether this index file's graph edges were discarded and are waiting on `ok index`.
+///
+/// Read-only on purpose: callers such as the cross-project workspace linker open member
+/// indexes under `PRAGMA query_only = ON`, where the `CREATE TABLE IF NOT EXISTS` that
+/// [`schema_meta_flag`] performs would fail. A store with no `schema_meta` table has never
+/// been reset, so a missing table reports `false`.
+pub fn graph_rebuild_required(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "schema_meta")? {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT 1 FROM schema_meta WHERE key = ?1",
+        params![GRAPH_REBUILD_REQUIRED_FLAG],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(storage_err)
+}
+
+/// The error every read-only graph reader returns for an index awaiting a rebuild.
+fn rebuild_required_error(context: &str) -> OkError {
+    OkError::Index(format!(
+        "{context}: graph edges were built by an older index format and were discarded on \
+         open; run `ok index` in that repository to rebuild them"
+    ))
+}
+
+/// Turn the "this index still has the pre-4.0 edge layout" failure into an instruction.
+///
+/// A read-only connection never runs the reset, so it meets the old table shape directly and
+/// SQLite reports a missing internal column. That is a rebuild instruction, not a bug report.
+fn map_edge_read_error(err: rusqlite::Error, context: &str) -> OkError {
+    let message = err.to_string();
+    if message.contains("no such column") || message.contains("no such table") {
+        return rebuild_required_error(context);
+    }
+    storage_err(err)
+}
+
+/// Refuse to read edges out of an index whose graph is known to be missing.
+fn require_rebuilt_graph(conn: &Connection, context: &str) -> Result<()> {
+    if graph_rebuild_required(conn)? {
+        return Err(rebuild_required_error(context));
+    }
+    Ok(())
+}
+
 /// Every edge of one type, read straight from an open index connection.
 ///
 /// The cross-project workspace linker opens each member repository's index file directly
 /// rather than through a [`SqliteStore`], and edges are no longer a self-describing JSON
-/// column it can decode on its own.
+/// column it can decode on its own. Because that path never constructs a store, it never
+/// runs the rebuild gate either — so these readers carry it themselves. An index awaiting a
+/// rebuild must not answer "no such relationship exists" to a workspace linker that would
+/// then persist the empty result.
 pub fn read_graph_edges_by_type(
     conn: &Connection,
     edge_type: GraphEdgeType,
 ) -> Result<Vec<GraphEdge>> {
+    let context = "reading graph edges";
+    require_rebuilt_graph(conn, context)?;
     let mut stmt = conn
         .prepare(&format!(
             "{} WHERE e.edge_type = ?1 ORDER BY e.id",
             compact::EDGE_SELECT
         ))
-        .map_err(storage_err)?;
+        .map_err(|err| map_edge_read_error(err, context))?;
     let mut rows = stmt
         .query(params![format!("{edge_type:?}")])
-        .map_err(storage_err)?;
+        .map_err(|err| map_edge_read_error(err, context))?;
     collect_edges(&mut rows)
 }
 
@@ -3254,15 +3316,17 @@ pub fn read_graph_edges_by_source_type(
     conn: &Connection,
     source_type: EvidenceSourceType,
 ) -> Result<Vec<GraphEdge>> {
+    let context = "reading graph edges";
+    require_rebuilt_graph(conn, context)?;
     let mut stmt = conn
         .prepare(&format!(
             "{} WHERE e.source_type = ?1 ORDER BY e.id",
             compact::EDGE_SELECT
         ))
-        .map_err(storage_err)?;
+        .map_err(|err| map_edge_read_error(err, context))?;
     let mut rows = stmt
         .query(params![format!("{source_type:?}")])
-        .map_err(storage_err)?;
+        .map_err(|err| map_edge_read_error(err, context))?;
     collect_edges(&mut rows)
 }
 
@@ -3434,12 +3498,24 @@ const GRAPH_REBUILD_REQUIRED_FLAG: &str = "graph_rebuild_required_v4";
 /// The two tables used to carry a `json` column holding a self-contained copy of every row;
 /// 4.0 replaces it with typed columns and a string dictionary. The old rows cannot be read
 /// by the new statements, so the shapes are mutually exclusive and the `json` column is an
-/// exact discriminator. This runs at most once per store: after the reset the column is
-/// gone, so the detection cannot match again.
+/// exact discriminator.
+///
+/// The drops and the rebuild marker commit in **one** transaction. Writing the marker
+/// afterwards would leave a window — an interrupt, an OOM kill, a failed write — in which the
+/// edges are gone and nothing records it: the discriminating column would be gone too, so the
+/// next open would create an empty compact table and answer relationship questions with a
+/// confident zero, forever. `interrupted_reset` is the second layer, covering the same state
+/// arrived at by any other route.
 fn reset_legacy_graph_storage(conn: &mut Connection) -> Result<()> {
     let legacy =
         has_column(conn, "graph_edges", "json")? || has_column(conn, "call_sites", "json")?;
-    if !legacy {
+    // A store that has been initialized once always has both tables. If the index has content
+    // but the edge table is missing, its edges were removed by something that did not record
+    // the fact, and they must be rebuilt rather than reported as absent.
+    let interrupted_reset = !legacy
+        && table_exists(conn, "manifests")?
+        && (!table_exists(conn, "graph_edges")? || !table_exists(conn, "call_sites")?);
+    if !legacy && !interrupted_reset {
         return Ok(());
     }
     let tx = conn.transaction().map_err(storage_err)?;
@@ -3449,8 +3525,9 @@ fn reset_legacy_graph_storage(conn: &mut Connection) -> Result<()> {
     ] {
         tx.execute(stmt, []).map_err(storage_err)?;
     }
+    set_schema_meta_flag(&tx, GRAPH_REBUILD_REQUIRED_FLAG)?;
     tx.commit().map_err(storage_err)?;
-    set_schema_meta_flag(conn, GRAPH_REBUILD_REQUIRED_FLAG)
+    Ok(())
 }
 
 /// Whether `table` exists and has `column`. A missing table reports `false`.
@@ -3466,6 +3543,17 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+    .map_err(storage_err)
 }
 
 fn migrate_history_schema(conn: &mut Connection) -> Result<()> {
@@ -4051,7 +4139,7 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact, schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
+        compact, schema_meta_flag, set_schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
         SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
@@ -5745,8 +5833,25 @@ mod tests {
             );
         }
 
-        let migrated_counts = store.graph_schema_counts().unwrap();
-        assert_eq!(migrated_counts.node_types.get("File"), Some(&1));
+        // The surviving nodes are still readable and still true; the per-type edge
+        // statistics are not, and say so rather than reporting a counted zero.
+        assert_eq!(
+            store
+                .node_type_stats()
+                .unwrap()
+                .get("File")
+                .map(|s| s.count),
+            Some(1)
+        );
+        for error in [
+            store.graph_schema_counts().unwrap_err().to_string(),
+            store.edge_type_stats().unwrap_err().to_string(),
+        ] {
+            assert!(
+                error.contains("older index format") && error.contains("ok index"),
+                "expected a rebuild instruction, got: {error}"
+            );
+        }
 
         let node = GraphNode {
             id: NodeId::new("test_node"),
@@ -6215,6 +6320,129 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM graph_strings", [], |row| row.get(0))
             .unwrap();
         assert_eq!(first, second);
+    }
+
+    /// An interrupted reset must not look like a repository with no relationships.
+    ///
+    /// The drops and the marker commit together, so this state is unreachable through the
+    /// migration itself — but it is reachable by anything else that removes the tables, and
+    /// the failure mode is the worst one this format has: successful, confident, zero-edge
+    /// answers forever, because the `json` discriminator is gone too.
+    #[test]
+    fn graph_tables_missing_without_a_marker_report_a_rebuild_rather_than_zero_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store
+                .replace_index(sample_index_data(&make_manifest()))
+                .unwrap();
+            let edge = GraphEdge {
+                id: EdgeId::new("edge:1"),
+                from: NodeId::new("a"),
+                to: NodeId::new("b"),
+                edge_type: GraphEdgeType::Calls,
+                evidence: evidence(),
+                ..Default::default()
+            };
+            store
+                .replace_graph(&[], std::slice::from_ref(&edge))
+                .unwrap();
+            assert_eq!(store.graph_edges_between("a", "b", 10).unwrap().len(), 1);
+
+            // Simulate a reset that lost its marker: tables gone, nothing recording it.
+            let conn = store.connection.lock().unwrap();
+            conn.execute("DROP TABLE graph_edges", []).unwrap();
+            conn.execute("DROP TABLE call_sites", []).unwrap();
+            conn.execute(
+                "DELETE FROM schema_meta WHERE key = ?1",
+                params![GRAPH_REBUILD_REQUIRED_FLAG],
+            )
+            .unwrap();
+        }
+
+        let reopened = SqliteStore::open(&path).unwrap();
+        reopened.initialize().unwrap();
+        let error = reopened
+            .graph_edges_between("a", "b", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("older index format") && error.contains("ok index"),
+            "expected a rebuild instruction, got: {error}"
+        );
+        assert!(schema_meta_flag(
+            &reopened.connection.lock().unwrap(),
+            GRAPH_REBUILD_REQUIRED_FLAG
+        )
+        .unwrap());
+    }
+
+    /// The read-only readers the workspace linker uses carry the gate themselves, because
+    /// that path never builds a store and so never runs `initialize`.
+    #[test]
+    fn read_only_edge_readers_refuse_an_index_awaiting_a_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store
+                .replace_index(sample_index_data(&make_manifest()))
+                .unwrap();
+            store.replace_graph(&[], &[]).unwrap();
+            set_schema_meta_flag(
+                &store.connection.lock().unwrap(),
+                GRAPH_REBUILD_REQUIRED_FLAG,
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA query_only = ON;").unwrap();
+        // Read-only: the marker check must not try to create `schema_meta`.
+        assert!(crate::graph_rebuild_required(&conn).unwrap());
+        for error in [
+            crate::read_graph_edges_by_type(&conn, GraphEdgeType::ExposesEndpoint)
+                .unwrap_err()
+                .to_string(),
+            crate::read_graph_edges_by_source_type(&conn, EvidenceSourceType::StaticAnalysis)
+                .unwrap_err()
+                .to_string(),
+        ] {
+            assert!(
+                error.contains("older index format") && error.contains("ok index"),
+                "expected a rebuild instruction, got: {error}"
+            );
+        }
+    }
+
+    /// A pre-4.0 index opened read-only never runs the reset, so it meets the old table shape
+    /// directly. The failure must name the fix, not an internal column.
+    #[test]
+    fn read_only_edge_readers_translate_a_pre_4_layout_into_a_rebuild_instruction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE graph_edges(id TEXT PRIMARY KEY, from_id TEXT, to_id TEXT, \
+                 edge_type TEXT, source_type TEXT, json TEXT)",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA query_only = ON;").unwrap();
+        let error = crate::read_graph_edges_by_type(&conn, GraphEdgeType::ExposesEndpoint)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("older index format") && error.contains("ok index"),
+            "expected a rebuild instruction, got: {error}"
+        );
+        assert!(
+            !error.contains("from_sid"),
+            "leaked an internal column: {error}"
+        );
     }
 
     fn sample_index_data<'a>(manifest: &'a IndexManifest) -> IndexData<'a> {

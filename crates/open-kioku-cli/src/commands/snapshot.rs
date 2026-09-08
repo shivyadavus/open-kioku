@@ -510,6 +510,18 @@ fn load_workspace_project(
     )
     .with_context(|| format!("opening project index {}", index_path.display()))?;
     conn.execute_batch("PRAGMA query_only = ON;")?;
+    // The linker reads each member index read-only, so nothing here runs the store's rebuild
+    // gate. Without this check a project whose edges are awaiting `ok index` would contribute
+    // zero boundary edges and the workspace report would state, cleanly and wrongly, that it
+    // makes no cross-project calls — which `replace_graph` would then persist.
+    if open_kioku_storage_sqlite::graph_rebuild_required(&conn)? {
+        anyhow::bail!(
+            "project `{}` at {} has no graph edges: they were built by an older index format \
+             and were discarded on open; run `ok index` in that project first",
+            project.name,
+            index_path.display()
+        );
+    }
 
     let nodes = load_graph_nodes_by_id(&conn)?;
     let graph_node_count = nodes.len();

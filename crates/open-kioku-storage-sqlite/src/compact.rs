@@ -292,7 +292,17 @@ pub(crate) fn encode_edge(
     };
     let (path_sid, line_start, line_end) = match &evidence.file_range {
         Some(range) => (
-            Some(strings.intern(tx, &range.path.to_string_lossy())?),
+            // `SharedPath`'s serializer refuses non-UTF-8 rather than emitting something a
+            // reader cannot round-trip; the stored form matches it instead of quietly
+            // substituting replacement characters.
+            Some(strings.intern(
+                tx,
+                range.path.to_str().ok_or_else(|| {
+                    OkError::Storage(
+                        "evidence file range path contains invalid UTF-8 characters".into(),
+                    )
+                })?,
+            )?),
             range.line_range.as_ref().map(|r| r.start as i64),
             range.line_range.as_ref().map(|r| r.end as i64),
         ),
@@ -329,12 +339,17 @@ pub(crate) fn encode_edge(
 }
 
 /// Columns every edge read selects, in the order [`edge_from_row`] expects.
+///
+/// Every join is a LEFT JOIN, including the two endpoints. An inner join would make an edge
+/// whose endpoint dictionary entry went missing disappear from every read with no error —
+/// silently dropping a relationship, which is the one failure this format must not have.
+/// [`edge_from_row`] turns the resulting `NULL` into an explicit error instead.
 pub(crate) const EDGE_SELECT: &str = "\
 SELECT e.id, sf.value, st.value, e.edge_type, e.confidence, e.source_type, ss.value, \
 e.ev_id, ep.value, e.ev_line_start, e.ev_line_end, esy.value, em.value, ei.value, ex.value \
 FROM graph_edges e \
-JOIN graph_strings sf ON sf.sid = e.from_sid \
-JOIN graph_strings st ON st.sid = e.to_sid \
+LEFT JOIN graph_strings sf ON sf.sid = e.from_sid \
+LEFT JOIN graph_strings st ON st.sid = e.to_sid \
 LEFT JOIN graph_strings ss ON ss.sid = e.source_sid \
 LEFT JOIN graph_strings ep ON ep.sid = e.ev_path_sid \
 LEFT JOIN graph_strings esy ON esy.sid = e.ev_symbol_sid \
@@ -391,10 +406,19 @@ pub(crate) fn edge_from_row(row: &Row<'_>) -> Result<GraphEdge> {
         confidence_reason: extra.confidence_reason,
         freshness: extra.evidence_freshness,
     };
+    // An endpoint with no dictionary entry is a damaged row. Reporting it is the point: the
+    // alternative is an edge that quietly stops existing.
+    let endpoint = |index: usize, field: &str| -> Result<String> {
+        get_opt(index)?.ok_or_else(|| {
+            OkError::Storage(format!(
+                "graph edge row has an unresolvable `{field}` endpoint; re-index this repository"
+            ))
+        })
+    };
     Ok(GraphEdge {
         id: open_kioku_core::EdgeId::new(get_string(0)?),
-        from: NodeId::new(get_string(1)?),
-        to: NodeId::new(get_string(2)?),
+        from: NodeId::new(endpoint(1, "from")?),
+        to: NodeId::new(endpoint(2, "to")?),
         edge_type: parse_edge_type(&get_string(3)?)?,
         evidence,
         properties: extra.properties,

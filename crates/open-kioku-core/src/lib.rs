@@ -61,9 +61,10 @@ pub const HISTORY_SCHEMA_VERSION: u32 = 1;
 
 /// Version of the on-disk index layout an [`IndexManifest`] was written for.
 ///
-/// A manifest whose version differs from this one marks every file stale, which is how a
-/// storage-format change forces a full re-index rather than a partial update onto rows the
-/// current reader cannot interpret. Bumped to 2 in 4.0.0 for the compact graph tables.
+/// A stored manifest whose version differs from this one is not partially indexable
+/// (`partial_index_supported`), so the next `ok index` on an index written by an older layout
+/// is a full rebuild rather than an update onto rows the current reader cannot interpret.
+/// Bumped to 2 in 4.0.0 for the compact graph tables.
 pub const INDEX_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -967,8 +968,8 @@ pub enum EvidenceSourceType {
 /// `AnalysisFact` message into the `Evidence` on its edge while the fact itself
 /// is still resident.
 ///
-/// Serializes and deserializes exactly as a JSON string, so the wire format,
-/// the stored `graph_edges.json`, and the golden MCP snapshots are unchanged.
+/// Serializes and deserializes exactly as a JSON string, so the wire format and the golden
+/// MCP snapshots are unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SharedStr(std::sync::Arc<str>);
 
@@ -4005,8 +4006,8 @@ mod tests {
 
     #[test]
     fn evidence_message_deserializes_from_a_plain_string_field() {
-        // Existing rows in graph_edges.json were written when the field was a
-        // String; they must still load.
+        // MCP payloads and stored documents written when this field was a plain `String`
+        // must still load.
         let evidence: Evidence = serde_json::from_str(
             r#"{"id":"e1","source":"s","source_type":"lexical","file_range":null,
                 "symbol_id":null,"confidence":"high","message":"stored as a plain string",
