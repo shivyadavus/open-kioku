@@ -2014,6 +2014,9 @@ struct DoctorReport {
     ok: bool,
     repo: PathBuf,
     checks: Vec<DoctorCheck>,
+    /// Per-language discovered/indexed/skipped counts from the manifest; `None` when
+    /// there is no index or it predates coverage recording.
+    coverage: Option<IndexCoverage>,
     next_steps: Vec<String>,
 }
 

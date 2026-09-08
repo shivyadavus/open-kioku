@@ -3160,3 +3160,94 @@ fn reviewer_benchmark_corpus_passes() {
     );
     assert!(report["failures"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn index_reports_coverage_in_summary_status_and_doctor() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("vendor")).unwrap();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+    // Dropped by the vendor detector and the secret-path rule respectively: the two
+    // kinds of omission coverage exists to make visible.
+    fs::write(repo.join("vendor/dep.rs"), "pub fn vendored() {}\n").unwrap();
+    fs::write(repo.join("config/secrets.json"), "{}\n").unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let indexed = run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let coverage_line = indexed
+        .lines()
+        .find(|line| line.starts_with("coverage: "))
+        .expect("index prints a coverage line");
+    // The judged ratio counts source only (1 of 2 Rust files); the all-languages
+    // ratio is reported beside it and includes the skipped JSON file.
+    assert!(
+        coverage_line.contains("1 of 2 programming-language files indexed (50.0%)"),
+        "{coverage_line}"
+    );
+    assert!(
+        coverage_line.contains("recognised files indexed"),
+        "{coverage_line}"
+    );
+    assert!(coverage_line.contains("1 secret-policy"));
+    assert!(coverage_line.contains("1 vendor"));
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--json").arg("status").arg(repo);
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    let rust = &status["coverage"]["by_language"]["rust"];
+    assert_eq!(rust["discovered"], 2);
+    assert_eq!(rust["indexed"], 1);
+    assert_eq!(rust["skipped"]["vendor"], 1);
+    assert_eq!(
+        status["coverage"]["by_language"]["json"]["skipped"]["secret_policy"],
+        1
+    );
+    assert_eq!(status["quality"]["coverage"]["by_language"]["rust"], *rust);
+
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    assert_eq!(doctor["coverage"]["by_language"]["rust"], *rust);
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "coverage")
+        .expect("doctor has a coverage check");
+    assert_eq!(check["status"], "warn");
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("top skip reasons:"), "{message}");
+    // Two Rust files are under the per-language floor, so no language is named; the
+    // programming-language ratio itself (1 of 2) is what warns.
+    assert!(
+        message.contains("1 of 2 programming-language files indexed (50.0%)"),
+        "{message}"
+    );
+    assert!(!message.contains("under 98%:"), "{message}");
+
+    let doctor_text = run({
+        let mut command = ok();
+        command.arg("doctor").arg(repo);
+        command
+    });
+    assert!(doctor_text.contains("Coverage by language:"));
+    assert!(doctor_text
+        .lines()
+        .any(|line| line.trim_start().starts_with("rust ") && line.contains("50.0%!")));
+}
