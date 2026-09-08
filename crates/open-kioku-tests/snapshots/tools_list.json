@@ -170,7 +170,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry. Use to browse the indexed symbol table or filter by exact substring match. Supports pagination via limit and offset. Do NOT use for fuzzy or ranked symbol search (use search_symbols), for retrieving a symbol's full definition body (use get_definition), or for comprehensive symbol context (use get_symbol_context). This is read-only and reads from the local index only.",
+        "description": "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry. Use to browse the indexed symbol table or filter it by case-insensitive substring. Supports pagination via limit and offset. search_symbols is the same call under another name, so there is no fuzzy or ranked alternative here. Do NOT use for a symbol's defining record (use get_definition) or for its body and surrounding lines (use get_symbol_context). This is read-only and reads from the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -226,7 +226,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Search indexed code symbols (functions, classes, structs, traits, interfaces) by name using fuzzy matching. Returns ranked candidates with symbol name, kind, file path, and line range. Use when an agent has an approximate or partial symbol name and needs fuzzy-ranked candidates from the indexed symbol table. Do NOT use for exact substring inventory (use list_symbols), retrieving a symbol's full body (use get_definition), or comprehensive symbol context with docs (use get_symbol_context). This is read-only and searches the local index only.",
+        "description": "Alias of list_symbols with a query set. Filters indexed symbols by case-insensitive substring against name and qualified name, ordered by qualified name. This is not fuzzy matching and the results are not ranked, so an approximate name does not match. Returns symbol name, kind, file path, and line range. Use when filtering the symbol table by a substring you already know. Do NOT use when the query is only approximate; nothing here is fuzzy or ranked, so a name that shares no substring will not appear at all. For a symbol's defining record use get_definition, for its body use get_symbol_context, and for cross-references use get_references. This is read-only and searches the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -368,7 +368,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Return evaluated configured architecture-policy violations, component mappings, and bounded unknown-edge evidence. Without a policy, returns an explicit unavailable result. Use to inspect evaluated architecture-policy violations with their configured component mappings and bounded unknown-edge evidence. When no policy exists, this returns an explicit unavailable result rather than inferred violations. Do NOT use to validate policy syntax (use architecture_policy_validate), for a policy-only report (use architecture_policy_check), or to explain a specific finding (use architecture_policy_explain). This is read-only.",
+        "description": "Alias of architecture_boundaries: returns the same repository architecture summary, whose violations field is copied from the evaluated policy_check when a policy is configured. Without a policy the components are heuristic and the response reports configured=false with an explicit caveat rather than inferring violations. Use when the violations field of the architecture summary is the part that matters; architecture_boundaries and summarize_architecture return the same object. Do NOT use to validate policy syntax (use architecture_policy_validate), for a policy-only report (use architecture_policy_check), or to explain a specific finding (use architecture_policy_explain). This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {},
@@ -932,7 +932,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Run a hybrid search and return per-result ranking breakdowns including BM25 text relevance, semantic similarity, graph proximity, and evidence spans for each retrieved code snippet. Use when search results need transparent justification before being relied upon in a plan — returns per-result BM25 and semantic score breakdowns, matched evidence spans, and ranking signal weights. Do NOT use for basic search without explanation (use hybrid_search) or when only lexical matches are needed (use search_code). This is read-only and combines the local Tantivy lexical index with the semantic vector index when available.",
+        "description": "Alias of hybrid_search: runs the same query with the same parameters and returns an identical payload. The per-signal score_breakdown and evidence_refs it is named for are already carried by every search result; this tool adds no separate explanation step. Use hybrid_search instead for new work; this name is kept for callers that already reference it. Do NOT expect ranking detail here that hybrid_search does not also return. This is read-only and combines the local Tantivy lexical index with the semantic vector index when available.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -987,7 +987,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Use for experimental local candidate discovery with structure-shaped queries. Currently returns lexical candidates from the local index rather than guaranteed AST-pattern matches; inspect match_reason on each result. Use for experimental local candidate discovery with structure-shaped queries. It currently returns lexical candidates from the local index; inspect each result's match_reason and do not treat it as an AST-pattern match. Use regex_search for literal patterns, get_definition for a known symbol, or search_code for ordinary ranked keyword search. This is read-only.",
+        "description": "Alias of search_code: runs the same ranked lexical BM25 query over indexed chunks. No AST or structural matching exists in this workspace, so a structure-shaped query is treated as ordinary text; inspect match_reason on each result. Use regex_search when the pattern is literal. Use search_code instead for new work; this name is kept for callers that already reference it. Do NOT read a hit as an AST-pattern match: check each result's match_reason. Use regex_search for literal patterns and get_definition for a known symbol. This is read-only.",
         "experimental": true,
         "inputSchema": {
           "properties": {
@@ -1042,7 +1042,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the definition location, file range, and body of a symbol (function, class, struct, trait, module) by its name. Use after resolving a symbol name to retrieve its defining range and body. Prefer search_symbols for candidate discovery and get_symbol_context when surrounding references and documentation are needed. This is read-only.",
+        "description": "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. This returns the record, not the source text; use get_symbol_context for the definition body. Use after resolving a symbol name, when knowing where it lives is enough. Prefer search_symbols or list_symbols for candidate discovery, and get_symbol_context when the definition text and the lines around it are what the task needs. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -1420,7 +1420,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a comprehensive validation plan including static checks (use recommend_validation_plan). This is read-only and analyzes the local index only.",
+        "description": "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact). Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a full evidence-backed pre-edit plan (use plan_change or preflight_change). This is read-only and analyzes the local index only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -2483,7 +2483,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve a concise explanation of one indexed symbol, including its definition range, qualified name, kind (function, class, struct, trait), and direct structural relationships within the codebase. Use for a concise explanation of one known symbol, returning its definition range, qualified name, kind, and direct structural relationships. Do NOT use for a comprehensive context bundle with docs and surrounding code (use get_symbol_context), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
+        "description": "Alias of get_definition: returns the same indexed definition record for one symbol — file, line range, qualified name, kind, confidence, and provenance. It returns no source text and no relationship edges of its own. Use get_definition instead for new work; this name is kept for callers that already reference it. Do NOT use for the definition body and surrounding lines (use get_symbol_context), for call edges (use get_callers or get_callees), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -2625,7 +2625,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Identify test files that should be run to validate changes to one repository-relative file. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use when a broader validation plan including static checks and coverage actions is needed (use recommend_validation_plan) or when checking existing coverage data (use explain_test_coverage). This is read-only.",
+        "description": "Identify test files that should be run to validate changes to one repository-relative file. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use for a full evidence-backed pre-edit plan (use plan_change or preflight_change) or when checking existing coverage data (use explain_test_coverage). recommend_validation_plan is this same call under another name. This is read-only.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -2680,7 +2680,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Recommend a comprehensive validation plan (test targets, coverage checks, static checks) for a file change. Use before finalizing a change to choose tests, static checks, and coverage actions for one path. Prefer find_tests_for_change for test-only recommendations. This is read-only.",
+        "description": "Alias of find_tests_for_change: returns the same ranked test targets for one changed path. Despite the name it produces no static checks and no coverage actions. Use find_tests_for_change instead for new work; this name is kept for callers that already reference it. For a full evidence-backed pre-edit plan use plan_change or preflight_change, and for stored coverage evidence use explain_test_coverage. This is read-only and executes nothing.",
         "experimental": false,
         "inputSchema": {
           "properties": {
@@ -2735,7 +2735,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve stored test-coverage evidence and associated test suites for one repository-relative file or the whole repository. Returns coverage percentages, test file associations, and suite metadata from indexed data. Use to inspect stored test-coverage evidence for one file path or the whole repository. Returns associated test suites, coverage percentage when available, and test file associations from indexed metadata. Do NOT use to decide what tests to run next (use recommend_validation_plan) or to find tests for a specific change (use find_tests_for_change). This is read-only, does not execute any tests, and reports only previously indexed or stored coverage data.",
+        "description": "Retrieve stored test-coverage evidence and associated test suites for one repository-relative file or the whole repository. Returns coverage percentages, test file associations, and suite metadata from indexed data. Use to inspect stored test-coverage evidence for one file path or the whole repository. Returns associated test suites, coverage percentage when available, and test file associations from indexed metadata. Do NOT use to decide what tests to run next (use find_tests_for_change). This is read-only, does not execute any tests, and reports only previously indexed or stored coverage data.",
         "experimental": false,
         "inputSchema": {
           "properties": {
