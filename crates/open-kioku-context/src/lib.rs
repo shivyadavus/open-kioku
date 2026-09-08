@@ -2210,8 +2210,8 @@ fn path_names_primary_anchor(path: &std::path::Path, intent: &TaskSearchIntent) 
 
 /// `generated_paths`: files the index flagged as generated (a "do not edit" banner). They are
 /// indexed so an agent can read them and so derived-file links can be built, but they rank at
-/// the lowest quality tier: on a Python monorepo where every `modeling_*.py` is generated from
-/// a `modular_*.py`, letting them compete as source cost 0.015 R@5 because they share the
+/// the lowest quality tier: on a Python ML library where every implementation module is generated
+/// from a specification module, letting them compete as source cost 0.015 R@5 because they share the
 /// modular file's vocabulary and displaced it.
 fn rerank_fused_for_task_with_files(
     results: Vec<SearchResult>,
@@ -3253,7 +3253,7 @@ mod tests {
 
     #[test]
     fn generated_files_rank_below_source_unless_the_task_names_them() {
-        let intent = TaskSearchIntent::parse("Fix DBRX MoE hidden size");
+        let intent = TaskSearchIntent::parse("Fix Alpha MoE hidden size");
         let result = |path: &str, score: f32| SearchResult {
             path: path.into(),
             line_range: None,
@@ -3267,50 +3267,50 @@ mod tests {
             score_breakdown: Vec::new(),
         };
         let generated: std::collections::BTreeSet<String> =
-            ["src/models/dbrx/modeling_dbrx.py".to_string()]
+            ["src/models/alpha/impl_alpha.py".to_string()]
                 .into_iter()
                 .collect();
         let ranked = rerank_fused_for_task_with_files(
             vec![
-                result("src/models/dbrx/modeling_dbrx.py", 0.9),
-                result("src/models/dbrx/modular_dbrx.py", 0.5),
+                result("src/models/alpha/impl_alpha.py", 0.9),
+                result("src/models/alpha/spec_alpha.py", 0.5),
             ],
             &intent,
             &RetrievalDiagnostics::default(),
             &RankingOptions::default(),
             &generated,
         );
-        assert!(ranked[0].path.ends_with("modular_dbrx.py"));
+        assert!(ranked[0].path.ends_with("spec_alpha.py"));
         assert!(ranked[1]
             .evidence
             .iter()
             .any(|line| line.contains("generated file")));
         // Both files define the same class, so a symbol anchor must not exempt the generated one.
-        let intent = TaskSearchIntent::parse("Fix DbrxAttention rotary embedding");
+        let intent = TaskSearchIntent::parse("Fix AlphaAttention rotary embedding");
         let ranked = rerank_fused_for_task_with_files(
             vec![
-                result("src/models/dbrx/modeling_dbrx.py", 0.9),
-                result("src/models/dbrx/modular_dbrx.py", 0.5),
+                result("src/models/alpha/impl_alpha.py", 0.9),
+                result("src/models/alpha/spec_alpha.py", 0.5),
             ],
             &intent,
             &RetrievalDiagnostics::default(),
             &RankingOptions::default(),
             &generated,
         );
-        assert!(ranked[0].path.ends_with("modular_dbrx.py"));
+        assert!(ranked[0].path.ends_with("spec_alpha.py"));
         // A task that names the generated file's own path is asking for it.
-        let intent = TaskSearchIntent::parse("Regenerate modeling_dbrx after modular change");
+        let intent = TaskSearchIntent::parse("Regenerate impl_alpha after spec change");
         let ranked = rerank_fused_for_task_with_files(
             vec![
-                result("src/models/dbrx/modeling_dbrx.py", 0.9),
-                result("src/models/dbrx/modular_dbrx.py", 0.5),
+                result("src/models/alpha/impl_alpha.py", 0.9),
+                result("src/models/alpha/spec_alpha.py", 0.5),
             ],
             &intent,
             &RetrievalDiagnostics::default(),
             &RankingOptions::default(),
             &generated,
         );
-        assert!(ranked[0].path.ends_with("modeling_dbrx.py"));
+        assert!(ranked[0].path.ends_with("impl_alpha.py"));
     }
 
     #[test]

@@ -1369,8 +1369,8 @@ impl Indexer {
                 continue;
             }
             let content = String::from_utf8_lossy(&bytes);
-            // Generated source is indexed and flagged, never dropped: on a Python monorepo
-            // whose `modeling_*.py` files carry a "do not edit" banner, skipping them removed
+            // Generated source is indexed and flagged, never dropped: on a Python ML library
+            // whose generated implementation files carry a "do not edit" banner, skipping them removed
             // 394 files and a tenth of the files real commits went on to change. Ranking
             // decides what a generated file is worth; the index must still know it exists.
             let is_generated = likely_generated(&content);
@@ -2660,7 +2660,7 @@ fn is_programming_language(language: &Language) -> bool {
 
 /// Paths that hold key material or environment secrets are never read. A *programming-language*
 /// source file is only blocked by the strict list (key-material extensions and the `.env`,
-/// `.aws`, `.ssh` entries) because a class named `RepositoryS3BasicCredentialsRestIT` or a
+/// `.aws`, `.ssh` entries) because a class named `BasicCredentialsProviderIT` or a
 /// module named `secrets.go` is code, not a secret; the loose rule silently dropped 25 Java
 /// files from one repository. Data, config, and prose files (`credentials.json`,
 /// `secrets.yaml`, `SECRETS.md`) keep the loose name rule, because chunk contents are not
