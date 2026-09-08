@@ -119,6 +119,8 @@ if [[ -f "$DEMO_HTML" ]]; then
   sed -i.bak -E "s/Open Kioku v[0-9]+\.[0-9]+\.[0-9]+/Open Kioku v$VERSION/g" "$DEMO_HTML"
   # Terminal animation install output
   sed -i.bak -E "s/installed ok [0-9]+\.[0-9]+\.[0-9]+/installed ok $VERSION/g" "$DEMO_HTML"
+  # JSON-LD SoftwareApplication metadata
+  sed -i.bak -E "s/\"softwareVersion\":\"[0-9]+\.[0-9]+\.[0-9]+\"/\"softwareVersion\":\"$VERSION\"/g" "$DEMO_HTML"
   rm -f "${DEMO_HTML}.bak"
   echo "  ✓ demo/index.html"
 fi
