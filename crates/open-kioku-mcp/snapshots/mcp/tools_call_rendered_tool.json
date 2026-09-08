@@ -1,0 +1,18 @@
+{
+  "id": "tools-call-rendered",
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "# Task: publish invoice\n\n## Confidence\n\n- Overall: `Medium` (`0.55`)\n- Caveats:\n  - exact symbol/reference evidence is absent\n  - no validation target was selected\n  - runtime corroboration is absent\n- Components:\n  - `boundary_tightness` score `1.00`, weight `0.15`, contribution `0.15`\n  - `evidence_density` score `1.00`, weight `0.10`, contribution `0.10`\n  - `exact_references` score `0.25`, weight `0.20`, contribution `0.05`\n  - `negative_evidence` score `1.00`, weight `0.15`, contribution `0.15`\n  - `runtime_corroboration` score `0.25`, weight `0.05`, contribution `0.01`\n  - `task_relevance` score `1.00`, weight `0.20`, contribution `0.20`\n  - `test_coverage` score `0.20`, weight `0.10`, contribution `0.02`\n  - `validation_availability` score `0.20`, weight `0.15`, contribution `0.03`\n## Retrieval\n\n- Task family: `General` (confidence `0.50`)\n  - Routing rationale: no deterministic task-family rule matched; using conservative general retrieval\n- Attempted: `lexical, document, exact_semantic, graph, validation, git_history, runtime`\n- Succeeded: `lexical, document, exact_semantic, graph, validation`\n- Context budget: `4611686018427387903` tokens (`4611686018427387903` available after reserves); selected estimate `31`\n- Selected source mix: `lexical=1`\n- Exact-evidence selections: `0`; ambiguity/unresolved signals: `0`\n- Retrieval confidence: `Medium` (qualitative ContextPack confidence, not a calibrated probability)\n- Caveats:\n  - git-history candidates need an exact symbol or path anchor or a near-identical past commit subject; loose commit-message similarity is not a retrieval signal\n  - no runtime traces, logs, or incidents are ingested for this repository\n\n\n## Primary Context\n\n### src/billing.rs\nLines 7-9\n```\npub fn publish_invoice_event() {}\n```\n\n## Supporting Impact\n\n\n## Runtime Signals\n\n- None found\n\n## Validation Plan\n\n",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "bytes": 1862,
+      "rendered_in": "content",
+      "truncated": false
+    }
+  }
+}

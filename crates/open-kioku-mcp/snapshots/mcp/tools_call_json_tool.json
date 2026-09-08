@@ -1,0 +1,18 @@
+{
+  "id": "tools-call-json",
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "{\n  \"languages\": [\n    \"Rust\"\n  ]\n}",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "languages": [
+        "Rust"
+      ]
+    }
+  }
+}

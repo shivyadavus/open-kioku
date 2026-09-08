@@ -1084,9 +1084,12 @@ fn call_tool<'a>(
                 let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
                 let rendered = value.is_string();
                 let structured_content = structured_content_for(value, &text, text_truncated);
+                // `isError` is optional in the MCP schema and defaults to false, but a client
+                // that reads it should not have to infer success from a missing field.
                 let mut response = json!({
                     "content": [{"type": "text", "text": text}],
-                    "structuredContent": structured_content
+                    "structuredContent": structured_content,
+                    "isError": false
                 });
                 if text_truncated {
                     response["truncated"] = json!(true);
@@ -3138,6 +3141,17 @@ mod tests {
             (
                 "tool_error.json",
                 r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
+            ),
+            // The two shapes a successful `tools/call` can take. Only the error envelope was
+            // pinned before, so #389 changed the wire shape of every rendered response without
+            // a snapshot moving (#392).
+            (
+                "tools_call_json_tool.json",
+                r#"{"jsonrpc":"2.0","id":"tools-call-json","method":"tools/call","params":{"name":"list_languages","arguments":{}}}"#,
+            ),
+            (
+                "tools_call_rendered_tool.json",
+                r#"{"jsonrpc":"2.0","id":"tools-call-rendered","method":"tools/call","params":{"name":"build_context_pack","arguments":{"task":"publish invoice","limit":1,"format":"markdown"}}}"#,
             ),
             (
                 "pagination.json",

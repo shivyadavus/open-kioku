@@ -5,6 +5,7 @@
       "type": "text"
     }
   ],
+  "isError": false,
   "structuredContent": {
     "confidence_breakdown": {
       "blockers": [
