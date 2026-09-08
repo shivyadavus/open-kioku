@@ -24,6 +24,9 @@ use std::path::Path;
 
 /// Source label of a declared-origin fact; the graph builder attaches the proof by it.
 pub const DECLARED_ORIGIN_SOURCE: &str = open_kioku_core::DERIVED_FILE_DECLARED_ORIGIN_SOURCE;
+/// A banner whose named origin resolved but shares no directory or stem with it. Emitted so the
+/// claim is visible, deliberately without the proof label so it can never become authoritative.
+pub const UNCORROBORATED_ORIGIN_SOURCE: &str = "open-kioku-derived/uncorroborated-origin";
 /// Source label of a test paired with its subject by file-name convention.
 pub const TEST_PAIRING_SOURCE: &str = "open-kioku-derived/test-pairing";
 /// Source label of a declaration file paired with its implementation by extension.
@@ -55,29 +58,22 @@ struct DerivedPair<'a> {
 struct FileIndex<'a> {
     by_path: HashMap<String, &'a File>,
     by_stem: HashMap<String, Vec<&'a File>>,
-    by_name: HashMap<String, Vec<&'a File>>,
 }
 
 impl<'a> FileIndex<'a> {
     fn new(files: &'a [File]) -> Self {
         let mut by_path = HashMap::with_capacity(files.len());
         let mut by_stem: HashMap<String, Vec<&File>> = HashMap::new();
-        let mut by_name: HashMap<String, Vec<&File>> = HashMap::new();
         for file in files {
             let path = normalize(&file.path.to_string_lossy());
             let (_, name) = split_dir(&path);
-            by_name.entry(name.to_string()).or_default().push(file);
             by_stem
                 .entry(stem(name).to_string())
                 .or_default()
                 .push(file);
             by_path.insert(path, file);
         }
-        Self {
-            by_path,
-            by_stem,
-            by_name,
-        }
+        Self { by_path, by_stem }
     }
 
     fn get(&self, path: &str) -> Option<&'a File> {
@@ -85,7 +81,7 @@ impl<'a> FileIndex<'a> {
     }
 
     fn in_dir(&self, dir: &str, name: &str) -> Option<&'a File> {
-        self.get(&join(dir, name))
+        self.get(&join(dir, name)?)
     }
 }
 
@@ -144,34 +140,78 @@ fn declared_origin_pair<'a>(
     let origin = generated_origin(&read_header(&root.join(&file.path))?)?;
     let derived_path = normalize(&file.path.to_string_lossy());
     let (dir, _) = split_dir(&derived_path);
+    // Only the path the banner actually names, read from the repository root or relative to the
+    // generated file. A bare-name search over the whole index used to run when neither resolved —
+    // which is exactly when the header is wrong or points outside the index — and bound the file
+    // to an unrelated same-named one while still calling it repository truth.
     let target = index
         .get(&origin.path)
-        .or_else(|| index.get(&join(dir, &origin.path)))
-        .or_else(|| {
-            let name = origin.path.rsplit('/').next()?;
-            match index.by_name.get(name).map(Vec::as_slice) {
-                Some([only]) => Some(*only),
-                _ => None,
-            }
-        })?;
+        .or_else(|| join(dir, &origin.path).and_then(|joined| index.get(&joined)))?;
     if target.id == file.id {
         return None;
     }
+    let origin_path = normalize(&target.path.to_string_lossy());
+    // `likely_generated` is a prose match over eight lines — it was calibrated for a ranking
+    // demotion, where a false positive costs one rank. Promoting it to the workspace's newest
+    // authoritative proof needs a second, structural agreement: the two files sit in the same
+    // directory, or one stem contains the other (`modeling_x` <-> `modular_x`, `client.d` <->
+    // `client`). Without it the pairing is still emitted, but as a proofless heuristic that can
+    // never be presented as proven impact.
+    let corroborated = declared_origin_is_corroborated(&derived_path, &origin_path);
     Some(DerivedPair {
         derived: file,
         origin: target,
-        source: DECLARED_ORIGIN_SOURCE,
-        confidence: Confidence::High,
-        source_type: EvidenceSourceType::StaticAnalysis,
+        source: if corroborated {
+            DECLARED_ORIGIN_SOURCE
+        } else {
+            UNCORROBORATED_ORIGIN_SOURCE
+        },
+        confidence: if corroborated {
+            Confidence::High
+        } else {
+            Confidence::Medium
+        },
+        source_type: if corroborated {
+            EvidenceSourceType::StaticAnalysis
+        } else {
+            EvidenceSourceType::Heuristic
+        },
         range: Some(LineRange {
             start: origin.line,
             end: origin.line,
         }),
-        message: format!(
-            "header declares `{}` as the file it was generated from",
-            origin.path
-        ),
+        message: if corroborated {
+            format!(
+                "header declares `{}` as the file it was generated from",
+                origin.path
+            )
+        } else {
+            format!(
+                "header declares `{}` as its origin, but the two files share no directory or stem",
+                origin.path
+            )
+        },
     })
+}
+
+/// Structural agreement with the banner's claim: same directory, or one file stem contains the
+/// other. Both are properties of the paths, not of the prose that made the claim.
+fn declared_origin_is_corroborated(derived_path: &str, origin_path: &str) -> bool {
+    let (derived_dir, derived_name) = split_dir(derived_path);
+    let (origin_dir, origin_name) = split_dir(origin_path);
+    if derived_dir == origin_dir {
+        return true;
+    }
+    let derived_stem = stem(strip_declaration_suffix(derived_name));
+    let origin_stem = stem(strip_declaration_suffix(origin_name));
+    !derived_stem.is_empty()
+        && !origin_stem.is_empty()
+        && (derived_stem.contains(origin_stem) || origin_stem.contains(derived_stem))
+}
+
+/// `foo.d.ts` stems to `foo`, not `foo.d`.
+fn strip_declaration_suffix(name: &str) -> &str {
+    name.strip_suffix(".d.ts").unwrap_or(name)
 }
 
 fn read_header(path: &Path) -> Option<String> {
@@ -381,23 +421,26 @@ fn split_dir(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
-fn join(dir: &str, name: &str) -> String {
-    if dir.is_empty() {
-        return normalize(name);
-    }
-    // A header may name its origin relative to the generated file with `../`.
-    let mut segments = dir.split('/').collect::<Vec<_>>();
+/// Resolve a header's origin relative to the generated file's directory. A header may name its
+/// origin with `../`; one that climbs past the repository root is pointing outside the index and
+/// resolves to nothing. Silently clamping it (`Vec::pop` on an empty vector is a no-op) turned
+/// `../../../shared/schema.ts` into an in-repo `shared/schema.ts` and bound an unrelated file.
+fn join(dir: &str, name: &str) -> Option<String> {
     let name = normalize(name);
+    if dir.is_empty() {
+        return (!name.starts_with("../")).then_some(name);
+    }
+    let mut segments = dir.split('/').collect::<Vec<_>>();
     for segment in name.split('/') {
         match segment {
             "" | "." => {}
             ".." => {
-                segments.pop();
+                segments.pop()?;
             }
             other => segments.push(other),
         }
     }
-    segments.join("/")
+    (!segments.is_empty()).then(|| segments.join("/"))
 }
 
 fn stem(name: &str) -> &str {
@@ -447,6 +490,11 @@ mod tests {
                         "test"
                     }
                     DECLARATION_PAIRING_SOURCE => "declaration",
+                    UNCORROBORATED_ORIGIN_SOURCE => {
+                        assert_eq!(fact.confidence, Confidence::Medium);
+                        assert_eq!(fact.source_type, EvidenceSourceType::Heuristic);
+                        "uncorroborated"
+                    }
                     other => panic!("unexpected source {other}"),
                 };
                 (
@@ -483,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn a_banner_origin_resolves_relative_to_the_generated_file_or_by_unique_name() {
+    fn a_banner_origin_resolves_relative_to_the_generated_file() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("pkg/gen")).unwrap();
         fs::create_dir_all(root.path().join("pkg/schema")).unwrap();
@@ -492,40 +540,96 @@ mod tests {
             "// Code generated by gen-client from ../schema/client.schema.ts. DO NOT EDIT.\n",
         )
         .unwrap();
-        fs::write(
-            root.path().join("pkg/gen/types.ts"),
-            "// Code generated by gen-types from types.source.ts; DO NOT EDIT.\n",
-        )
-        .unwrap();
-        fs::write(
-            root.path().join("pkg/gen/dup.ts"),
-            "// Code generated from dup.source.ts; DO NOT EDIT.\n",
-        )
-        .unwrap();
         let files = vec![
             file("pkg/gen/client.ts", Language::TypeScript, true),
             file("pkg/schema/client.schema.ts", Language::TypeScript, false),
-            file("pkg/gen/types.ts", Language::TypeScript, true),
-            file("pkg/schema/types.source.ts", Language::TypeScript, false),
-            file("pkg/gen/dup.ts", Language::TypeScript, true),
-            file("pkg/a/dup.source.ts", Language::TypeScript, false),
-            file("pkg/b/dup.source.ts", Language::TypeScript, false),
         ];
-        let found = pairs(root.path(), &files);
-        assert!(found.contains(&(
-            "pkg/gen/client.ts".into(),
-            "pkg/schema/client.schema.ts".into(),
-            "declared"
-        )));
-        assert!(found.contains(&(
-            "pkg/gen/types.ts".into(),
-            "pkg/schema/types.source.ts".into(),
-            "declared"
-        )));
-        // Two files carry the declared name: not a fact, so no edge.
-        assert!(!found
-            .iter()
-            .any(|(derived, _, _)| derived == "pkg/gen/dup.ts"));
+        assert_eq!(
+            pairs(root.path(), &files),
+            vec![(
+                "pkg/gen/client.ts".into(),
+                "pkg/schema/client.schema.ts".into(),
+                "declared"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_banner_naming_a_path_that_does_not_resolve_binds_to_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("pkg/gen")).unwrap();
+        // The named path is not indexed. The only file with that basename lives somewhere
+        // unrelated; binding to it would report a relationship the banner never claimed.
+        fs::write(
+            root.path().join("pkg/gen/user.go"),
+            "// Code generated by protoc from proto/v1/user.proto. DO NOT EDIT.\n",
+        )
+        .unwrap();
+        let files = vec![
+            file("pkg/gen/user.go", Language::Go, true),
+            file("third_party/legacy/user.proto", Language::Go, false),
+        ];
+        assert!(pairs(root.path(), &files).is_empty());
+    }
+
+    #[test]
+    fn a_banner_origin_that_climbs_past_the_root_binds_to_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("pkg/gen")).unwrap();
+        fs::write(
+            root.path().join("pkg/gen/schema.ts"),
+            "// Code generated from ../../../shared/schema.ts; DO NOT EDIT.\n",
+        )
+        .unwrap();
+        let files = vec![
+            file("pkg/gen/schema.ts", Language::TypeScript, true),
+            // Same name, inside the repository: the clamped path used to land here.
+            file("shared/schema.ts", Language::TypeScript, false),
+        ];
+        assert!(pairs(root.path(), &files).is_empty());
+        assert_eq!(join("pkg/gen", "../../../shared/schema.ts"), None);
+        assert_eq!(
+            join("pkg/gen", "../schema/x.ts").as_deref(),
+            Some("pkg/schema/x.ts")
+        );
+    }
+
+    #[test]
+    fn a_banner_the_paths_do_not_corroborate_is_emitted_without_the_proof_label() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        // A fixture whose header quotes a banner. The named file exists, so the reference
+        // resolves — but nothing structural agrees, so it must not mint an authoritative proof.
+        fs::write(
+            root.path().join("docs/sample_output.py"),
+            "# This file was automatically generated from src/unrelated_helper.py.\n",
+        )
+        .unwrap();
+        let files = vec![
+            file("docs/sample_output.py", Language::Python, true),
+            file("src/unrelated_helper.py", Language::Python, false),
+        ];
+        assert_eq!(
+            pairs(root.path(), &files),
+            vec![(
+                "docs/sample_output.py".into(),
+                "src/unrelated_helper.py".into(),
+                "uncorroborated"
+            )]
+        );
+        assert!(declared_origin_is_corroborated(
+            "src/models/orbit/modeling_orbit.py",
+            "src/models/orbit/modular_orbit.py"
+        ));
+        assert!(declared_origin_is_corroborated(
+            "gen/client.d.ts",
+            "src/client.ts"
+        ));
+        assert!(!declared_origin_is_corroborated(
+            "docs/sample_output.py",
+            "src/unrelated_helper.py"
+        ));
     }
 
     #[test]
