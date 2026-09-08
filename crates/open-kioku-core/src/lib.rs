@@ -1583,6 +1583,50 @@ pub struct Symbol {
     pub visibility: Visibility,
 }
 
+/// A symbol together with as much of its definition as the index can actually
+/// prove, plus a plain statement of whatever it could not.
+///
+/// Every text field here is recovered from indexed chunk text. Nothing is read
+/// back from the working tree and nothing is inferred, so an empty field means
+/// the evidence is missing — which `caveats` says out loud rather than letting
+/// the caller read absence as a short definition.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolContext {
+    pub symbol: Symbol,
+    /// Repository-relative path of the defining file, when its row is still indexed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Definition text recovered from the indexed chunks covering the symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Lines `body` actually spans, which is not always the symbol's own range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_range: Option<LineRange>,
+    /// Indexed lines immediately above the definition, verbatim and in order.
+    /// Documentation comments appear here when the indexer chunked them; they
+    /// are never parsed out or synthesized, and the field stays empty when the
+    /// lines above the definition fall outside every chunk.
+    #[serde(default)]
+    pub leading_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leading_range: Option<LineRange>,
+    /// Indexed lines immediately below `body`, verbatim and in order.
+    #[serde(default)]
+    pub trailing_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_range: Option<LineRange>,
+    /// True when the definition ran past the bound and was cut short.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Where each returned span came from.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// What is missing, and why the caller should not read more into this
+    /// bundle than the index supports.
+    #[serde(default)]
+    pub caveats: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolOccurrence {
     pub symbol_id: SymbolId,
