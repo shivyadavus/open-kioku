@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "proof_kind": "anonymized_large_java_validation",
+  "proof_kind": "large_java_validation",
   "recorded_at": "2026-08-23",
   "release": {
     "version": "3.0.4",
