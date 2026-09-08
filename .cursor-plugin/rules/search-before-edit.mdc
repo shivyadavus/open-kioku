@@ -6,6 +6,6 @@ alwaysApply: false
 
 # Search before editing
 
-Before modifying any source file that has not been read in this session, call `search_code` or `resolve_symbol` via Open Kioku to confirm the current state of the code.
+Before modifying any source file that has not been read in this session, call `search_code` or `get_definition` via Open Kioku to confirm the current state of the code.
 
 Do not assume file contents based on filenames or prior context. Codebase state may have changed.
