@@ -895,6 +895,8 @@ enum ArchitectureCommand {
     Drift,
     Detect,
     Boundaries,
+    /// Components, configured policy, and the evaluated policy check in one report.
+    Summary,
     Violations,
     Bench(ArchitectureBenchArgs),
     Fleet {

@@ -1301,9 +1301,9 @@ fn change_boundary(
         }],
         signal_hooks: BoundarySignalHooks {
             architecture_components: vec![
-                "architecture_boundaries".into(),
-                "architecture_violations".into(),
-                "architecture_policy_check".into(),
+                "ok architecture summary".into(),
+                "ok architecture violations".into(),
+                "ok architecture policy check".into(),
             ],
             ownership_sources: vec!["CODEOWNERS".into(), "git_history".into()],
             cochange_sources: vec!["similar_change_overlap".into(), "historical_prs".into()],
