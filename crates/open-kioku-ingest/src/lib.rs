@@ -295,9 +295,42 @@ impl Default for Indexer {
     }
 }
 
+/// Why one file was dropped from the parse phase. Recorded as a `SkipReason::Error` skip so the
+/// omission stays visible in `skip_counts` / `skipped_paths` instead of aborting the index.
+struct ParseFailure {
+    source: SkipSource,
+    message: String,
+}
+
 impl Indexer {
     pub fn index_repo(&self, root: impl AsRef<Path>, config: &OkConfig) -> Result<IndexSnapshot> {
         self.index_repo_with_progress(root, config, |_| {})
+    }
+
+    /// Reads and parses one discovered file. A file that vanished or lost its permissions between
+    /// discovery and parsing is a filesystem skip; a grammar or heuristic that panics on the
+    /// file's content is a parser skip. The panic payload is deliberately not recorded: it can
+    /// quote the source text around the failing byte, and parser messages stay redacted.
+    /// `AssertUnwindSafe` holds because the parser is `Sync` and borrowed immutably; the only
+    /// other state the closure touches is the local content buffer, which is dropped either way.
+    fn parse_file(
+        &self,
+        root: &Path,
+        file: &File,
+        build_hint: Option<&str>,
+    ) -> std::result::Result<open_kioku_parse::ParsedFile, ParseFailure> {
+        let bytes = fs::read(root.join(&file.path)).map_err(|err| ParseFailure {
+            source: SkipSource::Filesystem,
+            message: err.to_string(),
+        })?;
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.parser.parse_with_hint(file, &content, build_hint)
+        }))
+        .map_err(|_| ParseFailure {
+            source: SkipSource::Parser,
+            message: "parser panicked on this file; its content was not indexed".to_string(),
+        })
     }
 
     pub fn index_repo_with_history(
@@ -498,14 +531,10 @@ impl Indexer {
                 .warnings(scan.warnings.clone()),
         );
         let parsed_count = AtomicUsize::new(0);
-        let parsed = files
+        let outcomes = files
             .par_iter()
-            .map(|file| -> Result<_> {
-                let bytes = fs::read(root.join(&file.path))?;
-                let content = String::from_utf8_lossy(&bytes).into_owned();
-                let parsed = self
-                    .parser
-                    .parse_with_hint(file, &content, build_hint.as_deref());
+            .map(|file| {
+                let outcome = self.parse_file(&root, file, build_hint.as_deref());
                 let indexed_files = parsed_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if should_emit_progress(indexed_files, files.len()) {
                     emit_progress(
@@ -518,9 +547,48 @@ impl Indexer {
                             .total(Some(files.len())),
                     );
                 }
-                Ok(parsed)
+                outcome
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
+        // A file that could not be read or parsed is dropped from the index and recorded as a
+        // skip; the rest of the repository still indexes. Aborting here left the user with an
+        // empty `.ok/` and the same failure on retry (#350).
+        let mut skipped_paths = scan.skipped_paths;
+        let mut coverage = scan.coverage;
+        let mut parse_warnings = Vec::new();
+        let mut kept_files = Vec::with_capacity(files.len());
+        let mut parsed = Vec::with_capacity(files.len());
+        for (file, outcome) in files.into_iter().zip(outcomes) {
+            match outcome {
+                Ok(parsed_file) => {
+                    kept_files.push(file);
+                    parsed.push(parsed_file);
+                }
+                Err(failure) => {
+                    parse_warnings.push(format!(
+                        "skipped {}: {}",
+                        file.path.display(),
+                        failure.message
+                    ));
+                    // Discovery already counted this file as indexed; move it so coverage keeps
+                    // reporting `discovered == indexed + sum(skipped)` per language.
+                    if is_supported_code(&file.language) {
+                        coverage.record_indexed_dropped(
+                            &file.language,
+                            file.is_generated,
+                            SkipReason::Error,
+                        );
+                    }
+                    skipped_paths.push(SkippedPath {
+                        path: file.path,
+                        reason: SkipReason::Error,
+                        source: failure.source,
+                        safe_to_show: true,
+                    });
+                }
+            }
+        }
+        let files = kept_files;
         // Move parse output into the per-kind collections in one consuming pass, then release
         // the parsed corpus immediately. Cloning field-by-field kept a duplicate of every chunk
         // text, symbol, and occurrence alive for the rest of indexing, which dominated peak
@@ -557,6 +625,8 @@ impl Indexer {
                 .scanned(files.len())
                 .indexed(files.len())
                 .total(Some(files.len()))
+                .skipped(skipped_paths.len())
+                .warnings(parse_warnings)
                 .nodes_added(files.len() + symbols.len() + chunks.len() + tests.len()),
         );
 
@@ -1070,8 +1140,8 @@ impl Indexer {
             quality_notes: &mode_notes,
             mode,
             phase_reports: &phase_reports,
-            skipped_paths: &scan.skipped_paths,
-            coverage: Some(scan.coverage.clone()),
+            skipped_paths: &skipped_paths,
+            coverage: Some(coverage),
         });
         let resolution_quality = if resolution_mode == open_kioku_config::ResolutionMode::Legacy {
             None
@@ -1105,7 +1175,7 @@ impl Indexer {
                 analysis_facts,
                 scip: scip_report,
                 phase_reports,
-                skipped_paths: scan.skipped_paths,
+                skipped_paths,
                 scopes,
                 bindings,
                 call_sites,
@@ -1294,9 +1364,20 @@ impl Indexer {
                 );
                 continue;
             }
-            let metadata = entry
-                .metadata()
-                .map_err(|err| OkError::Index(err.to_string()))?;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    skip_unreadable(
+                        root,
+                        path,
+                        &language,
+                        &err.to_string(),
+                        &mut ledger,
+                        &mut warnings,
+                    );
+                    continue;
+                }
+            };
             if metadata.len() > max_size {
                 ledger.skip(
                     root,
@@ -1311,7 +1392,20 @@ impl Indexer {
             if config.documents.enabled {
                 if let Some(document_type) = document_type_for_path(&rel, &document_plain_text) {
                     let document_started = Instant::now();
-                    let bytes = fs::read(path)?;
+                    let bytes = match fs::read(path) {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            skip_unreadable(
+                                root,
+                                path,
+                                &language,
+                                &err.to_string(),
+                                &mut ledger,
+                                &mut warnings,
+                            );
+                            continue;
+                        }
+                    };
                     if bytes.contains(&0) {
                         document_elapsed_ms = document_elapsed_ms.saturating_add(
                             u64::try_from(document_started.elapsed().as_millis())
@@ -1378,7 +1472,20 @@ impl Indexer {
                 );
                 continue;
             }
-            let bytes = fs::read(path)?;
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    skip_unreadable(
+                        root,
+                        path,
+                        &language,
+                        &err.to_string(),
+                        &mut ledger,
+                        &mut warnings,
+                    );
+                    continue;
+                }
+            };
             if bytes.contains(&0) {
                 ledger.skip(
                     root,
@@ -2715,6 +2822,28 @@ fn push_skip(
     });
 }
 
+/// A file the walker listed but the indexer could not open. The path passed every policy check
+/// before we tried to read it, so showing it is safe; the OS message carries no file content.
+fn skip_unreadable(
+    root: &Path,
+    path: &Path,
+    language: &Language,
+    error: &str,
+    ledger: &mut ScanLedger,
+    warnings: &mut Vec<String>,
+) {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    warnings.push(format!("skipped {}: {error}", rel.display()));
+    ledger.skip(
+        root,
+        path,
+        language,
+        SkipReason::Error,
+        SkipSource::Filesystem,
+        true,
+    );
+}
+
 fn skip_counts(skipped_paths: &[SkippedPath]) -> BTreeMap<SkipReason, usize> {
     let mut counts = BTreeMap::new();
     for skipped in skipped_paths {
@@ -3716,5 +3845,117 @@ mod document_corpus_acceptance_hardening_tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("disabled by configuration")));
+    }
+}
+
+#[cfg(test)]
+mod per_file_failure_tests {
+    use super::*;
+    use open_kioku_parse::ParsedFile;
+
+    /// Stands in for a grammar that crashes on one file's content (#347 was a slice landing
+    /// inside a multi-byte character); every other file parses as empty.
+    struct PanicsOnMarker;
+
+    impl Parser for PanicsOnMarker {
+        fn parse_with_hint(&self, _file: &File, content: &str, _hint: Option<&str>) -> ParsedFile {
+            assert!(!content.contains("boom"), "simulated parser crash");
+            ParsedFile {
+                syntax: Default::default(),
+                chunks: Vec::new(),
+                analysis_facts: Vec::new(),
+                tests: Vec::new(),
+            }
+        }
+    }
+
+    fn quiet_config() -> OkConfig {
+        let mut config = OkConfig::default();
+        config.scip.enabled = false;
+        config.history.enabled = false;
+        config.documents.enabled = false;
+        config
+    }
+
+    #[test]
+    fn file_removed_between_discovery_and_parse_is_a_filesystem_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = File {
+            id: FileId::new("gone"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/gone.rs"),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: String::new(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let failure = Indexer::default()
+            .parse_file(dir.path(), &file, None)
+            .expect_err("a missing file must not parse");
+        assert_eq!(failure.source, SkipSource::Filesystem);
+        assert!(!failure.message.is_empty());
+    }
+
+    #[test]
+    fn parser_panic_on_one_file_is_recorded_and_the_index_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/fine.rs"), "pub fn fine() {}\n").unwrap();
+        fs::write(dir.path().join("src/bad.rs"), "pub fn boom() {}\n").unwrap();
+        let indexer = Indexer {
+            parser: Box::new(PanicsOnMarker),
+        };
+        let snapshot = indexer
+            .index_repo(dir.path(), &quiet_config())
+            .expect("one crashing file must not abort the index");
+
+        let paths: Vec<_> = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, vec!["src/fine.rs"]);
+        assert_eq!(snapshot.manifest.file_count, 1);
+        let skipped: Vec<_> = snapshot
+            .skipped_paths
+            .iter()
+            .filter(|skip| skip.reason == SkipReason::Error)
+            .collect();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, PathBuf::from("src/bad.rs"));
+        assert_eq!(skipped[0].source, SkipSource::Parser);
+        assert_eq!(
+            snapshot
+                .manifest
+                .quality
+                .skip_counts
+                .get(&SkipReason::Error),
+            Some(&1)
+        );
+        assert!(snapshot
+            .phase_reports
+            .iter()
+            .any(|report| report.warnings.iter().any(|w| w.contains("src/bad.rs"))));
+
+        // The dropped file must move from indexed to skipped in coverage, or the ratio would
+        // claim a file the index does not hold.
+        let coverage = snapshot
+            .manifest
+            .quality
+            .coverage
+            .as_ref()
+            .expect("a full index records coverage");
+        assert_eq!(coverage.discovered, 2);
+        assert_eq!(coverage.indexed, 1);
+        assert_eq!(coverage.skipped.get(&SkipReason::Error), Some(&1));
+        let rust = coverage
+            .by_language
+            .get(Language::Rust.key())
+            .expect("rust coverage is recorded");
+        assert_eq!(
+            rust.discovered,
+            rust.indexed + rust.skipped.values().sum::<usize>()
+        );
     }
 }
