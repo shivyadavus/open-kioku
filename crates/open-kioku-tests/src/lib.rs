@@ -1391,23 +1391,23 @@ mod tests {
     }
 
     #[test]
-    fn gradle_command_scopes_elasticsearch_java_tests() {
+    fn gradle_command_scopes_java_tests_to_their_subproject() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(root.join("settings.gradle"), "").unwrap();
-        std::fs::create_dir_all(root.join("x-pack/plugin/ml")).unwrap();
-        std::fs::write(root.join("x-pack/plugin/ml/build.gradle"), "").unwrap();
+        std::fs::create_dir_all(root.join("plugins/ml")).unwrap();
+        std::fs::write(root.join("plugins/ml/build.gradle"), "").unwrap();
 
         let command = super::gradle_test_command(
             root,
-            Path::new("x-pack/plugin/ml/src/test/java/org/elasticsearch/xpack/ml/inference/assignment/planning/AssignmentPlannerTests.java"),
+            Path::new("plugins/ml/src/test/java/com/acme/ml/inference/assignment/planning/AssignmentPlannerTests.java"),
             "AssignmentPlannerTests",
         )
         .unwrap();
 
         assert_eq!(
             command,
-            "./gradlew :x-pack:plugin:ml:test --tests org.elasticsearch.xpack.ml.inference.assignment.planning.AssignmentPlannerTests"
+            "./gradlew :plugins:ml:test --tests com.acme.ml.inference.assignment.planning.AssignmentPlannerTests"
         );
     }
 

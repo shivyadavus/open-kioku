@@ -1,8 +1,7 @@
 {
- "corpus": "deno_std-d93aa7c9",
+ "corpus": "ts-a",
  "split": "holdout",
  "provenance": {
-  "repo": "https://github.com/denoland/std",
   "base": "d93aa7c94e640aa7b206e1a08e094eb705c1e1fa",
   "after": 1500,
   "ext": [

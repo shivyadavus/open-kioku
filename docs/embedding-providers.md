@@ -32,15 +32,16 @@ Neural model artifacts are stored under the Open Kioku model cache for the selec
 `.github/workflows/semantic-experiment.yml` scores the production `ok context` path on a
 real repository indexed at a base commit, with the semantic stream disabled (control) and
 enabled with one local model (treatment), on identical holdout cases (see
-`docs/retrieval-benchmark.md`, "Commit-derived corpora"). Hosted 4-vCPU, 16 GB Linux runners:
+`docs/retrieval-benchmark.md`, "Commit-derived corpora"). Corpora: a Go application (~800 files)
+and a TypeScript standard library (~900 files). Hosted 4-vCPU, 16 GB Linux runners:
 
 | Model | Corpus | R@5 | R@20 | MRR | Peak RSS | Index time |
 |---|---|---|---|---|---|---|
-| gte-modernbert-base | hugo (Go, 193 cases) | 0.389 → 0.409 | 0.534 → 0.549 | 0.284 → 0.309 | 4.4 GB | 25 min |
-| gte-modernbert-base | deno_std (TS, 193 cases) | 0.565 → 0.580 | 0.632 → 0.668 | 0.453 → 0.479 | 4.5 GB | 35 min |
-| jina-v2-code | hugo | 0.389 → 0.399 | 0.534 → 0.534 | 0.284 → 0.291 | 14.7 GB† | 61 min |
-| jina-v2-code | deno_std | 0.565 → 0.565 | 0.632 → 0.632 | 0.450 → 0.455 | 12.7 GB† | 95 min |
-| Qwen3-0.6B (candle, CPU) | hugo, deno_std | — | — | — | — | >3 h, job timed out |
+| gte-modernbert-base | Go (~800 files, 193 cases) | 0.389 → 0.409 | 0.534 → 0.549 | 0.284 → 0.309 | 4.4 GB | 25 min |
+| gte-modernbert-base | TypeScript (~900 files, 193 cases) | 0.565 → 0.580 | 0.632 → 0.668 | 0.453 → 0.479 | 4.5 GB | 35 min |
+| jina-v2-code | Go (~800 files) | 0.389 → 0.399 | 0.534 → 0.534 | 0.284 → 0.291 | 14.7 GB† | 61 min |
+| jina-v2-code | TypeScript (~900 files) | 0.565 → 0.565 | 0.632 → 0.632 | 0.450 → 0.455 | 12.7 GB† | 95 min |
+| Qwen3-0.6B (candle, CPU) | Go, TypeScript | — | — | — | — | >3 h, job timed out |
 
 † measured before ONNX batches were made sequential; the same fix that keeps gte at 4.4 GB applies.
 

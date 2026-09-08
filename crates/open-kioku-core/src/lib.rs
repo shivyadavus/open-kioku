@@ -3484,7 +3484,7 @@ mod tests {
 
     #[test]
     fn shared_path_serializes_exactly_as_a_pathbuf() {
-        let raw = "modules/lang-expression/src/main/java/org/elasticsearch/Script.java";
+        let raw = "modules/lang-expression/src/main/java/com/acme/Script.java";
         let as_pathbuf = serde_json::to_string(&std::path::PathBuf::from(raw)).unwrap();
         let as_shared = serde_json::to_string(&SharedPath::from(raw)).unwrap();
         assert_eq!(

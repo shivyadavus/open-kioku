@@ -68,8 +68,8 @@ Repeats are still worth running, but three are enough rather than the five to se
 The first A/B run with this harness, measuring the `format!` slack change (#337).
 
 Both arms were release builds with `--features mem-profile`, differing only by a
-`git revert` of the change under test. Corpus: `modules/` from a public
-Elasticsearch checkout at `f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1` — 1,751
+`git revert` of the change under test. Corpus: `modules/` from
+a 10k-file Java service at checkout `f7b6962b8d6c7bb55b93c870c77e5fd88e34d6f1` — 1,751
 Java files. Fresh `.ok` per run, arms alternated across three rounds.
 
 | arm | `peak_live_bytes` (median) | spread across 3 runs |

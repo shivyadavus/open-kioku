@@ -255,7 +255,7 @@ impl FusionConfig {
     /// The product default, from frozen-corpus data. Every source votes at 1.0 except validation
     /// at 0.5: a test whose *name* overlaps the task is weaker evidence than a full-text BM25
     /// match on the task, yet at 1.0 two such votes outranked a lexical #2 hit. On the 490-case
-    /// commit-derived Elasticsearch benchmark the prior is neutral (R@5/R@20 identical, MRR
+    /// commit-derived benchmark on a 10k-file Java service the prior is neutral (R@5/R@20 identical, MRR
     /// +0.001 on both splits); on this repository's workflow benchmark it restores the
     /// `test-selector` case. Re-measure before changing any weight here.
     pub fn measured() -> Self {
