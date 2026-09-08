@@ -2861,7 +2861,10 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_resolution_quality, derive_occurrences, map_symbol_touches, Indexer};
+    use super::{
+        attach_resolution_quality, derive_occurrences, is_secret_like_path, map_symbol_touches,
+        Indexer,
+    };
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
@@ -3160,7 +3163,9 @@ class Util {
 
     #[test]
     fn secret_path_rule_blocks_data_files_by_name_but_not_programming_source() {
-        let p = |v: &str| std::path::Path::new(v);
+        fn p(v: &str) -> &std::path::Path {
+            std::path::Path::new(v)
+        }
         assert!(!is_secret_like_path(
             p("src/CredentialsProvider.java"),
             true
