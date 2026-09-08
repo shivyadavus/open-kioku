@@ -632,8 +632,8 @@ impl<'a> ContextPackBuilder<'a> {
                 &generated,
             );
             let selected = select_context_units(ranked.clone(), &budget, &mut diagnostics);
-            // Widening runs after selection and spends only what selection left over, so it
-            // cannot reorder the pack or displace another file's first unit.
+            // Widening runs after selection and only grows or appends units, so it cannot
+            // remove or reorder what selection chose.
             let selected = region::widen_selected_regions(
                 selected,
                 &ranked,

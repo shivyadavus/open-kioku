@@ -61,14 +61,28 @@ weights than historical heuristics.
 - `path_quality`: penalties for generated or vendor paths.
 
 Region widening is not a ranking signal. Once selection has ordered the pack, the first
-three primary files have their selected regions widened — enclosing symbol, the file's other
-task-ranked units, adjacent chunks — up to a per-file token cap, spending only the budget
-selection left over (`docs/context-pack-spec.md`, "Selection and region widening"). It changes
-what the pack shows of a file, never which files or in what order: on the commit-derived
-holdouts of four large public repositories R@5, R@20 and MRR are bit-identical before and after,
-while the share of changed lines the pack shows within 8k tokens rises from 0.13-0.22 to
-0.22-0.36 depending on the language, with median pack size 3.0-3.9k estimated tokens. Each widening step is an
-evidence ref (`region:enclosing-symbol`, `region:ranked-unit`, `region:adjacent-unit`) on the unit.
+three primary files have their selected regions widened - enclosing symbol, the file's other
+task-ranked units, adjacent chunks - up to a per-file token cap
+(`docs/context-pack-spec.md`, "Selection and region widening"). It changes what the pack
+shows of a file, never which files or in what order: on the commit-derived holdouts of four
+large public repositories R@5, R@20, MRR and gold recall are identical before and after, and
+no case of 626 changed its rank or its top five.
+
+It is not free. Showing more of each top file raises the median pack from
+836-1,152 to 2,753-3,612 estimated tokens, about three times as many, and the 95th
+percentile from 1,549-5,600 to 4,322-7,629; a caller on a path that enforces
+`ContextBudget::default()` has 6,000 spendable tokens, so on that path widening consumes
+most of the headroom and stops there. What it buys, over the primary units alone
+(`gold_line_yield_primary@8k`, the share of the lines the real commit changed that the pack
+shows within 8k tokens): Java 0.216 -> 0.248, Go 0.207 -> 0.299, TypeScript 0.155 ->
+0.335, Python 0.130 -> 0.203. File yield is unchanged in every corpus, as it must be -
+widening grows regions inside files selection already chose and cannot add a gold file. The Java figure sits inside overlapping confidence
+intervals and is reported as measured, not as an improvement; that corpus is the one where
+the per-file cap binds, with widened files pinned at ~1,190 of their 1,200 tokens. Measured
+at `48e64c9` on a local workstation with `--workers 2`, both arms built from that commit;
+not re-scored after the branch was rebased onto `0684e62`. Each widening step is an
+evidence ref (`region:enclosing-symbol`, `region:ranked-unit`, `region:adjacent-unit`) on
+the unit.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
