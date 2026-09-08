@@ -1266,10 +1266,18 @@ pub async fn run_cli() -> anyhow::Result<()> {
             ArchitectureCommand::Boundaries => {
                 handle_architecture_trust_command(cli.json, &repo, "boundaries")?;
             }
-            ArchitectureCommand::Violations => {
+            ArchitectureCommand::Summary => {
                 let store = open_store(&repo)?;
-                let summary = ArchitectureDetector::new(&store, None).detect()?;
-                output(cli.json, &summary.violations, || {})?;
+                let report = architecture_summary_report(&repo, &store)?;
+                output(cli.json, &report, || {})?;
+            }
+            ArchitectureCommand::Violations => {
+                // Violations come from the evaluated policy, not from heuristic
+                // detection: without a configured policy there is nothing to
+                // violate, and the summary says so instead of inventing one.
+                let store = open_store(&repo)?;
+                let report = architecture_summary_report(&repo, &store)?;
+                output(cli.json, &report.summary.violations, || {})?;
             }
             ArchitectureCommand::Bench(args) => {
                 let min_precision = args.min_precision;

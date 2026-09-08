@@ -996,9 +996,9 @@
       ],
       "signal_hooks": {
         "architecture_components": [
-          "architecture_boundaries",
-          "architecture_violations",
-          "architecture_policy_check"
+          "ok architecture summary",
+          "ok architecture violations",
+          "ok architecture policy check"
         ],
         "cochange_sources": [
           "similar_change_overlap",

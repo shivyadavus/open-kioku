@@ -470,3 +470,56 @@ where
     })
 }
 
+
+/// The policy-aware repository architecture summary: heuristic components when
+/// no policy is configured, declared components and evaluated violations when
+/// one is. Violations are only ever reported from an evaluated policy — without
+/// one the report says `configured: false` rather than inferring any.
+#[derive(Debug, Serialize)]
+struct ArchitectureSummaryReport {
+    #[serde(flatten)]
+    summary: open_kioku_architecture::ArchitectureSummary,
+    configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_source: Option<String>,
+    policy: Option<ArchitecturePolicy>,
+    policy_check: PolicyCheckReport,
+    caveats: Vec<String>,
+}
+
+fn architecture_summary_report(
+    repo: &Path,
+    store: &SqliteStore,
+) -> anyhow::Result<ArchitectureSummaryReport> {
+    let Some(policy) = load_architecture_policy(repo)? else {
+        return Ok(ArchitectureSummaryReport {
+            summary: ArchitectureDetector::new(store, None).detect()?,
+            configured: false,
+            policy_source: None,
+            policy: None,
+            policy_check: PolicyCheckReport {
+                configured: false,
+                uncertainty: vec![
+                    "no architecture policy configured; component boundaries are heuristic and dependency edges were not evaluated".into()
+                ],
+                ..PolicyCheckReport::default()
+            },
+            caveats: vec![
+                "configure .open-kioku/architecture.toml to evaluate declared component boundaries and violations".into()
+            ],
+        });
+    };
+
+    let resolver = PolicyResolver::new(&policy)?;
+    let mut summary = ArchitectureDetector::new(store, Some(&resolver)).detect()?;
+    let policy_check = evaluate_policy(store, &resolver, &policy)?;
+    summary.violations = policy_check.violations.clone();
+    Ok(ArchitectureSummaryReport {
+        summary,
+        configured: true,
+        policy_source: Some(policy.source.to_string()),
+        policy: Some(policy),
+        policy_check,
+        caveats: Vec::new(),
+    })
+}
