@@ -1,3 +1,4 @@
+use open_kioku_core::process::process_peak_rss;
 use open_kioku_embeddings::{
     neural_model_cache_dir, EmbeddingProvider, FastEmbedEmbeddingProvider,
     LocalHashEmbeddingProvider, LocalNeuralModel,
@@ -53,6 +54,7 @@ struct ProviderResult {
     vector_bytes: usize,
     model_cache_bytes: u64,
     process_peak_rss_bytes: Option<u64>,
+    process_peak_rss_instrument: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -239,6 +241,7 @@ fn benchmark_provider(
     let query_mean_ms = query_latencies_ms.iter().sum::<f64>() / count;
     let query_p95_ms = percentile(&query_latencies_ms, 0.95);
 
+    let peak_rss = process_peak_rss();
     Ok(ProviderResult {
         label: label.into(),
         provider: descriptor.provider,
@@ -253,7 +256,8 @@ fn benchmark_provider(
         query_p95_ms,
         vector_bytes: documents.len() * descriptor.dimensions * std::mem::size_of::<f32>(),
         model_cache_bytes,
-        process_peak_rss_bytes: process_peak_rss_bytes(),
+        process_peak_rss_bytes: peak_rss.bytes,
+        process_peak_rss_instrument: peak_rss.instrument,
     })
 }
 
@@ -295,20 +299,6 @@ fn linux_meminfo_kib(key: &str) -> Option<u64> {
             return None;
         }
         line.split_whitespace().nth(1)?.parse().ok()
-    })
-}
-
-fn process_peak_rss_bytes() -> Option<u64> {
-    let content = fs::read_to_string("/proc/self/status").ok()?;
-    content.lines().find_map(|line| {
-        if !line.starts_with("VmHWM:") {
-            return None;
-        }
-        line.split_whitespace()
-            .nth(1)?
-            .parse::<u64>()
-            .ok()
-            .map(|value| value * 1024)
     })
 }
 
