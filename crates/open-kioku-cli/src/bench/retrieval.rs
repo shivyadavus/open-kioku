@@ -1012,6 +1012,7 @@ fn retrieval_source_label(source: open_kioku_core::RetrievalSourceKind) -> &'sta
         open_kioku_core::RetrievalSourceKind::Validation => "validation",
         open_kioku_core::RetrievalSourceKind::GitHistory => "git_history",
         open_kioku_core::RetrievalSourceKind::Runtime => "runtime",
+        open_kioku_core::RetrievalSourceKind::DerivedSibling => "derived_sibling",
     }
 }
 

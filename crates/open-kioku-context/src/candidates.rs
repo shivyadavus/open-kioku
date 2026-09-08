@@ -698,6 +698,7 @@ pub(crate) fn retrieval_source_label(source: RetrievalSourceKind) -> &'static st
         RetrievalSourceKind::Validation => "validation",
         RetrievalSourceKind::GitHistory => "git_history",
         RetrievalSourceKind::Runtime => "runtime",
+        RetrievalSourceKind::DerivedSibling => "derived_sibling",
     }
 }
 

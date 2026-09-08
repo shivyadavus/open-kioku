@@ -2929,6 +2929,8 @@ fn admit_derived_siblings(
         relative.iter().flatten().cloned().collect();
     let mut before: Vec<Vec<SearchResult>> = ranked.iter().map(|_| Vec::new()).collect();
     let mut end = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut truncated: Vec<String> = Vec::new();
     let window = ranked
         .len()
         .min(limit.max(DERIVED_SIBLING_MIN_WINDOW).saturating_mul(2));
@@ -2939,14 +2941,17 @@ fn admit_derived_siblings(
         let siblings = match siblings_for(origin_path) {
             Ok(siblings) => siblings,
             Err(err) => {
-                // One failure is every failure (the store is refusing relationship reads);
-                // say so once rather than silently returning a pack without siblings.
-                diagnostics
-                    .caveats
-                    .push(format!("derived-file siblings unavailable: {err}"));
-                break;
+                // One path failing is not proof the store is refusing every read, so the pass
+                // continues; each distinct failure is reported against the path that produced it.
+                failures.push(format!("`{origin_path}`: {err}"));
+                continue;
             }
         };
+        // The store caps how many edges it returns per node. A file at the cap has siblings the
+        // pack cannot see, and absence has to stay visible.
+        if siblings.len() >= DERIVED_SIBLING_EDGE_LIMIT {
+            truncated.push(origin_path.to_string());
+        }
         for sibling in siblings {
             if present.contains(&sibling.path) {
                 continue;
@@ -2973,7 +2978,7 @@ fn admit_derived_siblings(
                 fused_score: result.score,
                 authority,
                 contributions: vec![open_kioku_core::RetrievalContribution {
-                    source: RetrievalSourceKind::Graph,
+                    source: RetrievalSourceKind::DerivedSibling,
                     rank: index + 1,
                     raw_score: Some(origin.score),
                     rrf_contribution: 0.0,
@@ -2993,10 +2998,33 @@ fn admit_derived_siblings(
             // never displaces one. Inserting at the head of the block instead cost R@5 on all
             // three corpora (a gold file at rank 5 moved to 6) and gained nothing.
             match tiers.iter().position(|&t| t < tier) {
+                // Never rank 0: an admitted sibling has no score of its own, and the pack
+                // headline is also the impact seed. If nothing ranked reaches its tier it goes
+                // after the best result rather than in front of it.
+                Some(0) if ranked.len() > 1 => before[1].push(result),
+                Some(0) => end.push(result),
                 Some(at) => before[at].push(result),
                 None => end.push(result),
             }
         }
+    }
+    if !failures.is_empty() {
+        failures.sort();
+        failures.dedup();
+        diagnostics.caveats.push(format!(
+            "derived-file siblings could not be read for {} path(s): {}",
+            failures.len(),
+            failures.join("; ")
+        ));
+    }
+    if !truncated.is_empty() {
+        truncated.sort();
+        truncated.dedup();
+        diagnostics.caveats.push(format!(
+            "derived-file siblings truncated at {DERIVED_SIBLING_EDGE_LIMIT} edge(s) for {} path(s): {}",
+            truncated.len(),
+            truncated.join(", ")
+        ));
     }
     let mut admitted = Vec::with_capacity(ranked.len() + end.len());
     for (index, result) in ranked.into_iter().enumerate() {
@@ -4048,6 +4076,53 @@ mod tests {
     }
 
     #[test]
+    fn an_admitted_sibling_is_not_graph_evidence_for_budget_selection() {
+        // Budget selection ranks by source kind before utility and exempts graph/validation
+        // evidence from the redundancy cull. An admitted sibling has no score that earned
+        // either, so it must not arrive wearing the graph source kind.
+        let mut diagnostics = RetrievalDiagnostics::default();
+        admit_derived_siblings(
+            vec![ranked_result("src/orbit/pipeline.py", 0.9)],
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse("Fix pipeline batching"),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut derived_fixture_siblings,
+        );
+        let trace = diagnostics
+            .traces
+            .iter()
+            .find(|trace| trace.path.ends_with("test_pipeline.py"))
+            .expect("the sibling is traced");
+        let sources = trace
+            .contributions
+            .iter()
+            .map(|contribution| contribution.source)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            sources,
+            [RetrievalSourceKind::DerivedSibling].into_iter().collect()
+        );
+        assert!(!is_high_value_context(trace.authority, &sources));
+    }
+
+    #[test]
+    fn an_admitted_sibling_never_takes_the_first_rank() {
+        // Rank 1 is the pack headline and the impact seed; a file admitted without a score of
+        // its own must not hold it even when nothing ranked shares its tier.
+        let (paths, _) = admitted_paths(
+            "Fix pipeline batching",
+            vec![ranked_result("tests/orbit/test_pipeline.py", 0.9)],
+        );
+        assert_eq!(
+            paths,
+            vec!["tests/orbit/test_pipeline.py", "src/orbit/pipeline.py"]
+        );
+    }
+
+    #[test]
     fn an_admitted_sibling_scores_below_every_ranked_result_in_its_tier() {
         let mut diagnostics = RetrievalDiagnostics::default();
         let admitted = admit_derived_siblings(
@@ -4228,10 +4303,13 @@ mod tests {
             },
         );
         assert_eq!(admitted.len(), 1);
-        assert!(diagnostics
-            .caveats
-            .iter()
-            .any(|caveat| caveat.starts_with("derived-file siblings unavailable")));
+        assert!(
+            diagnostics.caveats.iter().any(|caveat| caveat
+                .starts_with("derived-file siblings could not be read")
+                && caveat.contains("src/orbit/pipeline.py")),
+            "{:?}",
+            diagnostics.caveats
+        );
     }
 
     #[test]

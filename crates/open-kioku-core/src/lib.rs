@@ -3172,6 +3172,11 @@ pub enum RetrievalSourceKind {
     Validation,
     GitHistory,
     Runtime,
+    /// A file admitted because the graph records it as a derived sibling of a candidate, not
+    /// because a retrieval stream ranked it. Deliberately distinct from [`Self::Graph`]: budget
+    /// selection gives graph and validation evidence priority over score, and an admitted
+    /// sibling has no score of its own to earn that with.
+    DerivedSibling,
 }
 
 #[derive(
