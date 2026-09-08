@@ -4,32 +4,26 @@
 
 # Open Kioku
 
-**Evidence before edits.**
+**Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared.**
 
-A local repository-intelligence and change-safety layer for AI coding agents.
+A local index of your repository feeds a bounded plan; after the edit, `ok verify` checks the actual changed files against that plan. Nothing leaves your machine.
 
 [![CI](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml/badge.svg)](https://github.com/shivyadavus/open-kioku/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![npm downloads](https://img.shields.io/npm/dm/open-kioku)](https://www.npmjs.com/package/open-kioku)
 [![crates.io](https://img.shields.io/crates/v/open-kioku-cli)](https://crates.io/crates/open-kioku-cli)
+[![crates.io downloads](https://img.shields.io/crates/d/open-kioku-cli)](https://crates.io/crates/open-kioku-cli)
 [![License](https://img.shields.io/badge/license-Elastic--2.0-blue)](LICENSE)
 
-[Website](https://www.openkioku.com) · [Quickstart](#first-win-2-commands) · [MCP tools](docs/mcp-tools.md) · [Measured proof](#measured-proof) · [Architecture](docs/architecture.md)
+[Website](https://www.openkioku.com) · [First win](#first-win-2-commands) · [What to expect](#what-to-expect) · [Install](#install) · [MCP tools](docs/mcp-tools.md) · [Architecture](docs/architecture.md)
 
 </div>
 
 ---
 
-Coding agents guess. They crawl files, grep for names, and hope the right context lands in the window.
-
-Open Kioku replaces that guesswork with evidence. It builds a local model of your repository — symbols, relationships, tests, history, runtime signals, docs, architecture — compiles the smallest useful context for each task, produces a **bounded plan before edits begin**, and **verifies the finished change** against what the agent said it would touch.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/flow-dark.svg">
-  <img src="assets/flow-light.svg" alt="Evidence streams feed an evidence model; the context compiler produces a bounded ContextPack; the workflow runs plan, edit, verify, prove." width="920">
-</picture>
-
-No hosted code index. No source upload. Read-only MCP tools by default. Optional semantic retrieval runs entirely on your machine.
+<p align="center">
+  <img src="assets/demo.gif" alt="Terminal recording: ok setup agent indexes a repository, ok context shows evidence and confidence, ok plan writes a boundary, an edit outside the boundary makes ok verify fail." width="920">
+</p>
 
 ## First Win: 2 Commands
 
@@ -38,209 +32,142 @@ npm install -g open-kioku
 ok setup agent cursor --repo . --apply
 ```
 
-For Claude Code:
+Use `claude` instead of `cursor` for Claude Code. One command indexes the repository, writes repository-scoped MCP configuration and agent guidance, and checks that the local server answers (run without `--apply` to preview; nothing is written). Then ask for evidence on a real task:
 
 ```sh
-ok setup agent claude --repo . --apply
+ok context "reap the doctor's MCP probe child process" --format markdown
 ```
 
-One command indexes the repository, installs repository-scoped MCP configuration and guidance, and checks that the local server responds (run without `--apply` to preview). From then on, your agent starts every task from a pre-edit evidence routine instead of rediscovering the repository from scratch.
+This is the actual output on this repository, trimmed (`…` marks cut lines). The commit that made this change touched exactly one file, and it is the first result:
 
-## Why Open Kioku
+```markdown
+# Task: reap the doctor's MCP probe child process
 
-- **Facts outrank guesses.** Exact definitions, references, and dependency paths stay authoritative; heuristic matches can help retrieval but never overwrite repository truth.
-- **Uncertainty stays visible.** Missing evidence lowers confidence and is reported as a caveat. Passing tests don't manufacture certainty the evidence doesn't support. Calibrated abstention is built and gated on held-out performance but is not yet enabled by default — on the frozen corpus, a task with no correct answer still returns results 80% of the time, and that number is published in [`benchmarks/retrieval-baseline.json`](benchmarks/retrieval-baseline.json).
-- **The loop closes.** Plans define edit boundaries; verification compares the actual changed files against them. A green exit code is not proof the right files changed.
-- **Local by design.** Everything lives under the repository's `.ok/` directory. Network denial is supported and fails closed.
+## Confidence
+- Overall: `Exact` (`1.00`)
+  - `exact_references` score `1.00`, weight `0.20`, contribution `0.20`
+  - `task_relevance` score `0.83`, weight `0.20`, contribution `0.17`
+  …
+## Retrieval
+- Attempted: `lexical, document, exact_semantic, graph, validation, git_history, runtime`
+- Succeeded: `lexical, document, exact_semantic, graph, validation`
+- Retrieval confidence: `Exact` (qualitative ContextPack confidence, not a calibrated probability)
+- Caveats:
+  - no runtime traces, logs, or incidents are ingested for this repository
+  …
+## Primary Context
+### crates/open-kioku-cli/src/reports/status_setup_doctor.rs
+Lines 932-1298  `fn doctor_report(repo: &Path) -> DoctorReport {`
+### crates/open-kioku-cli/src/commands/onboarding.rs
+Lines 554-610   `fn mcp_server_reachable(repo: &Path) -> anyhow::Result<bool> {`
+…
+```
 
-## What Open Kioku Understands
+Every pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
 
-| Evidence | What it contributes |
-|---|---|
-| **Code & symbols** | Definitions, chunks, imports, occurrences, scopes, source ranges |
-| **Relationships & impact** | Dependency paths, calls, references, types, inheritance, affected files/symbols |
-| **Tests & coverage** | Validation candidates, test-to-code evidence, local coverage reports |
-| **Git history** | Churn, co-change, ownership, reviewers, provenance, similar changes |
-| **Runtime evidence** | Local traces, spans, logs, incidents, errors, failures |
-| **Documentation** | Heading-aware repository documentation retrieval |
-| **Architecture & contracts** | Boundaries, policies, public API/dependency constraints, change contracts |
-| **Local semantics** | Optional local embeddings, hybrid retrieval, exact-flat and persistent ANN backends |
-
-Each task is routed through these streams as independent candidates, fused with authority awareness, and compiled into a bounded `ContextPack` with provenance, omissions, and quality signals. Retrieval quality is benchmarked against a frozen corpus with a held-out split and CI-enforced thresholds; the current gated benchmark measures the lexical retrieval path, and extending it to the full routed path is tracked in [#204](https://github.com/shivyadavus/open-kioku/issues/204).
-
-## What Your Agent Gets
+## What You Get
 
 ```sh
-ok plan "change token expiration"
+ok plan "change token expiration" --format json > plan.json   # context, impact, tests, edit boundary, caveats
+# ...edit with your normal agent or editor...
+ok verify --plan plan.json --git                               # the real diff against the declared boundary
 ```
 
-…or the `plan_change` MCP tool. A plan includes primary context with evidence provenance, impact candidates, likely validation targets, edit boundaries, explicit missing-evidence caveats, and confidence signals.
+`ok plan` (or the `plan_change` MCP tool) returns primary context with provenance, impact candidates split into structurally proven and heuristic, validation targets tiered by evidence, an edit boundary (allowed, caution, forbidden paths), and explicit caveats. `ok verify` reads the actual changed files and reports, for example, `[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary`. A green exit code from a test runner is not proof the right files changed; this is.
 
-After the edit, `ok verify` checks the actual change against the plan — not just whether a command exited 0.
+Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
-## Measured Proof
+## What to Expect
 
-Performance claims here are observations tied to an identifiable build, published with method and caveats. The current record validates the `3.1.0` release lineage at source commit `3959fdfb6ca27d0c279b635fca7fc1b7935d4889`, on the same host and protocol as the previous public record — directly comparable, with older records preserved as versioned history.
+Retrieval is measured on the production path (`ok context`, the same builder behind `ok plan` and the MCP `build_context_pack` tool) on four real repositories, each indexed at a fixed base commit. Every case is a later commit: the query is its subject line, the answer is the source files it changed. Cases are split chronologically; both splits are gated nightly, and the table shows holdout.
 
-### Large Java repository (v3.1.0 lineage, end to end)
+| Corpus | Holdout cases | R@5 | R@20 | MRR |
+|---|---:|---:|---:|---:|
+| Java, about 10k files | 113 | 0.549 | 0.681 | 0.482 |
+| Go application, ~800 files | 84 | 0.690 | 0.810 | 0.551 |
+| TypeScript, ~900 files | 166 | 0.753 | 0.801 | 0.621 |
+| Python library, ~4k files | 199 | 0.658 | 0.749 | 0.556 |
 
-| Measurement | Result |
+- **R@5** — the share of tasks for which at least one file the commit changed is in the first five results.
+- **R@20** — the same within the first twenty results, roughly the whole context pack.
+- **MRR** — the average of 1 / rank of the first correct file; 1.0 means it was always first, 0.5 is what you get if the first correct file were always second, or first half the time and never found the rest.
+
+Read it plainly. On a Java repository of about ten thousand files, the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the floor the agent starts from before it has looked at anything, and it is the number to watch. Exact lookups (definitions, references, dependency paths) and the plan → edit → verify loop sit on top of it.
+
+These baselines were frozen from a hosted Linux runner matrix on 2026-09-07 and are re-derived nightly by `.github/workflows/commit-derived-bench.yml`; the job fails when a watched metric falls more than 0.03 below its frozen baseline. Queries are commit subjects, not issue text, so the numbers are not comparable with published benchmarks that use issue text. Corpus identities, both splits, the scripts, and the regression policy: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md); frozen baselines: [`benchmarks/commit-derived/`](benchmarks/commit-derived/).
+
+Two more measured facts:
+
+- **When the task has no answer.** On the 30-case frozen fixture, all five no-gold tasks come back at `Low` confidence instead of being presented as answers (no-gold false-positive rate 0.0; the CI ceiling is 0.25). A low-confidence pack still lists candidates; it tells the caller not to trust them rather than returning nothing. [`benchmarks/retrieval-baseline.json`](benchmarks/retrieval-baseline.json)
+- **Optional local neural embeddings.** The default local neural profile (a 149M-parameter int8 model, pinned by digest) improved every metric on the Go and TypeScript corpora against a same-day control, by about +0.025 MRR, on 4-vCPU / 16 GB hosted runners. Real but modest; the lexical ranking fixes landed the same day were worth about four times as much. [`docs/embedding-providers.md`](docs/embedding-providers.md)
+
+## Measured at Scale
+
+Performance claims are observations tied to an identifiable build, published with method and caveats. The current record validates the `3.1.0` release lineage at source commit `3959fdfb6ca27d0c279b635fca7fc1b7935d4889` on a large Java repository, on the same host and protocol as the previous public record.
+
+| Measurement (v3.1.0 lineage, end to end) | Result |
 |---|---:|
 | Tracked source files / Java files | 16,537 / 12,580 |
 | Indexed files / symbols / chunks | 13,607 / 247,499 / 248,107 |
 | Graph nodes / edges | 402,844 / 1,522,135 |
-| Tests / imports | 84,504 / 181,966 |
 | Cold structural index | 19m 28s |
 | Exact class lookup, fresh process | 0.02–0.05s |
 | Exact references / lexical search, fresh process | 0.74s / 0.24s |
 | Exact-flat semantic build | 495,606 vectors in 58.8s; 0 failures |
 | Persistent HNSW build | 495,606 vectors in 10m 19s; 0 failures |
 
-Against the prior build on the identical corpus and host: fixed per-command startup ~14s → sub-second, exact class lookup 13.9s (returning an incorrect `symbol not found`) → 0.02s with the correct class, lexical search 13.7s → 0.24s, cold structural index 40m 40s → 19m 28s.
+Against `main` at `c96f61a` on the identical corpus and host ([methodology](docs/large-java-validation-2026-08-31.md)): per-command startup ~14s → sub-second, exact class lookup 13.9s (returning an incorrect `symbol not found`) → 0.02s with the correct class, cold structural index 40m 40s → 19m 28s. The repeat index reproduced identical totals and four parallel graph readers completed with zero lock failures. The repository identity is withheld, so this is a scale record rather than a replayable corpus: [machine-readable evidence](demo/proof/large-java-2026-08-31-main.json) · [methodology](docs/large-java-validation-2026-08-31.md) · previous record: [v3.0.4 evidence](demo/proof/large-java-3.0.4.json).
 
-The repeat index reproduced identical totals, four parallel graph reads completed without lock failures, and both semantic builds finished with zero failed vectors. The repository identity is intentionally withheld, so this is a scale record rather than a replayable corpus — everything else is auditable in the [machine-readable evidence](demo/proof/large-java-2026-08-31-main.json) and [methodology](docs/large-java-validation-2026-08-31.md). Previous record: [v3.0.4 evidence](demo/proof/large-java-3.0.4.json) · [methodology](docs/large-java-validation-3.0.4.md).
-
-### More proof artifacts
-
-- **Local semantic scale** — 51,349 vectors, persistent HNSW auto-selected above the crossover, 21.70s fresh build, 0 stale / 0 failed vectors: [`demo/proof/ann-50k-dogfood.json`](demo/proof/ann-50k-dogfood.json)
-- **Plan → edit → validate → verify** — `cargo test` through the policy-gated validation runner: 2 passed, 0 boundary violations, final verdict `warn` because stronger supporting evidence was absent. That's intentional: [`demo/proof/verification-dogfood.json`](demo/proof/verification-dogfood.json)
-- **Public repository audit** — 4,600+ files, 46,000+ symbols, 8,900+ tests indexed locally in 33.1s: [`docs/large-repo-proof.md`](docs/large-repo-proof.md)
+More artifacts: local semantic scale, 51,349 vectors, persistent HNSW auto-selected, 21.70s fresh build, 0 stale / 0 failed vectors ([`demo/proof/ann-50k-dogfood.json`](demo/proof/ann-50k-dogfood.json)); plan → edit → validate → verify through the policy-gated runner, 2 passed, 0 boundary violations, final verdict `warn` because stronger evidence was absent ([`demo/proof/verification-dogfood.json`](demo/proof/verification-dogfood.json)); a public repository audit, 4,600+ files, 46,000+ symbols, 8,900+ tests indexed in 33.1s ([`docs/large-repo-proof.md`](docs/large-repo-proof.md)).
 
 These are local workstation timings, not universal guarantees.
 
 ## Install
 
-| Method | Command |
+| Channel | How |
 |---|---|
-| **npm** (recommended) | `npm install -g open-kioku` |
-| cargo-binstall | `cargo binstall open-kioku-cli` |
-| crates.io | `cargo install open-kioku-cli` |
+| **npm** (recommended) | `npm install -g open-kioku` — the wrapper pulls `@open-kioku/{darwin-arm64,linux-x64,linux-arm64,win32-x64}` (sources under [`packages/`](packages/)) |
+| crates.io | `cargo install open-kioku-cli` or `cargo binstall open-kioku-cli` |
+| GitHub releases | Binaries with `SHA256SUMS`, `SBOM.cargo-metadata.json`, `PROVENANCE.json`, and GitHub build-provenance attestations ([`docs/release-trust.md`](docs/release-trust.md)) |
+| Homebrew | Formula tracked at [`Formula/open-kioku.rb`](Formula/open-kioku.rb); no public tap is published yet |
+| Claude Code plugin | [`claude_plugin.json`](claude_plugin.json) and [`.claude-plugin/`](.claude-plugin/) |
+| Cursor / Codex plugins | [`.cursor-plugin/`](.cursor-plugin/) · [`.codex-plugin/`](.codex-plugin/) |
+| MCP directories | Glama ([`glama.json`](glama.json)) · Smithery ([`smithery.yaml`](smithery.yaml)) |
 | From source | `git clone https://github.com/shivyadavus/open-kioku.git && cargo install --path open-kioku/crates/open-kioku-cli` |
-
-## Set Up a Repository
-
-```sh
-ok init /absolute/path/to/repo
-ok index /absolute/path/to/repo
-ok doctor /absolute/path/to/repo
-ok status /absolute/path/to/repo --markdown --write ok-status.md
-```
-
-Repository intelligence lives under `.ok/` — SQLite metadata/graph state and Tantivy lexical search data. Indexing never rewrites source files. Keep the index current with `ok watch /absolute/path/to/repo`.
 
 ## Connect an Agent
 
 ```sh
-ok setup agent claude --repo /absolute/path/to/repo --apply
-ok setup agent cursor --repo /absolute/path/to/repo --apply
+ok setup agent claude --repo . --apply    # Claude Code: index + .mcp.json + managed skill, then a live MCP check
+ok setup agent cursor --repo . --apply    # Cursor: index + .cursor/mcp.json + managed rule
+ok mcp install codex  --repo .            # Codex: prints the TOML server entry
+ok mcp install gemini --repo .            # Gemini CLI: prints the JSON server entry
 ```
 
-Manual MCP configuration covers the full client matrix — Cursor, Claude Code, Codex, Gemini CLI, Windsurf, Trae, OpenCode, and Zed:
+`ok setup agent --apply` is wired for `claude` and `cursor`; every other client listed by `ok mcp install --help` gets a read-only configuration snippet from `ok mcp install <client>`. The MCP server is local, read-only, and speaks stdio. Its 58 tools carry usage guidance, input/output schemas, safety annotations, and routing categories, and a metadata regression test rejects new tools that omit any of it.
 
-```sh
-ok mcp install <client> --repo /absolute/path/to/repo
-```
+Step-by-step guides: [Claude Code](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html) · CI: [`open-kioku-action`](https://github.com/shivyadavus/open-kioku-action) ([`docs/github-action.md`](docs/github-action.md))
 
-The MCP server is local, read-only, and speaks stdio. Its 58 tools ship with task-specific usage guidance, input/output schemas, standard safety annotations, and machine-readable routing categories — and a metadata regression test rejects new tools that omit any of it.
+## Why Local
 
-Agent setup guides: [Claude Code](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html)
+- No hosted index and no source upload: everything lives under the repository's `.ok/` directory, and `ok prove` shares counts and scores without source snippets.
+- MCP is read-only by default; source edits stay in your normal editor or agent harness.
+- Command execution and model downloads are policy-gated, secret-like paths are blocked, and network denial fails closed rather than degrading silently.
 
-## Local Semantic Retrieval
+[`docs/security-model.md`](docs/security-model.md) · [`SECURITY.md`](SECURITY.md) · [`docs/release-trust.md`](docs/release-trust.md)
 
-Semantic search is optional — the core workflow requires no embedding service. When enabled, embeddings are built locally, retrieval combines semantic and lexical signals, and the backend switches between an exact-flat correctness oracle and a persistent ANN index based on scale.
+## How It Is Measured
 
-```sh
-ok --repo . semantic status
-ok --repo . semantic index
-ok --repo . search "authorization expiry" --hybrid
-```
+- Commit-derived corpora on real repositories, re-run nightly: [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md) (derive with `scripts/commit-derived-cases.py`, score with `scripts/score-context-cases.py`, compare with `scripts/compare-commit-derived-report.py`).
+- The 30-case frozen fixture with a held-out split and CI thresholds: `ok retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30`.
+- Workflow, relationship, and contract suites: [`docs/workflow-benchmarks.md`](docs/workflow-benchmarks.md) · [`docs/relationship-benchmark.md`](docs/relationship-benchmark.md) · [`docs/contract-benchmarks.md`](docs/contract-benchmarks.md).
+- Scale and dogfood records: [`docs/proof.md`](docs/proof.md) and [`demo/proof/`](demo/proof/).
 
-Model acquisition is explicit and policy-controlled; network-denied execution fails closed. See [`docs/semantic-search.md`](docs/semantic-search.md), [`docs/vector-index.md`](docs/vector-index.md), and [`docs/embedding-providers.md`](docs/embedding-providers.md).
+Threshold changes are product changes and are reviewed as such; a threshold is never lowered to make CI green.
 
-## Share Proof, Not Source
+## More Than One Repository
 
-```sh
-ok prove . --task "the feature you're working on" --html
-```
-
-`ok prove` creates a shareable report with indexed counts, task scores, validation signals, and caveats — intentionally omitting source snippets. For pull requests, the opt-in [`open-kioku-action`](https://github.com/shivyadavus/open-kioku-action) attaches a privacy-safe preflight artifact:
-
-```yaml
-permissions:
-  contents: read
-
-steps:
-  - uses: actions/checkout@v7
-  - uses: shivyadavus/open-kioku-action@v1
-    with:
-      task: "change token expiration"
-      verify: true
-```
-
-See [`docs/github-action.md`](docs/github-action.md).
-
-## Beyond a Single Repository
-
-**Multi-project intelligence** — index projects individually, then link them into a workspace without reparsing source:
-
-```toml
-[workspace]
-projects = [
-  { name = "service-a", repo = "../service-a" },
-  { name = "service-b", repo = "../service-b" },
-]
-```
-
-```sh
-ok index --mode cross-project --workspace /absolute/path/to/workspace
-ok architecture fleet --workspace /absolute/path/to/workspace
-```
-
-**Index snapshots** — export/import known-good indexes for team and CI reuse. Personal memory and compressed-context state are excluded from shared snapshots by default:
-
-```sh
-ok --repo . snapshot export --quality best
-ok --repo . snapshot import
-ok --repo . index --from-snapshot auto
-```
-
-**Architecture, contracts, and verification** — detect architecture, evaluate policies, create bounded change contracts, and verify constraints around a change:
-
-```sh
-ok --repo . architecture detect
-ok --repo . architecture policy check --json
-ok --repo . --json contract create "update API boundary"
-ok --repo . contract verify --id <contract-id> --changed src/api.rs
-ok --repo . verify --plan /tmp/plan.json --git
-```
-
-## History, Runtime, and Validation Evidence
-
-Git history is on by default with a bounded window: co-change, churn, ownership, provenance, and similar-change signals. Runtime evidence (local JSONL traces/logs/incidents under `.ok/runtime/`) and validation evidence (JUnit XML, lcov, Cobertura, JaCoCo, coverage.py) are opt-in and mapped back to indexed files, symbols, and plausible tests.
-
-These sources contribute evidence; they never outrank exact source and reference truth.
-
-## Benchmarks
-
-Quality is a measured product surface, not a claim:
-
-```sh
-ok retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30
-ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
-ok eval . --case "auth flow=src/auth.rs,tests/auth_flow.rs"
-```
-
-The frozen retrieval corpus and regression policy are documented in [`docs/retrieval-benchmark.md`](docs/retrieval-benchmark.md).
-
-## Security Model
-
-- Read-only MCP by default; no hosted repository index; no source upload
-- No hosted embeddings required — optional semantic inference stays local
-- Secret-like paths blocked by policy; command execution policy-gated
-- Source edits remain in the normal editor/agent harness
-- Network denial supported; failures are explicit
-
-See [`docs/security-model.md`](docs/security-model.md) and [`SECURITY.md`](SECURITY.md).
+Semantic retrieval is optional and local (`ok --repo . semantic index`, then `ok search "authorization expiry" --hybrid`); model acquisition needs explicit consent and is refused under network denial ([`docs/semantic-search.md`](docs/semantic-search.md), [`docs/vector-index.md`](docs/vector-index.md)). Index projects individually and link them into a workspace (`ok index --mode cross-project --workspace <dir>`, `ok architecture fleet`). Export and import known-good indexes for team and CI reuse (`ok --repo . snapshot export --quality best`, `ok --repo . index --from-snapshot auto`); personal memory is excluded from shared snapshots by default. Detect architecture, check policies, and create bounded change contracts (`ok --repo . architecture detect`, `ok --repo . contract create "update API boundary"`). Git history is on by default with a bounded window; runtime traces and coverage reports are opt-in local inputs that never outrank exact source truth.
 
 ## Language Support
 
@@ -272,26 +199,7 @@ Full MCP tool reference: [`docs/mcp-tools.md`](docs/mcp-tools.md)
 
 ## Repository Layout
 
-This is a 43-crate Cargo workspace. Important crates include:
-
-| Crate | Role |
-|---|---|
-| `open-kioku-cli` | `ok` CLI and top-level product surface |
-| `open-kioku-mcp` | Local JSON-RPC MCP server |
-| `open-kioku-core` | Evidence, graph, report, and relationship-authority contracts |
-| `open-kioku-ingest` | Indexing pipeline and evidence ingestion |
-| `open-kioku-resolution` | Scope/receiver/type-aware semantic resolution |
-| `open-kioku-context` | Routed candidate streams and ContextPack compilation |
-| `open-kioku-graph` | Evidence graph and query layer |
-| `open-kioku-semantic` | Local semantic indexing and hybrid retrieval |
-| `open-kioku-vector` | Exact-flat oracle and persistent local ANN backend |
-| `open-kioku-plan` | Evidence-backed pre-edit planning |
-| `open-kioku-impact` | Impact analysis |
-| `open-kioku-tests` | Validation target selection |
-| `open-kioku-architecture` | Architecture detection and policy evaluation |
-| `open-kioku-contract` | Change-contract schema and validation |
-| `open-kioku-patch` | Post-edit verification |
-| `open-kioku-storage-sqlite` | Local persistence |
+This is a 43-crate Cargo workspace with a strict downward dependency direction: CLI / MCP → agent intelligence (`context`, `impact`, `tests`, `plan`, `patch`, `actions`) → code-intelligence kernel (`ingest`, `parse`, `tree-sitter`, `resolution`, `graph`, `architecture`) → storage and search (`storage-sqlite`, `search-tantivy`). `open-kioku-core` holds the evidence, graph, and report contracts; optional integrations (`scip`, `lsp`, `semantic`, `vector`, `qdrant`, `sentry`) return explicit disabled/unsupported diagnostics rather than degrading silently.
 
 Architecture: [`docs/architecture.md`](docs/architecture.md) · Crate map: [`docs/crate-map.md`](docs/crate-map.md) · Storage: [`docs/storage-model.md`](docs/storage-model.md)
 
@@ -301,19 +209,17 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Crate map: [`doc
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
-cargo test -p open-kioku-cli --test cli_smoke
+scripts/validate-docs.sh
 ok retrieval-bench . --cases-file benchmarks/retrieval-cases.json --min-cases 30
 ok workflow-bench . --cases-file benchmarks/workflow-cases.json --limit 10
 ```
 
-## Contributing
-
-Issues and pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Maintainer-led and source-available under Elastic-2.0; see [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ---
 
 <div align="center">
 
-If Open Kioku improves your agent workflow, consider [starring the repository ⭐](https://github.com/shivyadavus/open-kioku)
+If Open Kioku improves your agent workflow, consider [starring the repository](https://github.com/shivyadavus/open-kioku).
 
 </div>

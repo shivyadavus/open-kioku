@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="Open Kioku is a local-first evidence layer for AI coding agents. Index once, plan from repository facts, and verify bounded edits." />
+<meta name="description" content="Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first repository intelligence for AI coding agents; nothing leaves your machine." />
 <meta name="theme-color" content="#07090d" />
 <link rel="canonical" href="https://www.openkioku.com/" />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="Open Kioku" />
 <meta property="og:title" content="Open Kioku — Evidence before edits" />
-<meta property="og:description" content="Local-first repository evidence and change safety for AI coding agents." />
+<meta property="og:description" content="Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first; nothing leaves your machine." />
 <meta property="og:url" content="https://www.openkioku.com/" />
 <meta property="og:image" content="https://www.openkioku.com/og-image.png" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="Open Kioku — Evidence before edits" />
-<meta name="twitter:description" content="Local-first repository evidence and change safety for AI coding agents." />
+<meta name="twitter:description" content="Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first; nothing leaves your machine." />
 <meta name="twitter:image" content="https://www.openkioku.com/og-image.png" />
 <title>Open Kioku — Evidence before edits</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
@@ -22,7 +22,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@500;600;700&display=swap" />
 <link rel="stylesheet" href="site.css" />
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Open Kioku","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows","url":"https://www.openkioku.com/","downloadUrl":"https://www.npmjs.com/package/open-kioku","softwareVersion":"3.0.4","license":"https://github.com/shivyadavus/open-kioku/blob/main/LICENSE","description":"Local-first repository evidence and change safety for AI coding agents."}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Open Kioku","applicationCategory":"DeveloperApplication","operatingSystem":"Linux, macOS, Windows","url":"https://www.openkioku.com/","downloadUrl":"https://www.npmjs.com/package/open-kioku","softwareVersion":"3.1.0","license":"https://github.com/shivyadavus/open-kioku/blob/main/LICENSE","description":"Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first; nothing leaves your machine."}</script>
 </head>
 <body>
 <div class="noise"></div><canvas class="code-rain" id="code-rain" aria-hidden="true"></canvas><div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div>
@@ -31,14 +31,14 @@
 <svg viewBox="0 0 64 64" role="img" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2bd2ad"/><stop offset="1" stop-color="#7a8cff"/></linearGradient></defs><ellipse cx="32" cy="32" rx="26" ry="15.5" fill="none" stroke="url(#lg)" stroke-width="3.4"/><path d="M25.5 24.5 18 32l7.5 7.5M38.5 24.5 46 32l-7.5 7.5" fill="none" stroke="url(#lg)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="32" r="3.1" fill="#2bd2ad"/></svg>
 <span>Open Kioku</span></a>
 <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="primary-nav"><span class="sr-only">Open navigation</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span></button>
-<div class="nav-links" id="primary-nav"><a href="#proof">Proof</a><a href="#how">How it works</a><a href="#workflow">Workflow</a><a href="#security">Security</a><a href="docs.html">Docs</a><a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a></div>
+<div class="nav-links" id="primary-nav"><a href="#proof">Proof</a><a href="#expect">Accuracy</a><a href="#how">How it works</a><a href="#workflow">Workflow</a><a href="#security">Security</a><a href="docs.html">Docs</a><a class="nav-cta" href="https://github.com/shivyadavus/open-kioku">View source ↗</a></div>
 </nav></div></div>
 <main id="top">
 <section class="hero"><div class="wrap"><div class="hero-grid">
 <div>
 <div class="pill"><span class="dot"></span> Local-first evidence for coding agents</div>
 <h1><span class="grad">Evidence</span> before edits.</h1>
-<p class="lead">Open Kioku turns a repository into an <strong>evidence layer</strong>: exact answers in hundredths of a second, relationships resolved by typed proof instead of name-matching, and a bounded plan your agent can check its own diff against. Nothing leaves your machine.</p>
+<p class="lead">Open Kioku is a local index your coding agent reads before it edits. It <strong>shows its evidence</strong> — which files, which streams answered, what is missing — declares an edit boundary in a plan, and <strong>verifies the finished diff</strong> against that plan. Nothing leaves your machine.</p>
 <div class="actions"><a class="btn btn-primary" href="#workflow">See the workflow <span>→</span></a><a class="btn btn-secondary" href="#install">Run it locally</a></div>
 <div class="micro"><span><b class="check">✓</b> Read-only by default</span><span><b class="check">✓</b> No hosted code index</span><span><b class="check">✓</b> MCP over local stdio</span></div>
 </div>
@@ -51,21 +51,35 @@
 <div class="term-row"><span class="dim">boundary</span><span>source + matching tests only</span></div>
 <div class="term-row"><span class="dim">caveats</span><span class="warn">missing runtime evidence is explicit</span></div>
 <div class="evidence-card"><div class="evidence-top"><strong>Evidence quality</strong><span class="score">grounded</span></div><div class="out" style="margin-top:5px">exact facts stay authoritative; heuristic signals remain labeled</div></div>
-<div class="cmd" style="margin-top:20px"><span class="prompt">$</span> <span class="dim"># edit with your normal coding agent</span></div><div class="cmd"><span class="prompt">$</span> ok verify --changed src/auth.rs tests/auth_flow.rs</div><div class="out"><span class="good">✓</span> change stayed inside the planned boundary</div>
+<div class="cmd" style="margin-top:20px"><span class="prompt">$</span> <span class="dim"># edit with your normal coding agent</span></div><div class="cmd"><span class="prompt">$</span> ok verify --plan plan.json --git</div><div class="out"><span class="good">✓</span> change stayed inside the planned boundary</div>
 </div></aside>
 </div>
-<div class="trustbar numbers"><div><strong>0.02s</strong>exact class lookup, fresh process</div><div><strong>247,499</strong>symbols indexed from one large repo</div><div><strong>1.52M</strong>relationship edges with typed proofs</div><div><strong>0</strong>lock failures under parallel readers</div></div>
+<div class="trustbar numbers"><div><strong>0.02–0.05s</strong>exact class lookup, fresh process</div><div><strong>247,499</strong>symbols indexed from one large repo</div><div><strong>1.52M</strong>relationship edges with typed proofs</div><div><strong>0</strong>lock failures under parallel readers</div></div>
 </div></section>
-<section id="proof"><div class="wrap"><div class="section-head"><div class="kicker">Measured on large repositories</div><h2 class="section-title">Repository intelligence that survives contact with real code.</h2><p class="section-copy">The 3.1.0 release lineage was validated end to end on a large Java repository — same protocol and same hardware as the previous public record, so the improvements are directly comparable.</p></div>
+<section id="proof"><div class="wrap"><div class="section-head"><div class="kicker">Measured on large repositories</div><h2 class="section-title">Repository intelligence that survives contact with real code.</h2><p class="section-copy">The 3.1.0 release lineage was validated end to end on a large Java repository — same protocol and same hardware as the 3.0.4 record; the before/after figures compare against <code>main</code> at c96f61a on the identical corpus.</p></div>
 <div class="proof-grid"><div class="big-proof"><div class="kicker">Cold structural index</div><div class="proof-number">19m<span>28s</span></div><div class="proof-note">13,607 indexed files, 247,499 symbols, 248,107 chunks, 402,844 graph nodes, and 1,522,135 relationship edges — a corpus 46% larger than the prior record. A repeat rebuild reproduced identical totals.</div></div>
-<div class="proof-stack"><div><div class="stat">0.02s</div><div class="stat-label">exact class lookup, fresh process — down from 13.9s on the prior build</div></div><div><div class="stat">495,606</div><div class="stat-label">local semantic vectors · 0 failures</div></div><div><div class="stat">84,504</div><div class="stat-label">tests indexed and tiered by evidence</div></div><div><div class="stat">58</div><div class="stat-label">MCP tools with routing + safety metadata</div></div></div></div>
+<div class="proof-stack"><div><div class="stat">0.02–0.05s</div><div class="stat-label">exact class lookup, fresh process — down from 13.9s on <code>main</code> at c96f61a, same host as the 3.0.4 record</div></div><div><div class="stat">495,606</div><div class="stat-label">local semantic vectors · 0 failures</div></div><div><div class="stat">84,504</div><div class="stat-label">tests indexed and tiered by evidence</div></div><div><div class="stat">58</div><div class="stat-label">MCP tools with routing + safety metadata</div></div></div></div>
 <div class="dogfood-note"><b>Measured, not promised:</b> timings come from one local workstation and vary with hardware, repository shape, Git history, and enabled evidence. Four concurrent graph reads completed without lock failures; optional compiler-grade SCIP evidence was unavailable for this build and remained explicitly reported as missing. <a class="proof-link inline-proof" href="proof/large-java-2026-08-31-main.json">Inspect the JSON evidence ↗</a> <a class="proof-link inline-proof" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/large-java-validation-2026-08-31.md">Read the method and caveats ↗</a></div></div></section>
 
+<section id="expect"><div class="wrap"><div class="section-head"><div class="kicker">What to expect</div><h2 class="section-title">The floor your agent starts from, measured on real repositories.</h2><p class="section-copy">Retrieval is scored on the production <code>ok context</code> path — the same builder behind <code>ok plan</code> and the MCP <code>build_context_pack</code> tool — on four repositories indexed at a fixed base commit. Each case is a later commit: the query is its subject line, the answer is the source files it changed. Both splits are gated nightly; the table shows holdout.</p></div>
+<div class="expect-grid"><div class="expect-table-wrap"><table class="expect-table"><thead><tr><th>Corpus</th><th>Holdout cases</th><th>R@5</th><th>R@20</th><th>MRR</th></tr></thead><tbody>
+<tr><td>Java, about 10k files</td><td>113</td><td>0.549</td><td>0.681</td><td>0.482</td></tr>
+<tr><td>Go application, ~800 files</td><td>84</td><td>0.690</td><td>0.810</td><td>0.551</td></tr>
+<tr><td>TypeScript, ~900 files</td><td>166</td><td>0.753</td><td>0.801</td><td>0.621</td></tr>
+<tr><td>Python library, ~4k files</td><td>199</td><td>0.658</td><td>0.749</td><td>0.556</td></tr>
+</tbody></table></div>
+<div class="expect-notes">
+<div><b>R@5</b> — the share of tasks for which at least one file the commit changed is in the first five results.</div>
+<div><b>R@20</b> — the same within the first twenty results, roughly the whole context pack.</div>
+<div><b>MRR</b> — the average of 1 / rank of the first correct file; 1.0 means it was always first, 0.5 is what you get if the first correct file were always second, or first half the time and never found the rest.</div>
+</div></div>
+<div class="dogfood-note"><b>Read it plainly:</b> on a Java repository of about ten thousand files the right file is in the top five about half the time and in the pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the floor the agent starts from; exact lookups and the plan → edit → verify loop sit on top of it. Baselines were frozen from a hosted Linux runner matrix on 2026-09-07 and are re-derived nightly against the frozen files in <code>benchmarks/commit-derived/</code> by the scripts in the repository; the job fails when a watched metric drops more than 0.03 below its baseline. Queries are commit subjects, not issue text, so these numbers are not comparable with published benchmarks. <a class="proof-link inline-proof" href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Method, corpora, both splits, and scripts ↗</a></div>
+</div></section>
 <section id="honesty"><div class="wrap"><div class="section-head"><div class="kicker">Built to be trusted</div><h2 class="section-title">The parts we can prove, we prove. The parts we can’t, we publish.</h2><p class="section-copy">Every claim on this page traces to a frozen corpus and a machine-readable artifact in the repository — including the numbers that are not good yet.</p></div>
 <div class="features">
-<article class="feature"><div class="feature-icon">ABS</div><h3>Retrieval ranking is our open problem</h3><p>On our frozen 30-case corpus, when a task has no correct answer, retrieval still returns something 80% of the time. That number is published, thresholded in CI, and linked from the repository. Calibrated abstention is built and gated on held-out performance — and off by default until it earns activation.</p><div class="meta">benchmarks/retrieval-baseline.json</div></article>
+<article class="feature"><div class="feature-icon">ABS</div><h3>When the task has no answer</h3><p>On the frozen 30-case fixture, all five no-gold tasks now come back at <em>Low</em> confidence instead of being presented as answers (no-gold false-positive rate 0.0; the CI ceiling is 0.25). A low-confidence pack still lists candidates — it tells the caller not to trust them rather than returning nothing. Calibrated abstention is built and gated on held-out performance, and off by default until it earns activation.</p><div class="meta">benchmarks/retrieval-baseline.json · benchmarks/retrieval-thresholds.json</div></article>
 <article class="feature"><div class="feature-icon">TIER</div><h3>Proof-tiered claims</h3><p>A file that merely shares a name can never become a “proven dependency” or a “required test.” Structural claims carry typed proofs; heuristic candidates stay clearly labeled suggestions.</p><div class="meta">retrieval may speculate · truth may not</div></article>
-<article class="feature"><div class="feature-icon">GEN</div><h3>Atomic index generations</h3><p>Every index builds into its own generation and publishes with one atomic switch. Kill it mid-build, lose power, downgrade — readers never see a half-built index.</p><div class="meta">atomic publish · last-known-good recovery</div></article>
+<article class="feature"><div class="feature-icon">GEN</div><h3>Atomic index generations</h3><p>Every index builds into its own generation and publishes with one atomic switch — designed so a reader never sees a half-built index; a kill mid-build or a downgrade falls back to the last good generation.</p><div class="meta">atomic publish · last-known-good recovery</div></article>
 </div></div></section>
 <section id="motion"><div class="wrap"><div class="section-head"><div class="kicker">Release-linked evidence</div><h2 class="section-title">Don’t take the marketing copy on faith. Inspect the proof.</h2><p class="section-copy">The evidence below identifies the exact build lineage, publishes aggregate results, and keeps caveats beside the claims they qualify. The newest record also publishes what got faster — and what still isn’t perfect.</p></div>
 <div class="motion-grid">
@@ -87,12 +101,22 @@
 <div class="workflow-terminal"><div class="window"><div class="lights"><i></i><i></i><i></i></div><div class="window-title" id="tour-title">ok plan</div><div></div></div><div class="workflow-body" id="tour-output" role="tabpanel" aria-live="polite" aria-labelledby="tab-plan" tabindex="0"></div></div></div>
 </div></section>
 <section id="security"><div class="wrap"><div class="section-head"><div class="kicker">Local by design</div><h2 class="section-title">Your repository is the source of truth — and it stays yours.</h2><p class="section-copy">The default workflow is designed for local repository intelligence rather than a hosted code-index service.</p></div>
-<div class="security-grid"><div class="security-card"><div class="shield">◈</div><b>No hosted index</b><p>Core search and evidence are stored under the repository’s local <code>.ok/</code> data.</p></div><div class="security-card"><div class="shield">⌁</div><b>Read-only by default</b><p>The MCP server provides evidence tools; source edits remain in the normal editor and agent workflow.</p></div><div class="security-card"><div class="shield">⊘</div><b>Network-denial posture</b><p>Default MCP security configuration includes network denial; local semantic search does not require a hosted embeddings API.</p></div><div class="security-card"><div class="shield">✓</div><b>Share proof, not source</b><p><code>ok prove</code> reports index and validation signals while intentionally omitting source snippets.</p></div></div>
+<div class="security-grid"><div class="security-card"><div class="shield">◈</div><b>No hosted index</b><p>Core search and evidence are stored under the repository’s local <code>.ok/</code> data.</p></div><div class="security-card"><div class="shield">⌁</div><b>Read-only by default</b><p>The MCP server provides evidence tools; source edits remain in the normal editor and agent workflow.</p></div><div class="security-card"><div class="shield">⊘</div><b>Network-denial posture</b><p>Command execution and model downloads are policy-gated. Default configuration includes network denial, and denial fails closed. Local semantic search needs no hosted embeddings API.</p></div><div class="security-card"><div class="shield">✓</div><b>Share proof, not source</b><p><code>ok prove</code> reports index and validation signals while intentionally omitting source snippets.</p></div></div>
 <div class="semantic-note"><strong>Evidence stays honest:</strong> runtime traces and coverage reports are optional local inputs; when evidence is missing, Open Kioku reports the caveat instead of pretending certainty.</div>
 </div></section>
-<section id="install"><div class="wrap"><div class="cta-box"><div><div class="kicker">Start with your own repository</div><h2>Give your coding agent evidence before the next edit.</h2><p>Install locally, build the repository index, then generate a plan from the task you actually care about.</p></div><div class="install-inline"><span><span class="prompt">$</span> npm install -g open-kioku</span><button class="copy" data-copy="npm install -g open-kioku">Copy</button></div></div><div class="semantic-note">If Open Kioku improves your agent workflow, consider <a class="proof-link" href="https://github.com/shivyadavus/open-kioku">starring the repository ↗</a>.</div></div></section>
+<section id="install"><div class="wrap"><div class="cta-box"><div><div class="kicker">Start with your own repository</div><h2>Give your coding agent evidence before the next edit.</h2><p>Install from the channel you already use, run one setup command, then ask for evidence on the task you actually care about.</p></div><div class="install-inline"><span><span class="prompt">$</span> npm install -g open-kioku</span><button class="copy" data-copy="npm install -g open-kioku">Copy</button></div></div><div class="install-grid">
+<div class="install-card"><b>npm</b><code>npm install -g open-kioku</code><p>Pulls the native binary for macOS, Linux, or Windows through platform packages.</p></div>
+<div class="install-card"><b>crates.io</b><code>cargo install open-kioku-cli</code><p>Or <code>cargo binstall open-kioku-cli</code> for the prebuilt binary.</p></div>
+<div class="install-card"><b>GitHub releases</b><code>ok-{linux,macos,windows}-*</code><p>Binaries with <code>SHA256SUMS</code>, an SBOM, <code>PROVENANCE.json</code>, and build-provenance attestations. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/release-trust.md">Release trust ↗</a></p></div>
+<div class="install-card"><b>Homebrew</b><code>Formula/open-kioku.rb</code><p>Formula tracked in the repository; no public tap is published yet.</p></div>
+<div class="install-card"><b>Claude Code plugin</b><code>claude_plugin.json</code><p>Plugin manifest and <code>.claude-plugin/</code> marketplace entry in the repository.</p></div>
+<div class="install-card"><b>Cursor / Codex plugins</b><code>.cursor-plugin/ · .codex-plugin/</code><p>Agent, rules, and skill for Cursor; plugin manifest for Codex.</p></div>
+<div class="install-card"><b>MCP directories</b><code>glama.json · smithery.yaml</code><p>Server manifests for the Glama and Smithery MCP directories.</p></div>
+<div class="install-card"><b>Setup guides</b><code>ok setup agent claude|cursor --repo . --apply</code><p><a href="claude-code-setup.html">Claude Code</a> · <a href="cursor-setup.html">Cursor</a> · <a href="codex-setup.html">Codex</a> · <a href="gemini-cli-setup.html">Gemini CLI</a></p></div>
+</div>
+<div class="semantic-note">If Open Kioku improves your agent workflow, consider <a class="proof-link" href="https://github.com/shivyadavus/open-kioku">starring the repository ↗</a>.</div></div></section>
 </main>
-<footer><div class="wrap foot"><div>Open Kioku · local-first repository evidence for AI coding workflows.</div><div class="foot-links"><a href="https://github.com/shivyadavus/open-kioku">Source</a><a href="docs.html">Docs</a><a href="proof/large-java-3.0.4.json">Proof</a></div></div></footer>
+<footer><div class="wrap foot"><div>Open Kioku · local-first repository evidence for AI coding workflows.</div><div class="foot-links"><a href="https://github.com/shivyadavus/open-kioku">Source</a><a href="docs.html">Docs</a><a href="proof/large-java-2026-08-31-main.json">Proof</a></div></div></footer>
 <script src="site.js"></script>
 </body>
 </html>
