@@ -9,7 +9,7 @@
     <link rel="canonical" href="https://www.openkioku.com/claude-code-setup.html">
 
     <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
-    <meta property="og:description" content="Give Claude Code an evidence layer before it edits your codebase. Local code search, symbol resolution, impact analysis, and edit plans via MCP.">
+    <meta property="og:description" content="Claude Code shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://www.openkioku.com/claude-code-setup.html">
     <meta property="og:image" content="https://www.openkioku.com/og-image.png">
@@ -17,7 +17,7 @@
 
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Claude Code">
-    <meta name="twitter:description" content="Give Claude Code an evidence layer before it edits your codebase. Local code search, symbol resolution, impact analysis, and edit plans via MCP.">
+    <meta name="twitter:description" content="Claude Code shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
 
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
@@ -820,7 +820,7 @@
                 Claude Code + Open Kioku MCP
             </div>
             <h1>Give Claude Code an <span class="accent">evidence layer</span> before it edits your codebase</h1>
-            <p class="hero-sub">Connect Open Kioku as a local MCP server so Claude Code can search your code, resolve symbols, trace impact, build plans, and verify edits from a local index.</p>
+            <p class="hero-sub">Connect Open Kioku as a local MCP server so Claude Code shows its evidence before it edits — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Nothing leaves your machine.</p>
             <div class="hero-actions">
                 <a class="button button-primary" href="#step-1">
                     <span>Start setup</span>
@@ -862,6 +862,7 @@
                                 <pre><span class="shell-prompt">$</span> npm install -g open-kioku</pre>
                             </div>
                         </div>
+                        <p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
                     </div>
                 </article>
 
@@ -893,7 +894,22 @@
                     <div class="step-number">3</div>
                     <div class="step-content">
                         <h3>Connect MCP to Claude Code</h3>
-                        <p>Generate the MCP configuration for Claude Code. The command prints a JSON snippet — paste it into your Claude Code MCP settings file.</p>
+                        <p>Shortcut: one command indexes the repository, writes a repository-scoped <code>.mcp.json</code> plus managed guidance, and checks that the local server answers an MCP initialize request (run without <code>--apply</code> to preview; nothing is written).</p>
+                        <div class="terminal-card">
+                            <div class="terminal-header">
+                                <div class="window-controls" aria-hidden="true">
+                                    <span class="control-red"></span>
+                                    <span class="control-amber"></span>
+                                    <span class="control-green"></span>
+                                </div>
+                                <div class="terminal-title">terminal</div>
+                                <button class="copy-button" type="button" data-copy="ok setup agent claude --repo . --apply" aria-label="Copy setup command">Copy</button>
+                            </div>
+                            <div class="terminal-body">
+                                <pre><span class="shell-prompt">$</span> ok setup agent claude --repo . --apply</pre>
+                            </div>
+                        </div>
+                        <p>Or generate the MCP server entry for Claude Code manually and paste it into your Claude Code MCP settings:</p>
                         <div class="terminal-card">
                             <div class="terminal-header">
                                 <div class="window-controls" aria-hidden="true">
@@ -957,6 +973,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 <div class="section-kicker">What You Get</div>
                 <h2>MCP tools Claude Code can call after setup.</h2>
                 <p class="section-copy">Every Open Kioku tool runs locally against your indexed repo. No hosted index or embeddings service required, read-only by default.</p>
+<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
             </div>
 
             <div class="tools-grid">

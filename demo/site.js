@@ -35,7 +35,7 @@ if(live){
       ['row','impact','2 structurally proven dependents · 1 possible (heuristic)'],
       ['row','tests','<span class="good">issue_token</span> · <span class="good">validate_token</span> — required by coverage evidence'],
       ['row','boundary','source + matching tests only'],
-      ['out','exact lookup answered in <span class="good">0.02s</span>']]},
+      ['out','exact lookup answered in <span class="good">0.02–0.05s</span>']]},
     {cmd:'ok verify --plan plan.json --changed src/auth.rs tests/auth_flow.rs',lines:[
       ['good','✓ cargo test · 2 passed · 0 failed'],
       ['good','✓ boundary violations: 0'],

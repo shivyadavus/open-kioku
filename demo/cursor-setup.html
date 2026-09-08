@@ -7,14 +7,14 @@
     <meta name="keywords" content="Cursor MCP server, Cursor code intelligence plugin, MCP code search for Cursor, Cursor local code intelligence, Open Kioku Cursor setup">
     <link rel="canonical" href="https://www.openkioku.com/cursor-setup.html">
     <meta property="og:title" content="How to Set Up Open Kioku MCP Server for Cursor | openkioku.com">
-    <meta property="og:description" content="Give Cursor an evidence layer before it edits your codebase. Local-first code intelligence with search, impact analysis, and edit plans via MCP.">
+    <meta property="og:description" content="Cursor shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://www.openkioku.com/cursor-setup.html">
     <meta property="og:image" content="https://www.openkioku.com/og-image.png">
     <meta property="og:site_name" content="Open Kioku">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="How to Set Up Open Kioku MCP Server for Cursor | openkioku.com">
-    <meta name="twitter:description" content="Give Cursor an evidence layer before it edits your codebase. Local code intelligence via MCP — search, symbols, impact analysis, and edit plans.">
+    <meta name="twitter:description" content="Cursor shows its evidence before it edits, and its diff is verified against the plan it declared. Local MCP server; no source upload.">
     <meta name="twitter:image" content="https://www.openkioku.com/og-image.png">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080a0d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-size='24' font-family='monospace' font-weight='700' fill='%232dd4bf'%3Eok%3C/text%3E%3C/svg%3E">
     <title>How to Set Up Open Kioku MCP Server for Cursor | openkioku.com</title>
@@ -806,7 +806,7 @@
                 <span class="eyebrow-icon" aria-hidden="true">⎈</span> Cursor + Open Kioku MCP
             </div>
             <h1>Give Cursor an <span class="accent">evidence layer</span> before it edits your codebase</h1>
-            <p class="hero-copy">Open Kioku is a local-first MCP server that gives Cursor code search, symbol resolution, impact analysis, and evidence-backed edit plans. Index once, plan from facts, verify bounded changes. Open Kioku does not upload source.</p>
+            <p class="hero-copy">Open Kioku is a local MCP server Cursor reads before it edits: it shows its evidence — files, streams, confidence, caveats — declares an edit boundary in a plan, and has its diff verified against that plan. Open Kioku does not upload source.</p>
             <div class="hero-actions">
                 <a class="button button-primary" href="#step-1" aria-label="Jump to setup steps">
                     <span>Start setup</span>
@@ -848,6 +848,7 @@
                                 <pre><span class="shell-prompt">$</span>npm install -g open-kioku</pre>
                             </div>
                         </div>
+                        <p>Other channels: <code>cargo install open-kioku-cli</code> or <code>cargo binstall open-kioku-cli</code> from crates.io; binaries with checksums, an SBOM, and provenance on <a href="https://github.com/shivyadavus/open-kioku/releases">GitHub releases</a>; a Homebrew formula is tracked in the repository (no public tap yet).</p>
                     </div>
                 </article>
 
@@ -881,7 +882,22 @@
                     <div class="step-number">3</div>
                     <div class="step-content">
                         <h3>Connect MCP to Cursor</h3>
-                        <p>Generate the MCP server configuration for Cursor. This prints a JSON snippet that you paste into <strong>Cursor Settings → MCP</strong>.</p>
+                        <p>Shortcut: one command indexes the repository, writes a repository-scoped <code>.cursor/mcp.json</code> plus managed guidance, and checks that the local server answers an MCP initialize request (run without <code>--apply</code> to preview; nothing is written).</p>
+                        <div class="terminal-card">
+                            <div class="terminal-header">
+                                <div class="window-controls" aria-hidden="true">
+                                    <span class="control-red"></span>
+                                    <span class="control-amber"></span>
+                                    <span class="control-green"></span>
+                                </div>
+                                <div class="terminal-title">terminal</div>
+                                <button class="copy-button" type="button" data-copy="ok setup agent cursor --repo . --apply" aria-label="Copy setup command">Copy</button>
+                            </div>
+                            <div class="terminal-body">
+                                <pre><span class="shell-prompt">$</span> ok setup agent cursor --repo . --apply</pre>
+                            </div>
+                        </div>
+                        <p>Or generate the MCP server entry for Cursor manually and paste it into your Cursor MCP settings:</p>
                         <div class="terminal-card">
                             <div class="terminal-header">
                                 <div class="window-controls" aria-hidden="true">
@@ -953,6 +969,7 @@ plan_change first, then edit, and verify after the edit with verify_change.</cod
                 <div class="section-kicker">What You Get</div>
                 <h2>MCP tools Cursor can call after setup.</h2>
                 <p class="section-copy">Every tool runs locally against the index you built in Step 2. Read-only by default. No hosted index or embeddings service required.</p>
+<p class="section-copy">What to expect: on a Java repository of about ten thousand files the right file is in the top five about half the time and in the context pack about two thirds of the time; on a TypeScript repository of about nine hundred files, in the pack about four in five and in the top five about three in four. That is the retrieval floor before exact lookups and the plan → verify loop; it is re-measured nightly against frozen baselines. <a href="https://github.com/shivyadavus/open-kioku/blob/main/docs/retrieval-benchmark.md">Numbers and method</a>.</p>
             </div>
 
             <div class="tool-grid">
