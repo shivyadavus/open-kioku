@@ -1116,14 +1116,6 @@
         },
         "purpose": "Find indexed validation candidates for the primary source file.",
         "tool": "find_tests_for_change"
-      },
-      {
-        "arguments": {
-          "limit": 8,
-          "query": "add a subtract function next to add"
-        },
-        "purpose": "Check whether prior repo facts exist for this task.",
-        "tool": "search_memory"
       }
     ],
     "validation": []
