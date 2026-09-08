@@ -1,9 +1,7 @@
 use anyhow::Context;
 use open_kioku_actions::{ActionKind, PolicyGate};
-use open_kioku_architecture::{
-    evaluate_policy, evaluate_public_api_boundary, ArchitectureDetector, PolicyResolver,
-};
-use open_kioku_config::{load_architecture_policy, load_architecture_policy_from_path, OkConfig};
+use open_kioku_architecture::{evaluate_policy, ArchitectureDetector, PolicyResolver};
+use open_kioku_config::{load_architecture_policy, OkConfig};
 use open_kioku_context::{
     candidates::{
         CandidateRequest, CandidateStream, ContextCandidateSource, SearchIndexCandidateSource,
@@ -17,7 +15,6 @@ use open_kioku_contract::{
 };
 use open_kioku_core::{
     Confidence, ContextHandleId, GraphEdgeType, GraphNodeType, PlanReport, PolicyCheckReport,
-    PolicyComponentMatch, SimilarChangeQuery, SymbolId,
 };
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
@@ -29,7 +26,7 @@ use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::disabled_response;
-use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, OkStore, SearchIndex};
+use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
 use open_kioku_tests::TestSelector;
@@ -355,14 +352,11 @@ async fn dispatch(
                 );
                 // Same numbers as `ok --json status`: null when the manifest predates
                 // coverage recording, so absence is never mistaken for 100%.
-                object.insert(
-                    "coverage".into(),
-                    serde_json::to_value(
-                        manifest
-                            .as_ref()
-                            .and_then(|manifest| manifest.quality.coverage.as_ref()),
-                    )?,
-                );
+                let coverage = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.quality.coverage.as_ref());
+                object.insert("coverage".into(), serde_json::to_value(coverage)?);
+                object.insert("languages".into(), json!(indexed_languages(store, coverage)?));
                 let semantic = SemanticIndexManager::new(repo, store, &config.semantic).status();
                 object.insert(
                     "semantic_lifecycle".into(),
@@ -381,18 +375,27 @@ async fn dispatch(
             }
             Ok(status)
         }
-        "list_languages" => {
-            let files = store.list_files(usize::MAX, 0)?;
-            let mut languages = files
-                .into_iter()
-                .map(|file| format!("{:?}", file.language))
-                .collect::<Vec<_>>();
-            languages.sort();
-            languages.dedup();
-            Ok(json!({"languages": languages}))
-        }
         "list_files" => {
             gate.ensure_allowed(ActionKind::Read)?;
+            // One `path` turns the inventory into the per-file detail view: the
+            // indexed record plus the chunks that cover it. File-level detail
+            // and symbol-level detail are different questions, so this is the
+            // file-level tool rather than a mode on `get_definition`.
+            if let Some(path) = params.get("path").and_then(Value::as_str) {
+                let file = store.get_file_by_path(Path::new(path))?;
+                let chunks = match &file {
+                    Some(file) => store.chunks_for_file(&file.id)?,
+                    None => Vec::new(),
+                };
+                let caveats = if file.is_none() {
+                    vec![format!(
+                        "`{path}` is not in the index; it may be excluded, unsupported, or added since the last `ok index`"
+                    )]
+                } else {
+                    Vec::new()
+                };
+                return Ok(json!({"path": path, "file": file, "chunks": chunks, "caveats": caveats}));
+            }
             let limit = limit(&params);
             let offset = offset(&params);
             Ok(paged_overfetch_response(
@@ -402,7 +405,7 @@ async fn dispatch(
                 offset,
             )?)
         }
-        "list_symbols" | "search_symbols" => {
+        "search_symbols" => {
             let query = params.get("query").and_then(Value::as_str);
             let limit = limit(&params);
             let offset = offset(&params);
@@ -413,41 +416,41 @@ async fn dispatch(
                 offset,
             )?)
         }
-        "search_code" | "search_files" => search_tool(repo, store, &params),
+        "search_code" => match params.get("mode").and_then(Value::as_str).unwrap_or("code") {
+            "code" | "graph" => search_tool(repo, store, &params),
+            "semantic" => semantic_search_tool(repo, store, config, &params),
+            "hybrid" => hybrid_search_tool(repo, store, config, &params),
+            other => anyhow::bail!(
+                "unknown `mode` `{other}` for search_code; expected one of code, graph, semantic, hybrid"
+            ),
+        },
         "regex_search" => regex_search_tool(store, &params),
         "build_context_pack" => {
             let task = required_str(&params, "task")?;
             let pack = build_context_for_task(repo, store, config, task, limit(&params))?;
+            // `compress` is the only path that writes: it stores the snippets
+            // under `.ok` and returns handles instead. The default renders the
+            // pack inline and touches nothing.
+            if bool_arg(&params, "compress") {
+                let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
+                return if format_arg(&params, "json") == "toon" {
+                    Ok(json!(open_kioku_format::render_compressed_context_toon(
+                        &compressed
+                    )))
+                } else {
+                    Ok(json!(compressed))
+                };
+            }
             // Markdown is the default because JSON is roughly two orders of
             // magnitude larger for the same answer, and this tool exists to
             // spend an agent's context window well. Callers that parse the
             // response ask for "json" explicitly.
-            let format_arg = params
-                .get("format")
-                .and_then(Value::as_str)
-                .unwrap_or("markdown");
-            match format_arg {
+            match format_arg(&params, "markdown") {
                 "json" => Ok(json!(pack)),
                 "toon" => Ok(json!(open_kioku_format::render_context_pack_toon(&pack))),
                 _ => Ok(json!(
                     open_kioku_context::ContextPackFormat::Markdown.render(&pack)?
                 )),
-            }
-        }
-        "build_compressed_context" => {
-            let task = required_str(&params, "task")?;
-            let pack = build_context_for_task(repo, store, config, task, limit(&params))?;
-            let compressed = ContextHandleStore::open_repo(repo)?.compress_pack(&pack)?;
-            let format_arg = params
-                .get("format")
-                .and_then(Value::as_str)
-                .unwrap_or("json");
-            if format_arg == "toon" {
-                Ok(json!(open_kioku_format::render_compressed_context_toon(
-                    &compressed
-                )))
-            } else {
-                Ok(json!(compressed))
             }
         }
         "retrieve_context" => {
@@ -457,7 +460,45 @@ async fn dispatch(
             Ok(json!(retrieved))
         }
         "plan_change" => {
+            // `persist` is the only writing path: it turns the plan into a
+            // durable ChangeContractV1 that `verify_change` can later be held
+            // to. It accepts a plan the caller already holds so a saved plan
+            // becomes a contract without re-planning.
+            if bool_arg(&params, "persist") {
+                let plan = contract_plan_from_params(repo, store, &params)?;
+                let contract = ContractBuilder::from_plan(&plan)?;
+                let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
+                let should_store = params.get("store").and_then(Value::as_bool).unwrap_or(true);
+                if should_store {
+                    contract_store.save(&contract)?;
+                }
+                let output = ContractCreateToolOutput {
+                    contract_id: contract.id.0.clone(),
+                    stored: should_store,
+                    store_path: should_store.then(|| {
+                        repo.join(".ok/contracts")
+                            .join(format!("{}.json", contract.id.0))
+                    }),
+                    contract,
+                };
+                return format_contract_create_output(&output, format_arg(&params, "json"));
+            }
+
             let task = required_str(&params, "task")?;
+            let detail = params
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("plan");
+            if detail == "patch" {
+                return Ok(json!(
+                    PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
+                ));
+            }
+            anyhow::ensure!(
+                matches!(detail, "plan" | "preflight"),
+                "unknown `detail` `{detail}` for plan_change; expected one of plan, preflight, patch"
+            );
+
             let task = if let Some(since) = params.get("since").and_then(Value::as_str) {
                 task_with_changed_ranges(repo, task, since)?
             } else {
@@ -470,63 +511,21 @@ async fn dispatch(
                 .with_history_store(Some(store))
                 .with_memory_facts(memory_facts)
                 .plan_from_context(&task, limit, context)?;
-            let format_arg = params
-                .get("format")
-                .and_then(Value::as_str)
-                .unwrap_or("markdown");
-            match format_arg {
+
+            if detail == "preflight" {
+                let report = PreflightReport::from_plan(&report);
+                return match format_arg(&params, "json") {
+                    "markdown" => Ok(json!(PreflightFormat::Markdown.render(&report)?)),
+                    "html" => Ok(json!(PreflightFormat::Html.render(&report)?)),
+                    "text" => Ok(json!(PreflightFormat::Text.render(&report)?)),
+                    _ => Ok(json!(report)),
+                };
+            }
+            match format_arg(&params, "markdown") {
                 "json" => Ok(json!(report)),
                 "toon" => Ok(json!(PlanFormat::Toon.render(&report)?)),
                 _ => Ok(json!(PlanFormat::Markdown.render(&report)?)),
             }
-        }
-        "preflight_change" => {
-            let task = required_str(&params, "task")?;
-            let task = if let Some(since) = params.get("since").and_then(Value::as_str) {
-                task_with_changed_ranges(repo, task, since)?
-            } else {
-                task.to_string()
-            };
-            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
-            let limit = limit(&params);
-            let context = build_context_for_task(repo, store, config, &task, limit)?;
-            let plan = PlanEngine::new(store as &dyn OkStore)
-                .with_history_store(Some(store))
-                .with_memory_facts(memory_facts)
-                .plan_from_context(&task, limit, context)?;
-            let report = PreflightReport::from_plan(&plan);
-            let format_arg = params
-                .get("format")
-                .and_then(Value::as_str)
-                .unwrap_or("json");
-            match format_arg {
-                "markdown" => Ok(json!(PreflightFormat::Markdown.render(&report)?)),
-                "html" => Ok(json!(PreflightFormat::Html.render(&report)?)),
-                "text" => Ok(json!(PreflightFormat::Text.render(&report)?)),
-                _ => Ok(json!(report)),
-            }
-        }
-        "create_change_contract" => {
-            let plan = contract_plan_from_params(repo, store, &params)?;
-            let contract = ContractBuilder::from_plan(&plan)?;
-            let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
-            let should_store = params.get("store").and_then(Value::as_bool).unwrap_or(true);
-            if should_store {
-                contract_store.save(&contract)?;
-            }
-            let output = ContractCreateToolOutput {
-                contract_id: contract.id.0.clone(),
-                stored: should_store,
-                store_path: should_store.then(|| {
-                    repo.join(".ok/contracts")
-                        .join(format!("{}.json", contract.id.0))
-                }),
-                contract,
-            };
-            Ok(format_contract_create_output(
-                &output,
-                format_arg(&params, "json"),
-            )?)
         }
         "remember_fact" => {
             let text = required_str(&params, "text")?;
@@ -564,217 +563,9 @@ async fn dispatch(
             report.architecture_policy = configured_architecture_policy_report(repo, store)?;
             Ok(json!(report))
         }
-        "history_provenance_lookup" => {
-            let path = params.get("path").and_then(Value::as_str);
-            let symbol = params.get("symbol").and_then(Value::as_str);
-            match (path, symbol) {
-                (Some(path), None) => Ok(json!(
-                    store.provenance_for_path(Path::new(path), limit(&params))?
-                )),
-                (None, Some(query)) => {
-                    let symbol = resolve_history_symbol(store, query)?;
-                    Ok(json!(
-                        store.provenance_for_symbol(&symbol.id, limit(&params))?
-                    ))
-                }
-                (Some(_), Some(_)) => {
-                    anyhow::bail!("provide exactly one of `path` or `symbol`")
-                }
-                (None, None) => anyhow::bail!("missing required `path` or `symbol` argument"),
-            }
-        }
-        "churn_analysis" => {
-            let path = params.get("path").and_then(Value::as_str);
-            let module = params.get("module").and_then(Value::as_str);
-            let symbol = params.get("symbol").and_then(Value::as_str);
-            let provided = usize::from(path.is_some())
-                + usize::from(module.is_some())
-                + usize::from(symbol.is_some());
-            if provided != 1 {
-                anyhow::bail!("provide exactly one of `path`, `module`, or `symbol`");
-            }
-            if let Some(path) = path {
-                Ok(json!(store.churn_for_file(Path::new(path))?))
-            } else if let Some(module) = module {
-                Ok(json!(store.churn_for_module(Path::new(module))?))
-            } else if let Some(query) = symbol {
-                let symbol = resolve_history_symbol(store, query)?;
-                Ok(json!(store.churn_for_symbol(&symbol.id)?))
-            } else {
-                unreachable!("exactly one churn target was checked above");
-            }
-        }
-        "history_similar_changes" => {
-            let query = similar_change_query_from_params(&params)?;
-            Ok(json!(store.similar_changes(&query, limit(&params))?))
-        }
-        "ownership_lookup" => {
-            let path = Path::new(required_str(&params, "path")?);
-            let components = ownership_components(repo, store, path)?;
-            let memory_facts = ownership_memory_facts(repo, path, &components)?;
-            Ok(json!(open_kioku_git::ownership_for_path(
-                open_kioku_git::OwnershipInput {
-                    repo,
-                    path,
-                    history: store,
-                    memory_facts: &memory_facts,
-                    components,
-                }
-            )?))
-        }
-        "reviewer_suggestions" => {
-            let path = Path::new(required_str(&params, "path")?);
-            let components = ownership_components(repo, store, path)?;
-            let memory_facts = ownership_memory_facts(repo, path, &components)?;
-            let ownership = open_kioku_git::ownership_for_path(open_kioku_git::OwnershipInput {
-                repo,
-                path,
-                history: store,
-                memory_facts: &memory_facts,
-                components,
-            })?;
-            Ok(json!(open_kioku_git::suggest_reviewers(
-                open_kioku_git::ReviewerSuggestionInput {
-                    path,
-                    history: store,
-                    ownership: Some(&ownership),
-                }
-            )?))
-        }
-        "find_tests_for_change" | "recommend_validation_plan" => {
-            let path = required_str(&params, "path")?;
-            Ok(json!(
-                TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
-            ))
-        }
-        "detect_architecture" => {
-            require_authoritative_relationships(store)?;
-            Ok(json!(ArchitectureDetector::new(store, None).detect()?))
-        }
-        "architecture_boundaries" | "architecture_violations" => {
-            require_authoritative_relationships(store)?;
-            architecture_summary_tool(repo, store)
-        }
-        "architecture_policy_validate" => architecture_policy_validate_tool(repo, &params),
-        "architecture_policy_check" => {
-            require_authoritative_relationships(store)?;
-            let Some(policy) = load_architecture_policy(repo)? else {
-                return Ok(json!(open_kioku_core::PolicyCheckReport {
-                    configured: false,
-                    uncertainty: vec![
-                        "no architecture policy configured; dependency edges were not evaluated"
-                            .into()
-                    ],
-                    ..Default::default()
-                }));
-            };
-            let resolver = PolicyResolver::new(&policy)?;
-            Ok(json!(evaluate_policy(store, &resolver, &policy)?))
-        }
-        "architecture_policy_explain" => {
-            require_authoritative_relationships(store)?;
-            let Some(policy) = load_architecture_policy(repo)? else {
-                return Ok(json!({
-                    "configured": false,
-                    "violations": [],
-                    "exemptions": [],
-                    "uncertainty": ["no architecture policy configured; public API boundaries were not evaluated"]
-                }));
-            };
-            let resolver = PolicyResolver::new(&policy)?;
-            architecture_policy_explain_tool(repo, store, &resolver, &policy, &params)
-        }
-        "get_definition" | "explain_symbol" => {
-            let query = required_str(&params, "query")?;
-            Ok(json!(SymbolEngine::new(store).definition(query)?))
-        }
-        "get_symbol_context" => {
-            let query = required_str(&params, "query")?;
-            Ok(json!(
-                SymbolEngine::new(store).context(query, SYMBOL_CONTEXT_SURROUNDING_LINES)?
-            ))
-        }
-        "get_references" => {
-            require_authoritative_relationships(store)?;
-            let query = required_str(&params, "query")?;
-            Ok(json!(
-                SymbolEngine::new(store).references(query, limit(&params))?
-            ))
-        }
-        "get_callers" | "get_callees" => {
-            require_authoritative_relationships(store)?;
-            let query = required_str(&params, "query")?;
-            let symbol = SymbolEngine::new(store).definition(query)?;
-            let node = format!("symbol:{}", symbol.id.0);
-            let (nodes, edges) = store.neighbors(&node, MAX_MCP_FETCH)?;
-            let callers = method == "get_callers";
-            let edges = edges
-                .into_iter()
-                .filter(|edge| {
-                    edge.edge_type == GraphEdgeType::Calls
-                        && if callers {
-                            edge.to.0 == node
-                        } else {
-                            edge.from.0 == node
-                        }
-                })
-                .take(limit(&params))
-                .collect::<Vec<_>>();
-            let related_ids = edges
-                .iter()
-                .map(|edge| if callers { &edge.from.0 } else { &edge.to.0 })
-                .collect::<std::collections::BTreeSet<_>>();
-            let nodes = nodes
-                .into_iter()
-                .filter(|candidate| related_ids.contains(&candidate.id.0))
-                .collect::<Vec<_>>();
-            Ok(json!({"symbol": symbol, "nodes": nodes, "edges": edges}))
-        }
-        "semantic_status" => semantic_status_tool(repo, store, config),
-        "semantic_search" => semantic_search_tool(repo, store, config, &params),
-        "hybrid_search" => hybrid_search_tool(repo, store, config, &params),
-        "explain_search_result" => hybrid_search_tool(repo, store, config, &params),
-        "structural_search" => search_tool(repo, store, &params),
-        "get_implementations" => {
-            require_authoritative_relationships(store)?;
-            implementation_lookup_tool(store, &params)
-        }
-        "dependency_path" => {
-            require_authoritative_relationships(store)?;
-            let from = required_str(&params, "from")?;
-            let to = required_str(&params, "to")?;
-            let from = resolve_graph_node(store, from)?;
-            let to = resolve_graph_node(store, to)?;
-            Ok(json!({
-                "from": from,
-                "to": to,
-                "edges": store.shortest_path(&from, &to, 12)?,
-                "evidence_source": "sqlite_graph_store"
-            }))
-        }
-        "module_dependencies" => {
-            require_authoritative_relationships(store)?;
-            let node = required_str(&params, "node")?;
-            let node = resolve_graph_node(store, node)?;
-            let (nodes, edges) = store.neighbors(&node, limit(&params))?;
-            Ok(json!({"node": node, "nodes": nodes, "edges": edges}))
-        }
-        "explain_file" => {
-            let path = required_str(&params, "path")?;
-            let file = store.get_file_by_path(Path::new(path))?;
-            let chunks = if let Some(file) = &file {
-                store.chunks_for_file(&file.id)?
-            } else {
-                Vec::new()
-            };
-            Ok(json!({"file": file, "chunks": chunks}))
-        }
-        "explain_flow" => explain_flow_tool(store, &params),
-        "summarize_architecture" => {
-            require_authoritative_relationships(store)?;
-            architecture_summary_tool(repo, store)
-        }
-        "explain_test_coverage" => {
+        "find_tests_for_change" => {
+            // `path` is optional: without one this reports the repository-wide
+            // test evidence the retired `explain_test_coverage` returned.
             let path = params
                 .get("path")
                 .and_then(Value::as_str)
@@ -783,13 +574,72 @@ async fn dispatch(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
         }
-        "propose_patch" => {
-            let task = required_str(&params, "task")?;
-            Ok(json!(
-                PatchPlanner::new(config, store as &dyn OkStore).plan(task)?
-            ))
+        "get_definition" => {
+            let query = required_str(&params, "query")?;
+            let engine = SymbolEngine::new(store);
+            // The record answers "where does this live"; the body answers "what
+            // does it say". The body is a strictly larger read, so the record
+            // stays the default.
+            if bool_arg(&params, "include_body") {
+                return Ok(json!(
+                    engine.context(query, SYMBOL_CONTEXT_SURROUNDING_LINES)?
+                ));
+            }
+            Ok(json!(engine.definition(query)?))
         }
+        "get_references" => {
+            require_authoritative_relationships(store)?;
+            symbol_evidence_tool(store, &params)
+        }
+        "dependency_path" => {
+            require_authoritative_relationships(store)?;
+            let from = required_str(&params, "from")?;
+            let from = resolve_graph_node(store, from)?;
+            // Without a destination there is no route to trace, so the answer
+            // is the node's direct neighbourhood instead.
+            let Some(to) = params.get("to").and_then(Value::as_str) else {
+                let (nodes, edges) = store.neighbors(&from, limit(&params))?;
+                return Ok(json!({
+                    "node": from,
+                    "nodes": nodes,
+                    "edges": edges,
+                    "evidence_source": "sqlite_graph_store"
+                }));
+            };
+            let to = resolve_graph_node(store, to)?;
+            Ok(json!({
+                "from": from,
+                "to": to,
+                "edges": store.shortest_path(&from, &to, 12)?,
+                "evidence_source": "sqlite_graph_store"
+            }))
+        }
+        "explain_flow" => explain_flow_tool(store, &params),
         "verify_change" => {
+            // Three inputs, three jobs, one verb. A supplied report is
+            // explained rather than re-verified; a contract id or inline
+            // contract is verified against the contract; otherwise the saved
+            // plan is the boundary the change is held to.
+            if params.get("verification").is_some() || params.get("verification_json").is_some() {
+                let report = verification_report_from_params(&params)?;
+                let explanation = explain_verification_report(&report);
+                return format_verification_explanation(&explanation, format_arg(&params, "json"));
+            }
+            if params.get("contract_id").is_some()
+                || params.get("contract").is_some()
+                || params.get("contract_json").is_some()
+            {
+                let verification = verify_change_contract_tool(repo, store, &params)?;
+                if !bool_arg(&params, "explain") {
+                    return Ok(verification);
+                }
+                let report: ContractVerificationReport =
+                    serde_json::from_value(verification.clone()).context(
+                        "contract verification must round-trip into a ContractVerificationReport",
+                    )?;
+                let explanation = explain_verification_report(&report);
+                return format_verification_explanation(&explanation, format_arg(&params, "json"));
+            }
             let plan = plan_from_params(&params)?;
             let mut changed_files = params
                 .get("changed_files")
@@ -882,25 +732,14 @@ async fn dispatch(
                     },
                 )?))
         }
-        "verify_change_contract" => verify_change_contract_tool(repo, store, &params),
-        "get_change_contract" => {
-            let contract_id = required_str(&params, "contract_id")?;
-            let contract_store = FsContractStore::new(repo.join(".ok/contracts"));
-            let contract = contract_store.load(&ContractId::new(contract_id))?;
-            Ok(format_contract_output(
-                &contract,
-                format_arg(&params, "json"),
-            )?)
-        }
-        "explain_verification" => {
-            let report = verification_report_from_params(&params)?;
-            let explanation = explain_verification_report(&report);
-            Ok(format_verification_explanation(
-                &explanation,
-                format_arg(&params, "json"),
-            )?)
-        }
-        "get_evidence_schema" => {
+        "query_evidence_graph"
+            if params
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .is_empty() =>
+        {
             let manifest = store.manifest().ok().flatten();
             let schema = open_kioku_graph::schema::current_schema_with_manifest(
                 Some(store as &dyn open_kioku_storage::GraphStore),
@@ -1238,15 +1077,6 @@ fn semantic_search_tool(
     Ok(response)
 }
 
-fn semantic_status_tool(
-    repo: &Path,
-    store: &dyn MetadataStore,
-    config: &OkConfig,
-) -> anyhow::Result<Value> {
-    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
-    Ok(json!(manager.status()))
-}
-
 fn hybrid_search_tool(
     repo: &Path,
     store: &dyn MetadataStore,
@@ -1331,6 +1161,58 @@ fn tool_title(name: &str) -> String {
     format!("Open Kioku {words}")
 }
 
+/// Names that left the advertised surface and the dispatch table together.
+/// Nothing here may come back as a hidden alias: an agent holding a stale name
+/// must get a clear error rather than a response whose shape no longer matches
+/// the description that name was chosen from.
+#[cfg(test)]
+const RETIRED_TOOLS: &[&str] = &[
+    // Removed before 4.0.0.
+    "apply_patch",
+    "review_patch",
+    "validate_patch",
+    // Folded into one of the sixteen in 4.0.0 (#406).
+    "list_languages",
+    "list_symbols",
+    "search_files",
+    "semantic_status",
+    "semantic_search",
+    "hybrid_search",
+    "explain_search_result",
+    "explain_file",
+    "explain_symbol",
+    "get_symbol_context",
+    "get_callers",
+    "get_callees",
+    "get_implementations",
+    "module_dependencies",
+    "build_compressed_context",
+    "preflight_change",
+    "create_change_contract",
+    "propose_patch",
+    "verify_change_contract",
+    "explain_verification",
+    "recommend_validation_plan",
+    "explain_test_coverage",
+    "get_evidence_schema",
+    // Removed with nothing lost: no structural or AST matching exists here.
+    "structural_search",
+    // Moved to the CLI in 4.0.0; the capability ships, the MCP name does not.
+    "detect_architecture",
+    "architecture_boundaries",
+    "architecture_violations",
+    "architecture_policy_validate",
+    "architecture_policy_check",
+    "architecture_policy_explain",
+    "summarize_architecture",
+    "history_provenance_lookup",
+    "churn_analysis",
+    "history_similar_changes",
+    "ownership_lookup",
+    "reviewer_suggestions",
+    "get_change_contract",
+];
+
 fn tool_annotations(name: &str) -> Value {
     let mut read_only = true;
     let destructive = false;
@@ -1338,10 +1220,10 @@ fn tool_annotations(name: &str) -> Value {
     let mut open_world = false;
 
     match name {
-        "build_compressed_context"
-        | "create_change_contract"
-        | "remember_fact"
-        | "verify_change_contract" => {
+        // Conditionally writing: `build_context_pack` only with compress=true,
+        // `plan_change` only with persist=true. The hint describes what the
+        // tool can do, not what the default call does.
+        "build_context_pack" | "plan_change" | "remember_fact" => {
             read_only = false;
             idempotent = false;
         }
@@ -1388,191 +1270,100 @@ fn tool_output_schema() -> Value {
 
 fn tool_category(name: &str) -> &'static str {
     match name {
-        "repo_status" | "list_files" | "list_languages" => "repository",
-        "list_symbols"
-        | "search_symbols"
-        | "get_definition"
-        | "get_references"
-        | "get_implementations"
-        | "get_callers"
-        | "get_callees"
-        | "get_symbol_context"
-        | "explain_file"
-        | "explain_symbol" => "code-intelligence",
-        "search_code"
-        | "search_files"
-        | "regex_search"
-        | "semantic_status"
-        | "semantic_search"
-        | "hybrid_search"
-        | "explain_search_result"
-        | "structural_search" => "search",
-        "detect_architecture"
-        | "architecture_boundaries"
-        | "architecture_violations"
-        | "architecture_policy_validate"
-        | "architecture_policy_check"
-        | "architecture_policy_explain"
-        | "summarize_architecture" => "architecture",
-        "dependency_path" | "impact_analysis" | "module_dependencies" | "explain_flow" => {
-            "dependencies"
-        }
-        "history_provenance_lookup"
-        | "churn_analysis"
-        | "history_similar_changes"
-        | "ownership_lookup"
-        | "reviewer_suggestions" => "history",
-        "build_context_pack" | "build_compressed_context" | "retrieve_context" => "context",
-        "plan_change"
-        | "preflight_change"
-        | "create_change_contract"
-        | "get_change_contract"
-        | "propose_patch" => "planning",
+        "repo_status" | "list_files" => "repository",
+        "search_code" | "regex_search" => "search",
+        "search_symbols" | "get_definition" | "get_references" => "code-intelligence",
+        "dependency_path" | "impact_analysis" | "explain_flow" => "dependencies",
+        "build_context_pack" | "retrieve_context" => "context",
+        "plan_change" => "planning",
+        "verify_change" | "find_tests_for_change" => "validation",
+        "query_evidence_graph" => "evidence-graph",
         "remember_fact" | "search_memory" => "memory",
-        "find_tests_for_change"
-        | "recommend_validation_plan"
-        | "explain_test_coverage"
-        | "verify_change"
-        | "verify_change_contract"
-        | "explain_verification" => "validation",
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => "runtime",
-        "get_evidence_schema" | "query_evidence_graph" => "evidence-graph",
         _ => "repository-intelligence",
     }
 }
 
 fn tool_description(name: &str, base: &str) -> String {
     let guidance = match name {
-        "repo_status" => "Use first to check whether the local index exists and is fresh enough before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
-        "list_files" => "Use for broad repository inventory and pagination over indexed paths; use search_files when you already have a keyword or path fragment. This is read-only and returns indexed data only.",
-        "list_languages" => "Use for a quick language/support overview before choosing language-specific investigation paths. This is read-only and does not rescan the repository.",
-        "list_symbols" => "Use to browse the indexed symbol table or filter it by case-insensitive substring. Supports pagination via limit and offset. search_symbols is the same call under another name, so there is no fuzzy or ranked alternative here. Do NOT use for a symbol's defining record (use get_definition) or for its body and surrounding lines (use get_symbol_context). This is read-only and reads from the local index only.",
-        "search_symbols" => "Use when filtering the symbol table by a substring you already know. Do NOT use when the query is only approximate; nothing here is fuzzy or ranked, so a name that shares no substring will not appear at all. For a symbol's defining record use get_definition, for its body use get_symbol_context, and for cross-references use get_references. This is read-only and searches the local index only.",
-        "detect_architecture" => "Use to infer high-level architectural components and layers from the repository directory structure using heuristic analysis. Do NOT use when enforced policy rules are needed (use architecture_policy_check), when specific boundary constraints are needed (use architecture_boundaries), or when file-level policy membership must be explained (use architecture_policy_explain). This is read-only and performs heuristic detection only.",
-        "architecture_boundaries" => "Use to inspect configured architecture-policy components, path mappings, and dependency rules before planning or validating a change. When no policy exists, this returns heuristic components plus an explicit caveat; it does not invent constraints. Do NOT use for a policy syntax check (use architecture_policy_validate), a direct policy-only evaluation (use architecture_policy_check), or file-level membership evidence (use architecture_policy_explain). This is read-only.",
-        "architecture_violations" => "Use when the violations field of the architecture summary is the part that matters; architecture_boundaries and summarize_architecture return the same object. Do NOT use to validate policy syntax (use architecture_policy_validate), for a policy-only report (use architecture_policy_check), or to explain a specific finding (use architecture_policy_explain). This is read-only.",
-        "architecture_policy_validate" => "Use before architecture_policy_check when editing or debugging policy TOML syntax and component resolution. It validates policy shape only and does not evaluate graph edges.",
-        "architecture_policy_check" => "Use to enforce architecture policy against indexed import/reference/call edges. Use architecture_policy_validate first for policy syntax errors and architecture_policy_explain for why a specific file or symbol matched. This is read-only.",
-        "architecture_policy_explain" => "Use after a policy check to explain component membership, public API boundaries, or exemptions for one file, one symbol, or the whole repo. This is read-only and does not change policy.",
-        "search_code" => "Use for lexical BM25 code search when exact identifiers, terms, routes, or config keys are known. Prefer semantic_search for conceptual queries, hybrid_search when both lexical and semantic evidence are needed, and regex_search for exact patterns. This is read-only.",
-        "search_files" => "Use when the target is a file path or filename rather than a symbol; search_code is the same call under its primary name, so expect code hits rather than file records. Set mode=graph to search indexed graph-node documents. Do NOT use for browsing all files without a query (use list_files), for file metadata such as size or language (use list_files or explain_file), or for exact regex line matching (use regex_search). This is read-only and searches the local Tantivy index only.",
-        "regex_search" => "Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use semantic_search or hybrid_search), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
-        "semantic_status" => "Use before calling semantic_search or hybrid_search to confirm that the local vector index exists, is ready, and is not stale. Do NOT use to build or rebuild the index (run `ok semantic index` via the CLI instead). This is read-only, inspects only local metadata, and never generates embeddings or contacts external services.",
-        "semantic_search" => "Use for natural-language concepts when exact identifiers are unknown. Prefer search_code for exact terms and hybrid_search when results need both semantic recall and lexical precision. This is read-only.",
-        "hybrid_search" => "Use as the default investigative search when both keyword precision and semantic recall are needed — merges candidates from the Tantivy BM25 index and the local semantic vector index, deduplicates by file path, and sorts by combined score. Do NOT use when only exact lexical matches are needed (use search_code), when only conceptual similarity matters (use semantic_search), or when regex patterns are required (use regex_search). Falls back to lexical-only results when the semantic index is not ready. This is read-only.",
-        "explain_search_result" => "Use hybrid_search instead for new work; this name is kept for callers that already reference it. Do NOT expect ranking detail here that hybrid_search does not also return. This is read-only and combines the local Tantivy lexical index with the semantic vector index when available.",
-        "structural_search" => "Use search_code instead for new work; this name is kept for callers that already reference it. Do NOT read a hit as an AST-pattern match: check each result's match_reason. Use regex_search for literal patterns and get_definition for a known symbol. This is read-only.",
-        "get_definition" => "Use after resolving a symbol name, when knowing where it lives is enough. Prefer search_symbols or list_symbols for candidate discovery, and get_symbol_context when the definition text and the lines around it are what the task needs. This is read-only.",
-        "get_references" => "Use to find usages of a resolved symbol across the index. Prefer get_callers for caller-only relationships and impact_analysis for broader file-level blast radius. This is read-only.",
-        "get_implementations" => "Use to retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes the implementing symbol when available plus parser provenance and confidence. Do NOT use for lexical candidates (use search_code) or all usages (use get_references). This is read-only and returns no result when the current index has no implementation evidence.",
-        "get_callers" => "Use to trace inbound call-sites to a function, method, or callable symbol from the indexed call graph. Do NOT use for all reference types including imports and type usages (use get_references), for outbound calls (use get_callees), or for finding a route between two nodes (use dependency_path). Accuracy depends on tree-sitter and optional SCIP indexing depth. This is read-only.",
-        "get_callees" => "Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
-        "get_symbol_context" => "Use when the definition text itself is needed, not just where it lives. Do NOT use for the symbol record alone (use get_definition), for symbol discovery (use search_symbols), or for cross-reference tracing (use get_references). Read `caveats` before relying on the body: it names anything the index could not recover. This is read-only and reads from the local index.",
-        "dependency_path" => "Use to explain how two files or symbols are connected through indexed dependencies. Prefer module_dependencies for local neighbors and impact_analysis for downstream blast radius. This is read-only.",
-        "impact_analysis" => "Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a full evidence-backed pre-edit plan (use plan_change or preflight_change). This is read-only and analyzes the local index only.",
-        "history_provenance_lookup" => "Use when authorship timing or first/last-touch evidence is needed for exactly one path or symbol. Prefer churn_analysis for hotspot metrics and ownership_lookup for maintainers. This is read-only and reports uncertainty.",
-        "churn_analysis" => "Use to identify hotspots for one path, module, or symbol using materialized git statistics. Prefer history_provenance_lookup for commit provenance and history_similar_changes for prior change examples. This is read-only.",
-        "history_similar_changes" => "Use during planning to find prior commits related to a task, path, or symbol. Prefer churn_analysis for risk scoring and ownership_lookup for reviewer ownership. This is read-only.",
-        "ownership_lookup" => "Use to identify likely owners for one path from CODEOWNERS, git history, and memory facts. Prefer reviewer_suggestions when choosing reviewers for a proposed change. This is read-only.",
-        "reviewer_suggestions" => "Use when a change needs human reviewers and a path is known. Prefer ownership_lookup for ownership evidence without reviewer ranking. This is read-only.",
-        "module_dependencies" => "Use to inspect direct dependency neighbors for one file or symbol. Prefer dependency_path for a route between two nodes and architecture_policy_check for rule violations. This is read-only.",
-        "build_context_pack" => "Use before planning or editing to assemble a ranked bundle of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task description. Returns results in the specified format (JSON, Markdown, or TOON). Use build_compressed_context instead when you want short handles you can expand on demand rather than inline snippets or when only test recommendations are needed (use find_tests_for_change). This is read-only and queries the local index and git history only.",
-        "build_compressed_context" => "Use when a context pack is needed but prompt token budget is constrained. Returns compressed references with short handles instead of full source snippets, significantly reducing token count. Call retrieve_context later with a handle to expand the original snippet. Do NOT use when full inline context is acceptable (use build_context_pack) or when only test targets are needed (use find_tests_for_change). This tool writes reusable context handles under the .ok data directory and is not idempotent.",
-        "retrieve_context" => "Use only with handles returned by build_compressed_context to recover original snippets. Prefer build_context_pack for a fresh task-level context bundle. This is read-only.",
-        "plan_change" => "Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. Prefer create_change_contract when the plan must be persisted and verified later. This is read-only.",
-        "preflight_change" => "Use before a multi-file or risky edit to get one concise, evidence-backed start decision: confirmed edit files, likely impact, tests, risks, caveats, and evidence quality. This is read-only. Use plan_change when the full detailed plan is needed.",
-        "create_change_contract" => "Use when a plan needs a durable verification contract for later review or CI evidence. By default it writes a contract under .ok/contracts; set store=false for a transient contract.",
-        "get_change_contract" => "Use to retrieve a previously stored contract by id before verification or explanation. Prefer create_change_contract for new contracts. This is read-only.",
+        "repo_status" => "Use first to check whether the local index exists, how much of the repository it covers, which languages it holds, and whether the semantic index is ready, before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
+        "list_files" => "Use for a paginated inventory of what the index holds, or pass `path` for one file's indexed detail: its record plus every chunk covering it. Do NOT use to find files by keyword (use search_code) or for a symbol's definition (use get_definition). This is read-only and returns indexed data only.",
+        "search_code" => "Use as the single entry point for finding where something is handled. `mode` selects the evidence: `code` for lexical BM25 over indexed chunks, `graph` for indexed graph-node documents, `semantic` for the local vector index, `hybrid` for both merged and re-sorted. Semantic and hybrid fall back to lexical-only and say so in `semantic_status` when the vector index is not ready, so their extra recall is never assumed. Every result already carries `score_breakdown` and `evidence_refs`; there is no separate explain step. Do NOT use for literal patterns (use regex_search) or for a known symbol (use get_definition). This is read-only.",
+        "regex_search" => "Use when the target is a literal pattern and ranked guesses will not do. Every hit is exact, at confidence 1.0, and hits arrive in path order rather than by score. Do NOT use for ranked keyword search (use search_code), natural-language concept search (use search_code with mode=semantic or mode=hybrid), or broad candidate discovery (use search_code). Read the response caveats before concluding a pattern is absent from the repository. This is read-only.",
+        "search_symbols" => "Use to browse the indexed symbol table, or filter it by a substring you already know; omit `query` to page through everything. Do NOT use when the query is only approximate: matching is case-insensitive substring, not fuzzy or ranked, so a name that shares no substring will not appear at all. For a symbol's defining record use get_definition, and for its usages use get_references. This is read-only and searches the local index only.",
+        "get_definition" => "Use after resolving a symbol name, when knowing where it lives is enough. Set include_body=true when the definition text and the indexed lines around it are what the task needs, and read `caveats` before relying on that body: it names anything the index could not recover. Do NOT use for candidate discovery (use search_symbols) or for usages (use get_references). This is read-only.",
+        "get_references" => "Use to answer what else touches one resolved symbol. `kind` selects the evidence: `references` for occurrences, `callers` and `callees` for persisted CALLS edges, `implementations` for persisted IMPLEMENTS facts, `all` for every section at once. Each section names its own `evidence_source` and caveats because absence means different things: no occurrence is not the same claim as no persisted IMPLEMENTS fact. Do NOT flatten the sections together, and do NOT use this for file-level blast radius (use impact_analysis). This is read-only.",
+        "dependency_path" => "Use to explain how two files or symbols are connected through indexed dependencies. Omit `to` to get the direct dependency neighbours of `from` instead of a route. Prefer impact_analysis for downstream blast radius and query_evidence_graph for arbitrary traversal. This is read-only.",
+        "impact_analysis" => "Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a full evidence-backed pre-edit plan (use plan_change). This is read-only and analyzes the local index only.",
+        "explain_flow" => "Use to retrieve graph-backed endpoint-to-call-path evidence from indexed endpoint nodes and directed CALLS edges. Each flow starts at an indexed endpoint and contains a bounded directed call path. Do NOT use for arbitrary graph traversal (use query_evidence_graph) or for a route between two named nodes (use dependency_path). This is read-only; repositories without persisted endpoint or call evidence return no flow entries.",
+        "build_context_pack" => "Use before planning or editing to assemble a ranked bundle of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Set compress=true when prompt budget is tight: it stores the snippets under .ok and returns short handles that retrieve_context expands on demand. Do NOT use when only test targets are needed (use find_tests_for_change). With compress=false, the default, this is read-only.",
+        "retrieve_context" => "Use only with handles returned by build_context_pack with compress=true, to recover the original snippets. Prefer build_context_pack for a fresh task-level context bundle. This is read-only.",
+        "plan_change" => "Use before editing to create an evidence-backed plan with expected files, ranges, impact, and tests. `detail` selects the artifact: `plan` for the full report, `preflight` for one concise start decision, `patch` for a patch plan that writes nothing. Set persist=true to turn the plan into a durable change contract that verify_change can later hold the edit to; it accepts `plan` or `plan_json` so a plan you already hold becomes a contract without re-planning, and store=false keeps it transient. With persist=false, the default, this is read-only.",
+        "verify_change" => "Use after code edits to check what actually changed against what was declared. Supply `plan` or `plan_json` to verify against a saved PlanReport, or `contract_id`, `contract`, or `contract_json` to verify against a change contract; supply `verification` or `verification_json` instead to explain a report you already hold without verifying anything. Set explain=true to get the explanation of a contract verification directly. When run_commands=true it executes the plan's validation commands on the local machine, and write_attestation=true persists timestamped records under .ok/contracts. Do NOT use for pre-edit planning (use plan_change). Side effects are conditional on those flags; with all flags false the tool is read-only.",
+        "find_tests_for_change" => "Use after identifying a changed file to select the test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history; omit `path` for the repository-wide test evidence. Do NOT use for a full evidence-backed pre-edit plan (use plan_change) and do NOT read it as proof a test exercises the change. This is read-only and executes nothing.",
+        "query_evidence_graph" => "Use for advanced read-only evidence queries when no purpose-built tool fits, and call it with no `query` first to get the schema: node types, edge types, properties, and the versioned relationship-semantic capability matrix. The query language is a constrained Cypher-like DSL, not full Cypher. Prefer the purpose-built tools when they answer the question. This is read-only.",
         "remember_fact" => "Use only for durable, repository-scoped facts (architectural decisions, ownership conventions, known anti-patterns) that an agent should recall across sessions. Appends an immutable record to the local .ok SQLite store; duplicates are not deduplicated. Do NOT use for transient session notes, per-task scratch data, or facts derivable from the live index. Call search_memory first to avoid recording redundant entries. This tool writes to local storage and is not idempotent.",
-        "search_memory" => "Use to retrieve stored repository-scoped memory facts by keyword, entity, or text match from the local .ok SQLite store. Returns fact text, source, confidence, timestamp, and associated entities for each match. Do NOT use for current source code search (use search_code or hybrid_search) or for live index data (use the search and symbol tools). Use remember_fact to write new entries. This is read-only.",
-        "explain_file" => "Use to retrieve comprehensive indexed metadata for one known repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbols. Do NOT use to discover files by keyword (use search_files), for symbol-level context (use explain_symbol or get_symbol_context), or for architecture-level file analysis (use architecture_policy_explain). This is read-only and returns only previously indexed data.",
-        "explain_symbol" => "Use get_definition instead for new work; this name is kept for callers that already reference it. Do NOT use for the definition body and surrounding lines (use get_symbol_context), for call edges (use get_callers or get_callees), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
-        "explain_flow" => "Use to retrieve graph-backed flow evidence from indexed endpoint nodes and directed CALLS edges, alongside heuristic architecture components. Each flow starts at an indexed endpoint and contains a bounded directed call path. Do NOT use for enforceable violations (use architecture_policy_check), for a components-only architecture report (use summarize_architecture), or for arbitrary graph traversal (use query_evidence_graph). This is read-only; repositories without persisted endpoint or call evidence return no flow entries.",
-        "summarize_architecture" => "Use for a structured architecture overview with layer constraints and violation checks. Prefer explain_flow for a narrative and architecture_policy_explain for file-level evidence. This is read-only.",
-        "find_tests_for_change" => "Use after identifying a changed file to select relevant test files that should be run to validate the change. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history. Do NOT use for a full evidence-backed pre-edit plan (use plan_change or preflight_change) or when checking existing coverage data (use explain_test_coverage). recommend_validation_plan is this same call under another name. This is read-only.",
-        "recommend_validation_plan" => "Use find_tests_for_change instead for new work; this name is kept for callers that already reference it. For a full evidence-backed pre-edit plan use plan_change or preflight_change, and for stored coverage evidence use explain_test_coverage. This is read-only and executes nothing.",
-        "explain_test_coverage" => "Use to inspect stored test-coverage evidence for one file path or the whole repository. Returns associated test suites, coverage percentage when available, and test file associations from indexed metadata. Do NOT use to decide what tests to run next (use find_tests_for_change). This is read-only, does not execute any tests, and reports only previously indexed or stored coverage data.",
-        "propose_patch" => "Use to draft a patch plan without modifying files. Prefer plan_change for evidence-backed planning, then apply approved source edits with the normal editor before using verify_change. This is read-only.",
-        "verify_change" => "Use after code edits to compare an actual unified diff or changed file list against a PlanReport produced by plan_change. When run_commands=true, executes shell commands listed in the plan's validation section (test runners, linters) on the local machine. When write_attestation=true, persists timestamped pass/fail records under .ok/contracts/validation/. Do NOT use for pre-edit planning (use plan_change) or contract-based verification (use verify_change_contract). Side effects are conditional on boolean flags; with all flags false the tool is read-only.",
-        "verify_change_contract" => "Use after edits to verify a diff against a stored or inline change contract. Stored contract ids append verification records under .ok/contracts, and command execution is opt-in via run_commands.",
-        "explain_verification" => "Use after verify_change_contract to translate a verification report into a decision, failures, warnings, and next tests. This is read-only.",
+        "search_memory" => "Use to retrieve stored repository-scoped memory facts by keyword, entity, or text match from the local .ok SQLite store. Returns fact text, source, confidence, timestamp, and associated entities for each match. Do NOT use for current source code search (use search_code) or for live index data (use the search and symbol tools). Use remember_fact to write new entries. This is read-only.",
         "map_stacktrace_to_code" => "Use when runtime stack trace text must be mapped to indexed source locations. Prefer find_errors_for_symbol when the symbol is known and recent stored failures are needed. This tool is read-only and returns disabled status when runtime integration is not configured.",
         "find_errors_for_symbol" => "Use to look up recently stored runtime errors and stack traces for one specific symbol name. Returns error messages, stack frames, and timestamps when runtime integration is configured. Do NOT use for ad-hoc stack trace text mapping (use map_stacktrace_to_code) or for a broad inventory of recent failures (use find_recent_failures). This is read-only and returns a disabled-status response when runtime error integration is not configured in the repository.",
         "find_recent_failures" => "Use to list recently stored runtime failures, errors, and incidents across the repository before beginning a debugging investigation. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured. Do NOT use when errors for one specific symbol are needed (use find_errors_for_symbol) or for stack trace mapping (use map_stacktrace_to_code). This is read-only and returns a disabled-status response when runtime error integration is not configured.",
-        "get_evidence_schema" => "Use before query_evidence_graph to learn available graph node types, edge types, properties, and the versioned Tier-1 relationship-semantic capability matrix. This is read-only and does not query graph data.",
-        "query_evidence_graph" => "Use for advanced read-only evidence queries after inspecting get_evidence_schema. The query language is a constrained Cypher-like DSL, not full Cypher; prefer purpose-built tools when available.",
         _ => "Use when this exact indexed repository capability is needed. Prefer narrower sibling tools when they match the task. This tool reports local Open Kioku index data and does not contact external services.",
     };
 
     format!("{base} {guidance}")
 }
 
+/// The advertised tool surface: sixteen tools that each answer one question no
+/// other tool answers, plus the two families that are advertised only when the
+/// repository has configured them. Retired names are gone from here and from
+/// the dispatch table together, so a stale name fails loudly instead of
+/// resolving to a shape that no longer matches the description it was chosen
+/// from.
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
-        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, index coverage (source files discovered versus indexed per language, each discovered file's omission attributed to a skip reason, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements).", json!({"type":"object","properties":{}})),
-        ("list_files", "List all indexed files within the repository. Returns metadata such as relative path, size in bytes, and language. Useful for codebase structure discovery.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of files to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip. Defaults to 0."}}})),
-        ("list_languages", "List all programming languages detected and indexed in the repository, alongside support status.", json!({"type":"object","properties":{}})),
-        ("list_symbols", "List or substring-filter all indexed code symbols (functions, classes, structs, traits, interfaces) with pagination. Returns symbol name, kind, file path, and line range for each entry.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring query to filter symbol names by exact match. If omitted, returns all symbols ordered by name."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
-        ("search_symbols", "Alias of list_symbols with a query set. Filters indexed symbols by case-insensitive substring against name and qualified name, ordered by qualified name. This is not fuzzy matching and the results are not ranked, so an approximate name does not match. Returns symbol name, kind, file path, and line range.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return, in qualified-name order. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
-        ("detect_architecture", "Infer high-level architectural components and layers from the repository directory structure and file layout. Returns detected component names, directory paths, and inferred layer assignments using heuristic analysis.", json!({"type":"object","properties":{}})),
-        ("architecture_boundaries", "Return configured architecture-policy components, path mappings, dependency rules, and the evaluated policy report. Without a policy, returns heuristic components and an explicit caveat.", json!({"type":"object","properties":{}})),
-        ("architecture_violations", "Alias of architecture_boundaries: returns the same repository architecture summary, whose violations field is copied from the evaluated policy_check when a policy is configured. Without a policy the components are heuristic and the response reports configured=false with an explicit caveat rather than inferring violations.", json!({"type":"object","properties":{}})),
-        ("architecture_policy_validate", "Validate the resolved repository architecture policy, or an explicit policy TOML path, without evaluating indexed graph edges.", json!({"type":"object","properties":{"path":{"type":"string","description":"Optional repository-relative or absolute path to a standalone architecture policy TOML file."}}})),
-        ("architecture_policy_check", "Evaluate repository-owned architecture policy dependency rules against indexed import, reference, and call graph edges. Returns allowed, forbidden, and unknown edge counts with bounded unknown samples.", json!({"type":"object","properties":{}})),
-        ("architecture_policy_explain", "Explain architecture policy component, public API boundary, and exemption evidence for one indexed file, symbol, or the whole repository.", json!({"type":"object","properties":{"file":{"type":"string","description":"Repository-relative file path to explain."},"symbol":{"type":"string","description":"Indexed symbol name or qualified name to explain."},"scope":{"type":"string","enum":["repo"],"description":"Use `repo` to return repository-wide public API boundary findings."}},"oneOf":[{"required":["file"]},{"required":["symbol"]},{"required":["scope"]}]})),
-        ("search_code", "Perform a lexical BM25 search across indexed code chunks. Set mode=graph to search indexed graph-node identifiers, qualified names, routes, config keys, and properties.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query containing terms, code patterns, identifiers, graph entity names, routes, or config keys."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. Defaults to code; graph searches indexed graph-node documents."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
-        ("search_files", "Alias of search_code: the same lexical BM25 query over the same index, matching file paths as well as chunk text, and supporting the same mode=graph. Returns ranked hits with path, line range, snippet, score, and evidence — these are code results, not file records, and carry no size or language field.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query matched against file paths and file contents. Accepts filenames, directory fragments, or content keywords."},"mode":{"type":"string","enum":["code","graph"],"description":"Search mode. 'code' (default) searches file names and contents; 'graph' searches indexed graph-node documents including entity names and properties."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching results to skip before returning. Defaults to 0."}}})),
+        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files discovered versus indexed per language, each discovered file's omission attributed to a skip reason, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements).", json!({"type":"object","properties":{}})),
+        ("list_files", "List indexed files with relative path, size in bytes, and language, or pass one `path` to get that file's indexed detail instead: its file record plus every code chunk covering it, with line ranges. A path that is not indexed returns a null file and an explicit caveat rather than an empty success.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of a single file to describe in detail (e.g. 'src/main.rs'). When set, `limit` and `offset` are ignored and the response carries the file record and its chunks."},"limit":{"type":"integer","description":"Maximum number of files to return when listing. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip when listing. Defaults to 0."}}})),
+        ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or a hybrid merge of lexical and semantic candidates deduplicated by path and re-sorted by combined score. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is a tool error."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
-        ("semantic_status", "Report the current readiness, document count, staleness, and configured embedding provider of the local semantic vector index. Returns a status object indicating whether semantic_search and hybrid_search can produce vector results.", json!({"type":"object","properties":{}})),
-        ("semantic_search", "Search the local semantic vector index using natural language queries to retrieve conceptually related code snippets.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural language search query expressing the concept or functionality you are looking for."},"limit":{"type":"integer","description":"Maximum number of results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
-        ("hybrid_search", "Perform a hybrid search that merges ranked candidates from the Tantivy BM25 lexical index and the local semantic vector index, deduplicates by file path, and returns combined-score-sorted results with evidence spans. Falls back to lexical-only when the semantic index is unavailable.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Natural-language or keyword query to match both lexically (BM25) and semantically (vector similarity) against the indexed codebase. Supports identifiers, phrases, and conceptual descriptions."},"limit":{"type":"integer","description":"Maximum number of merged results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of merged results to skip before returning. Defaults to 0."}}})),
-        ("explain_search_result", "Alias of hybrid_search: runs the same query with the same parameters and returns an identical payload. The per-signal score_breakdown and evidence_refs it is named for are already carried by every search result; this tool adds no separate explanation step.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query whose results should be explained with full score breakdowns and evidence."},"limit":{"type":"integer","description":"Maximum number of explained results to return. Defaults to 20, capped at 100."}}})),
-        ("structural_search", "Alias of search_code: runs the same ranked lexical BM25 query over indexed chunks. No AST or structural matching exists in this workspace, so a structure-shaped query is treated as ordinary text; inspect match_reason on each result. Use regex_search when the pattern is literal.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Matched as ordinary text by the lexical BM25 index. Structural syntax carries no meaning here; there is no AST pattern language behind this parameter."},"limit":{"type":"integer","description":"Maximum number of candidate results to return. Defaults to 20, capped at 100."}}})),
-        ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. This returns the record, not the source text; use get_symbol_context for the definition body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."}}})),
-        ("get_references", "Retrieve all references, usages, and call-sites of a given symbol throughout the indexed codebase.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to find references for."},"limit":{"type":"integer","description":"Maximum number of references to return. Defaults to 20, capped at 100."}}})),
-        ("get_implementations", "Retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes parser provenance and confidence.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name of the interface, trait, abstract class, or protocol whose persisted implementation evidence is needed."},"limit":{"type":"integer","description":"Maximum number of verified implementation results to return. Defaults to 20, capped at 100."}}})),
-        ("get_callers", "Find all inbound call-sites to a function, method, or callable symbol from the indexed call graph. Returns caller symbol name, file path, and line range for each call-site found.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol whose inbound callers you want to find."},"limit":{"type":"integer","description":"Maximum number of caller entries to return. Defaults to 20, capped at 100."}}})),
-        ("get_callees", "Find all functions, methods, or symbols called by the target symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol whose calls you want to trace."},"limit":{"type":"integer","description":"Maximum number of callees to return. Defaults to 20, capped at 100."}}})),
-        ("get_symbol_context", "Resolve one symbol and join it back to the indexed chunk text that covers it: the definition body with the line range it spans, plus up to ten indexed lines above and below it verbatim. Documentation comments appear in the leading lines only when the indexer chunked them; they are never parsed out or reconstructed. Anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to retrieve context for."}}})),
-        ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected.", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name."}}})),
+        ("search_symbols", "List or substring-filter the indexed symbol table (functions, classes, structs, traits, interfaces) with pagination, returning symbol name, kind, file path, and line range. Matching is case-insensitive substring against name and qualified name, ordered by qualified name: it is not fuzzy and the results are not ranked, so an approximate name does not match. Omitting `query` pages through every indexed symbol.", json!({"type":"object","properties":{"query":{"type":"string","description":"Substring matched case-insensitively against symbol names and qualified names. Omit to list all symbols ordered by qualified name. Not fuzzy: a name that shares no substring with the query does not match."},"limit":{"type":"integer","description":"Maximum number of symbols to return. Defaults to 20, capped at 100. Use with offset for pagination."},"offset":{"type":"integer","description":"Number of matching symbols to skip before returning results. Defaults to 0."}}})),
+        ("get_definition", "Retrieve the indexed definition record for a symbol (function, class, struct, trait, module) by name: its file, line range, kind, qualified name, confidence, and provenance. With include_body=true it also joins the symbol back to the indexed chunk text covering it, returning the definition body with the line range it spans plus up to ten indexed lines above and below it verbatim; anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to find the definition for."},"include_body":{"type":"boolean","description":"Set true to return the definition body and the indexed lines around it alongside the record. Defaults to false, which returns the record only."}}})),
+        ("get_references", "Retrieve evidence about how one resolved symbol is used, in sections that keep their provenance apart: `references` returns indexed occurrences, each with its own provenance and confidence; `callers` and `callees` return persisted CALLS graph edges in the named direction; `implementations` returns verified implementation sites from persisted IMPLEMENTS facts with parser provenance. Every section names its own evidence_source and caveats, because an empty occurrence list and an empty IMPLEMENTS list are different claims.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol to gather usage evidence for. For implementations this is the interface, trait, abstract class, or protocol name."},"kind":{"type":"string","enum":["references","callers","callees","implementations","all"],"description":"Which evidence sections to return. Defaults to 'references'. 'all' returns every section in one response, each still labelled with its own evidence_source. An unknown kind is a tool error."},"limit":{"type":"integer","description":"Maximum number of entries per section. Defaults to 20, capped at 100."}}})),
+        ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols from the persisted graph, or, when `to` is omitted, list the direct dependency graph neighbours (imports and dependents) of `from` instead.", json!({"type":"object","required":["from"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name. Omit to return the direct neighbours of `from` rather than a route between two nodes."},"limit":{"type":"integer","description":"Maximum number of neighbours to return when `to` is omitted. Defaults to 20, capped at 100."}}})),
         ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact).", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs')."}}})),
-        ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
-        ("churn_analysis", "Return materialized churn and hotspot stats for exactly one repository-relative path, module directory, or indexed symbol. Includes all-time, 30-day, 90-day, recency-weighted, hotspot score, confidence, and uncertainty without scanning raw commit history.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path to inspect."},"module":{"type":"string","description":"Repository-relative module or directory path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."}},"oneOf":[{"required":["path"]},{"required":["module"]},{"required":["symbol"]}]})),
-        ("history_similar_changes", "Retrieve ranked similar historical commits using task text, paths, symbols, co-change neighborhoods, churn, and commit metadata. Returns evidence and confidence for each hit.", json!({"type":"object","properties":{"task":{"type":"string","description":"Natural-language task or change description."},"path":{"type":"string","description":"Single repository-relative path to match."},"paths":{"type":"array","items":{"type":"string"},"description":"Repository-relative paths to match."},"symbol":{"type":"string","description":"Single symbol name, qualified name, or symbol ID to match."},"symbols":{"type":"array","items":{"type":"string"},"description":"Symbol names, qualified names, or symbol IDs to match."},"limit":{"type":"integer","description":"Maximum similar changes to return. Defaults to 20, capped at 100."}}})),
-        ("ownership_lookup", "Resolve ranked owner suggestions for one repository-relative path from CODEOWNERS, persisted local git history, and secondary repo memory facts. Returns source breakdown, confidence, staleness, component matches, and explicit uncertainty.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
-        ("reviewer_suggestions", "Suggest ranked reviewers for one repository-relative path from stored review evidence when available, otherwise explicit ownership and git-author inference. Returns source type, rationale, confidence, availability, and fallback fields.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path to inspect."}}})),
-        ("module_dependencies", "List the direct dependency graph neighbors (imports and dependents) of a given file or symbol node.", json!({"type":"object","required":["node"],"properties":{"node":{"type":"string","description":"The file path or symbol node identifier."},"limit":{"type":"integer","description":"Maximum number of neighbors to return. Defaults to 20, capped at 100."}}})),
-        ("build_context_pack", "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2')."},"limit":{"type":"integer","description":"Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation."}}})),
-        ("build_compressed_context", "Build a compressed context pack with short handles instead of full source snippets, reducing token count for prompt-constrained scenarios. Use retrieve_context with the returned handles to expand original snippets on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather compressed context for."},"limit":{"type":"integer","description":"Maximum number of context items to compress. Defaults to 20. Higher values increase completeness but also stored handle count."},"format":{"type":"string","enum":["json","toon"],"description":"Output format. 'json' returns structured handle objects, 'toon' returns token-optimized notation with handles. Defaults to 'json' when omitted."}}})),
-        ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_compressed_context."}}})),
-        ("plan_change", "Generate an evidence-backed pre-edit plan for a task, including primary files to edit, expected impact, changed-line ranges, and recommended test targets.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which is what an agent should read. Ask for 'json' when the plan will be saved and passed to verify_change, or supplied as plan_json to create_change_contract."}}})),
-        ("preflight_change", "Return a concise pre-edit decision with confirmed edit files, likely affected files, validation commands, risks, caveats, evidence references, and evidence quality.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the change to assess before editing."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to consider. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","html","text"],"description":"The preflight rendering. Defaults to json."}}})),
-        ("create_change_contract", "Create and optionally store a versioned change contract from a task or saved plan while preserving plan_change for backwards compatibility.", json!({"type":"object","properties":{"task":{"type":"string","description":"Natural language task used to build a fresh plan before contract creation."},"plan":{"type":"object","description":"Inline PlanReport object used as the source plan."},"plan_json":{"type":"string","description":"JSON-encoded PlanReport used as the source plan."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 when planning from task."},"limit":{"type":"integer","description":"Maximum planning results to generate when task is provided. Defaults to 20."},"store":{"type":"boolean","description":"Persist the contract under .ok/contracts. Defaults to true."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["task"]},{"required":["plan"]},{"required":["plan_json"]}]})),
-        ("get_change_contract", "Retrieve a stored change contract by id and optionally export it as JSON, Markdown, or TOON.", json!({"type":"object","required":["contract_id"],"properties":{"contract_id":{"type":"string","description":"Stored contract id."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}}})),
+        ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
+        ("build_context_pack", "Assemble a ranked context pack of relevant files, symbol definitions, test targets, git history evidence, and architecture policy context for a natural-language task. Returns Markdown by default, sized for an agent's context window. With compress=true it stores the original snippets under the .ok data directory and returns compact handles instead, which retrieve_context expands on demand.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the task to gather context for (e.g., 'refactor the authentication middleware to support OAuth2')."},"compress":{"type":"boolean","description":"Set true to store snippets locally and return short handles instead of inline source, reducing token count. Defaults to false. This is the only path that writes."},"limit":{"type":"integer","description":"Maximum number of context items to gather. Defaults to 20. Raise it when the pack missed a file you expected; it controls coverage, not rendering cost."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Output format. Defaults to 'markdown', which carries the same evidence as 'json' at a small fraction of the context cost and is what an agent should read. Ask for 'json' only when the result will be parsed rather than read - for example a plan saved for verify_change. 'toon' is token-optimized notation. With compress=true the default is 'json' and 'markdown' is not produced."}}})),
+        ("retrieve_context", "Retrieve the original uncompressed source code snippet associated with a compressed context handle.", json!({"type":"object","required":["handle"],"properties":{"handle":{"type":"string","description":"The handle ID returned by build_context_pack with compress=true."}}})),
+        ("plan_change", "Generate an evidence-backed pre-edit plan for a task: primary files to edit, expected impact, changed-line ranges, edit boundaries, and recommended test targets. `detail` chooses between the full plan, a concise preflight decision, and a patch plan that writes nothing. With persist=true the plan is turned into a versioned ChangeContractV1, stored under .ok/contracts by default, which verify_change can later hold the actual edit to.", json!({"type":"object","properties":{"task":{"type":"string","description":"A natural language description of the task or change to plan. Required unless persist=true is given an existing `plan` or `plan_json`."},"detail":{"type":"string","enum":["plan","preflight","patch"],"description":"Which artifact to return. 'plan' (default) is the full evidence-backed report; 'preflight' is one concise start decision with verdict, confirmed edit files, risks, and evidence quality; 'patch' is a patch plan that writes no files. Ignored when persist=true. An unknown value is a tool error."},"persist":{"type":"boolean","description":"Set true to build a versioned change contract from the plan instead of returning the plan itself. Defaults to false. This is the only path that writes."},"store":{"type":"boolean","description":"With persist=true, whether the contract is written under .ok/contracts. Defaults to true; set false for a transient contract that is returned but not stored."},"plan":{"type":"object","description":"With persist=true, an inline PlanReport object to build the contract from instead of planning afresh."},"plan_json":{"type":"string","description":"With persist=true, a JSON-encoded PlanReport to build the contract from instead of planning afresh."},"since":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to include changed files and line ranges in planning context."},"limit":{"type":"integer","description":"Maximum planning results to generate. Defaults to 20."},"format":{"type":"string","enum":["json","markdown","toon","html","text"],"description":"Output format. The full plan defaults to 'markdown', which is what an agent should read; ask for 'json' when the plan will be saved and passed to verify_change. Preflight defaults to 'json' and also accepts 'markdown', 'html', and 'text'. Contracts default to 'json'."}}})),
+        ("verify_change", "Verify what actually changed against what was declared. Checks an actual unified diff or changed file list against a saved PlanReport or against a stored or inline change contract, covering boundary constraints, expected file coverage, API surface stability, and dependency policy. Supplying an existing verification report instead explains that report - decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests - without verifying anything. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"contract_id":{"type":"string","description":"Id of a contract stored under .ok/contracts to verify against. Stored ids append verification records to that contract."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object to verify against."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord to verify against."},"verification":{"type":"object","description":"An existing ContractVerificationReport to explain. When present, nothing is verified."},"verification_json":{"type":"string","description":"A JSON-encoded ContractVerificationReport to explain. When present, nothing is verified."},"explain":{"type":"boolean","description":"Set true with a contract to return the explanation of the resulting verification report rather than the report itself. Defaults to false."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during contract verification."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan or contract, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false; a configured policy enables it anyway."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan or contract on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. With a contract it requires a stored contract_id. Defaults to false."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format for contract verification and for explanations. Defaults to json."}}})),
+        ("find_tests_for_change", "Identify the test files that should be run to validate a change, ranked by relevance from naming conventions, import relationships, and co-change history. With a `path` the ranking is for that changed file; without one it reports the repository-wide stored test evidence.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs'). Omit for the repository-wide test evidence."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
+        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher, or, when called with no `query`, return the versioned evidence schema instead: supported node types, edge types, query properties, and the Tier-1 relationship-semantic capability matrix. (Note: the DSL is NOT full Cypher.) Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","properties":{"query":{"type":"string","description":"The graph query string to execute. Omit or leave empty to return the evidence schema instead of running a query."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
+    ];
+
+    // Advertised only where the feature is configured. Both families stay in
+    // the dispatch table either way; what the gate removes is a name an agent
+    // would otherwise be taught to reach for and get nothing from.
+    let memory_tools: &[(&str, &str, Value)] = &[
         ("remember_fact", "Persist a durable, repository-scoped memory fact into the local .ok SQLite store with optional source attribution and confidence level. The fact is append-only and survives re-indexing.", json!({"type":"object","required":["text"],"properties":{"text":{"type":"string","description":"The fact text to persist. Should be a complete, self-contained statement (e.g., 'The auth module uses JWT tokens with 24h expiry'). Maximum ~4KB."},"source":{"type":"string","description":"Identifier for the source that observed this fact (e.g., 'mcp', 'agent', 'human'). Defaults to 'mcp' when omitted."},"confidence":{"type":"string","enum":["low","medium","high","exact"],"description":"Confidence level indicating reliability of the fact. 'low' for uncertain inferences, 'exact' for verified truths. Defaults to 'medium' when omitted."}}})),
         ("search_memory", "Search the append-only repository memory store for previously recorded facts by keyword and entity match. Returns fact text, source, confidence level, and timestamp for each matching entry.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Keyword or phrase to match against stored fact text and entity names."},"limit":{"type":"integer","description":"Maximum number of matching facts to return, ordered by relevance. Defaults to 20."}}})),
-        ("explain_file", "Retrieve comprehensive indexed metadata for one repository-relative file, including language detection, syntax parsing status, all code chunks with line ranges, and associated symbol definitions.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path of the file to explain (e.g., 'src/main.rs' or 'lib/auth/handler.ts')."}}})),
-        ("explain_symbol", "Alias of get_definition: returns the same indexed definition record for one symbol — file, line range, qualified name, kind, confidence, and provenance. It returns no source text and no relationship edges of its own.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to explain. Matches against indexed symbol names and qualified names."}}})),
-        ("explain_flow", "Return graph-backed endpoint-to-call flow evidence, plus a heuristic architecture summary. Each flow contains an indexed endpoint and a bounded directed CALLS path.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum endpoint flows to return. Defaults to 20, capped at 100."}}})),
-        ("summarize_architecture", "Return a structured summary of the codebase architecture, including layer constraints and violation checks.", json!({"type":"object","properties":{}})),
-        ("find_tests_for_change", "Identify test files that should be run to validate changes to one repository-relative file. Returns ranked test file paths with relevance scores based on naming conventions, import relationships, and co-change history.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Repository-relative path of the file being changed (e.g., 'src/auth/handler.rs')."},"limit":{"type":"integer","description":"Maximum number of test file recommendations to return, ranked by relevance. Defaults to 20."}}})),
-        ("recommend_validation_plan", "Alias of find_tests_for_change: returns the same ranked test targets for one changed path. Despite the name it produces no static checks and no coverage actions.", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative file path."},"limit":{"type":"integer","description":"Maximum recommendations to return. Defaults to 20."}}})),
-        ("explain_test_coverage", "Retrieve stored test-coverage evidence and associated test suites for one repository-relative file or the whole repository. Returns coverage percentages, test file associations, and suite metadata from indexed data.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of the file to inspect coverage for. If omitted, returns repository-wide coverage summary."},"limit":{"type":"integer","description":"Maximum number of coverage entries to return. Defaults to 20."}}})),
-        ("propose_patch", "Propose a patch plan (file edits, context bounds) for a task. Read-only; does not write any files.", json!({"type":"object","required":["task"],"properties":{"task":{"type":"string","description":"A natural language description of the changes to propose."}}})),
-        ("verify_change", "Verify an actual unified diff or set of changed files against a saved PlanReport, checking boundary constraints, expected file coverage, API surface stability, and dependency policy. Optionally executes configured validation commands and persists timestamped attestation records.", json!({"type":"object","properties":{"plan":{"type":"object","description":"A JSON object containing the saved PlanReport to verify against."},"plan_json":{"type":"string","description":"A JSON-encoded string representation of the PlanReport to verify against."},"diff":{"type":"string","description":"The unified diff (git diff format) showing the actual changes to verify."},"since_plan":{"type":"string","description":"Git revision or range (e.g., 'HEAD~1', 'abc123..def456') used with git diff --unified=0 to derive changed files and diff input automatically."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files. Used when diff is not provided."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers supporting the change."},"traceability_strict":{"type":"boolean","description":"Set true to reject any evidence references not present in the saved plan, enforcing full traceability. Defaults to false (lenient mode allows extra evidence)."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API surface changes (additions, removals, signature modifications) and flag them as warnings. Defaults to false."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph changes and flag forbidden dependency additions based on architecture policy. Defaults to false."},"run_commands":{"type":"boolean","description":"Set true to execute shell validation commands (test runners, linters) defined in the plan on the local machine. Commands run synchronously and their exit codes are recorded. Defaults to false."},"write_attestation":{"type":"boolean","description":"Set true together with run_commands to persist timestamped pass/fail attestation records under .ok/contracts/validation/. Has no effect when run_commands is false. Defaults to false."}}})),
-        ("verify_change_contract", "Verify changed files or a diff against a stored or inline change contract. Stored contract ids append verification records to .ok/contracts.", json!({"type":"object","properties":{"contract_id":{"type":"string","description":"Stored contract id."},"contract":{"type":"object","description":"Inline ChangeContractV1 or StoredContractRecord object."},"contract_json":{"type":"string","description":"JSON-encoded ChangeContractV1 or StoredContractRecord."},"diff":{"type":"string","description":"The unified diff showing the actual changes."},"since_plan":{"type":"string","description":"Optional git revision/range used with git diff --unified=0 to derive changed files and diff input."},"changed_files":{"type":"array","items":{"type":"string"},"description":"List of repository-relative paths of changed files."},"evidence_refs":{"type":"array","items":{"type":"string"},"description":"List of evidence reference identifiers."},"traceability_strict":{"type":"boolean","description":"Set true to reject supplied evidence references that are not present in the contract."},"check_api_surface":{"type":"boolean","description":"Set true to detect public API additions, removals, and signature changes during verification."},"check_dependency_delta":{"type":"boolean","description":"Set true to detect dependency graph deltas and flag forbidden dependency additions."},"run_commands":{"type":"boolean","description":"Set true to execute validation commands defined in the contract."},"write_attestation":{"type":"boolean","description":"Set true with run_commands and a stored contract id to persist validation attestations."},"validation_attestations":{"type":"array","items":{"type":"object"},"description":"Previously recorded validation attestations to replay during verification."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["contract_id"]},{"required":["contract"]},{"required":["contract_json"]}]})),
-        ("explain_verification", "Explain a contract verification report, including the decision, boundary failures, warnings, dependency deltas, validation attestations, and recommended tests.", json!({"type":"object","properties":{"verification":{"type":"object","description":"Inline ContractVerificationReport object."},"verification_json":{"type":"string","description":"JSON-encoded ContractVerificationReport."},"format":{"type":"string","enum":["json","markdown","toon"],"description":"Return format. Defaults to json."}},"oneOf":[{"required":["verification"]},{"required":["verification_json"]}]})),
+    ];
+    let runtime_tools: &[(&str, &str, Value)] = &[
         ("map_stacktrace_to_code", "Map a runtime stack trace to indexed source locations and file lines.", json!({"type":"object","properties":{"stacktrace":{"type":"string","description":"The stack trace string to analyze."}}})),
         ("find_errors_for_symbol", "Retrieve recently stored runtime errors and stack traces for one specific symbol from the local error store. Returns error messages, stack frames, and timestamps when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact symbol name to look up stored runtime errors for."}}})),
         ("find_recent_failures", "Retrieve a list of recently stored runtime failures, errors, and incidents from the repository's local error store. Returns failure entries with timestamps, error types, and affected symbols when runtime integration is configured; otherwise returns a disabled-status response.", json!({"type":"object","properties":{"limit":{"type":"integer","description":"Maximum number of failure entries to retrieve, ordered by most recent. Defaults to 20."}}})),
-        ("get_evidence_schema", "Retrieve the versioned schema defining supported graph types, query properties, and the Tier-1 relationship-semantic capability matrix.", json!({"type":"object","properties":{}})),
-        ("query_evidence_graph", "Execute a read-only graph query using a constrained subset of Cypher. Call get_evidence_schema first to see available node/edge types. (Note: The DSL is NOT full Cypher). Output rows are JSON arrays aligned with the user-selected variables in `columns`.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The graph query string to execute."},"limit":{"type":"integer","description":"Maximum rows to return. Defaults to 50, capped at 100."},"offset":{"type":"integer","description":"Number of matching rows to skip. Defaults to 0."}}})),
     ];
+
+    let mut advertised = read_only_tools.iter().collect::<Vec<_>>();
+    if config.memory.enabled {
+        advertised.extend(memory_tools.iter());
+    }
+    if config.runtime.configured() {
+        advertised.extend(runtime_tools.iter());
+    }
 
     let mut tools = Vec::new();
     let mut unstable = Vec::new();
 
-    for (name, description, schema) in read_only_tools {
+    for (name, description, schema) in advertised {
         let maturity = tool_maturity(name);
         if maturity == "experimental" {
             unstable.push(name.to_string());
@@ -1601,22 +1392,9 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
 
 fn tool_maturity(name: &str) -> &'static str {
     match name {
-        "semantic_search"
-        | "semantic_status"
-        | "hybrid_search"
-        | "explain_search_result"
-        | "structural_search"
-        | "get_implementations"
-        | "get_callers"
-        | "get_callees"
-        | "history_provenance_lookup"
-        | "churn_analysis"
-        | "history_similar_changes"
-        | "ownership_lookup"
-        | "reviewer_suggestions"
-        | "map_stacktrace_to_code"
-        | "find_errors_for_symbol"
-        | "find_recent_failures" => "experimental",
+        "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
+            "experimental"
+        }
         _ => "stable",
     }
 }
@@ -1906,297 +1684,6 @@ where
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
 }
 
-fn architecture_summary_tool(repo: &Path, store: &SqliteStore) -> anyhow::Result<Value> {
-    let Some(policy) = load_architecture_policy(repo)? else {
-        let mut summary = serde_json::to_value(ArchitectureDetector::new(store, None).detect()?)?;
-        let response = summary
-            .as_object_mut()
-            .context("architecture summary must serialize as an object")?;
-        response.insert("configured".into(), json!(false));
-        response.insert("policy".into(), Value::Null);
-        response.insert(
-            "policy_check".into(),
-            json!(PolicyCheckReport {
-                configured: false,
-                uncertainty: vec![
-                    "no architecture policy configured; component boundaries are heuristic and dependency edges were not evaluated".into()
-                ],
-                ..PolicyCheckReport::default()
-            }),
-        );
-        response.insert(
-            "caveats".into(),
-            json!([
-                "configure .open-kioku/architecture.toml to evaluate declared component boundaries and violations"
-            ]),
-        );
-        return Ok(summary);
-    };
-
-    let resolver = PolicyResolver::new(&policy)?;
-    let mut summary = ArchitectureDetector::new(store, Some(&resolver)).detect()?;
-    let policy_check = evaluate_policy(store, &resolver, &policy)?;
-    summary.violations = policy_check.violations.clone();
-    let mut summary = serde_json::to_value(summary)?;
-    let response = summary
-        .as_object_mut()
-        .context("architecture summary must serialize as an object")?;
-    response.insert("configured".into(), json!(true));
-    response.insert("policy_source".into(), json!(policy.source.to_string()));
-    response.insert("policy".into(), serde_json::to_value(policy)?);
-    response.insert("policy_check".into(), serde_json::to_value(policy_check)?);
-    response.insert("caveats".into(), json!([]));
-    Ok(summary)
-}
-
-fn ownership_components(
-    repo: &Path,
-    store: &dyn MetadataStore,
-    path: &Path,
-) -> anyhow::Result<Vec<PolicyComponentMatch>> {
-    if let Some(policy) = load_architecture_policy(repo)? {
-        let resolver = PolicyResolver::new(&policy)?;
-        return Ok(resolver.resolve_file(path));
-    }
-
-    let path_text = path.display().to_string();
-    let summary = ArchitectureDetector::new(store, None).detect()?;
-    Ok(summary
-        .components
-        .into_iter()
-        .filter(|component| {
-            component
-                .paths
-                .iter()
-                .any(|candidate| candidate == &path_text)
-        })
-        .map(|component| PolicyComponentMatch {
-            component_id: component.id,
-            matched_glob: "inferred_component_path".into(),
-        })
-        .collect())
-}
-
-fn ownership_memory_facts(
-    repo: &Path,
-    path: &Path,
-    components: &[PolicyComponentMatch],
-) -> anyhow::Result<Vec<open_kioku_core::MemorySearchResult>> {
-    let mut query_terms = vec![
-        "ownership".to_string(),
-        "owner".to_string(),
-        "owners".to_string(),
-        "maintainer".to_string(),
-        path.display().to_string(),
-    ];
-    query_terms.extend(
-        components
-            .iter()
-            .map(|component| component.component_id.clone()),
-    );
-    Ok(RepoMemoryStore::open_repo(repo)?.search(&query_terms.join(" "), 20)?)
-}
-
-fn architecture_policy_validate_tool(repo: &Path, params: &Value) -> anyhow::Result<Value> {
-    let (policy, paths) = if let Some(path) = params.get("path").and_then(Value::as_str) {
-        let path = Path::new(path);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            repo.join(path)
-        };
-        (Some(load_architecture_policy_from_path(&path)?), vec![path])
-    } else {
-        let policy = load_architecture_policy(repo)?;
-        let paths = policy
-            .as_ref()
-            .map(|policy| policy.source_paths(repo))
-            .unwrap_or_default();
-        (policy, paths)
-    };
-    let source = policy.as_ref().map(|policy| policy.source);
-    let configured = policy.is_some();
-    let message = if let Some(source) = source {
-        format!("Architecture policy is valid ({source}).")
-    } else {
-        "No architecture policy configured. Heuristic architecture detection remains active.".into()
-    };
-    Ok(json!({
-        "valid": true,
-        "configured": configured,
-        "source": source,
-        "paths": paths,
-        "policy": policy,
-        "message": message,
-    }))
-}
-
-fn architecture_policy_explain_tool(
-    repo: &Path,
-    store: &SqliteStore,
-    resolver: &PolicyResolver,
-    policy: &open_kioku_config::ArchitecturePolicy,
-    params: &Value,
-) -> anyhow::Result<Value> {
-    let file = params.get("file").and_then(Value::as_str);
-    let symbol = params.get("symbol").and_then(Value::as_str);
-    let scope = params.get("scope").and_then(Value::as_str);
-    if let Some(scope) = scope {
-        anyhow::ensure!(
-            scope == "repo",
-            "unsupported architecture policy scope `{scope}`"
-        );
-    }
-    let selectors = file.is_some() as u8 + symbol.is_some() as u8 + scope.is_some() as u8;
-    anyhow::ensure!(
-        selectors <= 1,
-        "provide exactly one of `file`, `symbol`, or `scope`"
-    );
-    let (query_kind, query, file_path, symbol_value) = match (file, symbol, scope) {
-        (Some(path), None, None) => {
-            let path = repo_relative_path(repo, Path::new(path));
-            ("file", path.display().to_string(), Some(path), Value::Null)
-        }
-        (None, Some(query), None) => {
-            let symbol = SymbolEngine::new(store).definition(query)?;
-            let file_path = file_path_for_symbol(store, &symbol)?;
-            (
-                "symbol",
-                query.to_string(),
-                Some(file_path),
-                serde_json::to_value(symbol)?,
-            )
-        }
-        (None, None, Some("repo")) | (None, None, None) => {
-            ("repo", repo.display().to_string(), None, Value::Null)
-        }
-        _ => unreachable!("selector count was validated above"),
-    };
-    let mut uncertainty = Vec::new();
-    let components = if let Some(file_path) = &file_path {
-        match resolver.resolve_node(file_path, None) {
-            Ok(resolved) => resolved.components,
-            Err(unmapped) => {
-                uncertainty.push(format!(
-                    "{} did not match any architecture policy component",
-                    unmapped.file_path.display()
-                ));
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
-    let boundary = evaluate_public_api_boundary(store, resolver, policy)?;
-    let violations = boundary
-        .violations
-        .into_iter()
-        .filter(|violation| match &file_path {
-            Some(file_path) => {
-                violation.source_path == *file_path || violation.target_path == *file_path
-            }
-            None => true,
-        })
-        .collect::<Vec<_>>();
-    let exemptions = boundary
-        .exemptions
-        .into_iter()
-        .filter(|exemption| match &file_path {
-            Some(file_path) => {
-                exemption.source_path == *file_path || exemption.target_path == *file_path
-            }
-            None => true,
-        })
-        .collect::<Vec<_>>();
-    uncertainty.extend(boundary.uncertainty);
-    if file_path.is_some() && violations.is_empty() && exemptions.is_empty() {
-        uncertainty.push("no public API boundary findings matched this query".into());
-    }
-    uncertainty.sort();
-    uncertainty.dedup();
-    Ok(json!({
-        "configured": true,
-        "query_kind": query_kind,
-        "query": query,
-        "file_path": file_path,
-        "symbol": symbol_value,
-        "components": components,
-        "violations": violations,
-        "exemptions": exemptions,
-        "uncertainty": uncertainty,
-        "message": format!(
-            "Architecture policy explanation for {query_kind} `{query}`: {} component match(es), {} violation(s), {} exemption(s).",
-            components.len(),
-            violations.len(),
-            exemptions.len()
-        )
-    }))
-}
-
-fn file_path_for_symbol(
-    store: &dyn MetadataStore,
-    symbol: &open_kioku_core::Symbol,
-) -> anyhow::Result<PathBuf> {
-    store
-        .file_by_id(&symbol.file_id)?
-        .map(|file| file.path)
-        .with_context(|| {
-            format!(
-                "indexed symbol `{}` references missing file id `{}`",
-                symbol.qualified_name, symbol.file_id.0
-            )
-        })
-}
-
-fn repo_relative_path(repo: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.strip_prefix(repo).unwrap_or(path).to_path_buf()
-    } else {
-        path.to_path_buf()
-    }
-}
-
-fn similar_change_query_from_params(params: &Value) -> anyhow::Result<SimilarChangeQuery> {
-    let task = params
-        .get("task")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let mut paths = Vec::new();
-    if let Some(path) = params.get("path").and_then(Value::as_str) {
-        paths.push(PathBuf::from(path));
-    }
-    if let Some(values) = params.get("paths").and_then(Value::as_array) {
-        for value in values {
-            let Some(path) = value.as_str() else {
-                anyhow::bail!("`paths` must contain only strings");
-            };
-            paths.push(PathBuf::from(path));
-        }
-    }
-    let mut symbols = Vec::new();
-    if let Some(symbol) = params.get("symbol").and_then(Value::as_str) {
-        symbols.push(symbol.to_string());
-    }
-    if let Some(values) = params.get("symbols").and_then(Value::as_array) {
-        for value in values {
-            let Some(symbol) = value.as_str() else {
-                anyhow::bail!("`symbols` must contain only strings");
-            };
-            symbols.push(symbol.to_string());
-        }
-    }
-    if task.is_none() && paths.is_empty() && symbols.is_empty() {
-        anyhow::bail!("provide at least one of `task`, `path`/`paths`, or `symbol`/`symbols`");
-    }
-    Ok(SimilarChangeQuery {
-        task,
-        paths,
-        symbols,
-    })
-}
-
 fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     params
         .get(key)
@@ -2300,7 +1787,7 @@ fn contract_plan_from_params(
     let selectors = task.is_some() as u8 + plan.is_some() as u8 + plan_json.is_some() as u8;
     anyhow::ensure!(
         selectors == 1,
-        "create_change_contract requires exactly one of `task`, `plan`, or `plan_json`"
+        "plan_change with persist=true requires exactly one of `task`, `plan`, or `plan_json`"
     );
 
     if let Some(plan) = plan {
@@ -2545,15 +2032,6 @@ fn format_contract_create_output(
         "markdown" => Ok(json!(render_contract_create_markdown(output))),
         "toon" => Ok(json!(render_contract_create_toon(output))),
         "json" => Ok(json!(output)),
-        other => anyhow::bail!("unsupported contract format `{other}`"),
-    }
-}
-
-fn format_contract_output(contract: &ChangeContractV1, format: &str) -> anyhow::Result<Value> {
-    match format {
-        "markdown" => Ok(json!(render_contract_markdown(contract))),
-        "toon" => Ok(json!(render_contract_toon(contract))),
-        "json" => Ok(json!(contract)),
         other => anyhow::bail!("unsupported contract format `{other}`"),
     }
 }
@@ -2912,45 +2390,154 @@ fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<
     Ok(query.to_string())
 }
 
-fn resolve_history_symbol(
-    store: &dyn MetadataStore,
-    query: &str,
-) -> anyhow::Result<open_kioku_core::Symbol> {
-    if let Some(symbol) = store.symbol_by_id(&SymbolId::new(query))? {
-        return Ok(symbol);
-    }
-    let candidates = store.list_symbols(Some(query), 101, 0)?;
-    let exact = candidates
-        .iter()
-        .filter(|symbol| symbol.name == query || symbol.qualified_name == query)
-        .cloned()
-        .collect::<Vec<_>>();
-    match exact.as_slice() {
-        [symbol] => Ok(symbol.clone()),
-        [] if candidates.len() == 1 => Ok(candidates[0].clone()),
-        [] if candidates.is_empty() => anyhow::bail!("symbol not found: {query}"),
-        matches => {
-            let ambiguous = if matches.is_empty() {
-                &candidates
-            } else {
-                matches
-            };
-            let names = ambiguous
-                .iter()
-                .take(10)
-                .map(|symbol| format!("{} [{}]", symbol.qualified_name, symbol.id.0))
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!(
-                "symbol query `{query}` is ambiguous; use a qualified name or symbol ID: {names}"
-            )
+/// The three kinds of evidence an agent asks for about one resolved symbol,
+/// answered in one response with each kind's provenance kept apart.
+///
+/// References are occurrence evidence, calls are persisted CALLS edges, and
+/// implementations are persisted IMPLEMENTS facts. They are not
+/// interchangeable, and absence does not mean the same thing in each: no
+/// occurrence is a different claim from no persisted IMPLEMENTS fact. Merging
+/// them into one ranked list would move that distinction into the reader's
+/// head, so every section instead names its own `evidence_source` and carries
+/// its own caveats.
+fn symbol_evidence_tool<S>(store: &S, params: &Value) -> anyhow::Result<Value>
+where
+    S: MetadataStore + GraphStore,
+{
+    let query = required_str(params, "query")?;
+    let kind = params
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("references");
+    anyhow::ensure!(
+        matches!(
+            kind,
+            "references" | "callers" | "callees" | "implementations" | "all"
+        ),
+        "unknown `kind` `{kind}` for get_references; expected one of references, callers, callees, implementations, all"
+    );
+    let limit = limit(params);
+    let engine = SymbolEngine::new(store);
+    let wanted = |section: &str| kind == section || kind == "all";
+
+    // Implementation facts are keyed by target name, so a trait the index never
+    // recorded a definition for still has answerable IMPLEMENTS evidence.
+    // Occurrence and call evidence need a resolved symbol, so an unresolvable
+    // name is still an error for those.
+    let symbol = match engine.definition(query) {
+        Ok(symbol) => Some(symbol),
+        Err(err) if kind == "implementations" => {
+            let mut response = Map::new();
+            response.insert("query".into(), json!(query));
+            response.insert("kind".into(), json!(kind));
+            response.insert("symbol".into(), Value::Null);
+            response.insert("symbol_resolution".into(), json!(err.to_string()));
+            response.insert(
+                "implementations".into(),
+                implementation_section(store, query, limit)?,
+            );
+            return Ok(Value::Object(response));
         }
+        Err(err) => return Err(err.into()),
+    };
+    let symbol = symbol.context("symbol resolution must have produced a definition")?;
+
+    let mut response = Map::new();
+    response.insert("query".into(), json!(query));
+    response.insert("kind".into(), json!(kind));
+    response.insert("symbol".into(), serde_json::to_value(&symbol)?);
+
+    if wanted("references") {
+        let mut occurrences = engine.references(query, overfetch_limit(limit))?;
+        let has_more = occurrences.len() > limit;
+        occurrences.truncate(limit);
+        response.insert(
+            "references".into(),
+            json!({
+                "evidence_source": "symbol_occurrences",
+                "occurrences": occurrences,
+                "returned": occurrences.len(),
+                "limit": limit,
+                "has_more": has_more,
+                "caveats": [
+                    "each occurrence carries its own provenance and confidence; a `lexical` occurrence at low confidence is the name-match fallback used when the index holds no resolved occurrence for this symbol"
+                ],
+            }),
+        );
     }
+
+    for (section, inbound) in [("callers", true), ("callees", false)] {
+        if !wanted(section) {
+            continue;
+        }
+        response.insert(
+            section.into(),
+            call_edge_section(store, &symbol, inbound, limit)?,
+        );
+    }
+
+    if wanted("implementations") {
+        response.insert(
+            "implementations".into(),
+            implementation_section(store, query, limit)?,
+        );
+    }
+
+    Ok(Value::Object(response))
 }
 
-fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Result<Value> {
-    let query = required_str(params, "query")?;
-    let limit = limit(params);
+/// Inbound or outbound CALLS edges for one symbol, from the persisted graph.
+fn call_edge_section<S>(
+    store: &S,
+    symbol: &open_kioku_core::Symbol,
+    inbound: bool,
+    limit: usize,
+) -> anyhow::Result<Value>
+where
+    S: GraphStore + ?Sized,
+{
+    let node = format!("symbol:{}", symbol.id.0);
+    let (nodes, edges) = store.neighbors(&node, MAX_MCP_FETCH)?;
+    let mut edges = edges
+        .into_iter()
+        .filter(|edge| {
+            edge.edge_type == GraphEdgeType::Calls
+                && if inbound {
+                    edge.to.0 == node
+                } else {
+                    edge.from.0 == node
+                }
+        })
+        .collect::<Vec<_>>();
+    let has_more = edges.len() > limit;
+    edges.truncate(limit);
+    let related_ids = edges
+        .iter()
+        .map(|edge| if inbound { &edge.from.0 } else { &edge.to.0 })
+        .collect::<std::collections::BTreeSet<_>>();
+    let nodes = nodes
+        .into_iter()
+        .filter(|candidate| related_ids.contains(&candidate.id.0))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "evidence_source": "sqlite_graph_store",
+        "direction": if inbound { "inbound" } else { "outbound" },
+        "nodes": nodes,
+        "edges": edges,
+        "returned": edges.len(),
+        "limit": limit,
+        "has_more": has_more,
+        "caveats": [
+            "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+        ],
+    }))
+}
+
+/// Verified implementation sites from persisted IMPLEMENTS facts.
+fn implementation_section<S>(store: &S, query: &str, limit: usize) -> anyhow::Result<Value>
+where
+    S: MetadataStore + ?Sized,
+{
     let matching_facts = store.implementation_facts_for_target(query, overfetch_limit(limit))?;
     let has_more = matching_facts.len() > limit;
     let mut implementations = Vec::new();
@@ -2966,7 +2553,7 @@ fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyh
         }));
     }
     Ok(json!({
-        "query": query,
+        "evidence_source": "persisted_implements_facts",
         "implementations": implementations,
         "returned": implementations.len(),
         "limit": limit,
@@ -2975,6 +2562,27 @@ fn implementation_lookup_tool(store: &dyn MetadataStore, params: &Value) -> anyh
             "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
         ],
     }))
+}
+
+/// The language inventory `list_languages` used to answer. Index coverage
+/// already records one entry per language the last index saw, so the usual
+/// path costs nothing extra; the file scan is the fallback for indexes written
+/// before coverage recording, where the alternative is reporting no languages.
+fn indexed_languages(
+    store: &dyn MetadataStore,
+    coverage: Option<&open_kioku_core::IndexCoverage>,
+) -> anyhow::Result<Vec<String>> {
+    if let Some(coverage) = coverage.filter(|coverage| !coverage.by_language.is_empty()) {
+        return Ok(coverage.by_language.keys().cloned().collect());
+    }
+    let mut languages = store
+        .list_files(usize::MAX, 0)?
+        .into_iter()
+        .map(|file| file.language.key().to_string())
+        .collect::<Vec<_>>();
+    languages.sort_unstable();
+    languages.dedup();
+    Ok(languages)
 }
 
 #[cfg(test)]
@@ -3176,8 +2784,8 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"repo-status","method":"repo_status","params":{}}"#,
             ),
             (
-                "get_evidence_schema.json",
-                r#"{"jsonrpc":"2.0","id":"get-evidence-schema","method":"get_evidence_schema","params":{}}"#,
+                "evidence_schema.json",
+                r#"{"jsonrpc":"2.0","id":"evidence-schema","method":"query_evidence_graph","params":{}}"#,
             ),
             (
                 "query_evidence_graph.json",
@@ -3200,7 +2808,7 @@ mod tests {
             // a snapshot moving (#392).
             (
                 "tools_call_json_tool.json",
-                r#"{"jsonrpc":"2.0","id":"tools-call-json","method":"tools/call","params":{"name":"list_languages","arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":"tools-call-json","method":"tools/call","params":{"name":"list_files","arguments":{"limit":1}}}"#,
             ),
             (
                 "tools_call_rendered_tool.json",
@@ -3211,44 +2819,16 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"pagination","method":"list_files","params":{"limit":1,"offset":0}}"#,
             ),
             (
-                "history_provenance.json",
-                r#"{"jsonrpc":"2.0","id":"history-provenance","method":"history_provenance_lookup","params":{"path":"src/billing.rs","limit":5}}"#,
-            ),
-            (
-                "churn_analysis.json",
-                r#"{"jsonrpc":"2.0","id":"churn-analysis","method":"churn_analysis","params":{"path":"src/billing.rs"}}"#,
-            ),
-            (
-                "history_similar_changes.json",
-                r#"{"jsonrpc":"2.0","id":"history-similar-changes","method":"history_similar_changes","params":{"task":"publish invoice","path":"src/billing.rs","limit":5}}"#,
-            ),
-            (
-                "ownership_lookup.json",
-                r#"{"jsonrpc":"2.0","id":"ownership-lookup","method":"ownership_lookup","params":{"path":"src/billing.rs"}}"#,
-            ),
-            (
-                "reviewer_suggestions.json",
-                r#"{"jsonrpc":"2.0","id":"reviewer-suggestions","method":"reviewer_suggestions","params":{"path":"src/billing.rs"}}"#,
-            ),
-            (
-                "semantic_status.json",
-                r#"{"jsonrpc":"2.0","id":"semantic-status","method":"semantic_status","params":{}}"#,
+                "list_files_detail.json",
+                r#"{"jsonrpc":"2.0","id":"list-files-detail","method":"list_files","params":{"path":"src/billing.rs"}}"#,
             ),
             (
                 "semantic_search_not_ready.json",
-                r#"{"jsonrpc":"2.0","id":"semantic-search","method":"semantic_search","params":{"query":"publish invoice","limit":1}}"#,
+                r#"{"jsonrpc":"2.0","id":"semantic-search","method":"search_code","params":{"query":"publish invoice","mode":"semantic","limit":1}}"#,
             ),
             (
                 "hybrid_search_lexical_fallback.json",
-                r#"{"jsonrpc":"2.0","id":"hybrid-search","method":"hybrid_search","params":{"query":"publish invoice","limit":1}}"#,
-            ),
-            (
-                "explain_search_result_lexical_fallback.json",
-                r#"{"jsonrpc":"2.0","id":"explain-search","method":"explain_search_result","params":{"query":"publish invoice","limit":1}}"#,
-            ),
-            (
-                "structural_search.json",
-                r#"{"jsonrpc":"2.0","id":"structural-search","method":"structural_search","params":{"query":"publish_invoice_event","limit":1}}"#,
+                r#"{"jsonrpc":"2.0","id":"hybrid-search","method":"search_code","params":{"query":"publish invoice","mode":"hybrid","limit":1}}"#,
             ),
             (
                 "regex_search.json",
@@ -3259,20 +2839,30 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"regex-search-invalid","method":"regex_search","params":{"pattern":"pub fn (","limit":5}}"#,
             ),
             (
-                "get_symbol_context.json",
-                r#"{"jsonrpc":"2.0","id":"get-symbol-context","method":"get_symbol_context","params":{"query":"publish_invoice_event"}}"#,
+                "get_definition_with_body.json",
+                r#"{"jsonrpc":"2.0","id":"get-definition-body","method":"get_definition","params":{"query":"publish_invoice_event","include_body":true}}"#,
             ),
             (
-                "get_implementations.json",
-                r#"{"jsonrpc":"2.0","id":"get-implementations","method":"get_implementations","params":{"query":"InvoicePublisher","limit":1}}"#,
+                "get_references.json",
+                r#"{"jsonrpc":"2.0","id":"get-references","method":"get_references","params":{"query":"publish_invoice_event","limit":1}}"#,
+            ),
+            // Every evidence kind in one response, which is where the
+            // provenance of each has to stay legible.
+            (
+                "get_references_all.json",
+                r#"{"jsonrpc":"2.0","id":"get-references-all","method":"get_references","params":{"query":"publish_invoice_event","kind":"all","limit":1}}"#,
             ),
             (
-                "get_callees.json",
-                r#"{"jsonrpc":"2.0","id":"get-callees","method":"get_callees","params":{"query":"publish_invoice_event","limit":1}}"#,
+                "get_references_implementations.json",
+                r#"{"jsonrpc":"2.0","id":"get-references-impls","method":"get_references","params":{"query":"InvoicePublisher","kind":"implementations","limit":1}}"#,
             ),
             (
-                "get_callers.json",
-                r#"{"jsonrpc":"2.0","id":"get-callers","method":"get_callers","params":{"query":"archive_invoice_event","limit":1}}"#,
+                "get_references_callers.json",
+                r#"{"jsonrpc":"2.0","id":"get-references-callers","method":"get_references","params":{"query":"archive_invoice_event","kind":"callers","limit":1}}"#,
+            ),
+            (
+                "dependency_path_neighbors.json",
+                r#"{"jsonrpc":"2.0","id":"dependency-neighbors","method":"dependency_path","params":{"from":"src/billing.rs","limit":5}}"#,
             ),
             (
                 "explain_flow.json",
@@ -3296,41 +2886,6 @@ mod tests {
                 .expect("snapshot request should return a response");
             assert_mcp_snapshot(name, &response);
         }
-    }
-
-    #[tokio::test]
-    async fn architecture_summary_uses_configured_policy_for_components_and_violations() {
-        let fixture = McpSnapshotFixture::new();
-        let policy_dir = fixture.repo.join(".open-kioku");
-        fs::create_dir_all(&policy_dir).unwrap();
-        fs::write(
-            policy_dir.join("architecture.toml"),
-            r#"
-version = "v1"
-
-[[layers]]
-id = "billing"
-paths = ["src/**"]
-"#,
-        )
-        .unwrap();
-
-        let response = handle_line(
-            &fixture.repo,
-            &fixture.store,
-            &fixture.config,
-            r#"{"jsonrpc":"2.0","id":"architecture-summary","method":"summarize_architecture","params":{}}"#,
-        )
-        .await
-        .expect("architecture summary should return a response");
-        let result = response
-            .result
-            .expect("architecture summary should succeed");
-        assert_eq!(result["configured"], true);
-        assert_eq!(result["policy_source"], "canonical");
-        assert_eq!(result["components"][0]["id"], "billing");
-        assert_eq!(result["components"][0]["paths"][0], "src/billing.rs");
-        assert_eq!(result["policy_check"]["configured"], true);
     }
 
     struct McpSnapshotFixture {
@@ -3973,10 +3528,10 @@ paths = ["src/**"]
         .await
         .unwrap();
         let tools_ro = result_ro["tools"].as_array().unwrap();
-        assert_eq!(tools_ro.len(), 58, "the documented MCP inventory changed");
-        for retired_tool in ["apply_patch", "review_patch", "validate_patch"] {
+        assert_eq!(tools_ro.len(), 16, "the documented MCP inventory changed");
+        for retired_tool in RETIRED_TOOLS {
             assert!(
-                tools_ro.iter().all(|tool| tool["name"] != retired_tool),
+                tools_ro.iter().all(|tool| tool["name"] != *retired_tool),
                 "{retired_tool} must not be advertised"
             );
         }
@@ -4050,55 +3605,39 @@ paths = ["src/**"]
                 }
             }
         }
-        let provenance = tools_ro
+        let references = tools_ro
             .iter()
-            .find(|tool| tool["name"] == "history_provenance_lookup")
+            .find(|tool| tool["name"] == "get_references")
             .unwrap();
-        assert_eq!(provenance["maturity"], "experimental");
-        let churn = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "churn_analysis")
-            .unwrap();
-        assert_eq!(churn["maturity"], "experimental");
-        let similar = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "history_similar_changes")
-            .unwrap();
-        assert_eq!(similar["maturity"], "experimental");
-        let ownership = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "ownership_lookup")
-            .unwrap();
-        assert_eq!(ownership["maturity"], "experimental");
-        let reviewer_suggestions = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "reviewer_suggestions")
-            .unwrap();
-        assert_eq!(reviewer_suggestions["maturity"], "experimental");
-        let structural_search = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "structural_search")
-            .unwrap();
-        assert_eq!(structural_search["maturity"], "experimental");
-        assert!(structural_search["description"]
-            .as_str()
-            .unwrap()
-            .contains("Alias of search_code"));
-        let implementations = tools_ro
-            .iter()
-            .find(|tool| tool["name"] == "get_implementations")
-            .unwrap();
-        assert_eq!(implementations["maturity"], "experimental");
-        assert!(implementations["description"]
-            .as_str()
-            .unwrap()
-            .contains("persisted IMPLEMENTS facts"));
-        let remember_fact = tools_ro
+        let description = references["description"].as_str().unwrap();
+        assert!(description.contains("persisted IMPLEMENTS facts"));
+        assert!(
+            description.contains("evidence_source"),
+            "the merged tool must advertise that each section names its own provenance"
+        );
+
+        // `remember_fact` is only advertised when memory is configured, so the
+        // annotation check moves to the configured surface.
+        let mut memory_config = OkConfig::default();
+        memory_config.memory.enabled = true;
+        let (memory_tools, _) = tools(&memory_config);
+        let remember_fact = memory_tools
             .iter()
             .find(|tool| tool["name"] == "remember_fact")
             .unwrap();
         assert_eq!(remember_fact["annotations"]["readOnlyHint"], false);
         assert_eq!(remember_fact["annotations"]["destructiveHint"], false);
+
+        // Conditionally writing tools must say so: the compress and persist
+        // paths write under .ok, and a readOnlyHint of true would be a lie a
+        // client's approval policy would act on.
+        for name in ["build_context_pack", "plan_change"] {
+            let tool = tools_ro.iter().find(|tool| tool["name"] == name).unwrap();
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"], false,
+                "{name} can write and must not claim otherwise"
+            );
+        }
         let verify_change = tools_ro
             .iter()
             .find(|tool| tool["name"] == "verify_change")
@@ -4119,18 +3658,177 @@ paths = ["src/**"]
         .await
         .unwrap();
         let tools_write_enabled = result_write_enabled["tools"].as_array().unwrap();
-        for retired_tool in ["apply_patch", "review_patch", "validate_patch"] {
+        for retired_tool in RETIRED_TOOLS {
             assert!(
                 tools_write_enabled
                     .iter()
-                    .all(|tool| tool["name"] != retired_tool),
+                    .all(|tool| tool["name"] != *retired_tool),
                 "{retired_tool} must not be restored by write configuration"
             );
         }
     }
 
     #[tokio::test]
-    async fn test_get_evidence_schema_shape() {
+    async fn merged_symbol_evidence_keeps_each_provenance_separate() {
+        // `get_references` absorbed the call and implementation lookups. The
+        // point of the merge is one call; the risk of the merge is that
+        // occurrence evidence, graph call edges, and persisted IMPLEMENTS facts
+        // read as one undifferentiated list. Each has to keep its own source,
+        // its own caveats, and its own meaning of "empty".
+        let fixture = McpSnapshotFixture::new();
+        let all = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "get_references",
+            json!({"query": "publish_invoice_event", "kind": "all", "limit": 5}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(all["kind"], "all");
+        assert_eq!(
+            all["references"]["evidence_source"], "symbol_occurrences",
+            "occurrence evidence must name its own source: {all}"
+        );
+        assert_eq!(
+            all["callers"]["evidence_source"], "sqlite_graph_store",
+            "call edges must name the graph store, not the occurrence table: {all}"
+        );
+        assert_eq!(all["callees"]["evidence_source"], "sqlite_graph_store");
+        assert_eq!(all["callers"]["direction"], "inbound");
+        assert_eq!(all["callees"]["direction"], "outbound");
+        assert_eq!(
+            all["implementations"]["evidence_source"], "persisted_implements_facts",
+            "IMPLEMENTS facts must not be presented as occurrences: {all}"
+        );
+
+        for section in ["references", "callers", "callees", "implementations"] {
+            assert!(
+                !all[section]["caveats"].as_array().unwrap().is_empty(),
+                "{section} must carry the caveat that says what its absence means"
+            );
+        }
+        // No section leaks into another: the payload key differs per kind, so a
+        // caller cannot read an implementation as a reference by position.
+        assert!(all["references"]["occurrences"].is_array());
+        assert!(all["implementations"]["implementations"].is_array());
+        assert!(all["references"].get("implementations").is_none());
+        assert!(all["implementations"].get("occurrences").is_none());
+
+        // Each per-occurrence record still carries the provenance the fusion
+        // rules depend on, so an exact occurrence is never confused with the
+        // low-confidence lexical fallback.
+        for occurrence in all["references"]["occurrences"].as_array().unwrap() {
+            assert!(occurrence["provenance"].is_string(), "{occurrence}");
+            assert!(occurrence["confidence"].is_string(), "{occurrence}");
+        }
+
+        // A trait the index holds no definition for still has answerable
+        // IMPLEMENTS evidence; requiring symbol resolution first would have
+        // silently dropped it.
+        let implementations = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "get_references",
+            json!({"query": "InvoicePublisher", "kind": "implementations", "limit": 5}),
+        )
+        .await
+        .unwrap();
+        assert!(implementations["symbol"].is_null());
+        assert_eq!(
+            implementations["implementations"]["evidence_source"],
+            "persisted_implements_facts"
+        );
+        assert_eq!(implementations["implementations"]["returned"], 1);
+
+        // An unknown kind is an error, not a quietly different answer.
+        let unknown = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "get_references",
+            json!({"query": "publish_invoice_event", "kind": "callsites"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(unknown.to_string().contains("unknown `kind`"));
+    }
+
+    #[tokio::test]
+    async fn retired_tool_names_fail_loudly_instead_of_resolving() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        for retired_tool in RETIRED_TOOLS {
+            let error = dispatch(Path::new("."), &store, &config, retired_tool, json!({}))
+                .await
+                .expect_err("a retired tool name must not dispatch");
+            assert!(
+                error.to_string().contains(*retired_tool),
+                "the error for `{retired_tool}` must name it: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_and_runtime_tools_are_advertised_only_when_configured() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let gated = ["remember_fact", "search_memory"];
+        let runtime = [
+            "map_stacktrace_to_code",
+            "find_errors_for_symbol",
+            "find_recent_failures",
+        ];
+
+        let default_config = OkConfig::default();
+        let (advertised, _) = tools(&default_config);
+        let names = advertised
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        for name in gated.iter().chain(runtime.iter()) {
+            assert!(
+                !names.contains(name),
+                "{name} must stay off the default surface"
+            );
+        }
+        // Gated off the listing, still answerable: the disabled stub is the
+        // honest answer, and hiding the name is not the same as removing it.
+        let disabled = dispatch(
+            Path::new("."),
+            &store,
+            &default_config,
+            "find_recent_failures",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(disabled["configured"], false);
+
+        let mut configured = OkConfig::default();
+        configured.memory.enabled = true;
+        configured.runtime.enabled = true;
+        configured.runtime.provider = "sentry".into();
+        let (advertised, _) = tools(&configured);
+        let names = advertised
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(advertised.len(), 21);
+        for name in gated.iter().chain(runtime.iter()) {
+            assert!(names.contains(name), "{name} must appear once configured");
+        }
+
+        // `enabled` alone is not a configured provider.
+        let mut half_configured = OkConfig::default();
+        half_configured.runtime.enabled = true;
+        let (advertised, _) = tools(&half_configured);
+        assert_eq!(advertised.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn query_evidence_graph_without_a_query_returns_the_evidence_schema() {
         let store = SqliteStore::open(":memory:").unwrap();
         let config = OkConfig::default();
 
@@ -4139,7 +3837,7 @@ paths = ["src/**"]
             Path::new("."),
             &store,
             &config,
-            "get_evidence_schema",
+            "query_evidence_graph",
             params,
         )
         .await

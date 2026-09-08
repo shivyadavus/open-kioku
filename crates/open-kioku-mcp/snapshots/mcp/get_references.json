@@ -1,0 +1,45 @@
+{
+  "id": "get-references",
+  "jsonrpc": "2.0",
+  "result": {
+    "kind": "references",
+    "query": "publish_invoice_event",
+    "references": {
+      "caveats": [
+        "each occurrence carries its own provenance and confidence; a `lexical` occurrence at low confidence is the name-match fallback used when the index holds no resolved occurrence for this symbol"
+      ],
+      "evidence_source": "symbol_occurrences",
+      "has_more": false,
+      "limit": 1,
+      "occurrences": [
+        {
+          "confidence": "low",
+          "file_id": "file-billing",
+          "is_definition": false,
+          "provenance": "lexical",
+          "range": {
+            "end": 9,
+            "start": 7
+          },
+          "symbol_id": "symbol-publish"
+        }
+      ],
+      "returned": 1
+    },
+    "symbol": {
+      "confidence": "exact",
+      "file_id": "file-billing",
+      "id": "symbol-publish",
+      "kind": "function",
+      "language": "rust",
+      "name": "publish_invoice_event",
+      "provenance": "scip",
+      "qualified_name": "billing::routes::publish_invoice_event",
+      "range": {
+        "end": 7,
+        "start": 7
+      },
+      "visibility": "unknown"
+    }
+  }
+}

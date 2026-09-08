@@ -5,74 +5,83 @@ disable-model-invocation: true
 
 # Open Kioku — Code Intelligence
 
-Open Kioku gives you a persistent, evidence-backed memory of the indexed repository. All tools are read-only by default and operate entirely locally — no network calls, no cloud API.
+Open Kioku answers questions about this repository from a local index: no hosted
+index, no source upload, no embeddings API for the default workflow. Sixteen
+tools, one per question nothing else answers. Everything is read-only unless a
+parameter named below says otherwise.
+
+## When to use it
+
+- Before editing a file you have not read in this session
+- When you need to find where something is defined or used
+- Before a refactor, to know what else breaks
+- When building context for a multi-file task
+- After editing, to check the change stayed inside the plan
+
+## The routine
+
+1. **`repo_status`** — confirm the repository is indexed. Read `coverage` before
+   trusting an absence: it says how much of the repository the index actually holds.
+2. **`search_code`** — find where the thing is handled. `mode` picks the evidence:
+   `code` (lexical BM25, the default), `graph`, `semantic`, `hybrid`. Semantic and
+   hybrid fall back to lexical and say so in `semantic_status`.
+   - `regex_search` when the target is a literal pattern — exact, unranked, path-ordered, and `caveats` says what was not searched.
+   - `search_symbols` when you already have a name fragment. Substring, not fuzzy.
+   - `list_files` with a `path` for one file's indexed record and chunks.
+3. **`get_definition`** — resolve the symbol. `include_body: true` adds the
+   definition text and the indexed lines around it; read `caveats` before relying
+   on that body.
+4. **`get_references`** — what else touches it. `kind` picks the evidence:
+   `references` (occurrences, the default), `callers`, `callees`,
+   `implementations`, or `all`. Each section names its own `evidence_source` and
+   caveats — an empty occurrence list and an empty IMPLEMENTS list are different
+   claims, so do not read them as one list.
+5. **`impact_analysis`** — the file-level blast radius, with dependents split into
+   structurally proven and heuristic.
+   - `dependency_path` for how two nodes connect, or one node's neighbours when `to` is omitted.
+   - `explain_flow` for indexed endpoints and the call paths they start.
+6. **`find_tests_for_change`** — pick what to run. A ranked test is a candidate,
+   not proof of coverage.
+7. **`plan_change`** — the evidence-backed plan with edit boundaries.
+   `detail: "preflight"` for a short start decision, `detail: "patch"` for a patch
+   plan, `persist: true` to store a versioned change contract (this writes).
+   - `build_context_pack` when you want the grounding bundle instead of the plan; `compress: true` returns handles (this writes) that `retrieve_context` expands.
+8. **`verify_change`** — hold the edit to what was declared. Pass the saved plan,
+   or a `contract_id`. A green test run is not proof the right files changed.
+
+`query_evidence_graph` is the escape hatch. Call it with no `query` first to get
+the evidence schema.
 
 ## Output format
 
-`build_context_pack` and `plan_change` return Markdown by default. Markdown is the
-rendering you want: it is the same evidence with the same coverage, written to be read,
-and it costs a small fraction of the JSON rendering of the same result.
+`build_context_pack` and `plan_change` return Markdown by default. That is the
+rendering you want: the same evidence with the same coverage, written to be read,
+at a small fraction of the cost of the JSON rendering.
 
 - Do not pass `format`. The default is correct for reading.
-- Pass `format: "json"` only when the result is going to be parsed rather than read —
-  saving a plan for `verify_change`, or supplying `plan_json` to
-  `create_change_contract`. A plan you intend to verify against must be JSON.
+- Pass `format: "json"` only when the result will be parsed rather than read —
+  a plan saved for `verify_change`, or a plan handed to `plan_change` with
+  `persist: true`. A plan you intend to verify against must be JSON.
 - Pass `format: "toon"` when the result goes straight into another model's prompt.
-- Use `limit` to widen coverage when the pack missed a file you expected, not to control
-  cost. It changes how many context items are gathered, not how they are rendered.
+- Use `limit` to widen coverage when the pack missed a file you expected, not to
+  control cost. It changes how many context items are gathered, not how they are
+  rendered.
 
-## When to use each tool
+## Rules
 
-### Orientation (start here on an unfamiliar codebase)
-- `repo_status` — check what is indexed and when it was last updated
-- `list_languages` — understand the technology stack
-- `detect_architecture` / `summarize_architecture` — get a high-level map of the codebase layout
+1. Call `search_code` or `get_definition` before editing a file you have not read
+   in this session.
+2. Call `impact_analysis` before any rename, deletion, or interface change.
+3. Use `build_context_pack` when a task touches more than three files.
+4. Prefer Open Kioku evidence over assumptions about file contents, and read the
+   `caveats` — absence of evidence is reported, not hidden.
+5. Open Kioku never edits source files. Apply approved edits with your normal
+   editor, then run `verify_change`.
 
-### Search
-- `search_code` — full-text BM25 search across all indexed chunks; best for business logic keywords
-- `regex_search` — exact regular-expression line matching over indexed chunk text; unranked and path-ordered, and `caveats` says what was not searched
-- `semantic_search` — falls back to lexical when embeddings are disabled
-- `list_symbols` — browse all indexed symbols by substring
+## Not on the MCP surface
 
-### Symbol navigation
-- `get_definition` — find where a symbol is defined before editing it
-- `get_symbol_context` — read the definition body and the indexed lines around it; `caveats` names anything the index could not recover
-- `get_references` — find every place a symbol is used before renaming or deleting it
-- `get_callers` / `get_callees` — trace call graphs for debugging or refactoring
-- `get_implementations` — find all concrete implementations of an interface or trait
-- `explain_symbol` — an alias of `get_definition`; the same record, no source text
-
-### Change analysis
-- `impact_analysis` — measure the blast radius before modifying a file; shows all direct and transitive dependants
-- `find_tests_for_change` — identify which tests cover a file before pushing
-- `recommend_validation_plan` — an alias of `find_tests_for_change`; the same test targets, no static checks
-- `dependency_path` — find how two files or symbols are connected
-
-### Refactoring and patch planning
-- `build_context_pack` — assemble a context bundle (files + symbols + tests + patch boundaries) for a complex task; pass the task in natural language. Returns Markdown; raise `limit` if it missed something
-- `propose_patch` — generate a patch plan without writing any files
-- `verify_change` / `verify_change_contract` — verify a completed source edit against an evidence-backed plan or contract
-
-### File-level exploration
-- `explain_file` — get all chunks and metadata for a single file
-- `module_dependencies` — list direct graph neighbours of a file or symbol node
-
-## Workflow examples
-
-**Before editing a function:**
-1. `get_definition` → locate it
-2. `get_references` → see all callers
-3. `impact_analysis` → measure downstream risk
-4. `find_tests_for_change` → know what to run after
-
-**Starting a large refactor:**
-1. `build_context_pack` with your task description
-2. `propose_patch` to plan the changes
-3. apply reviewed source changes with the normal editor
-4. `verify_change` or `verify_change_contract` after editing
-
-**Exploring an unfamiliar repo:**
-1. `repo_status` → confirm index is fresh
-2. `detect_architecture` → understand the layout
-3. `search_code` with a domain keyword → find the relevant module
-4. `explain_file` → read the key file in full
+Architecture reports, git history, ownership, and stored contracts ship on the
+CLI, not as tools: `ok architecture summary|detect|boundaries|violations|policy …`,
+`ok history provenance|churn|similar|ownership|reviewers`, `ok contract show <id>`.
+Memory (`remember_fact`, `search_memory`) and runtime-error tools appear in
+`tools/list` only when those features are configured.

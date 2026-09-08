@@ -1,0 +1,107 @@
+{
+  "id": "get-references-all",
+  "jsonrpc": "2.0",
+  "result": {
+    "callees": {
+      "caveats": [
+        "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+      ],
+      "direction": "outbound",
+      "edges": [
+        {
+          "edge_type": "CALLS",
+          "evidence": {
+            "confidence": "low",
+            "file_range": null,
+            "id": "",
+            "indexed_at": "<indexed_at>",
+            "message": "",
+            "source": "",
+            "source_type": "lexical",
+            "symbol_id": null
+          },
+          "from": "symbol:symbol-publish",
+          "id": "edge-publish-calls-archive",
+          "to": "symbol:symbol-archive"
+        }
+      ],
+      "evidence_source": "sqlite_graph_store",
+      "has_more": false,
+      "limit": 1,
+      "nodes": [
+        {
+          "file_id": "file-billing",
+          "id": "symbol:symbol-archive",
+          "label": "archive_invoice_event",
+          "node_type": "function",
+          "properties": {
+            "qualified_name": "billing::routes::archive_invoice_event"
+          },
+          "symbol_id": "symbol-archive"
+        }
+      ],
+      "returned": 1
+    },
+    "callers": {
+      "caveats": [
+        "call edges are persisted CALLS graph edges; a repository without call evidence returns none rather than an inferred path"
+      ],
+      "direction": "inbound",
+      "edges": [],
+      "evidence_source": "sqlite_graph_store",
+      "has_more": false,
+      "limit": 1,
+      "nodes": [],
+      "returned": 0
+    },
+    "implementations": {
+      "caveats": [
+        "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
+      ],
+      "evidence_source": "persisted_implements_facts",
+      "has_more": false,
+      "implementations": [],
+      "limit": 1,
+      "returned": 0
+    },
+    "kind": "all",
+    "query": "publish_invoice_event",
+    "references": {
+      "caveats": [
+        "each occurrence carries its own provenance and confidence; a `lexical` occurrence at low confidence is the name-match fallback used when the index holds no resolved occurrence for this symbol"
+      ],
+      "evidence_source": "symbol_occurrences",
+      "has_more": false,
+      "limit": 1,
+      "occurrences": [
+        {
+          "confidence": "low",
+          "file_id": "file-billing",
+          "is_definition": false,
+          "provenance": "lexical",
+          "range": {
+            "end": 9,
+            "start": 7
+          },
+          "symbol_id": "symbol-publish"
+        }
+      ],
+      "returned": 1
+    },
+    "symbol": {
+      "confidence": "exact",
+      "file_id": "file-billing",
+      "id": "symbol-publish",
+      "kind": "function",
+      "language": "rust",
+      "name": "publish_invoice_event",
+      "provenance": "scip",
+      "qualified_name": "billing::routes::publish_invoice_event",
+      "range": {
+        "end": 7,
+        "start": 7
+      },
+      "visibility": "unknown"
+    }
+  }
+}

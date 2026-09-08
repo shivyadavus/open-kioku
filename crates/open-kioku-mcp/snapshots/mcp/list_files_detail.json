@@ -1,0 +1,31 @@
+{
+  "id": "list-files-detail",
+  "jsonrpc": "2.0",
+  "result": {
+    "caveats": [],
+    "chunks": [
+      {
+        "file_id": "file-billing",
+        "id": "chunk-publish",
+        "language": "rust",
+        "range": {
+          "end": 9,
+          "start": 7
+        },
+        "symbol_id": "symbol-publish",
+        "text": "pub fn publish_invoice_event() {}"
+      }
+    ],
+    "file": {
+      "content_hash": "hash-billing",
+      "id": "file-billing",
+      "is_generated": false,
+      "is_vendor": false,
+      "language": "rust",
+      "path": "src/billing.rs",
+      "repository_id": "repo",
+      "size_bytes": 128
+    },
+    "path": "src/billing.rs"
+  }
+}

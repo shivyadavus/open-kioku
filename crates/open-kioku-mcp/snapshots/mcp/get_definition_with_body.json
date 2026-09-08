@@ -1,0 +1,38 @@
+{
+  "id": "get-definition-body",
+  "jsonrpc": "2.0",
+  "result": {
+    "body": "pub fn publish_invoice_event() {}",
+    "body_range": {
+      "end": 7,
+      "start": 7
+    },
+    "caveats": [
+      "the definition body is incomplete: 2 of 3 line(s) sought in src/billing.rs:7-9 are outside every indexed chunk, so the returned body covers only 7-7",
+      "the indexed range for `billing::routes::publish_invoice_event` is a single line, so the body extent comes from the chunk boundary at line 9 and may include text that follows the definition",
+      "no indexed lines precede src/billing.rs line 7, so any documentation comment above the definition is outside the indexed corpus and is not reported"
+    ],
+    "evidence": [
+      "definition body recovered from indexed chunk `chunk-publish` covering src/billing.rs lines 7-9"
+    ],
+    "leading_lines": [],
+    "path": "src/billing.rs",
+    "symbol": {
+      "confidence": "exact",
+      "file_id": "file-billing",
+      "id": "symbol-publish",
+      "kind": "function",
+      "language": "rust",
+      "name": "publish_invoice_event",
+      "provenance": "scip",
+      "qualified_name": "billing::routes::publish_invoice_event",
+      "range": {
+        "end": 7,
+        "start": 7
+      },
+      "visibility": "unknown"
+    },
+    "trailing_lines": [],
+    "truncated": false
+  }
+}

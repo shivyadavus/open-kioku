@@ -1,0 +1,54 @@
+{
+  "id": "get-references-impls",
+  "jsonrpc": "2.0",
+  "result": {
+    "implementations": {
+      "caveats": [
+        "returns only persisted IMPLEMENTS facts; absent language or parser evidence yields no result"
+      ],
+      "evidence_source": "persisted_implements_facts",
+      "has_more": false,
+      "implementations": [
+        {
+          "evidence": {
+            "confidence": "high",
+            "edge_type": "IMPLEMENTS",
+            "file_id": "file-billing",
+            "id": "invoice-publisher-implementation",
+            "message": "fixture implementation evidence",
+            "range": {
+              "end": 15,
+              "start": 15
+            },
+            "source": "fixture-static-analysis",
+            "source_type": "static_analysis",
+            "symbol_id": "symbol-invoice-publisher-impl",
+            "target": "InvoicePublisher",
+            "target_kind": "interface"
+          },
+          "implementation": {
+            "confidence": "high",
+            "file_id": "file-billing",
+            "id": "symbol-invoice-publisher-impl",
+            "kind": "class",
+            "language": "java",
+            "name": "InvoicePublisherImpl",
+            "provenance": "static_analysis",
+            "qualified_name": "billing::InvoicePublisherImpl",
+            "range": {
+              "end": 15,
+              "start": 15
+            },
+            "visibility": "unknown"
+          }
+        }
+      ],
+      "limit": 1,
+      "returned": 1
+    },
+    "kind": "implementations",
+    "query": "InvoicePublisher",
+    "symbol": null,
+    "symbol_resolution": "symbol not found: InvoicePublisher"
+  }
+}
