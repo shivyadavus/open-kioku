@@ -1391,7 +1391,7 @@ mod tests {
     }
 
     #[test]
-    fn gradle_command_scopes_java-a_java_tests() {
+    fn gradle_command_scopes_java_tests_to_their_subproject() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(root.join("settings.gradle"), "").unwrap();

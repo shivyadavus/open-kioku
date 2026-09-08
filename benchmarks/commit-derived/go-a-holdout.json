@@ -2,7 +2,6 @@
  "corpus": "go-a",
  "split": "holdout",
  "provenance": {
-  "repo": "<withheld>",
   "base": "<withheld>",
   "after": 1500,
   "ext": [

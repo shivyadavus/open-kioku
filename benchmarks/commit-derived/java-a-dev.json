@@ -2,7 +2,6 @@
  "corpus": "java-a",
  "split": "dev",
  "provenance": {
-  "repo": "<withheld>",
   "base": "<withheld>",
   "after": 3800,
   "ext": [

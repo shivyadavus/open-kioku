@@ -617,7 +617,7 @@ impl<'a> BuiltinCandidateContext<'a> {
         // ~5 s per query. Symbol and path anchors are what co-change history can actually
         // speak to.
         // Loose prose similarity is noise, but a *near-identical* past subject is not: the
-        // 24th "releaser: Bump versions for release of 0.158.0" touches the file the other 23
+        // 24th "publisher: Bump versions for release of 0.158.0" touches the file the other 23
         // touched, and "feat(async): stabilize Lazy" edits the same barrel every stabilize
         // commit did. Twins are matched on the subject after numbers and PR references are
         // stripped, with a high Jaccard bar, and vote for the files most of them touched.
@@ -796,7 +796,7 @@ const SUBJECT_TWIN_MIN_FILE_SHARE: f32 = 0.5;
 const SUBJECT_TWIN_SCAN: usize = 40;
 
 /// Subject vocabulary with version numbers, PR references, and punctuation removed, so
-/// "releaser: Bump versions for release of 0.158.0" and "... of 0.161.1" are the same subject.
+/// "publisher: Bump versions for release of 0.158.0" and "... of 0.161.1" are the same subject.
 fn subject_tokens(subject: &str) -> Vec<String> {
     let mut tokens: Vec<String> = subject
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -1548,10 +1548,10 @@ mod indexed_document_stream_tests {
 
     #[test]
     fn subject_twins_ignore_numbers_and_pr_references() {
-        let a = subject_tokens("releaser: Bump versions for release of 0.158.0");
-        let b = subject_tokens("releaser: Bump versions for release of 0.161.1 (#12345)");
+        let a = subject_tokens("publisher: Bump versions for release of 0.158.0");
+        let b = subject_tokens("publisher: Bump versions for release of 0.161.1 (#12345)");
         assert!(subject_similarity(&a, &b) >= SUBJECT_TWIN_MIN_SIMILARITY);
-        let c = subject_tokens("releaser: Prepare repository for 0.164.0-DEV");
+        let c = subject_tokens("publisher: Prepare repository for 0.164.0-DEV");
         assert!(subject_similarity(&a, &c) < SUBJECT_TWIN_MIN_SIMILARITY);
         let d = subject_tokens("feat(async): stabilize Lazy");
         let e = subject_tokens("feat(async): stabilize Channel");

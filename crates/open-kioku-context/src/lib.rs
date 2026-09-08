@@ -2243,7 +2243,7 @@ fn rerank_fused_for_task_with_options(
     }
     // Quality tier first: docs and tests are support material for a task that is not about
     // them, however strongly they mention its anchors; then anchor relevance, authority, score.
-    // The one exception is a file the task names outright ("Guard cluster cleanup in
+    // The one exception is a file the task names outright ("Guard pool shutdown in
     // ConnectionPoolMetricsIT"): it is the edit target whatever kind of file it is, and demoting
     // it put twenty source files that merely share vocabulary above the file three streams had
     // ranked first.
@@ -2484,9 +2484,9 @@ fn append_scope_entry_points(
     // any of them matched the task's own words. `feat(async): stabilize Channel` matches
     // async/ files on "async" alone — nothing in the directory knows "Channel" yet — so the
     // barrel is the best guess and goes just below the group's best. `[Scheduler] Fix speculative
-    // decoding` matches real modules on "speculative" and "decoding", so the barrel goes last:
+    // prefetch` matches real modules on "speculative" and "prefetch", so the barrel goes last:
     // as runner-up it pushed rank-2 modules to rank 3 on a Python monorepo (MRR -0.011), and
-    // at the floor it never surfaced on ts-a at all (gain 0.000).
+    // at the floor it never surfaced on the TypeScript standard library at all (gain 0.000).
     let scope_group: Vec<&SearchResult> = results
         .iter()
         .filter(|result| path_matches_scope(&normalize_path(&result.path), &intent.scope_anchors))
@@ -3169,10 +3169,10 @@ mod tests {
         );
         assert_eq!(
             commit_scope_tokens("pkg/render: Fix template lookup"),
-            vec!["tpl", "render"]
+            vec!["pkg", "render"]
         );
         assert_eq!(
-            commit_scope_tokens("[Scheduler] fix generation config"),
+            commit_scope_tokens("[Scheduler] fix retry config"),
             vec!["scheduler"]
         );
         assert!(commit_scope_tokens("docs: fix typo").is_empty());
@@ -3182,7 +3182,7 @@ mod tests {
 
     #[test]
     fn a_test_file_the_task_names_is_not_demoted_below_source() {
-        let intent = TaskSearchIntent::parse("Guard cluster cleanup in ConnectionPoolMetricsIT");
+        let intent = TaskSearchIntent::parse("Guard pool shutdown in ConnectionPoolMetricsIT");
         let result = |path: &str, score: f32| SearchResult {
             path: path.into(),
             line_range: None,
@@ -3197,9 +3197,9 @@ mod tests {
         };
         let ranked = rerank_fused_for_task(
             vec![
-                result("server/src/main/java/com/acme/cleanup/CleanupAction.java", 0.9),
+                result("server/src/main/java/com/acme/shutdown/ShutdownAction.java", 0.9),
                 result(
-                    "modules/netpool/src/internalClusterTest/java/com/acme/index/reindex/ConnectionPoolMetricsIT.java",
+                    "modules/netpool/src/internalClusterTest/java/com/acme/netpool/ConnectionPoolMetricsIT.java",
                     0.8,
                 ),
             ],
@@ -3215,22 +3215,22 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         // A test the task does not name is still support material below source.
-        let intent = TaskSearchIntent::parse("Guard cluster cleanup in reindex");
+        let intent = TaskSearchIntent::parse("Guard pool shutdown in netpool");
         let ranked = rerank_fused_for_task(
             vec![
                 result(
-                    "modules/netpool/src/main/java/com/acme/reindex/Reindexer.java",
+                    "modules/netpool/src/main/java/com/acme/netpool/Pooler.java",
                     0.5,
                 ),
                 result(
-                    "modules/netpool/src/test/java/com/acme/reindex/ReindexerTests.java",
+                    "modules/netpool/src/test/java/com/acme/netpool/PoolerTests.java",
                     0.9,
                 ),
             ],
             &intent,
             &RetrievalDiagnostics::default(),
         );
-        assert!(ranked[0].path.ends_with("Reindexer.java"));
+        assert!(ranked[0].path.ends_with("Pooler.java"));
     }
 
     #[test]
@@ -3282,8 +3282,8 @@ mod tests {
         assert!(path_matches_scope("path/posix/join.ts", &posix));
         assert!(!path_matches_scope("path/windows/join.ts", &posix));
         assert!(!path_matches_scope("anything", &[]));
-        let intent = TaskSearchIntent::parse("docs(expect): correct minor typo");
-        assert_eq!(intent.scope_anchors, vec!["expect"]);
+        let intent = TaskSearchIntent::parse("docs(yaml): correct minor typo");
+        assert_eq!(intent.scope_anchors, vec!["yaml"]);
         assert_eq!(
             task_relevance_tier(
                 std::path::Path::new("yaml/yaml.ts"),

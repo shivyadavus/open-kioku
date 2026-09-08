@@ -140,14 +140,14 @@ repository's own history, after the Agent Retrieval Bench methodology:
    set is the source files it modified that already existed at `B`. Commits whose subject
    names a path are dropped (kept, the path is the answer; stripped, the subject no longer
    describes the change), and a subject that repeats an earlier one up to numbers keeps only
-   its first instance: go-a's "releaser: Bump versions for release of X" was a third of its
+   its first instance: on a Go application (~800 files), "publisher: Bump versions for release of X" was a third of its
    holdout with the same gold file every time, so one pattern decided the corpus.
    The change lives in the future, never in the index, so a query cannot retrieve its
    own diff.
 3. Split chronologically — older cases are the development set, newer ones the holdout.
 
 ```sh
-scripts/commit-derived-cases.py ~/src/java-a --base <withheld> --after 3800 \
+scripts/commit-derived-cases.py ~/src/java-service --base <withheld> --after 3800 \
     --path-prefix libs/ --path-prefix modules/ --path-prefix server/ --out cases.tsv
 scripts/score-context-cases.py --ok target/release/ok --repo ./corpus-at-base \
     --cases cases-holdout.tsv --label holdout --out holdout.json
@@ -158,25 +158,28 @@ scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/
 `build_context_pack` tool use, and ranks files in the order the pack presents them. It
 reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live under
 `benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives four
-corpora nightly as a matrix — java-a (Java, `libs/ modules/ server/`), go-a (Go),
-ts-a (TypeScript), and py-a (Python) — and fails when a watched metric falls more
-than 0.03 below its baseline. The baselines were frozen from a hosted-runner matrix run on
+corpora from four large public repositories nightly as a matrix — a 10k-file Java service (`libs/ modules/ server/`
+indexed), a Go application (~800 files), a TypeScript standard library (~900 files), and
+a Python ML library (~4k files) — and fails when a watched metric falls more
+than 0.03 below its baseline. The repositories are not named here; the baseline files are keyed by
+language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.json`, and so on), and
+the workflow reads each repository URL from a repository variable. The baselines were frozen from a hosted-runner matrix run on
 2026-09-07 after the commit-scope anchors landed and repeated subjects were dropped from the
 derivation (each file records its run and commit under `provenance`); earlier freezes are in
 each file's git history:
 
 | Corpus | Split | Cases | R@5 | R@20 | MRR |
 |---|---|---|---|---|---|
-| java-a | dev | 262 | 0.576 | 0.744 | 0.460 |
-| java-a | holdout | 113 | 0.549 | 0.681 | 0.482 |
-| go-a | dev | 196 | 0.571 | 0.765 | 0.395 |
-| go-a | holdout | 84 | 0.691 | 0.809 | 0.551 |
-| ts-a | dev | 385 | 0.797 | 0.893 | 0.636 |
-| ts-a | holdout | 166 | 0.753 | 0.801 | 0.621 |
-| py-a | dev | 462 | 0.606 | 0.732 | 0.512 |
-| py-a | holdout | 199 | 0.658 | 0.749 | 0.556 |
+| Java (10k files) | dev | 262 | 0.576 | 0.744 | 0.460 |
+| Java (10k files) | holdout | 113 | 0.549 | 0.681 | 0.482 |
+| Go (~800 files) | dev | 196 | 0.571 | 0.765 | 0.395 |
+| Go (~800 files) | holdout | 84 | 0.690 | 0.810 | 0.551 |
+| TypeScript (~900 files) | dev | 385 | 0.797 | 0.893 | 0.636 |
+| TypeScript (~900 files) | holdout | 166 | 0.753 | 0.801 | 0.621 |
+| Python (~4k files) | dev | 462 | 0.606 | 0.732 | 0.512 |
+| Python (~4k files) | holdout | 199 | 0.658 | 0.749 | 0.556 |
 
-go-a was the hardest of the four while a third of its holdout was one repeated release-bump
+The Go application was the hardest of the four while a third of its holdout was one repeated release-bump
 commit; with one case per repeated subject it sits between the others. 21% of its gold files
 are `_test.go` benchmarks for tasks that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
 an average; a change that helps Java and hurts Go is a regression on Go. The frozen baselines are what an accuracy change is judged
