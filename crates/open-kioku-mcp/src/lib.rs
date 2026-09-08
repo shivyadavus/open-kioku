@@ -31,7 +31,7 @@ use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::disabled_response;
 use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
-use open_kioku_symbols::SymbolEngine;
+use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
 use open_kioku_tests::TestSelector;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -684,9 +684,15 @@ async fn dispatch(
             let resolver = PolicyResolver::new(&policy)?;
             architecture_policy_explain_tool(repo, store, &resolver, &policy, &params)
         }
-        "get_definition" | "get_symbol_context" | "explain_symbol" => {
+        "get_definition" | "explain_symbol" => {
             let query = required_str(&params, "query")?;
             Ok(json!(SymbolEngine::new(store).definition(query)?))
+        }
+        "get_symbol_context" => {
+            let query = required_str(&params, "query")?;
+            Ok(json!(
+                SymbolEngine::new(store).context(query, SYMBOL_CONTEXT_SURROUNDING_LINES)?
+            ))
         }
         "get_references" => {
             require_authoritative_relationships(store)?;
@@ -1457,7 +1463,7 @@ fn tool_description(name: &str, base: &str) -> String {
         "get_implementations" => "Use to retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes the implementing symbol when available plus parser provenance and confidence. Do NOT use for lexical candidates (use search_code) or all usages (use get_references). This is read-only and returns no result when the current index has no implementation evidence.",
         "get_callers" => "Use to trace inbound call-sites to a function, method, or callable symbol from the indexed call graph. Do NOT use for all reference types including imports and type usages (use get_references), for outbound calls (use get_callees), or for finding a route between two nodes (use dependency_path). Accuracy depends on tree-sitter and optional SCIP indexing depth. This is read-only.",
         "get_callees" => "Use to trace outbound calls made by a function or method. Prefer module_dependencies for file/module neighbors and dependency_path for a specific connection. This is read-only.",
-        "get_symbol_context" => "Use to retrieve a comprehensive context bundle for one symbol, including its definition body, file location, enclosing scope, documentation comments, and surrounding code context when indexed. Returns more detail than get_definition. Do NOT use for simple definition lookup only (use get_definition), for fuzzy symbol search (use search_symbols), or for cross-reference tracing (use get_references). This is read-only and reads from the local index.",
+        "get_symbol_context" => "Use when the definition text itself is needed, not just where it lives. Do NOT use for the symbol record alone (use get_definition), for symbol discovery (use search_symbols), or for cross-reference tracing (use get_references). Read `caveats` before relying on the body: it names anything the index could not recover. This is read-only and reads from the local index.",
         "dependency_path" => "Use to explain how two files or symbols are connected through indexed dependencies. Prefer module_dependencies for local neighbors and impact_analysis for downstream blast radius. This is read-only.",
         "impact_analysis" => "Use before editing a file to estimate the blast radius: downstream dependent files, caller functions, related test files, and architecture policy impact from the indexed dependency graph. Do NOT use when only test targets are needed (use find_tests_for_change) or for a comprehensive validation plan including static checks (use recommend_validation_plan). This is read-only and analyzes the local index only.",
         "history_provenance_lookup" => "Use when authorship timing or first/last-touch evidence is needed for exactly one path or symbol. Prefer churn_analysis for hotspot metrics and ownership_lookup for maintainers. This is read-only and reports uncertainty.",
@@ -1523,7 +1529,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
         ("get_implementations", "Retrieve verified implementation sites for a trait, interface, abstract class, or protocol from persisted IMPLEMENTS facts. Each result includes parser provenance and confidence.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Name of the interface, trait, abstract class, or protocol whose persisted implementation evidence is needed."},"limit":{"type":"integer","description":"Maximum number of verified implementation results to return. Defaults to 20, capped at 100."}}})),
         ("get_callers", "Find all inbound call-sites to a function, method, or callable symbol from the indexed call graph. Returns caller symbol name, file path, and line range for each call-site found.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol whose inbound callers you want to find."},"limit":{"type":"integer","description":"Maximum number of caller entries to return. Defaults to 20, capped at 100."}}})),
         ("get_callees", "Find all functions, methods, or symbols called by the target symbol.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The name of the symbol whose calls you want to trace."},"limit":{"type":"integer","description":"Maximum number of callees to return. Defaults to 20, capped at 100."}}})),
-        ("get_symbol_context", "Retrieve a comprehensive context bundle for one symbol, including its full definition body, file location and range, enclosing scope, documentation comments, and surrounding code context from the local index.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to retrieve comprehensive context for."}}})),
+        ("get_symbol_context", "Resolve one symbol and join it back to the indexed chunk text that covers it: the definition body with the line range it spans, plus up to ten indexed lines above and below it verbatim. Documentation comments appear in the leading lines only when the indexer chunked them; they are never parsed out or reconstructed. Anything that could not be recovered from the index is stated in `caveats` rather than returned as a shorter body.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The exact or partial name of the symbol to retrieve context for."}}})),
         ("dependency_path", "Trace the shortest dependency or reference path between two files or symbols, illustrating how they are connected.", json!({"type":"object","required":["from","to"],"properties":{"from":{"type":"string","description":"The starting node path or symbol name."},"to":{"type":"string","description":"The target node path or symbol name."}}})),
         ("impact_analysis", "Analyze the blast radius of a change to one repository-relative file using the indexed dependency graph. Returns ranked downstream dependent files, caller functions, related test files, and architecture policy impact with impact scores and relationship types. Dependents reached through typed relationship edges are additionally split into proven_impact (authoritative structural proof) and possible_impact (heuristic or corroborating only, never presented as fact).", json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"The repository-relative path of the file to analyze for downstream impact (e.g., 'src/auth/handler.rs')."}}})),
         ("history_provenance_lookup", "Look up bounded commit provenance for exactly one repository-relative path or indexed symbol. Returns first-seen, last-touched, recent touches, confidence, and explicit uncertainty.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path to inspect."},"symbol":{"type":"string","description":"Exact symbol name, qualified name, or symbol ID to inspect."},"limit":{"type":"integer","description":"Maximum recent touches to return. Defaults to 20, capped at 100."}},"oneOf":[{"required":["path"]},{"required":["symbol"]}]})),
@@ -2111,10 +2117,8 @@ fn file_path_for_symbol(
     store: &dyn MetadataStore,
     symbol: &open_kioku_core::Symbol,
 ) -> anyhow::Result<PathBuf> {
-    let files = store.list_files(usize::MAX, 0)?;
-    files
-        .into_iter()
-        .find(|file| file.id == symbol.file_id)
+    store
+        .file_by_id(&symbol.file_id)?
         .map(|file| file.path)
         .with_context(|| {
             format!(
@@ -3233,6 +3237,10 @@ mod tests {
             (
                 "regex_search_invalid_pattern.json",
                 r#"{"jsonrpc":"2.0","id":"regex-search-invalid","method":"regex_search","params":{"pattern":"pub fn (","limit":5}}"#,
+            ),
+            (
+                "get_symbol_context.json",
+                r#"{"jsonrpc":"2.0","id":"get-symbol-context","method":"get_symbol_context","params":{"query":"publish_invoice_event"}}"#,
             ),
             (
                 "get_implementations.json",
