@@ -16,7 +16,8 @@ on:
         description: Repository to derive the corpus from (blank = the BENCH_GO_A_URL repository variable, the go-a corpus)
         default: ""
       base_sha:
-        default: 79da24a0ebc0a33be89052188040caeec93c741e
+        description: Base commit (blank = the BENCH_GO_A_BASE repository variable, the go-a corpus)
+        default: ""
       ext:
         default: .go
       path_prefixes:
@@ -55,19 +56,20 @@ jobs:
       - name: Derive the corpus at the base commit
         env:
           REPO_URL: ${{ github.event.inputs.repo_url || vars.BENCH_GO_A_URL }}
+          BASE_SHA: ${{ github.event.inputs.base_sha || vars.BENCH_GO_A_BASE }}
         run: |
           if [ -z "$REPO_URL" ]; then
             echo "::error::no repository URL: set the BENCH_GO_A_URL repository variable or pass repo_url"
             exit 1
           fi
           git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
-          git -C source fetch --quiet origin "${{ github.event.inputs.base_sha }}" || true
+          git -C source fetch --quiet origin "$BASE_SHA" || true
           PREFIXES="${{ github.event.inputs.path_prefixes }}"
           # shellcheck disable=SC2086
-          mkdir -p corpus && git -C source archive "${{ github.event.inputs.base_sha }}" $PREFIXES | tar -x -C corpus
+          mkdir -p corpus && git -C source archive "$BASE_SHA" $PREFIXES | tar -x -C corpus
           args=""; for p in $PREFIXES; do args="$args --path-prefix $p"; done
           # shellcheck disable=SC2086
-          python3 scripts/commit-derived-cases.py source --base "${{ github.event.inputs.base_sha }}" \
+          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" \
             --after "${{ github.event.inputs.after }}" --ext "${{ github.event.inputs.ext }}" $args --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines(); cut = int(len(rows) * 0.7)

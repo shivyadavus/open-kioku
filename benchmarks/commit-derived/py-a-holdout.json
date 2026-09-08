@@ -2,7 +2,6 @@
   "corpus": "py-a",
   "split": "holdout",
   "provenance": {
-    "base": "7cd9b985e0698d4f625a18be0125231b6b930390",
     "after": 1500,
     "ext": [
       ".py"
@@ -10,7 +9,8 @@
     "path_prefixes": [],
     "frozen_from": "commit-derived-bench run 34201235176 (ubuntu-latest), main after #390 (generated files indexed and ranked below hand-written source)",
     "frozen_on": "2026-09-08",
-    "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers"
+    "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers",
+    "base": "withheld: the base commit lives in the BENCH_<CODE>_A_BASE repository variable; a full hash identifies the repository"
   },
   "cases": 199,
   "label": "holdout",

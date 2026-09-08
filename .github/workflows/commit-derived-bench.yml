@@ -7,10 +7,12 @@ name: commit-derived-bench
 # corpus and scoring ~400 queries takes about 45 minutes.
 #
 # Matrix entries are keyed java-a, go-a, ts-a, py-a (a Java service, a Go application, a TypeScript
-# standard library, a Python ML library); the keys name the baseline files. Each repository URL lives in
-# a repository variable named `BENCH_<CODE>_URL` (Settings > Secrets and variables > Actions),
-# never in this file or in `benchmarks/commit-derived/`; the base commit, extension, and
-# indexed subtrees are checked in because they name nothing.
+# standard library, a Python ML library); the keys name the baseline files. Each repository URL lives
+# in a repository variable named `BENCH_<CODE>_URL`, and each base commit in `BENCH_<CODE>_BASE`
+# (Settings > Secrets and variables > Actions) -- never in this file or in
+# `benchmarks/commit-derived/`. A full commit hash of a public repository is searchable and
+# therefore identifies it, so it is withheld for the same reason the URL is. The extension and
+# indexed subtrees stay checked in because they name nothing.
 
 on:
   schedule:
@@ -46,32 +48,32 @@ jobs:
         corpus:
           - name: java-a
             url_var: BENCH_JAVA_A_URL
-            base: 1e6d79605440aa871287acacb604564d54ca7555
+            base_var: BENCH_JAVA_A_BASE
             prefixes: "libs/ modules/ server/"
             ext: .java
             after: "3800"
           - name: go-a
             url_var: BENCH_GO_A_URL
-            base: 79da24a0ebc0a33be89052188040caeec93c741e
+            base_var: BENCH_GO_A_BASE
             prefixes: ""
             ext: .go
             after: "1500"
           - name: ts-a
             url_var: BENCH_TS_A_URL
-            base: d93aa7c94e640aa7b206e1a08e094eb705c1e1fa
+            base_var: BENCH_TS_A_BASE
             prefixes: ""
             ext: .ts
             after: "1500"
           - name: py-a
             url_var: BENCH_PY_A_URL
-            base: 7cd9b985e0698d4f625a18be0125231b6b930390
+            base_var: BENCH_PY_A_BASE
             prefixes: ""
             ext: .py
             after: "1500"
     name: bench (${{ matrix.corpus.name }})
     env:
       REPO_URL: ${{ github.event.inputs.repo_url || vars[matrix.corpus.url_var] }}
-      BASE_SHA: ${{ github.event.inputs.base_sha || matrix.corpus.base }}
+      BASE_SHA: ${{ github.event.inputs.base_sha || vars[matrix.corpus.base_var] }}
       PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || matrix.corpus.prefixes }}
       EXT: ${{ matrix.corpus.ext }}
       AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
@@ -84,7 +86,11 @@ jobs:
             echo "::error::no repository URL for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.url_var }} repository variable or pass repo_url"
             exit 1
           fi
-          echo "corpus ${{ matrix.corpus.name }} at $BASE_SHA (URL from ${{ matrix.corpus.url_var }})"
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::no base commit for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.base_var }} repository variable or pass base_sha"
+            exit 1
+          fi
+          echo "corpus ${{ matrix.corpus.name }} resolved (URL from ${{ matrix.corpus.url_var }}, base from ${{ matrix.corpus.base_var }})"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
