@@ -21,6 +21,27 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
         );
     }
 
+    // A store whose edges were discarded still has an edge table, so the export would count
+    // it, write `graph_edge_count: 0` into the metadata, and pass the required-table check —
+    // a clean-looking measurement of a repository that has not been measured. The artifact is
+    // effect-safe (it carries the marker, and the importer's first open raises the rebuild
+    // error), but the metadata file is read by people, so refuse rather than publish the zero.
+    {
+        let conn = Connection::open_with_flags(
+            &index_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("opening {} read-only", index_path.display()))?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+        if open_kioku_storage_sqlite::graph_rebuild_required(&conn)? {
+            anyhow::bail!(
+                "index at {} has no graph edges: they were built by an older index format and \
+                 were discarded on open; run `ok index` before exporting a snapshot",
+                index_path.display()
+            );
+        }
+    }
+
     let artifact_dir = snapshot_artifact_dir(&repo);
     fs::create_dir_all(&artifact_dir)?;
     ensure_snapshot_gitattributes(&artifact_dir)?;
