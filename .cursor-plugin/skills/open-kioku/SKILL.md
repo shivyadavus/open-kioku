@@ -24,7 +24,8 @@ parameter named below says otherwise.
    trusting an absence: it says how much of the repository the index actually holds.
 2. **`search_code`** — find where the thing is handled. `mode` picks the evidence:
    `code` (lexical BM25, the default), `graph`, `semantic`, `hybrid`. Semantic and
-   hybrid fall back to lexical and say so in `semantic_status`.
+   hybrid fall back to lexical when the vector index is not ready and report that
+   readiness in the response, so their extra recall is never assumed.
    - `regex_search` when the target is a literal pattern — exact, unranked, path-ordered, and `caveats` says what was not searched.
    - `search_symbols` when you already have a name fragment. Substring, not fuzzy.
    - `list_files` with a `path` for one file's indexed record and chunks.

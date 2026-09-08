@@ -70,6 +70,25 @@ pub fn ensure_configured(config: &SentryConfig) -> Result<()> {
     Ok(())
 }
 
+/// The answer when the caller's provider validates but this build ships no
+/// query implementation for it. Reporting `configured: false` here would deny
+/// the configuration the user actually supplied, and reporting a result would
+/// claim evidence that was never fetched; the absence has to name its own cause.
+pub fn unimplemented_response(tool: &str, integration: &str) -> RuntimeToolResponse {
+    RuntimeToolResponse {
+        results: Vec::new(),
+        evidence: vec![format!(
+            "{integration} is configured, but this build ships no runtime query implementation"
+        )],
+        confidence: "low".into(),
+        reason: format!(
+            "{tool} found no runtime evidence because the {integration} query path is not implemented in this build; an empty result is not evidence that no runtime errors exist"
+        ),
+        integration: integration.into(),
+        configured: true,
+    }
+}
+
 pub fn disabled_response(tool: &str) -> RuntimeToolResponse {
     RuntimeToolResponse {
         results: Vec::new(),
@@ -89,6 +108,20 @@ mod tests {
     fn default_config_is_disabled() {
         let err = ensure_configured(&SentryConfig::default()).unwrap_err();
         assert!(err.to_string().contains("disabled"));
+    }
+
+    #[test]
+    fn unimplemented_response_keeps_the_users_configuration_and_names_the_gap() {
+        let response = unimplemented_response("find_recent_failures", "sentry");
+        assert!(response.configured, "a validated provider must be reported");
+        assert!(response.results.is_empty());
+        assert!(response.reason.contains("not implemented in this build"));
+        assert!(
+            response
+                .reason
+                .contains("not evidence that no runtime errors exist"),
+            "an empty result must not read as a clean bill of health"
+        );
     }
 
     #[test]

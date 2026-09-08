@@ -697,8 +697,9 @@ reason = "domain code must use the api facade"
         command
     });
     let violations: serde_json::Value = serde_json::from_str(&violations).unwrap();
+    assert_eq!(violations["configured"], true);
     assert_eq!(
-        violations[0]["rule_id"], "api-public-boundary",
+        violations["violations"][0]["rule_id"], "api-public-boundary",
         "violations must come from the evaluated policy, not heuristic detection"
     );
 

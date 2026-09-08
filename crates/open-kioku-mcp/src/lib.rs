@@ -25,7 +25,7 @@ use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, 
 use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
-use open_kioku_sentry::disabled_response;
+use open_kioku_sentry::{disabled_response, unimplemented_response, SentryConfig};
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
@@ -357,21 +357,12 @@ async fn dispatch(
                     .and_then(|manifest| manifest.quality.coverage.as_ref());
                 object.insert("coverage".into(), serde_json::to_value(coverage)?);
                 object.insert("languages".into(), json!(indexed_languages(store, coverage)?));
+                // The whole semantic status, not a readiness summary. An agent
+                // about to trust vector results has to be able to ask which
+                // provider, model and artifact produced them, and the retired
+                // `semantic_status` tool is the only place that answered.
                 let semantic = SemanticIndexManager::new(repo, store, &config.semantic).status();
-                object.insert(
-                    "semantic_lifecycle".into(),
-                    json!({
-                        "state": semantic.state,
-                        "ready": semantic.ready,
-                        "ann_active": semantic.ann_active,
-                        "ann_profile": semantic.ann_profile,
-                        "vector_count": semantic.vector_count,
-                        "failed_count": semantic.failed_count,
-                        "rebuild_required": semantic.rebuild_required,
-                        "rebuild_reasons": semantic.rebuild_reasons,
-                        "last_rebuilt_at": semantic.last_rebuilt_at,
-                    }),
-                );
+                object.insert("semantic_lifecycle".into(), serde_json::to_value(semantic)?);
             }
             Ok(status)
         }
@@ -381,7 +372,7 @@ async fn dispatch(
             // indexed record plus the chunks that cover it. File-level detail
             // and symbol-level detail are different questions, so this is the
             // file-level tool rather than a mode on `get_definition`.
-            if let Some(path) = params.get("path").and_then(Value::as_str) {
+            if let Some(path) = optional_str(&params, "path")? {
                 let file = store.get_file_by_path(Path::new(path))?;
                 let chunks = match &file {
                     Some(file) => store.chunks_for_file(&file.id)?,
@@ -566,11 +557,10 @@ async fn dispatch(
         }
         "find_tests_for_change" => {
             // `path` is optional: without one this reports the repository-wide
-            // test evidence the retired `explain_test_coverage` returned.
-            let path = params
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            // test evidence the retired `explain_test_coverage` returned. A
+            // `path` that is present but not a string is an error, not a
+            // silently broader answer.
+            let path = optional_str(&params, "path")?.unwrap_or_default();
             Ok(json!(
                 TestSelector::new(store).for_changed_path(Path::new(path), limit(&params))?
             ))
@@ -734,12 +724,13 @@ async fn dispatch(
                 )?))
         }
         "query_evidence_graph"
-            if params
-                .get("query")
-                .and_then(Value::as_str)
+            if optional_str(&params, "query")
+                .ok()
+                .flatten()
                 .unwrap_or_default()
                 .trim()
-                .is_empty() =>
+                .is_empty()
+                && params.get("query").is_none_or(Value::is_string) =>
         {
             let manifest = store.manifest().ok().flatten();
             let schema = open_kioku_graph::schema::current_schema_with_manifest(
@@ -777,10 +768,7 @@ async fn dispatch(
         }
         "query_evidence_graph" => {
             require_authoritative_relationships(store)?;
-            let query_str = params
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
+            let query_str = optional_str(&params, "query")?.unwrap_or("");
             let limit = params
                 .get("limit")
                 .and_then(serde_json::Value::as_u64)
@@ -905,7 +893,15 @@ async fn dispatch(
             }
         }
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => {
-            Ok(json!(disabled_response(method)))
+            // The same check that decides whether these are advertised decides
+            // what they answer, so the config switch is never decorative: a
+            // half-configured provider is `configured: false`, and a validated
+            // one is told plainly that this build cannot query it rather than
+            // returning an empty result that reads as "no runtime errors".
+            match runtime_provider(&config.runtime) {
+                Some(provider) => Ok(json!(unimplemented_response(method, &provider))),
+                None => Ok(json!(disabled_response(method))),
+            }
         }
         other => match retired_tool_guidance(other) {
             Some(guidance) => anyhow::bail!(
@@ -1200,7 +1196,7 @@ const RETIRED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "semantic_status",
-        "use `repo_status`; its `semantic_lifecycle` field carries the same status",
+        "use `repo_status`; its `semantic_lifecycle` field carries the whole status, and `ok semantic status` is the CLI equivalent",
     ),
     ("semantic_search", "use `search_code` with `mode: \"semantic\"`"),
     ("hybrid_search", "use `search_code` with `mode: \"hybrid\"`"),
@@ -1270,7 +1266,7 @@ const RETIRED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "architecture_violations",
-        "moved to the CLI: `ok architecture violations`",
+        "moved to the CLI: `ok architecture violations`, or `ok architecture summary` for the full report it was a view of",
     ),
     (
         "architecture_policy_validate",
@@ -1373,6 +1369,29 @@ fn tool_output_schema() -> Value {
     })
 }
 
+/// The configured runtime provider, or `None` when the repository has not
+/// supplied one the provider itself accepts. `enabled = true` is not enough:
+/// the provider validates its own configuration, so a switch that is on but
+/// incomplete advertises nothing and answers nothing.
+fn runtime_provider(config: &open_kioku_config::RuntimeConfig) -> Option<String> {
+    if !config.enabled {
+        return None;
+    }
+    match config.provider.trim() {
+        "sentry" => open_kioku_sentry::ensure_configured(&SentryConfig {
+            enabled: true,
+            organization: config.organization.clone(),
+            project: config.project.clone(),
+            auth_token_env: config.auth_token_env.clone(),
+        })
+        .ok()
+        .map(|()| "sentry".to_string()),
+        // An unknown provider name is an unsupported integration, not a
+        // working one; nothing is advertised for it.
+        _ => None,
+    }
+}
+
 fn tool_category(name: &str) -> &'static str {
     match name {
         "repo_status" | "list_files" => "repository",
@@ -1461,7 +1480,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     if config.memory.enabled {
         advertised.extend(memory_tools.iter());
     }
-    if config.runtime.configured() {
+    if runtime_provider(&config.runtime).is_some() {
         advertised.extend(runtime_tools.iter());
     }
 
@@ -1787,6 +1806,17 @@ where
     };
     let resolver = PolicyResolver::new(&policy)?;
     Ok(Some(evaluate_policy(store, &resolver, &policy)?))
+}
+
+/// An optional string parameter. Absent is `None`; present but not a string is
+/// an error, because returning the broader answer a missing parameter selects
+/// would answer a question the caller did not ask.
+fn optional_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<Option<&'a str>> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(other) => anyhow::bail!("`{key}` must be a string, got {other}"),
+    }
 }
 
 fn required_str<'a>(params: &'a Value, key: &str) -> anyhow::Result<&'a str> {
@@ -2533,7 +2563,7 @@ where
     // name is still an error for those.
     let symbol = match engine.definition(query) {
         Ok(symbol) => Some(symbol),
-        Err(err) if kind == "implementations" => {
+        Err(err) if matches!(kind, "implementations" | "all") => {
             let mut response = Map::new();
             response.insert("query".into(), json!(query));
             response.insert("kind".into(), json!(kind));
@@ -2543,6 +2573,14 @@ where
                 "implementations".into(),
                 implementation_section(store, query, limit)?,
             );
+            if kind == "all" {
+                response.insert(
+                    "caveats".into(),
+                    json!([format!(
+                        "`{query}` did not resolve to an indexed symbol, so occurrence and call evidence could not be gathered; only IMPLEMENTS facts, which are keyed by target name, are reported"
+                    )]),
+                );
+            }
             return Ok(Value::Object(response));
         }
         Err(err) => return Err(err.into()),
@@ -3850,6 +3888,32 @@ mod tests {
         );
         assert_eq!(implementations["implementations"]["returned"], 1);
 
+        // `all` degrades the way `implementations` does rather than losing the
+        // IMPLEMENTS evidence the specific kind would still have returned for
+        // the same name.
+        let unresolved_all = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "get_references",
+            json!({"query": "InvoicePublisher", "kind": "all", "limit": 5}),
+        )
+        .await
+        .unwrap();
+        assert!(unresolved_all["symbol"].is_null());
+        assert_eq!(unresolved_all["implementations"]["returned"], 1);
+        assert!(
+            unresolved_all["caveats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|caveat| caveat
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("did not resolve to an indexed symbol")),
+            "the sections that could not be gathered must be named: {unresolved_all}"
+        );
+
         // An unknown kind is an error, not a quietly different answer.
         let unknown = dispatch(
             &fixture.repo,
@@ -3861,6 +3925,45 @@ mod tests {
         .await
         .unwrap_err();
         assert!(unknown.to_string().contains("unknown `kind`"));
+    }
+
+    #[tokio::test]
+    async fn a_present_but_wrong_typed_optional_parameter_is_an_error() {
+        // Making a parameter optional in the fold must not turn a type error
+        // into a broader answer. `find_tests_for_change` and
+        // `query_evidence_graph` required theirs before the fold, so a
+        // non-string had been an error; answering repository-wide evidence or
+        // the schema instead answers a question the caller did not ask.
+        let fixture = McpSnapshotFixture::new();
+        for (tool, params) in [
+            ("find_tests_for_change", json!({"path": 123})),
+            ("list_files", json!({"path": ["src/billing.rs"]})),
+            ("query_evidence_graph", json!({"query": 7})),
+        ] {
+            let error = dispatch(&fixture.repo, &fixture.store, &fixture.config, tool, params)
+                .await
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{tool} answered instead of rejecting a non-string parameter")
+                });
+            assert!(
+                error.to_string().contains("must be a string"),
+                "{tool} should name the type it wanted: {error}"
+            );
+        }
+
+        // An absent parameter still selects the broader answer it was folded in
+        // to provide.
+        let repo_wide = dispatch(
+            &fixture.repo,
+            &fixture.store,
+            &fixture.config,
+            "find_tests_for_change",
+            json!({}),
+        )
+        .await
+        .expect("an absent `path` is still the repository-wide question");
+        assert!(repo_wide.is_object() || repo_wide.is_array());
     }
 
     #[tokio::test]
@@ -3924,6 +4027,10 @@ mod tests {
         configured.memory.enabled = true;
         configured.runtime.enabled = true;
         configured.runtime.provider = "sentry".into();
+        configured.runtime.organization = Some("acme".into());
+        configured.runtime.project = Some("api".into());
+        configured.runtime.auth_token_env = "OK_TEST_RUNTIME_TOKEN".into();
+        std::env::set_var("OK_TEST_RUNTIME_TOKEN", "token");
         let (advertised, _) = tools(&configured);
         let names = advertised
             .iter()
@@ -3934,11 +4041,29 @@ mod tests {
             assert!(names.contains(name), "{name} must appear once configured");
         }
 
-        // `enabled` alone is not a configured provider.
+        // A validated provider changes the answer too, not only the listing.
+        let answered = dispatch(
+            Path::new("."),
+            &store,
+            &configured,
+            "find_recent_failures",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answered["configured"], true);
+        assert!(answered["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not evidence that no runtime errors exist"));
+
+        // `enabled` alone is not a configured provider: the provider validates
+        // its own configuration, so a switch that only advertises cannot exist.
         let mut half_configured = OkConfig::default();
         half_configured.runtime.enabled = true;
         let (advertised, _) = tools(&half_configured);
         assert_eq!(advertised.len(), 16);
+        std::env::remove_var("OK_TEST_RUNTIME_TOKEN");
     }
 
     #[tokio::test]

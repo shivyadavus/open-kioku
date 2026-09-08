@@ -1276,10 +1276,13 @@ pub async fn run_cli() -> anyhow::Result<()> {
             ArchitectureCommand::Violations => {
                 // Violations come from the evaluated policy, not from heuristic
                 // detection: without a configured policy there is nothing to
-                // violate, and the summary says so instead of inventing one.
+                // violate. A bare list would print `[]` for that case, which
+                // reads as "no violations" when it means "nothing was
+                // evaluated", so the report's own configured flag, uncertainty
+                // and caveats travel with it.
                 let store = open_store(&repo)?;
                 let report = architecture_summary_report(&repo, &store)?;
-                output(cli.json, &report.summary.violations, || {})?;
+                output(cli.json, &architecture_violations_output(&report), || {})?;
             }
             ArchitectureCommand::Bench(args) => {
                 let min_precision = args.min_precision;
