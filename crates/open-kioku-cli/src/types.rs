@@ -86,7 +86,11 @@ enum Command {
         explain_ranking: bool,
         /// Treat the query as a regular expression and return exact line matches
         /// instead of ranked candidates.
-        #[arg(long, default_value_t = false)]
+        ///
+        /// Exact matching and the ranked modes answer different questions, so
+        /// asking for both is a mistake worth reporting rather than resolving
+        /// by precedence.
+        #[arg(long, default_value_t = false, conflicts_with_all = ["kind", "semantic", "hybrid"])]
         regex: bool,
         #[arg(long, default_value_t = false)]
         semantic: bool,

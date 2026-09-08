@@ -172,12 +172,16 @@ pub fn regex_search_index(
             let mut chunks = store.chunks_for_file(&file.id)?;
             chunks.sort_by_key(|chunk| chunk.range.start);
             for chunk in chunks {
+                let window = MatchWindow {
+                    path: &file.path,
+                    first_line: chunk.range.start,
+                    last_line: Some(chunk.range.end),
+                };
                 push_regex_matches(
                     &regex,
                     pattern,
-                    &file.path,
+                    window,
                     &chunk.text,
-                    chunk.range.start,
                     limit,
                     &mut scan.results,
                 );
@@ -201,7 +205,12 @@ pub fn regex_search_file(
 ) -> Result<Vec<SearchResult>> {
     let regex = compile(pattern)?;
     let mut results = Vec::new();
-    push_regex_matches(&regex, pattern, &path, content, 1, limit, &mut results);
+    let window = MatchWindow {
+        path: &path,
+        first_line: 1,
+        last_line: None,
+    };
+    push_regex_matches(&regex, pattern, window, content, limit, &mut results);
     Ok(results)
 }
 
@@ -209,26 +218,42 @@ fn compile(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|err| OkError::Search(err.to_string()))
 }
 
-/// `content` is a contiguous window of `path` beginning at `first_line`, so the
-/// reported range is the file's own line number rather than an offset into the
-/// window. Evidence ids are derived from that final range.
+/// Where a block of text sits in the file it came from, so a match is reported
+/// at the file's own line number rather than at an offset into the block.
+struct MatchWindow<'a> {
+    path: &'a Path,
+    first_line: u32,
+    /// Last line the block's owner declares it covers, when it declares one.
+    last_line: Option<u32>,
+}
+
+/// Evidence ids are derived from the final, file-absolute range.
 fn push_regex_matches(
     regex: &Regex,
     pattern: &str,
-    path: &Path,
+    window: MatchWindow<'_>,
     content: &str,
-    first_line: u32,
     limit: usize,
     results: &mut Vec<SearchResult>,
 ) {
+    let MatchWindow {
+        path,
+        first_line,
+        last_line,
+    } = window;
     for (idx, line) in content.lines().enumerate() {
         if results.len() >= limit {
+            return;
+        }
+        let line_number = first_line.saturating_add(idx as u32);
+        // A chunk's stored text can outrun its declared range; trust the range,
+        // so no match is ever reported at a line the chunk does not own.
+        if last_line.is_some_and(|last| line_number > last) {
             return;
         }
         if !regex.is_match(line) {
             continue;
         }
-        let line_number = first_line.saturating_add(idx as u32);
         let (evidence_strings, confidence) = EvidenceBuilder::new()
             .add(format!("regex match for `{pattern}`"), 1.0)
             .build();

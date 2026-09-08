@@ -2062,6 +2062,25 @@ fn demo_creates_indexed_sample_repo() {
     assert!(regex_search.contains("src/auth.rs"));
     assert!(regex_search.contains("\"match_reason\": \"regex match\""));
     assert!(regex_search.contains("\"confidence\": 1.0"));
+    assert!(regex_search.contains("\"caveats\""));
+
+    // Exact matching and the ranked modes answer different questions; asking for
+    // both is rejected rather than silently resolved by precedence.
+    let (_, regex_conflict) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("search")
+            .arg("--regex")
+            .arg("--hybrid")
+            .arg("issue_token");
+        command
+    });
+    assert!(
+        regex_conflict.contains("cannot be used with"),
+        "--regex and --hybrid should conflict, got: {regex_conflict}"
+    );
 
     let regex_no_match = run({
         let mut command = ok();
@@ -2074,7 +2093,12 @@ fn demo_creates_indexed_sample_repo() {
             .arg("^struct NoSuchSymbolAnywhere");
         command
     });
-    assert_eq!(regex_no_match.trim(), "[]");
+    // A miss under --json must still say what corpus was searched; an empty
+    // array alone would read as "absent from the repository".
+    assert!(regex_no_match.contains("\"results\": []"));
+    assert!(regex_no_match.contains("indexed chunk text"));
+    assert!(regex_no_match.contains("regions the indexer did not chunk were not searched"));
+    assert!(regex_no_match.contains("\"truncated\": false"));
 
     let (_, regex_invalid) = run_failure({
         let mut command = ok();
