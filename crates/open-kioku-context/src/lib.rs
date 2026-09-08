@@ -16,6 +16,7 @@ use open_kioku_tests::TestSelector;
 
 pub mod candidates;
 mod lattice;
+mod region;
 pub mod routing;
 
 fn is_trusted_context_dependency_edge(edge: &GraphEdge) -> bool {
@@ -623,16 +624,33 @@ impl<'a> ContextPackBuilder<'a> {
         } else {
             let mut results = fused.results;
             append_scope_entry_points(&mut results, &files, &chunks, &intent);
-            let primary = rerank_fused_for_task_with_files(
+            let ranked = rerank_fused_for_task_with_files(
                 results,
                 &intent,
                 &diagnostics,
                 &self.ranking_options,
                 &generated,
             );
-            select_context_units(primary, &budget, &mut diagnostics)
+            let selected = select_context_units(ranked.clone(), &budget, &mut diagnostics);
+            // Widening runs after selection and spends only what selection left over, so it
+            // cannot reorder the pack or displace another file's first unit.
+            let selected = region::widen_selected_regions(
+                selected,
+                &ranked,
+                &files,
+                &chunks,
+                &symbols,
+                &budget,
+                &mut diagnostics,
+            );
+            record_selected_units(&selected, &mut diagnostics);
+            selected
         };
-        self.build_from_primary_with_impact(task, limit, primary, true, false, diagnostics)
+        // Selection already bounded the units to `limit`; widening only adds units of files
+        // that are already in the pack, and the primary bound must not cut a lower-ranked
+        // file's unit to make room for them.
+        let primary_limit = limit.max(primary.len());
+        self.build_from_primary_with_impact(task, primary_limit, primary, true, false, diagnostics)
     }
 
     pub fn build_from_primary(
@@ -812,6 +830,7 @@ impl<'a> ContextPackBuilder<'a> {
             &primary_files,
             &confidence_breakdown,
         );
+        append_supporting_units(&supporting_files, &mut retrieval_diagnostics);
         let confidence_summary = confidence_summary(&confidence_breakdown);
         let mut pack = ContextPack {
             task: task.into(),
@@ -1267,17 +1286,95 @@ fn record_selected_units(selected: &[SearchResult], diagnostics: &mut RetrievalD
             .per_file_tokens
             .entry(result.path.clone())
             .or_default() += estimated_tokens;
+        diagnostics
+            .selection
+            .selected_units
+            .push(ContextSelectedUnit {
+                path: result.path.clone(),
+                line_range: result.line_range.clone(),
+                estimated_tokens,
+                authority,
+                evidence_refs: result.derived_evidence_ids(),
+                rationale: selection_rationale(result, authority),
+            });
+    }
+}
+
+fn selection_rationale(result: &SearchResult, authority: RetrievalAuthority) -> String {
+    let steps = region::region_steps(result);
+    let mut rationale = if steps.contains(&region::RANKED_UNIT_REF) {
+        format!(
+            "re-admitted by region widening of a top-ranked file after task-aware retrieval ranking ({authority:?} authority)"
+        )
+    } else {
+        format!(
+            "selected under context budget after task-aware retrieval ranking ({authority:?} authority)"
+        )
+    };
+    let widening = steps
+        .iter()
+        .filter(|step| **step != region::RANKED_UNIT_REF)
+        .fold(Vec::<(&str, usize)>::new(), |mut counts, step| {
+            match counts.iter_mut().find(|(tag, _)| *tag == *step) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((step, 1)),
+            }
+            counts
+        });
+    if !widening.is_empty() {
+        rationale.push_str("; region widened: ");
+        rationale.push_str(
+            &widening
+                .iter()
+                .map(|(tag, count)| {
+                    if *count > 1 {
+                        format!("{tag} x{count}")
+                    } else {
+                        (*tag).to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    rationale
+}
+
+/// Supporting files are listed by the pack, not selected under the budget. Costing them as
+/// units (at their listing size: path and reason, not the impact snippet) makes the selection
+/// ledger cover everything the pack presents, so a yield measured against it tracks the files
+/// the pack actually returns.
+fn append_supporting_units(supporting: &[SearchResult], diagnostics: &mut RetrievalDiagnostics) {
+    if diagnostics.selection.selected_units.is_empty() {
+        return;
+    }
+    for result in supporting {
+        let estimated_tokens = estimate_listing_tokens(result);
+        let authority = retrieval_authority_for_result(diagnostics, result);
+        diagnostics.selection.estimated_tokens_selected = diagnostics
+            .selection
+            .estimated_tokens_selected
+            .saturating_add(estimated_tokens);
+        *diagnostics
+            .selection
+            .per_file_tokens
+            .entry(result.path.clone())
+            .or_default() += estimated_tokens;
         diagnostics.selection.selected_units.push(ContextSelectedUnit {
             path: result.path.clone(),
             line_range: result.line_range.clone(),
             estimated_tokens,
             authority,
             evidence_refs: result.derived_evidence_ids(),
-            rationale: format!(
-                "selected under context budget after task-aware retrieval ranking ({authority:?} authority)"
-            ),
+            rationale: "supporting file listed from impact expansion of the top primary file; costed at its listing size, not selected under the context budget".into(),
         });
     }
+}
+
+fn estimate_listing_tokens(result: &SearchResult) -> usize {
+    let content =
+        result.path.to_string_lossy().chars().count() + result.match_reason.chars().count();
+    content.saturating_add(3) / 4 + 12
 }
 
 fn estimate_search_result_tokens(result: &SearchResult) -> usize {
@@ -4433,6 +4530,7 @@ mod tests {
             reserve_for_validation: 50,
             max_per_file: 2,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![exact], &budget, &mut diagnostics);
@@ -4495,6 +4593,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 2,
             max_primary_files: 0,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![graph], &budget, &mut diagnostics);
@@ -4526,6 +4625,7 @@ mod tests {
             reserve_for_validation: 50,
             max_per_file: 2,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![heuristic], &budget, &mut diagnostics);
@@ -4583,6 +4683,7 @@ mod tests {
             reserve_for_validation: 50,
             max_per_file: 2,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![result], &budget, &mut diagnostics);
@@ -4625,6 +4726,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 2,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![huge, compact.clone()], &budget, &mut diagnostics);
@@ -4677,6 +4779,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 2,
             max_primary_files: 1,
+            ..ContextBudget::default()
         };
 
         let selected =
@@ -4731,6 +4834,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 2,
             max_primary_files: 1,
+            ..ContextBudget::default()
         };
         let selected = select_context_units(ranked, &budget, &mut diagnostics);
         assert_eq!(selected.len(), 1);
@@ -4770,6 +4874,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 2,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected =
@@ -4831,6 +4936,7 @@ mod tests {
             reserve_for_validation: 100,
             max_per_file: 1,
             max_primary_files: 4,
+            ..ContextBudget::default()
         };
 
         let selected = select_context_units(vec![first, second], &budget, &mut diagnostics);
@@ -5281,6 +5387,87 @@ mod tests {
         let caveats = intent.vocabulary_caveats();
         assert_eq!(caveats.len(), 1, "{caveats:?}");
         assert!(caveats[0].contains("`QuantumFluxCapacitor`"));
+    }
+}
+
+#[cfg(test)]
+mod selection_ledger_tests {
+    use super::*;
+    use open_kioku_core::LineRange;
+
+    fn result(path: &str, snippet: &str) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange { start: 1, end: 4 }),
+            snippet: snippet.into(),
+            symbol: None,
+            score: 0.5,
+            match_reason: "impact".into(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn supporting_files_are_costed_at_listing_size_after_the_primary_units() {
+        let primary = result("src/primary.rs", "fn primary() {}");
+        let mut diagnostics = RetrievalDiagnostics::default();
+        record_selected_units(std::slice::from_ref(&primary), &mut diagnostics);
+        let primary_tokens = diagnostics.selection.estimated_tokens_selected;
+        let supporting = result("src/impacted.rs", &"x".repeat(4_000));
+
+        append_supporting_units(std::slice::from_ref(&supporting), &mut diagnostics);
+
+        let units = &diagnostics.selection.selected_units;
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[1].path, supporting.path);
+        // The listing (path and reason), not the 4,000-character impact snippet, is what costs.
+        assert!(
+            units[1].estimated_tokens < 40,
+            "{}",
+            units[1].estimated_tokens
+        );
+        assert!(units[1]
+            .rationale
+            .contains("not selected under the context budget"));
+        assert_eq!(
+            diagnostics.selection.estimated_tokens_selected,
+            primary_tokens + units[1].estimated_tokens
+        );
+        assert_eq!(
+            diagnostics.selection.per_file_tokens[&supporting.path],
+            units[1].estimated_tokens
+        );
+    }
+
+    #[test]
+    fn supporting_files_are_not_listed_when_no_selection_ran() {
+        let mut diagnostics = RetrievalDiagnostics::default();
+        append_supporting_units(&[result("src/impacted.rs", "fn f() {}")], &mut diagnostics);
+        assert!(diagnostics.selection.selected_units.is_empty());
+        assert_eq!(diagnostics.selection.estimated_tokens_selected, 0);
+    }
+
+    #[test]
+    fn rationale_names_each_region_step() {
+        let mut result = result("src/a.rs", "fn a() {}");
+        result.evidence_refs = vec![
+            "search:src/a.rs:1-4:0".into(),
+            "region:enclosing-symbol:sym".into(),
+            "region:adjacent-unit:5-9".into(),
+            "region:adjacent-unit:10-14".into(),
+        ];
+        let rationale = selection_rationale(&result, RetrievalAuthority::Heuristic);
+        assert!(rationale.starts_with("selected under context budget"));
+        assert!(
+            rationale.ends_with("region widened: region:enclosing-symbol, region:adjacent-unit x2")
+        );
+
+        result.evidence_refs = vec!["region:ranked-unit:4".into()];
+        assert!(selection_rationale(&result, RetrievalAuthority::Exact)
+            .starts_with("re-admitted by region widening"));
     }
 }
 

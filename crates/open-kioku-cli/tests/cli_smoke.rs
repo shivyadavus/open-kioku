@@ -3391,3 +3391,80 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
         .lines()
         .any(|line| line.trim_start().starts_with("rust ") && line.contains("50.0%!")));
 }
+
+#[test]
+fn context_pack_widens_top_file_regions_and_costs_supporting_files_in_the_ledger() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    let output = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("context")
+            .arg("issue token");
+        command
+    });
+    let pack: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let primary = pack["primary_files"].as_array().unwrap();
+    let supporting = pack["supporting_files"].as_array().unwrap();
+    let selection = &pack["retrieval_diagnostics"]["selection"];
+    let units = selection["selected_units"].as_array().unwrap();
+
+    // The ledger lists every primary unit first, then every supporting file, and its total is
+    // the sum of what it lists.
+    assert_eq!(units.len(), primary.len() + supporting.len());
+    let (primary_units, supporting_units) = units.split_at(primary.len());
+    for (unit, result) in primary_units.iter().zip(primary) {
+        assert_eq!(unit["path"], result["path"]);
+        assert_eq!(unit["line_range"], result["line_range"]);
+    }
+    for (unit, result) in supporting_units.iter().zip(supporting) {
+        assert_eq!(unit["path"], result["path"]);
+        assert!(unit["rationale"]
+            .as_str()
+            .unwrap()
+            .contains("not selected under the context budget"));
+    }
+    let total = units
+        .iter()
+        .map(|unit| unit["estimated_tokens"].as_u64().unwrap())
+        .sum::<u64>();
+    assert_eq!(
+        selection["estimated_tokens_selected"].as_u64().unwrap(),
+        total
+    );
+
+    // The top file's region was widened, every step is an evidence ref named in the
+    // rationale, and the widened range is what the primary snippet actually shows.
+    let first = &primary_units[0];
+    let region_refs = first["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|reference| reference.as_str().unwrap().starts_with("region:"))
+        .count();
+    assert!(region_refs > 0, "{first}");
+    assert!(first["rationale"]
+        .as_str()
+        .unwrap()
+        .contains("region widened: "));
+    let range = &primary[0]["line_range"];
+    let shown = primary[0]["snippet"].as_str().unwrap().split('\n').count() as u64;
+    assert_eq!(
+        range["end"].as_u64().unwrap() - range["start"].as_u64().unwrap() + 1,
+        shown
+    );
+    assert_eq!(
+        selection["unattributed_selected_file_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(selection["budget"]["region_files"].as_u64(), Some(3));
+}
