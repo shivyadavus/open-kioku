@@ -232,23 +232,35 @@ Two caveats travel with the numbers:
   that the change is expressed against, and it is used as the best available proxy. Line
   yield is therefore an underestimate on files that drifted between the two, exact on files
   that did not.
-- **A unit's `line_range` is the matched region, not the whole symbol.** The production
-  `ok context` path selects the reranked prefix of up to 20 units with an unbounded token
-  budget, and its units are search hits whose `line_range` is usually a few lines around
-  the match (a signature, a comment), occasionally a whole method, with a token estimate
-  sized to that snippet. Measured on 2026-09-08 on a local workstation build (main
-  `92169e9` plus a pending ingest fix), a 20-unit pack was 721–1,152 estimated tokens at
-  the median across the four holdouts and 1,549–5,600 at the 95th percentile, with 27 of
-  626 packs over 4,000 and one Python pack at 33,933; even so, no case's yield differed
-  between the 4,000 and 16,000 budgets, so `gold_file_yield@B` reads the same at every `B`:
-  gold recall within the selected units. It sits below `gold_recall@20` because supporting
-  files (dependency and test neighbours) are presented without a token estimate and are
-  not selected units, so the yield does not count them. `gold_line_yield@B` is bounded by
-  how much of the modified region a snippet-sized match can cover. The metric is defined
-  for the day the pack renders regions or enforces the 8,000-token default; on the current
-  path it documents that the budget is not the binding constraint — region granularity is.
-  The nightly commit-derived matrix carries the reproducible reading; the numbers above
-  are a workstation record, not a guarantee.
+- **A unit's `line_range` is a region of the file, widened for the top-ranked files.** The
+  production `ok context` path selects the reranked prefix of up to 20 units under the
+  file-limit budget, which sets `max_tokens` to a sentinel and so enforces no token ceiling
+  at all; `ContextBudget::default()`, used by callers that pass a real budget, allows 6,000
+  tokens (8,000 less the two 1,000-token reserves). A selected unit starts as a search hit
+  whose `line_range` is a few lines around the match, and the first `region_files` files
+  then have their regions widened to the enclosing symbol, their other ranked units, and
+  adjacent chunks, up to `region_tokens_per_file` (see `docs/context-pack-spec.md`,
+  "Selection and region widening"). Supporting files appear in the same ledger, costed at
+  their listing size.
+
+  Because the ledger now holds two kinds of entry, every report carries two yield families:
+  `gold_file_yield@B` / `gold_line_yield@B` over all ledger units, and
+  `gold_file_yield_primary@B` / `gold_line_yield_primary@B` over the primary units alone.
+  The primary-only family is the one to compare across versions when the question is what
+  retrieval put in front of the caller: a change to which files impact expansion appends
+  must not be credited to region selection, or vice versa. `gold_line_yield@B` remains
+  bounded by how much of the modified region the selected units cover.
+
+  Pack sizes move with region widening, so any figure here is a record of a build, not a
+  property of the tool: measure the arm under test rather than quoting these. On the
+  four commit-derived holdouts, primary units that were 836-1,152 estimated tokens at the
+  median before widening were 2,753-3,612 after, with the 95th percentile moving from
+  1,549-5,600 to 4,322-7,629 (measured at `48e64c9`, local workstation, `--workers 2`;
+  both arms' reports are in `benchmarks/commit-derived/region-widening-ab.json`). A p95 above
+  6,000 is reachable only on the file-limit path; a caller that passes
+  `ContextBudget::default()` is bounded by that ceiling instead. No case's yield differed
+  between the 4,000 and 16,000 budgets in either arm, so on this path region granularity,
+  not the budget, is still what limits how much of a change the pack shows.
 
 `scripts/compare-commit-derived-report.py` prints the yields as informational and does not
 gate on them; a baseline frozen before the metric existed compares without it.
