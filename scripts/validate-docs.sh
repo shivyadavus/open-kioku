@@ -27,6 +27,46 @@ fi
 scripts/validate-public-quickstart.sh --static
 scripts/validate-public-proof.sh
 
+# The MCP tool count is a documented contract, but README and docs/mcp-tools.md
+# only ever carried it as prose. Derive it from the tool table, cross-check the
+# in-crate inventory assertion against the same table, then hold both documents
+# to that number.
+mcp_tool_count="$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+source = Path("crates/open-kioku-mcp/src/lib.rs").read_text(encoding="utf-8")
+marker = "let read_only_tools: &[(&str, &str, Value)] = &["
+start = source.index(marker)
+end = source.index("\n    ];", start)
+names = re.findall(r'^        \("([a-z0-9_]+)", ', source[start:end], re.MULTILINE)
+
+if not names:
+    raise SystemExit("could not read the MCP tool table from open-kioku-mcp")
+duplicates = sorted({name for name in names if names.count(name) > 1})
+if duplicates:
+    raise SystemExit(f"the MCP tool table declares duplicate tools: {duplicates}")
+
+asserted = re.search(r"assert_eq!\(tools_ro\.len\(\), (\d+),", source)
+if asserted is None:
+    raise SystemExit("open-kioku-mcp is missing the tools_ro inventory assertion")
+if int(asserted.group(1)) != len(names):
+    raise SystemExit(
+        "the MCP inventory assertion is stale; "
+        f"the tool table declares {len(names)} tools, the assertion says {asserted.group(1)}"
+    )
+
+print(len(names))
+PY
+)"
+
+for doc in README.md docs/mcp-tools.md; do
+  if ! grep -Eq "(^|[^0-9])${mcp_tool_count} tools" "${doc}"; then
+    echo "${doc} MCP tool count is stale; expected \"${mcp_tool_count} tools\"" >&2
+    exit 1
+  fi
+done
+
 python3 - <<'PY'
 import re
 from pathlib import Path
@@ -72,4 +112,4 @@ if documented_count != len(expected) or documented != expected:
     )
 PY
 
-echo "docs validated: ${crate_count} crates, ${workflow_case_count} workflow cases, CLI command inventory, public quickstart, and public proof"
+echo "docs validated: ${crate_count} crates, ${workflow_case_count} workflow cases, ${mcp_tool_count} MCP tools, CLI command inventory, public quickstart, and public proof"
