@@ -26,6 +26,7 @@ fi
 
 scripts/validate-public-quickstart.sh --static
 scripts/validate-public-proof.sh
+scripts/validate-agent-guidance.py
 
 # The MCP tool count is a documented contract, but README and docs/mcp-tools.md
 # only ever carried it as prose. Derive it from the tool table, cross-check the
