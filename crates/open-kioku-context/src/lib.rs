@@ -2241,27 +2241,30 @@ fn rerank_fused_for_task_with_options(
     }
     // Quality tier first: docs and tests are support material for a task that is not about
     // them, however strongly they mention its anchors; then anchor relevance, authority, score.
+    // The one exception is a file the task names outright ("Guard cluster cleanup in
+    // ReindexPluginMetricsIT"): it is the edit target whatever kind of file it is, and demoting
+    // it put twenty source files that merely share vocabulary above the file three streams had
+    // ranked first.
     results.sort_by(|a, b| {
         let a_haystack = searchable_result_text(a);
         let b_haystack = searchable_result_text(b);
-        let quality = |result: &SearchResult| {
-            context_quality_tier(
-                &result.path,
-                ranking_options,
-                intent.wants_tests,
-                intent.documentation_target,
-            )
+        let a_relevance = task_relevance_tier(&a.path, a, &a_haystack, intent);
+        let b_relevance = task_relevance_tier(&b.path, b, &b_haystack, intent);
+        let quality = |result: &SearchResult, relevance: u8| {
+            if relevance >= NAMED_TARGET_RELEVANCE_TIER {
+                SOURCE_QUALITY_TIER
+            } else {
+                context_quality_tier(
+                    &result.path,
+                    ranking_options,
+                    intent.wants_tests,
+                    intent.documentation_target,
+                )
+            }
         };
-        quality(b)
-            .cmp(&quality(a))
-            .then_with(|| {
-                task_relevance_tier(&b.path, b, &b_haystack, intent).cmp(&task_relevance_tier(
-                    &a.path,
-                    a,
-                    &a_haystack,
-                    intent,
-                ))
-            })
+        quality(b, b_relevance)
+            .cmp(&quality(a, a_relevance))
+            .then_with(|| b_relevance.cmp(&a_relevance))
             .then_with(|| {
                 retrieval_authority_for_result(diagnostics, b)
                     .cmp(&retrieval_authority_for_result(diagnostics, a))
@@ -2275,6 +2278,12 @@ fn rerank_fused_for_task_with_options(
     });
     results
 }
+
+/// Relevance tier at which a file *is* the task's named target (its path or symbol names a
+/// primary anchor) and quality demotion no longer applies.
+const NAMED_TARGET_RELEVANCE_TIER: u8 = 4;
+/// The quality tier of ordinary source, which a named target is always treated as.
+const SOURCE_QUALITY_TIER: u8 = 2;
 
 /// Post-fusion quality tier: 2 for source, 1 for docs and (unless the task asks for them) tests,
 /// 0 for generated or vendored code. Tests are demoted rather than dropped: on a large Java
@@ -3065,6 +3074,59 @@ mod tests {
         assert!(commit_scope_tokens("docs: fix typo").is_empty());
         assert!(commit_scope_tokens("Fix geoip processor timeout").is_empty());
         assert!(commit_scope_tokens("Note: this is prose with a colon").is_empty());
+    }
+
+    #[test]
+    fn a_test_file_the_task_names_is_not_demoted_below_source() {
+        let intent = TaskSearchIntent::parse("Guard cluster cleanup in ReindexPluginMetricsIT");
+        let result = |path: &str, score: f32| SearchResult {
+            path: path.into(),
+            line_range: None,
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let ranked = rerank_fused_for_task(
+            vec![
+                result("server/src/main/java/org/elasticsearch/cleanup/CleanupAction.java", 0.9),
+                result(
+                    "modules/reindex/src/internalClusterTest/java/org/elasticsearch/index/reindex/ReindexPluginMetricsIT.java",
+                    0.8,
+                ),
+            ],
+            &intent,
+            &RetrievalDiagnostics::default(),
+        );
+        assert!(
+            ranked[0].path.ends_with("ReindexPluginMetricsIT.java"),
+            "the named test file must lead: {:?}",
+            ranked
+                .iter()
+                .map(|r| r.path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        // A test the task does not name is still support material below source.
+        let intent = TaskSearchIntent::parse("Guard cluster cleanup in reindex");
+        let ranked = rerank_fused_for_task(
+            vec![
+                result(
+                    "modules/reindex/src/main/java/org/elasticsearch/reindex/Reindexer.java",
+                    0.5,
+                ),
+                result(
+                    "modules/reindex/src/test/java/org/elasticsearch/reindex/ReindexerTests.java",
+                    0.9,
+                ),
+            ],
+            &intent,
+            &RetrievalDiagnostics::default(),
+        );
+        assert!(ranked[0].path.ends_with("Reindexer.java"));
     }
 
     #[test]
