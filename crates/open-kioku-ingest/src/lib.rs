@@ -1175,7 +1175,7 @@ impl Indexer {
             if is_supported_code(&language) {
                 source_like_files += 1;
             }
-            let secret_policy = is_secret_like_path(&rel, is_supported_code(&language));
+            let secret_policy = is_secret_like_path(&rel, is_programming_language(&language));
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
                 let reason = if secret_policy {
@@ -2642,11 +2642,30 @@ fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-/// Paths that hold key material or environment secrets are never read. A *source* file is
-/// only blocked by the strict list — key-material extensions and the `.aws`/`.ssh` directories —
-/// because a class named `RepositoryS3BasicCredentialsRestIT` or a module named `secrets.go` is
-/// code, not a secret (the loose rule silently dropped 25 Java files from one repository);
-/// secret-looking values inside source are handled by content redaction, not omission.
+/// Programming-language source, as opposed to data, config, and prose formats that the parser
+/// also understands (YAML, JSON, TOML, Markdown, text). A `credentials.json` is a credential
+/// store; a `CredentialsProvider.java` is code.
+fn is_programming_language(language: &Language) -> bool {
+    matches!(
+        language,
+        Language::Rust
+            | Language::Java
+            | Language::TypeScript
+            | Language::JavaScript
+            | Language::Python
+            | Language::Go
+            | Language::Sql
+    )
+}
+
+/// Paths that hold key material or environment secrets are never read. A *programming-language*
+/// source file is only blocked by the strict list (key-material extensions and the `.env`,
+/// `.aws`, `.ssh` entries) because a class named `RepositoryS3BasicCredentialsRestIT` or a
+/// module named `secrets.go` is code, not a secret; the loose rule silently dropped 25 Java
+/// files from one repository. Data, config, and prose files (`credentials.json`,
+/// `secrets.yaml`, `SECRETS.md`) keep the loose name rule, because chunk contents are not
+/// redacted today (tracked as #379); a hard-coded key inside a source file is indexed exactly
+/// as it was before this change, when only the file's name decided.
 fn is_secret_like_path(path: &Path, is_source: bool) -> bool {
     path.components().any(|component| {
         let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -3137,6 +3156,24 @@ class Util {
             .quality_notes
             .iter()
             .any(|note| note.contains("source parsing skipped")));
+    }
+
+    #[test]
+    fn secret_path_rule_blocks_data_files_by_name_but_not_programming_source() {
+        let p = |v: &str| std::path::Path::new(v);
+        assert!(!is_secret_like_path(
+            p("src/CredentialsProvider.java"),
+            true
+        ));
+        assert!(!is_secret_like_path(p("internal/secrets.go"), true));
+        assert!(is_secret_like_path(p("config/server.key"), true));
+        assert!(is_secret_like_path(p(".ssh/id_rsa.pub"), true));
+        assert!(is_secret_like_path(p(".env.local"), true));
+        assert!(is_secret_like_path(p("config/credentials.yaml"), false));
+        assert!(is_secret_like_path(p("credentials.json"), false));
+        assert!(is_secret_like_path(p("secret_key.txt"), false));
+        assert!(is_secret_like_path(p("docs/SECRETS.md"), false));
+        assert!(!is_secret_like_path(p("config/server.yaml"), false));
     }
 
     #[test]
