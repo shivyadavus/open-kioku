@@ -192,6 +192,7 @@ fn contract_plan_from_input(
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(store))
                 .with_memory_facts(RepoMemoryStore::open_repo(repo)?.search(&task, 8)?)
+                .with_memory_enabled(OkConfig::load_from_repo(repo)?.memory.enabled)
                 .plan_from_context(&task, limit, context)?)
         }
         _ => anyhow::bail!("provide exactly one of TASK, --plan, or --plan-json"),
