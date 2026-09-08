@@ -30,7 +30,7 @@ and it costs a small fraction of the JSON rendering of the same result.
 
 ### Search
 - `search_code` — full-text BM25 search across all indexed chunks; best for business logic keywords
-- `regex_search` — pattern-based search when you know the exact syntax
+- `regex_search` — exact regular-expression line matching over indexed chunk text; unranked and path-ordered, and `caveats` says what was not searched
 - `semantic_search` — falls back to lexical when embeddings are disabled
 - `list_symbols` — browse all indexed symbols by substring
 

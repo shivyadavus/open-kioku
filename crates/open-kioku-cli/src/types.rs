@@ -74,6 +74,7 @@ enum Command {
     #[command(after_help = "Examples:
   ok search \"token refresh\"
   ok search Worker --kind graph --limit 5
+  ok search \"fn issue_token\" --regex
   ok search issue_token --json")]
     Search {
         query: String,
@@ -83,6 +84,10 @@ enum Command {
         kind: SearchKind,
         #[arg(long, default_value_t = false)]
         explain_ranking: bool,
+        /// Treat the query as a regular expression and return exact line matches
+        /// instead of ranked candidates.
+        #[arg(long, default_value_t = false)]
+        regex: bool,
         #[arg(long, default_value_t = false)]
         semantic: bool,
         #[arg(long, default_value_t = false)]

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": -32000,
+    "message": "search error: regex parse error:\n    pub fn (\n           ^\nerror: unclosed group"
+  },
+  "id": "regex-search-invalid",
+  "jsonrpc": "2.0"
+}

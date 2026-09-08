@@ -24,6 +24,23 @@ fn search(
     search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
 }
 
+/// Exact regex matching over the indexed corpus, the same call the MCP
+/// `regex_search` tool makes, so the two surfaces answer identically.
+fn regex_search(
+    store: &dyn MetadataStore,
+    pattern: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
+    let scan = regex_search_index(store, pattern, limit)?;
+    if scan.files_capped {
+        eprintln!(
+            "note: the regex scan stopped after {} files; results are incomplete",
+            scan.files_scanned
+        );
+    }
+    Ok(scan.results)
+}
+
 fn graph_search(
     repo: impl AsRef<Path>,
     query: &str,
