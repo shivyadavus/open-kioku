@@ -115,8 +115,18 @@
     "pack_tokens_primary_p50": 883,
     "pack_tokens_primary_p95": 1549
    },
-   "base_commit": "79da24a0ebc0",
    "cases": 145,
+   "gold_line_yield_primary_delta@8000": {
+    "cases": 145,
+    "ci95": [
+     0.05731089443792414,
+     0.1327845592975097
+    ],
+    "improved": 27,
+    "mean": 0.09245982506521903,
+    "unchanged": 118,
+    "worse": 0
+   },
    "region": {
     "ci": {
      "MRR": [
@@ -222,6 +232,10 @@
     "pack_json_kb_p95": 1084,
     "pack_tokens_primary_p50": 2882,
     "pack_tokens_primary_p95": 4322
+   },
+   "supporting_unit_line_yield_contribution@8000": {
+    "cases_affected": 6,
+    "mean": 0.008727000968380279
    }
   },
   "Java (10k files)": {
@@ -328,11 +342,21 @@
     },
     "pack_json_kb_p50": 647,
     "pack_json_kb_p95": 825,
-    "pack_tokens_primary_p50": 1152.0,
+    "pack_tokens_primary_p50": 1152,
     "pack_tokens_primary_p95": 2178
    },
-   "base_commit": null,
    "cases": 116,
+   "gold_line_yield_primary_delta@8000": {
+    "cases": 116,
+    "ci95": [
+     0.012717675111130292,
+     0.057630301003213265
+    ],
+    "improved": 12,
+    "mean": 0.03172817658044342,
+    "unchanged": 104,
+    "worse": 0
+   },
    "region": {
     "ci": {
      "MRR": [
@@ -436,8 +460,12 @@
     },
     "pack_json_kb_p50": 700,
     "pack_json_kb_p95": 876,
-    "pack_tokens_primary_p50": 3316.5,
+    "pack_tokens_primary_p50": 3317,
     "pack_tokens_primary_p95": 4540
+   },
+   "supporting_unit_line_yield_contribution@8000": {
+    "cases_affected": 1,
+    "mean": 9.170946441672793e-05
    }
   },
   "Python (~4k files)": {
@@ -544,11 +572,21 @@
     },
     "pack_json_kb_p50": 732,
     "pack_json_kb_p95": 907,
-    "pack_tokens_primary_p50": 934.5,
+    "pack_tokens_primary_p50": 935,
     "pack_tokens_primary_p95": 5600
    },
-   "base_commit": "7cd9b985e069",
    "cases": 197,
+   "gold_line_yield_primary_delta@8000": {
+    "cases": 197,
+    "ci95": [
+     0.045581232597663265,
+     0.10220246458957696
+    ],
+    "improved": 37,
+    "mean": 0.07328443242607335,
+    "unchanged": 160,
+    "worse": 0
+   },
    "region": {
     "ci": {
      "MRR": [
@@ -652,8 +690,12 @@
     },
     "pack_json_kb_p50": 765,
     "pack_json_kb_p95": 948,
-    "pack_tokens_primary_p50": 3612.0,
+    "pack_tokens_primary_p50": 3612,
     "pack_tokens_primary_p95": 7629
+   },
+   "supporting_unit_line_yield_contribution@8000": {
+    "cases_affected": 9,
+    "mean": 0.012880135919760134
    }
   },
   "TypeScript (~900 files)": {
@@ -763,8 +805,18 @@
     "pack_tokens_primary_p50": 836,
     "pack_tokens_primary_p95": 2752
    },
-   "base_commit": "d93aa7c94e64",
    "cases": 168,
+   "gold_line_yield_primary_delta@8000": {
+    "cases": 168,
+    "ci95": [
+     0.13759479011967302,
+     0.22890120034491074
+    ],
+    "improved": 60,
+    "mean": 0.1807936335309066,
+    "unchanged": 108,
+    "worse": 0
+   },
    "region": {
     "ci": {
      "MRR": [
@@ -870,6 +922,10 @@
     "pack_json_kb_p95": 951,
     "pack_tokens_primary_p50": 2753,
     "pack_tokens_primary_p95": 4460
+   },
+   "supporting_unit_line_yield_contribution@8000": {
+    "cases_affected": 19,
+    "mean": 0.024316383978038113
    }
   }
  },
