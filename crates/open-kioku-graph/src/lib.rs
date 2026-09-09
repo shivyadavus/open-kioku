@@ -484,8 +484,9 @@ impl InMemoryGraph {
                         .next()
                         .unwrap_or(fact.source.as_str())),
                 );
-                // Only a banner that names its origin is proof. A naming-convention pairing
-                // stays proof-less so `relationship_authority` keeps it heuristic.
+                // Only a banner that names its origin carries a proof at all, and it caps at
+                // corroborating: prose is not structure. A naming-convention pairing stays
+                // proof-less so `relationship_authority` keeps it heuristic.
                 if fact.source.as_str() == DERIVED_FILE_DECLARED_ORIGIN_SOURCE
                     && matches!(fact.confidence, Confidence::High | Confidence::Exact)
                 {
@@ -494,7 +495,7 @@ impl InMemoryGraph {
                         fact.source.clone(),
                         1,
                     );
-                    proof.authority = RelationshipAuthority::Authoritative;
+                    proof.authority = RelationshipAuthority::Corroborating;
                     proof.source_range = fact.range.as_ref().map(|range| FileRange {
                         path: paths.intern(&file.path),
                         line_range: Some(range.clone()),
@@ -539,10 +540,14 @@ impl InMemoryGraph {
     }
 
     pub fn neighbors(&self, node: &str, limit: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+        // Derived siblings are excluded from the untyped read; see the SQLite store.
         let mut edges = self
             .edges
             .iter()
-            .filter(|edge| edge.from.0 == node || edge.to.0 == node)
+            .filter(|edge| {
+                (edge.from.0 == node || edge.to.0 == node)
+                    && edge.edge_type != GraphEdgeType::DerivedFrom
+            })
             .take(limit)
             .cloned()
             .collect::<Vec<_>>();
@@ -1020,7 +1025,12 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("declared-origin")
         );
-        assert!(declared.is_authoritative_relationship());
+        // Corroborating, never authoritative: the banner is prose, not parsed structure.
+        assert!(!declared.is_authoritative_relationship());
+        assert_eq!(
+            declared.relationship_authority(),
+            open_kioku_core::RelationshipAuthority::Corroborating
+        );
         assert!(declared.has_relationship_proof_kind(RelationshipProofKind::DeclaredOrigin));
         let paired = edges
             .iter()

@@ -926,6 +926,16 @@ fn relationship_impacts(
         .map(|file| (file.id.clone(), file))
         .collect::<HashMap<FileId, File>>();
 
+    // Indexed once: the previous lookup linear-scanned every file per unresolved edge per seed.
+    let files_by_path = files_by_id
+        .values()
+        .filter_map(|file| {
+            identity::normalize_repo_path(&file.path)
+                .ok()
+                .map(|path| (path, file.id.clone()))
+        })
+        .collect::<HashMap<String, FileId>>();
+
     let mut seeds: Vec<(NodeId, String)> = Vec::new();
     if let Ok(node_id) = identity::try_file_node_id(&target_file.path) {
         seeds.push((node_id, target_file.path.display().to_string()));
@@ -956,27 +966,39 @@ fn relationship_impacts(
         // derived impact at all while an 8-symbol file reported it correctly. Ask for those
         // edges by type, which filters in SQL.
         let mut nodes = nodes;
-        if let Ok(derived) = graph.edges_by_type_for_node(
-            GraphEdgeType::DerivedFrom,
-            &node_id.0,
-            false,
-            RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
-            0,
-        ) {
-            for edge in derived {
-                if edges.iter().any(|existing| existing.id == edge.id) {
-                    continue;
-                }
-                // `neighbors` returned nodes for its own window only. A derived edge's other
-                // endpoint is always a file node (`file:<path>`), so it is resolved from the
-                // indexed files rather than with a second graph query.
-                if !nodes.iter().any(|existing| existing.id == edge.from) {
-                    let Some(node) = file_node_for_id(&edge.from, &files_by_id) else {
+        // Only the file seed can carry this edge: derived edges join two file nodes, so the
+        // symbol seeds below it would always come back empty.
+        //
+        // Two absences are swallowed here that the context path reports as caveats: a store
+        // whose `edges_by_type_for_node` is the `Unsupported` default or whose authority gate
+        // refuses the read is indistinguishable from a file with no derived siblings, and an
+        // origin with more derived files than the row cap loses the rest silently.
+        // `ImpactReport` has no caveat channel — the neighbouring `neighbors` call discards
+        // errors the same way — so the two surfaces answer differently about the same missing
+        // evidence. Giving `ImpactReport` a caveat field is the fix and is out of scope here.
+        if node_id.0.starts_with("file:") {
+            if let Ok(derived) = graph.edges_by_type_for_node(
+                GraphEdgeType::DerivedFrom,
+                &node_id.0,
+                false,
+                RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
+                0,
+            ) {
+                for edge in derived {
+                    if edges.iter().any(|existing| existing.id == edge.id) {
                         continue;
-                    };
-                    nodes.push(node);
+                    }
+                    // `neighbors` returned nodes for its own window only. A derived edge's other
+                    // endpoint is always a file node (`file:<path>`), so it is resolved from the
+                    // indexed files rather than with a second graph query.
+                    if !nodes.iter().any(|existing| existing.id == edge.from) {
+                        let Some(node) = file_node_for_id(&edge.from, &files_by_path) else {
+                            continue;
+                        };
+                        nodes.push(node);
+                    }
+                    edges.push(edge);
                 }
-                edges.push(edge);
             }
         }
         let nodes_by_id = nodes
@@ -1014,16 +1036,16 @@ fn relationship_impacts(
 
 /// Rebuild the `GraphNode` for a `file:<path>` id from the indexed files. Used for edges fetched
 /// by type, whose endpoints are not in the `neighbors` window.
-fn file_node_for_id(node_id: &NodeId, files_by_id: &HashMap<FileId, File>) -> Option<GraphNode> {
+fn file_node_for_id(
+    node_id: &NodeId,
+    files_by_path: &HashMap<String, FileId>,
+) -> Option<GraphNode> {
     let path = node_id.0.strip_prefix("file:")?;
-    let file = files_by_id
-        .values()
-        .find(|file| identity::normalize_repo_path(&file.path).is_ok_and(|value| value == path))?;
     Some(GraphNode {
         id: node_id.clone(),
         node_type: GraphNodeType::File,
         label: path.to_string(),
-        file_id: Some(file.id.clone()),
+        file_id: Some(files_by_path.get(path)?.clone()),
         ..Default::default()
     })
 }
@@ -2219,15 +2241,21 @@ mod tests {
             .for_file(Path::new("src/client.ts"))
             .unwrap();
 
-        // The declared origin is repository truth, so the generated file is proven impact.
+        // A banner is prose, so even a declared origin is corroborating, never proven. It is
+        // surfaced with its proof kind so a reader can tell it from a naming guess.
         assert!(
             report
-                .proven_impact
+                .possible_impact
                 .iter()
                 .any(|impact| impact.path == Path::new("src/client.d.ts")
-                    && impact.authority == RelationshipAuthority::Authoritative
+                    && impact.authority == RelationshipAuthority::Corroborating
                     && impact.proof_kinds == vec![RelationshipProofKind::DeclaredOrigin]),
             "{:?}",
+            report.possible_impact
+        );
+        assert!(
+            report.proven_impact.is_empty(),
+            "a generation banner must never reach proven impact: {:?}",
             report.proven_impact
         );
         // The naming pairing is a guess: surfaced, but never as structural truth.

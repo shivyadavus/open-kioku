@@ -7,10 +7,12 @@
 //! `DERIVED_FROM` fact from the derived file to its origin, and retrieval treats the two as one
 //! edit.
 //!
-//! Two provenances, deliberately not one: a header that names its origin is repository truth
-//! and is emitted with high confidence and a declared-origin proof; a naming convention is a
-//! guess that is right most of the time and is emitted with medium confidence and no proof, so
-//! it can only ever corroborate. A convention that could mean two files emits nothing.
+//! Two provenances, deliberately not one. A header that names its origin carries a
+//! declared-origin proof and high confidence; a naming convention is a guess that is right most
+//! of the time and carries no proof and medium confidence. Neither is ever authoritative: a
+//! banner is a claim a comment makes about itself, and every authoritative proof in this
+//! workspace comes from parsed structure, so the strongest a declared origin can be is
+//! corroborating. A convention that could mean two files emits nothing.
 
 use open_kioku_core::{
     identity, AnalysisFact, Confidence, EvidenceSourceType, File, GraphEdgeType, GraphNodeType,
@@ -24,9 +26,6 @@ use std::path::Path;
 
 /// Source label of a declared-origin fact; the graph builder attaches the proof by it.
 pub const DECLARED_ORIGIN_SOURCE: &str = open_kioku_core::DERIVED_FILE_DECLARED_ORIGIN_SOURCE;
-/// A banner whose named origin resolved but shares no directory or stem with it. Emitted so the
-/// claim is visible, deliberately without the proof label so it can never become authoritative.
-pub const UNCORROBORATED_ORIGIN_SOURCE: &str = "open-kioku-derived/uncorroborated-origin";
 /// Source label of a test paired with its subject by file-name convention.
 pub const TEST_PAIRING_SOURCE: &str = "open-kioku-derived/test-pairing";
 /// Source label of a declaration file paired with its implementation by extension.
@@ -126,9 +125,11 @@ fn fact_for(pair: DerivedPair<'_>) -> AnalysisFact {
     }
 }
 
-/// A generated file whose banner names its origin. The path is tried as written from the
-/// repository root, then relative to the generated file, then as a bare file name that occurs
-/// once in the index; a name that occurs twice is not a fact and yields nothing.
+/// A generated file whose banner names its origin. The path is resolved only as written from the
+/// repository root or relative to the generated file. It is deliberately *not* looked up by bare
+/// file name across the index: that fallback ran precisely when the named path did not resolve —
+/// when the header is wrong or points outside the index — and bound the file to an unrelated
+/// same-named one. Do not re-add it.
 fn declared_origin_pair<'a>(
     root: &Path,
     file: &'a File,
@@ -150,68 +151,27 @@ fn declared_origin_pair<'a>(
     if target.id == file.id {
         return None;
     }
-    let origin_path = normalize(&target.path.to_string_lossy());
     // `likely_generated` is a prose match over eight lines — it was calibrated for a ranking
     // demotion, where a false positive costs one rank. Promoting it to the workspace's newest
     // authoritative proof needs a second, structural agreement: the two files sit in the same
     // directory, or one stem contains the other (`modeling_x` <-> `modular_x`, `client.d` <->
     // `client`). Without it the pairing is still emitted, but as a proofless heuristic that can
     // never be presented as proven impact.
-    let corroborated = declared_origin_is_corroborated(&derived_path, &origin_path);
     Some(DerivedPair {
         derived: file,
         origin: target,
-        source: if corroborated {
-            DECLARED_ORIGIN_SOURCE
-        } else {
-            UNCORROBORATED_ORIGIN_SOURCE
-        },
-        confidence: if corroborated {
-            Confidence::High
-        } else {
-            Confidence::Medium
-        },
-        source_type: if corroborated {
-            EvidenceSourceType::StaticAnalysis
-        } else {
-            EvidenceSourceType::Heuristic
-        },
+        source: DECLARED_ORIGIN_SOURCE,
+        confidence: Confidence::High,
+        source_type: EvidenceSourceType::StaticAnalysis,
         range: Some(LineRange {
             start: origin.line,
             end: origin.line,
         }),
-        message: if corroborated {
-            format!(
-                "header declares `{}` as the file it was generated from",
-                origin.path
-            )
-        } else {
-            format!(
-                "header declares `{}` as its origin, but the two files share no directory or stem",
-                origin.path
-            )
-        },
+        message: format!(
+            "header declares `{}` as the file it was generated from",
+            origin.path
+        ),
     })
-}
-
-/// Structural agreement with the banner's claim: same directory, or one file stem contains the
-/// other. Both are properties of the paths, not of the prose that made the claim.
-fn declared_origin_is_corroborated(derived_path: &str, origin_path: &str) -> bool {
-    let (derived_dir, derived_name) = split_dir(derived_path);
-    let (origin_dir, origin_name) = split_dir(origin_path);
-    if derived_dir == origin_dir {
-        return true;
-    }
-    let derived_stem = stem(strip_declaration_suffix(derived_name));
-    let origin_stem = stem(strip_declaration_suffix(origin_name));
-    !derived_stem.is_empty()
-        && !origin_stem.is_empty()
-        && (derived_stem.contains(origin_stem) || origin_stem.contains(derived_stem))
-}
-
-/// `foo.d.ts` stems to `foo`, not `foo.d`.
-fn strip_declaration_suffix(name: &str) -> &str {
-    name.strip_suffix(".d.ts").unwrap_or(name)
 }
 
 fn read_header(path: &Path) -> Option<String> {
@@ -490,11 +450,6 @@ mod tests {
                         "test"
                     }
                     DECLARATION_PAIRING_SOURCE => "declaration",
-                    UNCORROBORATED_ORIGIN_SOURCE => {
-                        assert_eq!(fact.confidence, Confidence::Medium);
-                        assert_eq!(fact.source_type, EvidenceSourceType::Heuristic);
-                        "uncorroborated"
-                    }
                     other => panic!("unexpected source {other}"),
                 };
                 (
@@ -592,44 +547,6 @@ mod tests {
             join("pkg/gen", "../schema/x.ts").as_deref(),
             Some("pkg/schema/x.ts")
         );
-    }
-
-    #[test]
-    fn a_banner_the_paths_do_not_corroborate_is_emitted_without_the_proof_label() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("docs")).unwrap();
-        fs::create_dir_all(root.path().join("src")).unwrap();
-        // A fixture whose header quotes a banner. The named file exists, so the reference
-        // resolves — but nothing structural agrees, so it must not mint an authoritative proof.
-        fs::write(
-            root.path().join("docs/sample_output.py"),
-            "# This file was automatically generated from src/unrelated_helper.py.\n",
-        )
-        .unwrap();
-        let files = vec![
-            file("docs/sample_output.py", Language::Python, true),
-            file("src/unrelated_helper.py", Language::Python, false),
-        ];
-        assert_eq!(
-            pairs(root.path(), &files),
-            vec![(
-                "docs/sample_output.py".into(),
-                "src/unrelated_helper.py".into(),
-                "uncorroborated"
-            )]
-        );
-        assert!(declared_origin_is_corroborated(
-            "src/models/orbit/modeling_orbit.py",
-            "src/models/orbit/modular_orbit.py"
-        ));
-        assert!(declared_origin_is_corroborated(
-            "gen/client.d.ts",
-            "src/client.ts"
-        ));
-        assert!(!declared_origin_is_corroborated(
-            "docs/sample_output.py",
-            "src/unrelated_helper.py"
-        ));
     }
 
     #[test]
