@@ -18,7 +18,7 @@ const OS_MAP = {
 
 function getBinaryPath() {
     if (os.platform() === 'darwin' && os.arch() === 'x64') {
-        console.error('Open Kioku 3.x on macOS requires Apple Silicon. Intel Mac users can install Open Kioku 2.4.x.');
+        console.error('Open Kioku ships no prebuilt macOS Intel binary on npm, GitHub releases, cargo-binstall, or Homebrew. Build from source with `cargo install open-kioku-cli`, or install the last release that shipped an Intel binary: `npm install -g open-kioku@2.4.0`.');
         process.exit(1);
     }
 

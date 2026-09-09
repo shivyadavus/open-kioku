@@ -35,20 +35,41 @@ The following MCP tools have stable JSON-RPC interfaces. Their input schemas,
 output schemas, and error codes will not change in backward-incompatible ways
 without a major version bump.
 
+These are the sixteen tools `tools/list` advertises. `docs/mcp-tools.md` is the reference;
+the count is derived from the tool table in `crates/open-kioku-mcp/src/lib.rs` and enforced
+against this list by `scripts/validate-docs.sh`.
+
 | Tool | Description |
 |---|---|
-| `repo_status` | Repository and index status |
-| `search_code` | Full-text code search |
-| `get_definition` | Look up a symbol's definition |
-| `get_references` | Find all references to a symbol |
+| `repo_status` | Repository, index, coverage, language and semantic-lifecycle status |
+| `list_files` | Indexed file inventory, or per-path detail |
+| `search_code` | Ranked search over indexed code (`mode`: `code`, `graph`, `semantic`, `hybrid`) |
+| `regex_search` | Exact regular-expression line matching over indexed chunk text |
+| `search_symbols` | Symbol inventory, optionally filtered by name |
+| `get_definition` | Look up a symbol's definition, optionally with its body |
+| `get_references` | References to a symbol (`kind`: `all`, `callers`, `callees`, `implementations`) |
+| `dependency_path` | Dependency path between two modules, or one module's dependencies |
 | `impact_analysis` | Blast-radius analysis for a change |
-| `find_tests_for_change` | Identify tests affected by a change |
-| `plan_change` | Generate a change plan |
-| `build_context_pack` | Build a ranked, token-budgeted context pack |
-| `compressed_context` | Compress a context pack for later retrieval |
-| `retrieve_compressed_context` | Retrieve a previously compressed context pack |
-| `remember_fact` | Store a persistent fact |
-| `recall_facts` | Retrieve previously stored facts |
+| `explain_flow` | Explain a control or data flow through the graph |
+| `build_context_pack` | Build a ranked, token-budgeted context pack (`compress` to persist it) |
+| `retrieve_context` | Retrieve a previously persisted context pack |
+| `plan_change` | Generate a change plan (`detail` for preflight or patch, `persist` for a contract) |
+| `verify_change` | Verify changed files against a plan or contract |
+| `find_tests_for_change` | Identify tests affected by a change, or the repository's test evidence |
+| `query_evidence_graph` | Query the evidence graph; with no `query`, return its schema |
+
+Five further tools are advertised **in addition** to the sixteen, but only when the
+corresponding feature is configured; all five stay dispatchable either way. `remember_fact` and
+`search_memory` require `[memory] enabled = true`; `map_stacktrace_to_code`,
+`find_errors_for_symbol` and `find_recent_failures` require `[runtime]` to name an enabled
+provider. They carry no stability guarantee here — the runtime three are `experimental`.
+
+`get_references` changed shape in 4.0.0: it returns an object whose sections each name their own
+`evidence_source`, not a bare occurrence array. See the 4.0.0 entry in `CHANGELOG.md`.
+
+Capabilities that reached 3.x through MCP and now ship only on the CLI — `ok architecture …`,
+`ok history …`, and `ok contract show` — are covered by the CLI section above only where the
+command is named there. A shell-capable agent can still reach them; a pure MCP client cannot.
 
 ## Experimental Features
 
