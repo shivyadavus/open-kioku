@@ -3313,6 +3313,21 @@ pub struct ContextSelectedUnit {
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     pub rationale: String,
+    /// Which part of the pack this unit accounts for. Consumers that measure what retrieval
+    /// selected must read this rather than the free-text rationale: the two kinds are costed
+    /// differently and mixing them makes a metric's basis depend on the build.
+    #[serde(default)]
+    pub kind: ContextUnitKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUnitKind {
+    /// A unit retrieval selected under the context budget, including any region widening.
+    #[default]
+    Primary,
+    /// A supporting file the pack lists from impact expansion, costed at its listing size.
+    Supporting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

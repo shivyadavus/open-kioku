@@ -1,9 +1,9 @@
 use chrono::Utc;
 use open_kioku_core::{
     AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
-    ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit, Evidence, EvidenceId,
-    EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType, GraphNodeType,
-    HistorySignalQuery, NegativeEvidence, RetrievalAuthority, RetrievalDiagnostics,
+    ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit, ContextUnitKind,
+    Evidence, EvidenceId, EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType,
+    GraphNodeType, HistorySignalQuery, NegativeEvidence, RetrievalAuthority, RetrievalDiagnostics,
     RetrievalSourceCount, RetrievalSourceKind, RetrievalTrace, RetrievalUnitKey, RiskReport,
     RuntimeSignal, ScoreComponent, SearchResult, Symbol, ValidationPlan,
 };
@@ -1296,6 +1296,7 @@ fn record_selected_units(selected: &[SearchResult], diagnostics: &mut RetrievalD
                 authority,
                 evidence_refs: result.derived_evidence_ids(),
                 rationale: selection_rationale(result, authority),
+                kind: ContextUnitKind::Primary,
             });
     }
 }
@@ -1367,6 +1368,7 @@ fn append_supporting_units(supporting: &[SearchResult], diagnostics: &mut Retrie
             authority,
             evidence_refs: result.derived_evidence_ids(),
             rationale: "supporting file listed from impact expansion of the top primary file; costed at its listing size, not selected under the context budget".into(),
+            kind: ContextUnitKind::Supporting,
         });
     }
 }
@@ -5440,6 +5442,37 @@ mod selection_ledger_tests {
             diagnostics.selection.per_file_tokens[&supporting.path],
             units[1].estimated_tokens
         );
+    }
+
+    /// The scorer that measures what retrieval selected splits the ledger on `kind`. A pack
+    /// whose supporting units were not marked would be scored as if impact expansion's files
+    /// were retrieved, so the two kinds must stay distinguishable by field, not by prose.
+    #[test]
+    fn ledger_units_carry_the_kind_that_tells_selection_from_impact_expansion() {
+        let primary = result("src/primary.rs", "fn primary() {}");
+        let mut diagnostics = RetrievalDiagnostics::default();
+        record_selected_units(std::slice::from_ref(&primary), &mut diagnostics);
+        append_supporting_units(
+            std::slice::from_ref(&result("src/impacted.rs", "fn impacted() {}")),
+            &mut diagnostics,
+        );
+
+        let units = &diagnostics.selection.selected_units;
+        assert_eq!(units[0].kind, ContextUnitKind::Primary);
+        assert_eq!(units[1].kind, ContextUnitKind::Supporting);
+        let json = serde_json::to_value(&diagnostics.selection).unwrap();
+        let serialized = &json["selected_units"];
+        assert_eq!(serialized[0]["kind"], "primary");
+        assert_eq!(serialized[1]["kind"], "supporting");
+        // A ledger deserialized without the field predates it and is primary-only.
+        let legacy: ContextSelectedUnit = serde_json::from_value(serde_json::json!({
+            "path": "src/legacy.rs",
+            "estimated_tokens": 10,
+            "authority": "heuristic",
+            "rationale": "legacy pack"
+        }))
+        .unwrap();
+        assert_eq!(legacy.kind, ContextUnitKind::Primary);
     }
 
     #[test]

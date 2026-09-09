@@ -22,12 +22,14 @@ score = load("score-context-cases")
 derive = load("commit-derived-cases")
 
 # (path, start, end, estimated_tokens) in pack order.
+# (path, start, end, tokens, primary): the fifth field splits units retrieval selected from
+# supporting files the pack lists, so yield can be scored over the primary units alone.
 UNITS = [
-    ("a/noise.py", 1, 10, 3000),
-    ("a/gold.py", 40, 60, 2500),
-    ("b/other.py", 5, 6, 1000),
-    ("a/gold.py", 100, 120, 2000),
-    ("c/gold2.py", 1, 5, 500),
+    ("a/noise.py", 1, 10, 3000, True),
+    ("a/gold.py", 40, 60, 2500, True),
+    ("b/other.py", 5, 6, 1000, True),
+    ("a/gold.py", 100, 120, 2000, True),
+    ("c/gold2.py", 1, 5, 500, True),
 ]
 GOLD = {"a/gold.py", "c/gold2.py"}
 RANGES = {"a/gold.py": [(50, 59), (110, 129)], "c/gold2.py": [(3, 3), (200, 209)]}
@@ -132,6 +134,42 @@ class AbstainingCasesCountAsZeroYield(unittest.TestCase):
         ]
         out = score.metrics(sample)
         self.assertAlmostEqual(out["gold_line_yield@4000"], 0.4)
+
+
+class PrimaryUnitClassification(unittest.TestCase):
+    """The primary/supporting split decides what the yield metric measures, so it reads the
+    structured `kind` the builder emits and only falls back to prose for older packs."""
+
+    def unit(self, **fields):
+        base = {"path": "src/a.rs", "line_range": {"start": 1, "end": 4}, "estimated_tokens": 10}
+        base.update(fields)
+        return base
+
+    def test_structured_kind_decides_and_outranks_the_rationale(self):
+        self.assertTrue(score.is_primary_unit(self.unit(kind="primary", rationale="anything")))
+        self.assertFalse(score.is_primary_unit(self.unit(kind="supporting", rationale="anything")))
+        # A reworded rationale cannot reclassify a unit that carries the field.
+        self.assertFalse(
+            score.is_primary_unit(self.unit(kind="supporting", rationale="listed alongside"))
+        )
+
+    def test_packs_without_the_field_fall_back_to_the_builder_rationale(self):
+        self.assertTrue(score.is_primary_unit(self.unit(rationale="selected under context budget")))
+        self.assertFalse(
+            score.is_primary_unit(
+                self.unit(rationale="supporting file listed from impact expansion of the top primary file")
+            )
+        )
+
+    def test_selected_units_splits_the_ledger_for_scoring(self):
+        pack = {"retrieval_diagnostics": {"selection": {"selected_units": [
+            self.unit(kind="primary", estimated_tokens=40),
+            self.unit(path="src/b.rs", kind="supporting", estimated_tokens=12),
+        ]}}}
+        units = score.selected_units(pack, "/repo")
+        self.assertEqual([u[4] for u in units], [True, False])
+        self.assertEqual(len(score.primary_units(units)), 1)
+        self.assertEqual(score.primary_units(units)[0][0], "src/a.rs")
 
 
 if __name__ == "__main__":
