@@ -78,7 +78,17 @@ def parse_ranges(field, gold):
     return ranges or None
 
 
+# Packs built before `kind` existed are classified by the rationale the builder wrote; the
+# structured field is authoritative whenever it is present. `scripts/tests/test_context_yield.py`
+# pins both, and `open-kioku-context` pins the field it emits.
 SUPPORTING_UNIT_MARKER = "supporting file listed from impact expansion"
+
+
+def is_primary_unit(unit):
+    kind = unit.get("kind")
+    if kind is not None:
+        return kind != "supporting"
+    return SUPPORTING_UNIT_MARKER not in (unit.get("rationale") or "")
 
 
 def selected_units(pack, repo):
@@ -99,7 +109,7 @@ def selected_units(pack, repo):
             int(span.get("start", 0) or 0),
             int(span.get("end", 0) or 0),
             int(unit.get("estimated_tokens", 0) or 0),
-            SUPPORTING_UNIT_MARKER not in (unit.get("rationale") or ""),
+            is_primary_unit(unit),
         ))
     return units
 
