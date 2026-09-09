@@ -28,6 +28,10 @@ fn is_trusted_context_dependency_edge(edge: &GraphEdge) -> bool {
         | GraphEdgeType::Extends
         | GraphEdgeType::Imports
         | GraphEdgeType::DependsOn => edge.is_authoritative_relationship(),
+        // Not a dependency at all, on the same reasoning that keeps it out of `dependency_path`
+        // and `module_dependencies`. Falling through to the permissive arm would have admitted a
+        // proofless naming pairing on easier terms than an `Imports` edge that failed resolution.
+        GraphEdgeType::DerivedFrom => false,
         _ => true,
     }
 }
@@ -2837,6 +2841,15 @@ pub struct DerivedSibling {
     pub message: String,
 }
 
+/// One file's derived siblings, and whether either direction hit the read cap.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DerivedSiblings {
+    pub siblings: Vec<DerivedSibling>,
+    /// True only when a single direction filled its window, so the caveat reports evidence that
+    /// is genuinely missing rather than the sum of two partial reads.
+    pub truncated: bool,
+}
+
 /// Edges read per direction for one file; a file with more derived siblings than this is a
 /// fixture directory, not a module.
 const DERIVED_SIBLING_EDGE_LIMIT: usize = 8;
@@ -2845,17 +2858,22 @@ const DERIVED_SIBLING_EDGE_LIMIT: usize = 8;
 const DERIVED_SIBLING_MIN_WINDOW: usize = 20;
 
 /// Both directions of the `DERIVED_FROM` edges incident to a repository-relative path.
-fn derived_siblings(store: &dyn OkStore, path: &str) -> Result<Vec<DerivedSibling>> {
+fn derived_siblings(store: &dyn OkStore, path: &str) -> Result<DerivedSiblings> {
     let node = open_kioku_core::identity::try_file_node_id(std::path::Path::new(path))?;
     let mut siblings = Vec::new();
+    // The cap is per direction, so the two reads have to be compared separately: four outgoing
+    // plus four incoming is eight siblings and nothing truncated.
+    let mut truncated = false;
     for outgoing in [true, false] {
-        for edge in store.edges_by_type_for_node(
+        let edges = store.edges_by_type_for_node(
             GraphEdgeType::DerivedFrom,
             &node.0,
             outgoing,
             DERIVED_SIBLING_EDGE_LIMIT,
             0,
-        )? {
+        )?;
+        truncated |= edges.len() >= DERIVED_SIBLING_EDGE_LIMIT;
+        for edge in edges {
             let other = if outgoing { &edge.to } else { &edge.from };
             let Some(sibling_path) = other.0.strip_prefix("file:") else {
                 continue;
@@ -2874,7 +2892,10 @@ fn derived_siblings(store: &dyn OkStore, path: &str) -> Result<Vec<DerivedSiblin
             });
         }
     }
-    Ok(siblings)
+    Ok(DerivedSiblings {
+        siblings,
+        truncated,
+    })
 }
 
 /// A candidate's derived siblings join the ordered list with the candidate's score and the
@@ -2891,7 +2912,7 @@ fn admit_derived_siblings(
     ranking_options: &RankingOptions,
     limit: usize,
     diagnostics: &mut RetrievalDiagnostics,
-    siblings_for: &mut dyn FnMut(&str) -> Result<Vec<DerivedSibling>>,
+    siblings_for: &mut dyn FnMut(&str) -> Result<DerivedSiblings>,
 ) -> Vec<SearchResult> {
     if ranked.is_empty() {
         return ranked;
@@ -2938,8 +2959,8 @@ fn admit_derived_siblings(
         let Some(origin_path) = relative[index].as_deref() else {
             continue;
         };
-        let siblings = match siblings_for(origin_path) {
-            Ok(siblings) => siblings,
+        let read = match siblings_for(origin_path) {
+            Ok(read) => read,
             Err(err) => {
                 // One path failing is not proof the store is refusing every read, so the pass
                 // continues; each distinct failure is reported against the path that produced it.
@@ -2947,11 +2968,11 @@ fn admit_derived_siblings(
                 continue;
             }
         };
-        // The store caps how many edges it returns per node. A file at the cap has siblings the
-        // pack cannot see, and absence has to stay visible.
-        if siblings.len() >= DERIVED_SIBLING_EDGE_LIMIT {
+        // A file at the cap has siblings the pack cannot see, and absence has to stay visible.
+        if read.truncated {
             truncated.push(origin_path.to_string());
         }
+        let siblings = read.siblings;
         for sibling in siblings {
             if present.contains(&sibling.path) {
                 continue;
@@ -4006,7 +4027,7 @@ mod tests {
     }
 
     /// The `DERIVED_FROM` edges the fixture index would hold, read from either endpoint.
-    fn derived_fixture_siblings(path: &str) -> Result<Vec<DerivedSibling>> {
+    fn derived_fixture_siblings(path: &str) -> Result<DerivedSiblings> {
         let pairs = [
             (
                 "tests/orbit/test_pipeline.py",
@@ -4021,19 +4042,22 @@ mod tests {
                 true,
             ),
         ];
-        Ok(pairs
-            .iter()
-            .filter(|(derived, origin, _, _)| *derived == path || *origin == path)
-            .map(
-                |(derived, origin, derivation, authoritative)| DerivedSibling {
-                    path: if *derived == path { origin } else { derived }.to_string(),
-                    edge_id: format!("edge:{derivation}:{derived}"),
-                    authoritative: *authoritative,
-                    derivation: derivation.to_string(),
-                    message: "fixture edge".into(),
-                },
-            )
-            .collect())
+        Ok(DerivedSiblings {
+            siblings: pairs
+                .iter()
+                .filter(|(derived, origin, _, _)| *derived == path || *origin == path)
+                .map(
+                    |(derived, origin, derivation, authoritative)| DerivedSibling {
+                        path: if *derived == path { origin } else { derived }.to_string(),
+                        edge_id: format!("edge:{derivation}:{derived}"),
+                        authoritative: *authoritative,
+                        derivation: derivation.to_string(),
+                        message: "fixture edge".into(),
+                    },
+                )
+                .collect(),
+            truncated: false,
+        })
     }
 
     fn ranked_result(path: &str, score: f32) -> SearchResult {
@@ -4073,6 +4097,68 @@ mod tests {
                 .collect(),
             diagnostics,
         )
+    }
+
+    #[test]
+    fn a_full_pack_of_siblings_split_across_directions_is_not_reported_as_truncated() {
+        // The read cap is per direction. Four out plus four in is eight siblings with nothing
+        // missing, and claiming otherwise reports absent evidence that is not absent.
+        let mut diagnostics = RetrievalDiagnostics::default();
+        admit_derived_siblings(
+            vec![ranked_result("src/orbit/pipeline.py", 0.9)],
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse("Fix pipeline batching"),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut |_| {
+                Ok(DerivedSiblings {
+                    siblings: (0..DERIVED_SIBLING_EDGE_LIMIT)
+                        .map(|index| DerivedSibling {
+                            path: format!("src/orbit/other{index}.py"),
+                            edge_id: format!("edge:{index}"),
+                            authoritative: false,
+                            derivation: "test-pairing".into(),
+                            message: "fixture".into(),
+                        })
+                        .collect(),
+                    truncated: false,
+                })
+            },
+        );
+        assert!(
+            !diagnostics
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("truncated")),
+            "{:?}",
+            diagnostics.caveats
+        );
+
+        let mut diagnostics = RetrievalDiagnostics::default();
+        admit_derived_siblings(
+            vec![ranked_result("src/orbit/pipeline.py", 0.9)],
+            &derived_fixture_files(),
+            &[],
+            &TaskSearchIntent::parse("Fix pipeline batching"),
+            &RankingOptions::default(),
+            5,
+            &mut diagnostics,
+            &mut |_| {
+                Ok(DerivedSiblings {
+                    siblings: Vec::new(),
+                    truncated: true,
+                })
+            },
+        );
+        assert!(
+            diagnostics
+                .caveats
+                .iter()
+                .any(|caveat| caveat.contains("truncated")),
+            "a direction that filled its window must still be reported"
+        );
     }
 
     #[test]
