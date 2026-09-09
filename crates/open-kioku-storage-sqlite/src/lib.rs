@@ -2951,9 +2951,13 @@ impl GraphStore for SqliteStore {
         let Some(node_sid) = compact::lookup_sid(&conn, compact::GRAPH_STRINGS, node)? else {
             return Ok((Vec::new(), Vec::new()));
         };
+        // `DERIVED_FROM` is excluded from every untyped read. It is a sibling relation, not a
+        // dependency — a test does not depend on the module it is named after — and `neighbors`
+        // backs `module_dependencies`, which callers read as imports and dependents. Consumers
+        // that want it ask for it by type through `edges_by_type_for_node`.
         let mut stmt = conn
             .prepare(&format!(
-                "{} WHERE e.from_sid = ?1 OR e.to_sid = ?1 LIMIT ?2",
+                "{} WHERE (e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom' LIMIT ?2",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
@@ -5711,6 +5715,64 @@ mod tests {
         let path = store.shortest_path("a", "b", 5).unwrap();
         assert_eq!(path.len(), 1);
         assert_eq!(path[0].id.0, "a-b");
+    }
+
+    #[test]
+    fn untyped_neighbor_reads_exclude_derived_siblings() {
+        // `neighbors` backs `module_dependencies`, which a caller reads as imports and
+        // dependents. A test paired with the module it is named after is not either.
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "a.rs")];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let edge = |id: &str, from: &str, to: &str, edge_type: GraphEdgeType| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new(format!("file:{from}")),
+            to: NodeId::new(format!("file:{to}")),
+            edge_type,
+            ..Default::default()
+        };
+        store
+            .replace_graph(
+                &[node("a.rs"), node("b.rs"), node("a_test.rs")],
+                &[
+                    edge("e-import", "a.rs", "b.rs", GraphEdgeType::Imports),
+                    edge("e-derived", "a_test.rs", "a.rs", GraphEdgeType::DerivedFrom),
+                ],
+            )
+            .unwrap();
+
+        let (_, edges) = store.neighbors("file:a.rs", 50).unwrap();
+        assert!(edges.iter().any(|e| e.id.0 == "e-import"));
+        assert!(
+            !edges.iter().any(|e| e.id.0 == "e-derived"),
+            "derived siblings must not reach an untyped neighbor read: {edges:?}"
+        );
+        // Consumers that want them ask by type.
+        let typed = store
+            .edges_by_type_for_node(GraphEdgeType::DerivedFrom, "file:a.rs", false, 10, 0)
+            .unwrap();
+        assert_eq!(typed.len(), 1);
     }
 
     #[test]
