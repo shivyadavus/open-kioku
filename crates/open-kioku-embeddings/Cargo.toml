@@ -11,13 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-open-kioku-errors = { version = "3.1.0", path = "../open-kioku-errors" }
+open-kioku-errors = { version = "4.0.0", path = "../open-kioku-errors" }
 candle-core.workspace = true
 fastembed.workspace = true
 sha2.workspace = true
 hf-hub.workspace = true
 
 [dev-dependencies]
-open-kioku-core = { version = "3.1.0", path = "../open-kioku-core" }
+open-kioku-core = { version = "4.0.0", path = "../open-kioku-core" }
 serde.workspace = true
 serde_json.workspace = true
