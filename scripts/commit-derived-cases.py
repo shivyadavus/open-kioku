@@ -121,7 +121,7 @@ def main():
     )
     ap.add_argument(
         "--keep-repeated-subjects", action="store_true",
-        help="keep every commit whose subject repeats an earlier one up to numbers (default: keep the first only; on one Go corpus a 'publisher: Bump versions for release of X' subject was a third of the holdout and every instance had the same gold file, so one pattern decided the corpus)",
+        help="keep every commit whose subject repeats an earlier one up to numbers (default: keep the first only; on one Go corpus a 'release: bump module versions for the X cut' subject was a third of the holdout and every instance had the same gold file, so one pattern decided the corpus)",
     )
     ap.add_argument(
         "--path-prefix", action="append", default=None,
