@@ -650,10 +650,18 @@ fn verify_diff_since(
     if let Some(path) = diff_path {
         diffs.push(fs::read_to_string(path)?);
     }
+    // `since` is user input; the terminator keeps a value such as `--output=<path>` from
+    // being an option to git, which would exit 0 and write the diff there.
     let output = ProcessCommand::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["diff", "--unified=0", "--no-ext-diff", "--relative"])
+        .args([
+            "diff",
+            "--unified=0",
+            "--no-ext-diff",
+            "--relative",
+            "--end-of-options",
+        ])
         .arg(since)
         .output()?;
     if !output.status.success() {
