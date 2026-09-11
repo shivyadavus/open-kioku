@@ -10,7 +10,8 @@
     "frozen_from": "commit-derived-bench run 34201235176 (ubuntu-latest), main after #390 (generated files indexed and ranked below hand-written source)",
     "frozen_on": "2026-09-08",
     "derivation": "scripts/commit-derived-cases.py, chronological 70/30 split, path-naming subjects dropped, one case per subject repeated up to numbers",
-    "base": "withheld: the base commit lives in the BENCH_<CODE>_A_BASE repository variable; a full hash identifies the repository"
+    "base": "withheld: the base commit lives in the BENCH_<CODE>_A_BASE repository variable; a full hash identifies the repository",
+    "yield_note": "yield fields (gold_file_yield@B, gold_line_yield@B and their CIs) were scored before the denominator change in ae59bb1 (abstaining cases now score 0 rather than being excluded); they are informational, nothing gates on them, and the next re-freeze replaces them"
   },
   "cases": 385,
   "label": "dev",
