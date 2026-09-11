@@ -1267,20 +1267,104 @@ fn snapshot_fixture_repo() -> tempfile::TempDir {
     temp
 }
 
+/// Set the marker `SqliteStore::open` leaves behind when it discards a pre-4.0 edge layout.
+fn mark_graph_rebuild_required(repo: &std::path::Path) {
+    let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); \
+         INSERT OR REPLACE INTO schema_meta(key, value) VALUES('graph_rebuild_required_v4', '1');",
+    )
+    .unwrap();
+}
+
+/// The analysis fingerprint is unchanged since 3.1.0, so only the marker records that a
+/// pre-4.0 index's edges were discarded on open. Impact and plan name the rebuild instead of
+/// answering with empty relationship lists, and every status surface reports the marker.
+#[test]
+fn impact_plan_and_status_surfaces_report_a_graph_awaiting_a_rebuild() {
+    let temp = snapshot_fixture_repo();
+    let repo = temp.path();
+    mark_graph_rebuild_required(repo);
+
+    for args in [
+        vec!["impact", "--file", "src/lib.rs"],
+        vec!["plan", "change Worker::run"],
+        vec!["preflight", "change Worker::run"],
+    ] {
+        let (_stdout, stderr) = run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(&args);
+            command
+        });
+        assert!(
+            stderr.contains("older index format") && stderr.contains("ok index"),
+            "{args:?} must name the rebuild, got: {stderr}"
+        );
+    }
+
+    let (doctor, _stderr) = run_failure({
+        let mut command = ok();
+        command.arg("doctor").arg(repo);
+        command
+    });
+    assert!(
+        doctor.contains("[fail] graph") && doctor.contains("run `ok index`"),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("[ok]   index"),
+        "file and symbol counts are intact: {doctor}"
+    );
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--json").arg("status").arg(repo);
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["graph_rebuild_required"], true);
+    assert_eq!(
+        status["analysis_semantics_status"]["status"], "compatible",
+        "the fingerprint alone does not see the marker: {status}"
+    );
+
+    let status_text = run({
+        let mut command = ok();
+        command.arg("status").arg(repo);
+        command
+    });
+    assert!(
+        status_text.contains("graph awaiting rebuild: run `ok index`"),
+        "{status_text}"
+    );
+
+    let audit = run({
+        let mut command = ok();
+        command.arg("--json").arg("setup").arg("audit").arg(repo);
+        command
+    });
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(audit["ok"], false);
+    let graph = audit["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "graph")
+        .expect("setup audit carries the graph check");
+    assert_eq!(graph["status"], "fail");
+    assert!(graph["message"]
+        .as_str()
+        .unwrap()
+        .contains("run `ok index`"));
+}
+
 /// A store whose edges were discarded still has an edge table, so the export would happily
 /// count it and publish `graph_edge_count: 0` as though the repository had been measured.
 #[test]
 fn snapshot_export_refuses_a_store_whose_graph_awaits_a_rebuild() {
     let temp = snapshot_fixture_repo();
     let repo = temp.path();
-    {
-        let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('graph_rebuild_required_v4', '1')",
-            [],
-        )
-        .unwrap();
-    }
+    mark_graph_rebuild_required(repo);
 
     let (_stdout, stderr) = run_failure({
         let mut command = ok();

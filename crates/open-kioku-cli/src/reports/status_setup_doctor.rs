@@ -29,6 +29,43 @@ fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
     Ok(SqliteStore::open(&index_path)?.manifest()?)
 }
 
+/// Whether the repository's index has a graph awaiting `ok index`. `false` without an index:
+/// there is nothing to rebuild, and the missing index is reported on its own.
+fn index_graph_rebuild_required(repo: &Path) -> anyhow::Result<bool> {
+    let index_path =
+        open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    if !index_path.exists() {
+        return Ok(false);
+    }
+    Ok(SqliteStore::open(&index_path)?.graph_rebuild_required()?)
+}
+
+const GRAPH_REBUILD_REQUIRED_MESSAGE: &str =
+    "graph awaiting rebuild: run `ok index` (edges were built by an older index format and were discarded on open)";
+
+/// The same pre-check the MCP server runs in front of `impact_analysis` and `plan_change`:
+/// `ok impact` and `ok plan` refuse to answer from a graph awaiting `ok index` or built under
+/// other analysis semantics, rather than reporting an empty dependent list as if measured.
+fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()> {
+    if store.graph_rebuild_required()? {
+        anyhow::bail!("authoritative relationship evidence unavailable: {GRAPH_REBUILD_REQUIRED_MESSAGE}");
+    }
+    let compatibility = analysis_semantics_compatibility_for_manifest(store.manifest()?.as_ref());
+    if compatibility.status.allows_authoritative_relationships() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "authoritative relationship evidence unavailable: analysis semantics {:?}: {}; stored={}, current={}; affected components [{}], languages [{}]; {}",
+        compatibility.status,
+        compatibility.reasons.join("; "),
+        compatibility.stored_fingerprint.as_deref().unwrap_or("missing"),
+        compatibility.current_fingerprint,
+        compatibility.affected_components.join(", "),
+        compatibility.affected_languages.join(", "),
+        compatibility.recommended_action
+    )
+}
+
 fn semantic_lifecycle_status(repo: &Path) -> Option<open_kioku_semantic::SemanticStatus> {
     let index_path =
         open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
@@ -94,6 +131,15 @@ fn render_status_markdown(
         out.push_str(&format!("| Analysis semantics | `{:?}` |\n", semantics.status));
         out.push_str(&format!("| Stored semantics fingerprint | `{}` |\n", semantics.stored_fingerprint.as_deref().unwrap_or("missing")));
         out.push_str(&format!("| Current semantics fingerprint | `{}` |\n", semantics.current_fingerprint));
+        // An unreadable marker is its own finding (the readiness checks below carry the
+        // error), not a claim either way about the graph.
+        out.push_str(&format!(
+            "| Graph rebuild required | `{}` |\n",
+            match index_graph_rebuild_required(repo) {
+                Ok(required) => required.to_string(),
+                Err(_) => "unknown".into(),
+            }
+        ));
         out.push_str(&format!("| Files | {} |\n", manifest.file_count));
         out.push_str(&format!("| Symbols | {} |\n", manifest.symbol_count));
         out.push_str(&format!("| Chunks | {} |\n", manifest.chunk_count));
@@ -262,6 +308,17 @@ fn setup_audit_report(repo: &Path) -> SetupAuditReport {
                 manifest.file_count, manifest.symbol_count, manifest.chunk_count
             ),
         });
+        if let Some(graph) = doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "graph" && !matches!(check.status, CheckStatus::Pass))
+        {
+            checks.push(SetupAuditCheck {
+                name: "graph".into(),
+                status: graph.status,
+                message: graph.message.clone(),
+            });
+        }
         if manifest.quality.scip_exact_references > 0 {
             checks.push(SetupAuditCheck {
                 name: "scip".into(),
@@ -1041,6 +1098,35 @@ fn doctor_report(repo: &Path) -> DoctorReport {
             message: ".ok/index.sqlite is missing".into(),
         });
         next_steps.push("Run `ok index .` before connecting an MCP client.".into());
+    }
+
+    // The index check above opens the store, which is the call that discards a pre-4.0 edge
+    // layout and sets the marker; it still reports file and symbol counts, which are intact.
+    // The relationship reads behind impact and plan are what the marker withholds, so it is a
+    // failure here, not a warning.
+    match index_graph_rebuild_required(&repo) {
+        Ok(true) => {
+            checks.push(DoctorCheck {
+                name: "graph",
+                status: CheckStatus::Fail,
+                message: GRAPH_REBUILD_REQUIRED_MESSAGE.into(),
+            });
+            next_steps.push("Run `ok index .` to rebuild the relationship graph.".into());
+        }
+        Ok(false) => {
+            if index_path.exists() {
+                checks.push(DoctorCheck {
+                    name: "graph",
+                    status: CheckStatus::Pass,
+                    message: "relationship graph present".into(),
+                });
+            }
+        }
+        Err(err) => checks.push(DoctorCheck {
+            name: "graph",
+            status: CheckStatus::Fail,
+            message: format!("could not read the graph rebuild marker: {err}"),
+        }),
     }
 
     if let Ok(Some(manifest)) = load_index_manifest(&repo) {

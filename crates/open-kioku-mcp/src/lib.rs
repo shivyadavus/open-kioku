@@ -275,6 +275,14 @@ fn analysis_semantics_compatibility_for_store(
 }
 
 fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()> {
+    // The fingerprint below did not change in 4.0.0, so it passes on a pre-4.0 index whose
+    // edges were discarded on open. The marker is the only record of that discard.
+    if store.graph_rebuild_required()? {
+        anyhow::bail!(
+            "authoritative relationship evidence unavailable: graph edges were built by an \
+             older index format and were discarded on open; run `ok index` to rebuild them"
+        );
+    }
     let compatibility = analysis_semantics_compatibility_for_store(store)?;
     if compatibility.status.allows_authoritative_relationships() {
         return Ok(());
@@ -342,6 +350,12 @@ async fn dispatch(
                 object.insert(
                     "analysis_semantics_status".into(),
                     serde_json::to_value(compatibility)?,
+                );
+                // The fingerprint above is unchanged since 3.1.0 and passes on a pre-4.0
+                // index whose edges were discarded on open; only the marker records that.
+                object.insert(
+                    "graph_rebuild_required".into(),
+                    Value::Bool(store.graph_rebuild_required()?),
                 );
                 object.insert(
                     "generation_id".into(),
@@ -475,6 +489,10 @@ async fn dispatch(
                 return format_contract_create_output(&output, format_arg(&params, "json"));
             }
 
+            // A plan's relationship claims come from the graph. Refuse up front rather than
+            // let a stale index produce a plan whose "structurally proven dependents"
+            // sentence is silently absent.
+            require_authoritative_relationships(store)?;
             let task = required_str(&params, "task")?;
             let detail = params
                 .get("detail")
@@ -3505,6 +3523,118 @@ mod tests {
             "an unclamped page is not truncated: {shallow}"
         );
         assert!(shallow["warnings"].as_array().unwrap().is_empty());
+    }
+
+    /// A pre-4.0 index has its edges discarded on open and only the marker records that; the
+    /// analysis fingerprint is unchanged since 3.1.0, so the fingerprint gate alone let
+    /// `impact_analysis` answer `proven_impact: []` and `plan_change` drop its relationship
+    /// sentence from such a store.
+    #[tokio::test]
+    async fn impact_and_plan_refuse_a_graph_awaiting_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.sqlite");
+        let config = OkConfig::default();
+        let manifest = fixture_manifest();
+        let file = open_kioku_core::File {
+            id: open_kioku_core::FileId::new("f1"),
+            repository_id: open_kioku_core::RepositoryId::new("repo"),
+            path: PathBuf::from("src/lib.rs"),
+            language: open_kioku_core::Language::Rust,
+            size_bytes: 10,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &[file],
+                    symbols: &[],
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+        }
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); \
+                 INSERT OR REPLACE INTO schema_meta(key, value) VALUES('graph_rebuild_required_v4', '1');",
+            )
+            .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+
+        let status = dispatch(Path::new("."), &store, &config, "repo_status", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(status["graph_rebuild_required"], true);
+        assert_eq!(
+            status["analysis_semantics_status"]["status"], "compatible",
+            "the fingerprint gate alone does not see the marker: {status}"
+        );
+
+        for (method, params) in [
+            ("impact_analysis", json!({"path": "src/lib.rs"})),
+            ("plan_change", json!({"task": "change src/lib.rs"})),
+            (
+                "plan_change",
+                json!({"task": "change src/lib.rs", "detail": "preflight"}),
+            ),
+        ] {
+            let error = dispatch(Path::new("."), &store, &config, method, params)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("older index format") && error.contains("ok index"),
+                "{method} must name the rebuild, got: {error}"
+            );
+        }
+    }
+
+    /// `since_plan` is caller input on a read-only server: after `--end-of-options` an
+    /// option-shaped value is a revision git cannot resolve, not a file it writes.
+    #[test]
+    fn verify_since_plan_never_reaches_git_as_an_option() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "one"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let sink = temp.path().join("stolen-diff.txt");
+        let since = format!("--output={}", sink.display());
+        assert!(git_diff_since(repo, &since).is_err());
+        assert!(
+            !sink.exists(),
+            "git must not have written {}",
+            sink.display()
+        );
+
+        let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();
+        assert!(diff.contains("+two"), "{diff}");
     }
 
     #[tokio::test]

@@ -231,6 +231,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
                             manifest.as_ref().and_then(|manifest| manifest.quality.coverage.as_ref()),
                         )?,
                     );
+                    // Also mirrored: the fingerprint above passes on a pre-4.0 index whose
+                    // edges were discarded on open, so the marker is reported beside it.
+                    object.insert(
+                        "graph_rebuild_required".into(),
+                        serde_json::Value::Bool(index_graph_rebuild_required(&repo)?),
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else if let Some(manifest) = manifest {
@@ -256,6 +262,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 if !semantics.status.allows_authoritative_relationships() {
                     println!("Relationship authority unavailable: {}", semantics.reasons.join("; "));
                     println!("Recommended action: {}", semantics.recommended_action);
+                }
+                if index_graph_rebuild_required(&repo)? {
+                    println!("Relationship authority unavailable: {GRAPH_REBUILD_REQUIRED_MESSAGE}");
                 }
                 if let Some(report) = manifest.quality.resolution_quality.as_ref() {
                     for line in relationship_resolution_summary_lines(report) {
@@ -718,6 +727,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::Impact(args) => {
             let store = open_store(&repo)?;
+            require_authoritative_relationships(&store)?;
             let index_dir = default_index_dir(&repo);
             let search_index = if TantivySearchIndex::exists(&index_dir) {
                 Some(TantivySearchIndex::open_or_create(&index_dir)?)
@@ -873,6 +883,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             verify_evidence,
         } => {
             let store = open_store(&repo)?;
+            require_authoritative_relationships(&store)?;
             let task = if let Some(since) = since.as_deref() {
                 task_with_changed_ranges(&repo, &task, since)?
             } else {
@@ -906,6 +917,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             since,
         } => {
             let store = open_store(&repo)?;
+            require_authoritative_relationships(&store)?;
             let task = if let Some(since) = since.as_deref() {
                 task_with_changed_ranges(&repo, &task, since)?
             } else {
