@@ -6,6 +6,10 @@ the rule `ok setup agent --apply` writes — lands in the user's own repository,
 where a retired name fails on first use with nothing to point at the fix. The
 retired-tool table in `open-kioku-mcp` is the source of truth, so this cannot
 drift from the code the way prose does.
+
+The prose under `docs/` is held to the same bar: two documents described
+retired tools as live for a release cycle after they were removed. The one
+document that records the retirements themselves is exempt.
 """
 
 from __future__ import annotations
@@ -22,6 +26,16 @@ GUIDANCE_FILES = [
     Path(".cursor-plugin/skills/open-kioku/SKILL.md"),
     Path(".cursor-plugin/skills/open-kioku.mdc"),
 ]
+
+# `docs/mcp-tools.md` is the migration table: it names every retired tool on
+# purpose, beside where its capability went.
+DOCS_EXEMPT = {Path("docs/mcp-tools.md")}
+
+# Retired tool names that are also live response-field names. `semantic_status`
+# is the field `search_code` reports its fallback in, so the substring cannot
+# tell a documented field from a retired tool; those names are skipped for
+# `docs/` only, where the guidance files above never had the collision.
+DOCS_FIELD_NAME_COLLISIONS = {"semantic_status"}
 
 
 def retired_tool_names() -> set[str]:
@@ -51,6 +65,14 @@ def guidance_files() -> list[Path]:
     return files
 
 
+def docs_files() -> list[Path]:
+    return [
+        path
+        for path in sorted(Path("docs").rglob("*.md"))
+        if path not in DOCS_EXEMPT
+    ]
+
+
 def main() -> int:
     retired = retired_tool_names()
     failures: list[str] = []
@@ -69,13 +91,20 @@ def main() -> int:
             if needle in text:
                 failures.append(f"{path}: names the retired MCP tool `{name}`")
 
+    docs = docs_files()
+    for path in docs:
+        text = path.read_text(encoding="utf-8")
+        for name in sorted(retired - DOCS_FIELD_NAME_COLLISIONS):
+            if name in text:
+                failures.append(f"{path}: describes the retired MCP tool `{name}`")
+
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
 
     print(
-        f"agent guidance validated: {len(guidance_files())} shipped files "
-        "carry no retired MCP tool name"
+        f"agent guidance validated: {len(guidance_files())} shipped files and "
+        f"{len(docs)} docs carry no retired MCP tool name"
     )
     return 0
 
