@@ -7,16 +7,16 @@ class OpenKioku < Formula
   on_macos do
     depends_on arch: :arm64
     url "https://github.com/shivyadavus/open-kioku/releases/download/v4.0.0/ok-macos-arm64"
-    sha256 "1c0a746cd2feb7af3e6b0eef59a9196c08170ed175ff5280a1683d8055eb0f2a"
+    sha256 "fb3651884fe7e81e4cb40aa9f929d46de3c16cd080226207bfd5ee8aa09273a8"
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/shivyadavus/open-kioku/releases/download/v4.0.0/ok-linux-arm64"
-      sha256 "a4244be41c0c7915b05da0f0818a002ad6e8571e8013cb7bdaf926435ee3d624"
+      sha256 "0bea285e2e8478be8cf904c6a5f8ea909b3f4c6669d15c249b4bcfe9febc08b0"
     else
       url "https://github.com/shivyadavus/open-kioku/releases/download/v4.0.0/ok-linux-x86_64"
-      sha256 "d99b5476f8a7b0072bd4efc0bf5dffc26967eaa3692688cf42e8ce92f10fcbec"
+      sha256 "ad18fc99a2d8ed84de194816d2b49e362faa940ffc861ff7b1a184a593adf75d"
     end
   end
 
