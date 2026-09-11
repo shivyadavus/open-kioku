@@ -1892,10 +1892,18 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
 }
 
 fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
+    // `since` is caller input on a read-only server. Without the terminator a value such as
+    // `--output=<path>` is an option to git, which exits 0 and writes the diff there.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["diff", "--unified=0", "--no-ext-diff", "--relative"])
+        .args([
+            "diff",
+            "--unified=0",
+            "--no-ext-diff",
+            "--relative",
+            "--end-of-options",
+        ])
         .arg(since)
         .output()?;
     if !output.status.success() {
