@@ -7,7 +7,7 @@ Default posture:
 - no network access
 - no file writes
 - no hidden-file scanning
-- deny `.env*`, `.aws/**`, `.ssh/**`, `id_rsa*`, `id_ed25519*`, and key material
+- deny `.env` / `.env.*`, `.aws/**`, `.ssh/**`, `id_rsa*`, `id_ed25519*`, and key material
   (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`) on every path; deny a
   path component naming `secret`, `credential`, or `*_key` only for files that are
   not in a programming language (data, config, prose). A source file such as
