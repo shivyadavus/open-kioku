@@ -140,7 +140,7 @@ repository's own history, after the Agent Retrieval Bench methodology:
    set is the source files it modified that already existed at `B`. Commits whose subject
    names a path are dropped (kept, the path is the answer; stripped, the subject no longer
    describes the change), and a subject that repeats an earlier one up to numbers keeps only
-   its first instance: on a Go application (~800 files), "publisher: Bump versions for release of X" was a third of its
+   its first instance: on a Go application (~800 files), "release: bump module versions for the X cut" was a third of its
    holdout with the same gold file every time, so one pattern decided the corpus.
    The change lives in the future, never in the index, so a query cannot retrieve its
    own diff. Each gold file also records the line ranges the commit modified (a fifth
@@ -149,9 +149,9 @@ repository's own history, after the Agent Retrieval Bench methodology:
 3. Split chronologically — older cases are the development set, newer ones the holdout.
 
 ```sh
-scripts/commit-derived-cases.py ~/src/java-service --base 1e6d7960 --after 3800 \
+scripts/commit-derived-cases.py ~/src/java-service --base <base-commit> --after 3800 \
     --path-prefix libs/ --path-prefix modules/ --path-prefix server/ --out cases.tsv
-scripts/score-context-cases.py --ok target/release/ok --repo ./es-at-base \
+scripts/score-context-cases.py --ok target/release/ok --repo ./corpus-at-base \
     --cases cases-holdout.tsv --label holdout --out holdout.json
 scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/java-a-holdout.json
 ```
