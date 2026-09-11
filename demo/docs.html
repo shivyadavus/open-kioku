@@ -65,7 +65,7 @@ ok setup agent cursor --repo . --apply</code></pre><p class="docs-hint">Use <cod
 <div class="install-card"><b>Setup guides</b><code>ok setup agent claude|cursor --repo . --apply</code><p><a href="claude-code-setup.html">Claude Code</a> · <a href="cursor-setup.html">Cursor</a> · <a href="codex-setup.html">Codex</a> · <a href="gemini-cli-setup.html">Gemini CLI</a></p></div>
 </div></div></div>
 </div></section>
-<section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">What to expect</div><h2 class="section-title">Measured on four real repositories, re-run nightly.</h2><p class="section-copy">Holdout split of the commit-derived corpora on the production <code>ok context</code> path. Baselines frozen 2026-09-07 from a hosted Linux runner matrix; the nightly job fails when a watched metric drops more than 0.03 below its baseline.</p></div>
+<section class="docs-section"><div class="wrap"><div class="section-head"><div class="kicker">What to expect</div><h2 class="section-title">Measured on four real repositories, re-run nightly.</h2><p class="section-copy">Holdout split of the commit-derived corpora on the production <code>ok context</code> path. Baselines frozen 2026-09-08 from a hosted Linux runner matrix; the nightly job fails when a watched metric drops more than 0.03 below its baseline.</p></div>
 <div class="expect-grid"><div class="readout"><table class="expect-table"><thead><tr><th>Corpus</th><th>Holdout cases</th><th>R@5</th><th>R@20</th><th>MRR</th></tr></thead><tbody>
 <tr><td>Java, about 10k files</td><td>113</td><td>0.566</td><td>0.699</td><td>0.504</td></tr>
 <tr><td>Go application, ~800 files</td><td>84</td><td>0.679</td><td>0.809</td><td>0.535</td></tr>

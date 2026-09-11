@@ -193,8 +193,9 @@ not against the literature.
 ## Gold yield at a token budget
 
 Recall@k and MRR say whether the right *file* is in the pack. They do not say whether the
-agent can afford to read it. Across the four commit-derived holdouts (Java, 10k files; Go,
-~800 files; TypeScript, ~900 files; Python, ~4k files) a gold file is 168–844 lines at the
+agent can afford to read it. Across the four corpora (Java, 10k files; Go, ~800 files;
+TypeScript, ~900 files; Python, ~4k files; measured on the 626-case locally derived files
+at `48e64c9`) a gold file is 168–844 lines at the
 median (381–1,368 mean) and the commit modifies 2–3 of them at the median — 0.4–1.8% of
 the file, 1.8–8.4% on average — so a pack that names the right file but spends the budget
 on the wrong region still costs the agent a file read. The yield metrics score the pack the
@@ -253,14 +254,18 @@ Two caveats travel with the numbers:
 
   Pack sizes move with region widening, so any figure here is a record of a build, not a
   property of the tool: measure the arm under test rather than quoting these. On the
-  four commit-derived holdouts, primary units that were 836-1,152 estimated tokens at the
+  626-case locally derived files (four corpora), primary units that were 836-1,152 estimated tokens at the
   median before widening were 2,753-3,612 after, with the 95th percentile moving from
   1,549-5,600 to 4,322-7,629 (measured at `48e64c9`, local workstation, `--workers 2`;
   both arms' reports are in `benchmarks/commit-derived/region-widening-ab.json`). A p95 above
   6,000 is reachable only on the file-limit path; a caller that passes
-  `ContextBudget::default()` is bounded by that ceiling instead. No case's yield differed
-  between the 4,000 and 16,000 budgets in either arm, so on this path region granularity,
-  not the budget, is still what limits how much of a change the pack shows.
+  `ContextBudget::default()` is bounded by that ceiling instead. In the base arm no case's
+  yield differed between the 4,000 and 16,000 budgets. In the widened arm 8,000 and 16,000
+  are identical but 4,000 is not: widened regions consume the budget before later gold files
+  are reached, so `gold_file_yield_primary@4k` reads 0.530 against 0.537 at 8k on Java,
+  0.693 against 0.696 on Go and 0.602 against 0.608 on Python (TypeScript 0.691 at every
+  budget). From 8k upward, region granularity rather than the budget is still what limits
+  how much of a change the pack shows.
 
 `scripts/compare-commit-derived-report.py` prints the yields as informational and does not
 gate on them; a baseline frozen before the metric existed compares without it.
