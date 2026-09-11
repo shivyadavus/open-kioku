@@ -222,30 +222,41 @@ pub fn commit_patches(root: impl AsRef<Path>, max_commits: usize) -> Result<Vec<
 }
 
 pub fn diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
-    run_diff_name_status(root, &[])
+    run_diff_name_status(root, &[], None)
 }
 
 pub fn diff_name_status_since(root: impl AsRef<Path>, since: &str) -> Result<Vec<DiffFile>> {
-    run_diff_name_status(root, &[since])
+    run_diff_name_status(root, &[], Some(since))
 }
 
 pub fn cached_diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
-    run_diff_name_status(root, &["--cached"])
+    run_diff_name_status(root, &["--cached"], None)
 }
 
 pub fn head_diff_name_status(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
-    run_diff_name_status(root, &["HEAD"])
+    run_diff_name_status(root, &[], Some("HEAD"))
 }
 
 pub fn diff_unified_zero(root: impl AsRef<Path>) -> Result<Vec<DiffFile>> {
-    run_diff_unified_zero(root, &[])
+    run_diff_unified_zero(root, None)
 }
 
 pub fn diff_unified_zero_since(root: impl AsRef<Path>, since: &str) -> Result<Vec<DiffFile>> {
-    run_diff_unified_zero(root, &[since])
+    run_diff_unified_zero(root, Some(since))
 }
 
-fn run_diff_unified_zero(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<Vec<DiffFile>> {
+/// The revision (or range) a caller supplied is placed after `--end-of-options`, so a value
+/// such as `--output=<path>` reaches git as a revision it cannot resolve rather than as an
+/// option it obeys. Git rejects an option after that terminator, which is why the fixed flags
+/// go first.
+fn revision_args(revision: Option<&str>) -> Vec<&str> {
+    match revision {
+        Some(revision) => vec!["--end-of-options", revision],
+        None => Vec::new(),
+    }
+}
+
+fn run_diff_unified_zero(root: impl AsRef<Path>, revision: Option<&str>) -> Result<Vec<DiffFile>> {
     let root = root.as_ref();
     if !root.join(".git").exists() {
         return Ok(Vec::new());
@@ -255,8 +266,8 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<
         .arg(root)
         .args(["-c", "core.quotePath=true"])
         .arg("diff")
-        .args(extra_args)
         .args(["--unified=0", "--no-ext-diff", "--no-textconv"])
+        .args(revision_args(revision))
         .output()
         .map_err(|err| OkError::Repository(format!("git diff failed: {err}")))?;
     if !output.status.success() {
@@ -269,7 +280,11 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<
     parse_unified_zero_diff(&git_text(&output.stdout, "diff output")?)
 }
 
-fn run_diff_name_status(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<Vec<DiffFile>> {
+fn run_diff_name_status(
+    root: impl AsRef<Path>,
+    flags: &[&str],
+    revision: Option<&str>,
+) -> Result<Vec<DiffFile>> {
     let root = root.as_ref();
     if !root.join(".git").exists() {
         return Ok(Vec::new());
@@ -278,8 +293,9 @@ fn run_diff_name_status(root: impl AsRef<Path>, extra_args: &[&str]) -> Result<V
         .arg("-C")
         .arg(root)
         .arg("diff")
-        .args(extra_args)
+        .args(flags)
         .args(["--name-status", "--find-renames"])
+        .args(revision_args(revision))
         .output()
         .map_err(|err| OkError::Repository(format!("git diff --name-status failed: {err}")))?;
     if !output.status.success() {
@@ -858,8 +874,9 @@ fn is_test_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cochange_records, commit_history, commit_patches, parse_commit_patches,
-        parse_diff_name_status, parse_file_patches, parse_unified_zero_diff,
+        cochange_records, commit_history, commit_patches, diff_name_status_since,
+        diff_unified_zero_since, parse_commit_patches, parse_diff_name_status, parse_file_patches,
+        parse_unified_zero_diff,
     };
     use open_kioku_core::GitChangeKind;
     use std::fs;
@@ -1169,5 +1186,44 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A `since` revision reaches git after `--end-of-options`: an option-shaped value is a
+    /// revision git cannot resolve, never an instruction it obeys.
+    #[test]
+    fn since_revision_is_never_parsed_as_a_git_option() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/one.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        write(dir.path(), "src/one.rs", "fn one() {}\nfn two() {}\n");
+        commit_all(dir.path(), "two");
+
+        let outside = tempfile::tempdir().unwrap();
+        let sink = outside.path().join("diff.txt");
+        let since = format!("--output={}", sink.display());
+        assert!(
+            diff_unified_zero_since(dir.path(), &since).is_err(),
+            "an option-shaped revision must be rejected"
+        );
+        assert!(
+            diff_name_status_since(dir.path(), &since).is_err(),
+            "an option-shaped revision must be rejected"
+        );
+        assert!(
+            !sink.exists(),
+            "git must not have written {}",
+            sink.display()
+        );
+
+        let changed = diff_unified_zero_since(dir.path(), "HEAD~1").unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            changed[0].new_path.as_deref(),
+            Some(Path::new("src/one.rs"))
+        );
+        assert_eq!(
+            diff_name_status_since(dir.path(), "HEAD~1").unwrap().len(),
+            1
+        );
     }
 }
