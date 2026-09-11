@@ -3538,7 +3538,7 @@ mod tests {
     /// `impact_analysis` answer `proven_impact: []` and `plan_change` drop its relationship
     /// sentence from such a store.
     #[tokio::test]
-    async fn impact_and_plan_refuse_a_graph_awaiting_rebuild() {
+    async fn impact_plan_and_context_refuse_a_graph_awaiting_rebuild() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("index.sqlite");
         let config = OkConfig::default();
@@ -3553,6 +3553,16 @@ mod tests {
             is_generated: false,
             is_vendor: false,
         };
+        // The context pack only reads the graph once a primary file is selected, so the
+        // task must match indexed text or the refusal is never reached.
+        let chunk = CodeChunk {
+            id: "chunk-worker".into(),
+            file_id: file.id.clone(),
+            range: LineRange { start: 1, end: 2 },
+            language: Language::Rust,
+            text: "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n".into(),
+            symbol_id: None,
+        };
         {
             let store = SqliteStore::open(&path).unwrap();
             store
@@ -3560,7 +3570,7 @@ mod tests {
                     manifest: &manifest,
                     files: &[file],
                     symbols: &[],
-                    chunks: &[],
+                    chunks: &[chunk],
                     tests: &[],
                     imports: &[],
                     occurrences: &[],
@@ -3596,6 +3606,7 @@ mod tests {
                 "plan_change",
                 json!({"task": "change src/lib.rs", "detail": "preflight"}),
             ),
+            ("build_context_pack", json!({"task": "change Worker::run"})),
         ] {
             let error = dispatch(Path::new("."), &store, &config, method, params)
                 .await
