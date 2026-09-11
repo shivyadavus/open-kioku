@@ -5,7 +5,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [4.0.0] — 2026-09-09
+## [4.0.0] — 2026-09-10
 
 Two things need doing on upgrade, both detailed first below: **run `ok index` to rebuild every existing index**, and **reconfigure any agent that names an MCP tool by one of the retired names** (`ok setup agent --apply` rewrites its own guidance for you).
 
