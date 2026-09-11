@@ -1278,10 +1278,11 @@ fn mark_graph_rebuild_required(repo: &std::path::Path) {
 }
 
 /// The analysis fingerprint is unchanged since 3.1.0, so only the marker records that a
-/// pre-4.0 index's edges were discarded on open. Impact and plan name the rebuild instead of
-/// answering with empty relationship lists, and every status surface reports the marker.
+/// pre-4.0 index's edges were discarded on open. Impact, plan and context name the rebuild
+/// instead of answering with empty relationship lists, and every status surface reports the
+/// marker.
 #[test]
-fn impact_plan_and_status_surfaces_report_a_graph_awaiting_a_rebuild() {
+fn impact_plan_context_and_status_surfaces_report_a_graph_awaiting_a_rebuild() {
     let temp = snapshot_fixture_repo();
     let repo = temp.path();
     mark_graph_rebuild_required(repo);
@@ -1290,6 +1291,8 @@ fn impact_plan_and_status_surfaces_report_a_graph_awaiting_a_rebuild() {
         vec!["impact", "--file", "src/lib.rs"],
         vec!["plan", "change Worker::run"],
         vec!["preflight", "change Worker::run"],
+        // The task must select a primary file; a pack with none never reads the graph.
+        vec!["context", "change Worker::run"],
     ] {
         let (_stdout, stderr) = run_failure({
             let mut command = ok();
