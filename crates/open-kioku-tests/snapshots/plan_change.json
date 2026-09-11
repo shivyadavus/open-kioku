@@ -99,7 +99,7 @@
       "overall_enum": "low",
       "overall_score": 0.0
     },
-    "confidence_summary": "overall Low (0.30) from evidence density, references, validation, boundaries, runtime, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
+    "confidence_summary": "overall Low (0.30) from task relevance, evidence density, references, validation, boundaries, runtime, test coverage, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
     "evidence": [
       {
         "confidence": "medium",

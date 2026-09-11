@@ -994,7 +994,7 @@ fn push_unique_negative_evidence(items: &mut Vec<NegativeEvidence>, item: Negati
 
 fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
     let mut parts = vec![format!(
-        "overall {:?} ({:.2}) from evidence density, references, validation, boundaries, runtime, and negative evidence",
+        "overall {:?} ({:.2}) from task relevance, evidence density, references, validation, boundaries, runtime, test coverage, and negative evidence",
         breakdown.overall_enum, breakdown.overall_score
     )];
     if let Some(blocker) = breakdown.blockers.first() {
