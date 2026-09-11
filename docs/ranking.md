@@ -65,9 +65,9 @@ Region widening is not a ranking signal. Once selection has ordered the pack, th
 three primary files have their selected regions widened - enclosing symbol, the file's other
 task-ranked units, adjacent chunks - up to a per-file token cap
 (`docs/context-pack-spec.md`, "Selection and region widening"). It changes what the pack
-shows of a file, never which files or in what order: on the commit-derived holdouts of four
+shows of a file, never which files or in what order: on the 626 locally derived cases across four
 large public repositories R@5, R@20, MRR and gold recall are identical before and after, and
-no case of 626 changed its rank or its top five.
+no case changed its rank or its top five.
 
 It is not free. Showing more of each top file raises the median pack from
 836-1,152 to 2,753-3,612 estimated tokens, about three times as many, and the 95th
