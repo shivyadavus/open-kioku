@@ -118,11 +118,11 @@ output. `validate`, `check`, and `explain` also accept `--format markdown` for
 readable reports. Repositories with no policy remain valid and explicitly
 report that heuristic architecture detection is still active.
 
-The MCP tool `architecture_policy_validate` validates the resolved repository
-policy or an explicit `path`. `architecture_policy_check` returns the same
-structured policy check report for indexed repositories.
-`architecture_policy_explain` accepts exactly one of `file`, `symbol`, or
-`scope: "repo"` and returns the same explanation shape as the CLI.
+These are CLI surfaces only. The MCP tools that wrapped them were retired in
+4.0.0; an agent with a shell reaches the same reports through
+`ok architecture policy validate`, `ok architecture policy check`, and
+`ok architecture policy explain` (`--file`, `--symbol`, or no flag for the
+repository scope), each with `--json` for the structured shape.
 
 When a repository policy is configured, `ok context`, `ok plan`, `ok impact`,
 MCP `build_context_pack`, MCP `plan_change`, and MCP `impact_analysis` include

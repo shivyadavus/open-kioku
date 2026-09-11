@@ -15,7 +15,7 @@ Open Kioku assumes AI agents can be tricked by repository content, stale memory,
 | Threat | Risk | Control |
 | --- | --- | --- |
 | Prompt injection in source or docs | Agent follows untrusted repo text as instruction | Agents must treat Open Kioku output as evidence, not instruction. |
-| Secret exposure through indexing | Sensitive files become searchable | Secret-like paths are denied and hidden files are blocked by default. |
+| Secret exposure through indexing | Sensitive files become searchable | Credential-shaped paths (`.env*`, `.aws`, `.ssh`, key files) are always denied and hidden files are blocked by default; a `secret`/`credential` name denies data, config and prose files but not programming-language files, which are indexed with parser messages redacted. |
 | Memory poisoning | Stale or malicious facts outrank code | Memory is append-only support context; indexed code evidence wins. |
 | MCP over-permissioning | Agent gains command or network access | Source edits stay in the normal editor; command execution and network access require explicit opt-in. |
 | Repo poisoning | Malicious files influence plan selection | `ok plan` reports confidence and evidence paths; low confidence should block edits. |

@@ -47,7 +47,7 @@ against this list by `scripts/validate-docs.sh`.
 | `regex_search` | Exact regular-expression line matching over indexed chunk text |
 | `search_symbols` | Symbol inventory, optionally filtered by name |
 | `get_definition` | Look up a symbol's definition, optionally with its body |
-| `get_references` | References to a symbol (`kind`: `all`, `callers`, `callees`, `implementations`) |
+| `get_references` | References to a symbol (`kind`: `references` (default), `callers`, `callees`, `implementations`, `all`) |
 | `dependency_path` | Dependency path between two modules, or one module's dependencies |
 | `impact_analysis` | Blast-radius analysis for a change |
 | `explain_flow` | Explain a control or data flow through the graph |

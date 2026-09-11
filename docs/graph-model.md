@@ -47,7 +47,8 @@ possibilities — a declared origin carrying its `declared_origin` proof kind so
 it from a naming guess, and neither ever as proven impact. Retrieval reads it from either end and admits the other side of a candidate into
 the context pack with the edge as evidence (`docs/ranking.md`, `derived:<edge>`).
 
-No untyped graph read returns it. `neighbors` — which backs `module_dependencies` — and
+No untyped graph read returns it. `neighbors` — which backs `dependency_path` when no
+destination is given — and
 `shortest_path`, which backs `dependency_path`, both exclude it in the SQLite and in-memory
 stores, and it is kept out of a context pack's `dependency_edges`: a test does not depend on the
 module it is named after, so it must not become a hop in anything a caller reads as a dependency
