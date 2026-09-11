@@ -246,11 +246,9 @@ ok --repo /path/to/repo history similar \
   --symbol validate_token
 ```
 
-The experimental MCP tool `history_similar_changes` accepts the same signals:
-
-```json
-{"task":"fix token expiration","path":"src/auth.rs","symbol":"validate_token","limit":5}
-```
+The MCP tool that accepted the same signals as a JSON object was retired in
+4.0.0; `ok --json history similar` with `--task`, `--path`, `--symbol`, and
+`--limit` returns the structured result.
 
 Results are ranked deterministically by combined evidence rather than path-only
 matching. Each `SimilarChangeHit` includes:
@@ -382,7 +380,7 @@ Lexical search is exposed behind `open-kioku-storage::SearchIndex`. `open-kioku-
 
 ## KV Graph
 
-`open-kioku-storage-kv` owns the graph-adjacency extension point for a future redb/fjall optimized store. SQLite currently implements `GraphStore` directly so `ok path`, MCP `dependency_path`, and MCP `module_dependencies` work from persisted facts.
+`open-kioku-storage-kv` owns the graph-adjacency extension point for a future redb/fjall optimized store. SQLite currently implements `GraphStore` directly so `ok path` and MCP `dependency_path` (with or without a destination) work from persisted facts.
 
 ## Migrations
 
