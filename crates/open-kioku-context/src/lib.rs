@@ -730,9 +730,14 @@ impl<'a> ContextPackBuilder<'a> {
         let mut dependency_edges: Vec<GraphEdge> = Vec::new();
         for result in primary_files.iter().take(5) {
             let node_id = format!("file:{}", result.path.display());
-            if let Ok((_nodes, edges)) = self.store.neighbors(&node_id, 20) {
-                dependency_edges
-                    .extend(edges.into_iter().filter(is_trusted_context_dependency_edge));
+            // A store without graph support has no edges to offer. A store that refuses the
+            // read — its graph awaiting `ok index`, or built under other analysis semantics —
+            // must not leave `dependency_edges` empty as though it had been measured.
+            match self.store.neighbors(&node_id, 20) {
+                Ok((_nodes, edges)) => dependency_edges
+                    .extend(edges.into_iter().filter(is_trusted_context_dependency_edge)),
+                Err(open_kioku_errors::OkError::Unsupported(_)) => {}
+                Err(err) => return Err(err),
             }
         }
         dependency_edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));

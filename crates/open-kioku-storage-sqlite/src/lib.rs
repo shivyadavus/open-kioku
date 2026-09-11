@@ -170,6 +170,19 @@ impl SqliteStore {
         &self.path
     }
 
+    /// Whether this store's graph edges were discarded on open and are waiting on `ok index`.
+    ///
+    /// Every relationship read already refuses such a store; this is for the status surfaces
+    /// (`ok doctor`, `ok status`, `repo_status`) and the pre-checks in front of impact and plan,
+    /// which need to report the marker rather than discover it one failed read at a time.
+    pub fn graph_rebuild_required(&self) -> Result<bool> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        graph_rebuild_required(&conn)
+    }
+
     /// SQLite's `PRAGMA data_version`: changes when another connection commits. Our own
     /// writes do not move it, so manifest writers call `invalidate_semantics_verdict`.
     fn data_version(&self) -> Result<i64> {

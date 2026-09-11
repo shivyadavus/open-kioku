@@ -43,6 +43,7 @@
     "coverage": null,
     "file_count": 2,
     "generation_id": null,
+    "graph_rebuild_required": false,
     "index_mode": "full",
     "indexed_at": "<indexed_at>",
     "languages": [

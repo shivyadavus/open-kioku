@@ -2755,6 +2755,7 @@ dependencies = [
  "open-kioku-search-regex",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
+ "rusqlite",
  "tempfile",
 ]
 
@@ -2829,8 +2830,10 @@ dependencies = [
  "open-kioku-storage-sqlite",
  "open-kioku-symbols",
  "open-kioku-tests",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
