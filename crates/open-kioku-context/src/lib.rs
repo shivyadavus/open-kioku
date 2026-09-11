@@ -2808,8 +2808,8 @@ const MODULE_ENTRY_FILE_NAMES: &[&str] = &[
 ];
 
 /// When a commit scope names a directory, that directory's entry file is a candidate even if
-/// it shares no vocabulary with the task: `feat(async): stabilize Channel` edits `async/mod.ts`,
-/// which does not mention Channel until the commit lands. Injected at a low score so a file
+/// it shares no vocabulary with the task: `feat(async): stabilize RetryGate` edits `async/mod.ts`,
+/// which does not mention RetryGate until the commit lands. Injected at a low score so a file
 /// that actually matches the task still outranks it inside the scope tier.
 /// The quality tier the pack ordering gives a result: a file the task names is source whatever
 /// kind of file it is; otherwise the path decides.
@@ -3138,8 +3138,8 @@ fn append_scope_entry_points(
         .map(|result| normalize_path(&result.path))
         .collect();
     // Where the entry point sits among the files the scope already matched depends on whether
-    // any of them matched the task's own words. `feat(async): stabilize Channel` matches
-    // async/ files on "async" alone — nothing in the directory knows "Channel" yet — so the
+    // any of them matched the task's own words. `feat(async): stabilize RetryGate` matches
+    // async/ files on "async" alone — nothing in the directory knows "RetryGate" yet — so the
     // barrel is the best guess and goes just below the group's best. `[Scheduler] Fix speculative
     // prefetch` matches real modules on "speculative" and "prefetch", so the barrel goes last:
     // as runner-up it pushed rank-2 modules to rank 3 on a Python monorepo (MRR -0.011), and
@@ -3974,7 +3974,7 @@ mod tests {
 
     #[test]
     fn scope_entry_points_are_injected_once_and_only_for_matching_directories() {
-        let intent = TaskSearchIntent::parse("feat(async): stabilize Channel");
+        let intent = TaskSearchIntent::parse("feat(async): stabilize RetryGate");
         let file = |path: &str, id: &str| File {
             id: FileId::new(id),
             repository_id: RepositoryId::new("repo"),
