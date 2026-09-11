@@ -22,4 +22,5 @@ open-kioku-config = { version = "4.0.0", path = "../open-kioku-config" }
 open-kioku-graph = { version = "4.0.0", path = "../open-kioku-graph" }
 open-kioku-ingest = { version = "4.0.0", path = "../open-kioku-ingest" }
 open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }
+rusqlite.workspace = true
 tempfile.workspace = true

@@ -5,7 +5,7 @@ use open_kioku_core::{
     GraphNode, GraphNodeType, HistorySignalQuery, HistorySignalSummary, ImpactReport, NodeId,
     RelationshipImpact, RiskReport, ScoreComponent, SearchResult, Symbol, SymbolOccurrence,
 };
-use open_kioku_errors::Result;
+use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::{RelationshipUseClass, RelationshipUsePolicy};
 use open_kioku_search_regex::search_chunks;
 use open_kioku_storage::{GraphStore, HistoryStore, MetadataStore, SearchIndex};
@@ -954,11 +954,18 @@ fn relationship_impacts(
     let mut proven = Vec::new();
     let mut possible = Vec::new();
     for (node_id, source_label) in &seeds {
-        let Ok((nodes, mut edges)) =
-            graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT)
-        else {
-            continue;
-        };
+        // A store with no graph support has no relationship evidence to offer, and an empty
+        // list is the documented answer for that. Every other failure — a graph awaiting
+        // `ok index`, a stale analysis fingerprint, a read error — is not "no dependents", and
+        // `ImpactReport` has no caveat channel to say so, so the report is refused instead.
+        // Two surfaces (`ok impact`, MCP `impact_analysis`) answered `proven_impact: []` from
+        // an index whose edges had been discarded on open before this propagated.
+        let (nodes, mut edges) =
+            match graph.neighbors(&node_id.0, RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT) {
+                Ok(window) => window,
+                Err(OkError::Unsupported(_)) => continue,
+                Err(err) => return Err(err),
+            };
         // `neighbors` is an untyped, unordered window over every edge touching the node. A file
         // node has one outgoing `DEFINES` edge per symbol, so on a 60-symbol source file the
         // window is exhausted by its own definitions and the incoming derived edges never come
@@ -969,36 +976,35 @@ fn relationship_impacts(
         // Only the file seed can carry this edge: derived edges join two file nodes, so the
         // symbol seeds below it would always come back empty.
         //
-        // Two absences are swallowed here that the context path reports as caveats: a store
-        // whose `edges_by_type_for_node` is the `Unsupported` default or whose authority gate
-        // refuses the read is indistinguishable from a file with no derived siblings, and an
-        // origin with more derived files than the row cap loses the rest silently.
-        // `ImpactReport` has no caveat channel — the neighbouring `neighbors` call discards
-        // errors the same way — so the two surfaces answer differently about the same missing
-        // evidence. Giving `ImpactReport` a caveat field is the fix and is out of scope here.
+        // One absence is still swallowed here that the context path reports as a caveat: an
+        // origin with more derived files than the row cap loses the rest silently, because
+        // `ImpactReport` has no caveat channel. Giving it one is out of scope here.
         if node_id.0.starts_with("file:") {
-            if let Ok(derived) = graph.edges_by_type_for_node(
+            let derived = match graph.edges_by_type_for_node(
                 GraphEdgeType::DerivedFrom,
                 &node_id.0,
                 false,
                 RELATIONSHIP_IMPACT_NEIGHBOR_LIMIT,
                 0,
             ) {
-                for edge in derived {
-                    if edges.iter().any(|existing| existing.id == edge.id) {
-                        continue;
-                    }
-                    // `neighbors` returned nodes for its own window only. A derived edge's other
-                    // endpoint is always a file node (`file:<path>`), so it is resolved from the
-                    // indexed files rather than with a second graph query.
-                    if !nodes.iter().any(|existing| existing.id == edge.from) {
-                        let Some(node) = file_node_for_id(&edge.from, &files_by_path) else {
-                            continue;
-                        };
-                        nodes.push(node);
-                    }
-                    edges.push(edge);
+                Ok(derived) => derived,
+                Err(OkError::Unsupported(_)) => Vec::new(),
+                Err(err) => return Err(err),
+            };
+            for edge in derived {
+                if edges.iter().any(|existing| existing.id == edge.id) {
+                    continue;
                 }
+                // `neighbors` returned nodes for its own window only. A derived edge's other
+                // endpoint is always a file node (`file:<path>`), so it is resolved from the
+                // indexed files rather than with a second graph query.
+                if !nodes.iter().any(|existing| existing.id == edge.from) {
+                    let Some(node) = file_node_for_id(&edge.from, &files_by_path) else {
+                        continue;
+                    };
+                    nodes.push(node);
+                }
+                edges.push(edge);
             }
         }
         let nodes_by_id = nodes
@@ -2290,6 +2296,80 @@ mod tests {
             "{:?} {:?}",
             reverse.proven_impact,
             reverse.possible_impact
+        );
+    }
+
+    /// The marker is the only record that a pre-4.0 index's edges were discarded on open. The
+    /// graph store refuses every relationship read on such a store, and that refusal has to
+    /// reach the caller rather than become an empty, confident `proven_impact`.
+    #[test]
+    fn relationship_impacts_refuse_a_graph_awaiting_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.sqlite");
+        let manifest = IndexManifest {
+            analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
+            repository: Repository {
+                id: RepositoryId::new("repo"),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 1,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 1,
+            index_mode: Default::default(),
+            phase_reports: Vec::new(),
+            quality: IndexQuality::default(),
+        };
+        let file = File {
+            id: FileId::new("f1"),
+            repository_id: RepositoryId::new("repo"),
+            path: PathBuf::from("src/core.rs"),
+            language: Language::Rust,
+            size_bytes: 100,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &[file],
+                    symbols: &[],
+                    occurrences: &[],
+                    chunks: &[],
+                    imports: &[],
+                    tests: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+        }
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); \
+                 INSERT OR REPLACE INTO schema_meta(key, value) VALUES('graph_rebuild_required_v4', '1');",
+            )
+            .unwrap();
+        let store = SqliteStore::open(&path).unwrap();
+
+        let error = ImpactEngine::new(&store)
+            .with_graph_store(Some(&store))
+            .for_file(Path::new("src/core.rs"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("older index format") && error.contains("ok index"),
+            "expected the rebuild instruction, got: {error}"
         );
     }
 
