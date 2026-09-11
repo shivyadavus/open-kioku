@@ -69,7 +69,7 @@ The first A/B run with this harness, measuring the `format!` slack change (#337)
 
 Both arms were release builds with `--features mem-profile`, differing only by a
 `git revert` of the change under test. Corpus: `modules/` from
-a 10k-file Java service at checkout `<withheld>` — 1,751
+a 10k-file Java service at a fixed commit — 1,751
 Java files. Fresh `.ok` per run, arms alternated across three rounds.
 
 | arm | `peak_live_bytes` (median) | spread across 3 runs |
