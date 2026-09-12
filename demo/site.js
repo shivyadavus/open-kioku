@@ -27,25 +27,30 @@ if(!reduceMotion&&'IntersectionObserver' in window){
 // ── Live evidence terminal ───────────────────────────────────────────────────
 const live=document.getElementById('live-proof');
 if(live){
+  // Scene 1 is actual `ok context` output on this repository (README, "First Win"), trimmed.
+  // Scene 2 is the verify failure from demo.tape (one drive-by edit outside the declared boundary).
+  // Scene 3 replays the frozen fixture's java-no-gold-password-reset case (benchmarks/retrieval-cases.json): 5 of 5 no-gold tasks come back Low.
   const scenes=[
-    {cmd:'ok plan "change token expiration"',lines:[
-      ['good','✓ index ready · generation g1756-4f2a · 247,499 symbols'],
-      ['section','PRE-EDIT PLAN'],
-      ['row','context','<span class="json-string">src/auth.rs</span> · <span class="json-string">src/lib.rs</span> · <span class="json-string">tests/auth_flow.rs</span>'],
-      ['row','impact','2 structurally proven dependents · 1 possible (heuristic)'],
-      ['row','tests','<span class="good">issue_token</span> · <span class="good">validate_token</span> — required by coverage evidence'],
-      ['row','boundary','source + matching tests only'],
-      ['out','exact lookup answered in <span class="good">0.02–0.05s</span>']]},
-    {cmd:'ok verify --plan plan.json --changed src/auth.rs tests/auth_flow.rs',lines:[
-      ['good','✓ cargo test · 2 passed · 0 failed'],
-      ['good','✓ boundary violations: 0'],
-      ['good','✓ change stayed inside the planned boundary'],
-      ['out','verdict: <span class="warn">WARN</span> — runtime evidence absent; confidence not overstated']]},
-    {cmd:'ok context "migrate the billing webhooks"',lines:[
-      ['warn','! calibrated_cc6_abstention: only 1 independent retrieval stream supports the top result'],
-      ['out','This repository has no billing webhooks. Open Kioku says so'],
-      ['out','instead of returning confident-looking noise.'],
-      ['comment','# insufficient evidence ≠ an answer']]}
+    {cmd:'ok context "reap the doctor\'s MCP probe child process" --format markdown',lines:[
+      ['section','CONFIDENCE'],
+      ['row','overall','<span class="good">Exact</span> (1.00) · exact_references 1.00 · task_relevance 0.83 …'],
+      ['section','RETRIEVAL'],
+      ['row','attempted','lexical · document · exact_semantic · graph · validation · git_history · runtime'],
+      ['row','succeeded','lexical · document · exact_semantic · graph · validation'],
+      ['row','caveats','<span class="warn">no runtime traces, logs, or incidents are ingested for this repository</span>'],
+      ['section','PRIMARY CONTEXT'],
+      ['row','1','<span class="json-string">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 932-1298'],
+      ['row','2','<span class="json-string">crates/open-kioku-cli/src/commands/onboarding.rs</span> lines 554-610'],
+      ['comment','# the commit that made this change touched exactly one file; it is the first result']]},
+    {cmd:'ok verify --plan plan.json --git',lines:[
+      ['warn','[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary'],
+      ['comment','# one edit inside the declared boundary, one drive-by outside it: the check fails'],
+      ['comment','# a green exit code from a test runner is not proof the right files changed; this is']]},
+    {cmd:'ok context "password reset should email a one-time code and throttle repeated reset attempts" --format markdown',lines:[
+      ['section','CONFIDENCE'],
+      ['row','overall','<span class="warn">Low</span>'],
+      ['out','candidates are still listed; the pack tells the caller not to trust them rather than returning nothing'],
+      ['comment','# on the frozen 30-case fixture, 5 of 5 no-gold tasks come back Low (benchmarks/retrieval-baseline.json)']]}
   ];
   const esc=t=>t;
   function renderScene(i,typed){

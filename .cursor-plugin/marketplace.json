@@ -5,14 +5,14 @@
     "email": "155265880+shivyadavus@users.noreply.github.com"
   },
   "metadata": {
-    "description": "Local-first code intelligence MCP for Cursor. Indexes your codebase with Tree-sitter symbol parsing, SQLite dependency graph, and BM25 full-text search under .ok/. No hosted index or embeddings API required.",
+    "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first code intelligence MCP for Cursor with 16 read-only tools under .ok/. No hosted index or embeddings API required.",
     "version": "4.0.0"
   },
   "plugins": [
     {
       "name": "open-kioku",
       "source": ".",
-      "description": "Local-first code intelligence MCP — search, symbols, impact analysis, and patch planning for Cursor."
+      "description": "Evidence before edits: local, read-only MCP — search, symbols, impact analysis, plan_change and verify_change for Cursor."
     }
   ]
 }

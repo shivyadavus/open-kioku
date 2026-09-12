@@ -1,98 +1,76 @@
 # Open Kioku
 
-Local-first code intelligence for AI agents. Plan before edit. Verify after edit.
+**Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared.**
 
-If Open Kioku helps your AI coding workflow, please consider starring the repo:
-https://github.com/shivyadavus/open-kioku
+A local index of your repository feeds a bounded plan; after the edit, `ok verify` checks the actual changed files against that plan. Nothing leaves your machine: no hosted index, no source upload, and the MCP server is read-only by default.
 
-Open Kioku indexes a repository on your machine and exposes fast code search, symbol navigation, impact analysis, context packs, and MCP tools through the `ok` CLI.
+Source, measured accuracy on four real repositories, and the method behind every number: https://github.com/shivyadavus/open-kioku
 
-## Install
-
-```sh
-npm install -g open-kioku
-```
-
-Then verify the installed binary:
-
-```sh
-ok --version
-```
-
-## Quick Start
-
-### Index Your Repository
+## First win: 2 commands
 
 ```sh
 npm install -g open-kioku
-ok init /absolute/path/to/repo
-ok index /absolute/path/to/repo
-ok doctor /absolute/path/to/repo
+ok setup agent cursor --repo . --apply
 ```
 
-Verify that the local index has useful evidence:
+Use `claude` instead of `cursor` for Claude Code. One command indexes the repository, writes repository-scoped MCP configuration and agent guidance, and checks that the local server answers (run without `--apply` to preview; nothing is written). Every other MCP client listed by `ok mcp install --help` gets a read-only configuration snippet from `ok mcp install <client> --repo .`.
+
+Then ask for evidence on a real task:
 
 ```sh
-ok --repo /absolute/path/to/repo search "auth flow" --limit 5
-ok --repo /absolute/path/to/repo plan "change auth flow" --format markdown
+ok context "change token expiration" --format markdown
 ```
 
-Connect the same indexed repo to your LLM client:
+Every context pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
+
+## The loop
 
 ```sh
-ok mcp install claude --repo /absolute/path/to/repo
-ok mcp install cursor --repo /absolute/path/to/repo
+ok plan "change token expiration" --format json > plan.json   # context, impact, tests, edit boundary, caveats
+# ...edit with your normal agent or editor...
+ok verify --plan plan.json --git                               # the real diff against the declared boundary
 ```
 
-Paste the printed MCP config snippet into Claude Code, Cursor, or another MCP-compatible client. Open Kioku runs locally over stdio and is read-only by default.
+`ok plan` (or the `plan_change` MCP tool) returns primary context with provenance, impact candidates split into structurally proven and heuristic, validation targets tiered by evidence, an edit boundary (allowed, caution, forbidden paths), and explicit caveats. `ok verify` reads the actual changed files and reports anything outside the boundary. A green exit code from a test runner is not proof the right files changed; this is.
 
-Ask the agent to use the index before editing:
+## MCP
+
+The server is local, read-only, and speaks stdio. It advertises 16 tools, one per question nothing else answers: `repo_status`, `list_files`, `search_code`, `regex_search`, `search_symbols`, `get_definition`, `get_references`, `dependency_path`, `impact_analysis`, `explain_flow`, `build_context_pack`, `retrieve_context`, `plan_change`, `verify_change`, `find_tests_for_change`, and `query_evidence_graph`. Reference: https://github.com/shivyadavus/open-kioku/blob/main/docs/mcp-tools.md
+
+Agent guidance that `ok setup agent --apply` installs for you, if you would rather paste it yourself:
 
 ```text
 Use Open Kioku before editing. Check repo_status, search_code, get_definition,
-get_references, impact_analysis, and find_tests_for_change. Build a plan first.
+get_references, impact_analysis, and find_tests_for_change. Build a plan with
+plan_change first, then edit, and verify after the edit with verify_change.
 ```
 
-Keep the index fresh while you work:
+Upgrading from 3.x: run `ok index` once. The index format changed in 4.0.0, and a pre-4.0 index withholds relationship evidence and says so rather than answering from an empty graph. Details: https://github.com/shivyadavus/open-kioku/blob/main/CHANGELOG.md
 
-```sh
-ok watch /absolute/path/to/repo
-```
-
-### Try The Demo
-
-Create and index a sample repository:
+## Try it on a sample repository
 
 ```sh
 ok demo --force
-```
-
-Search and inspect the demo:
-
-```sh
-ok --repo ./open-kioku-demo search token
-ok --repo ./open-kioku-demo symbol find issue_token
-ok --repo ./open-kioku-demo impact --file src/auth.rs
 ok --repo ./open-kioku-demo plan token --format markdown
 ok prove ./open-kioku-demo --task token
 ```
 
-## Package Layout
+## Package layout
 
-The `open-kioku` npm package is a small JavaScript wrapper. It installs one platform-specific optional dependency containing the native `ok` binary for your operating system and CPU architecture.
-
-Supported packages:
-
-> Open Kioku 3.x on macOS requires Apple Silicon. Intel macOS remains supported by the 2.4.x release line.
+`open-kioku` is a small JavaScript wrapper. It installs one platform-specific optional dependency containing the native `ok` binary:
 
 - `@open-kioku/darwin-arm64`
 - `@open-kioku/linux-x64`
 - `@open-kioku/linux-arm64`
 - `@open-kioku/win32-x64`
 
+Since 3.0, macOS builds are Apple Silicon only. On Intel macOS, build from source with `cargo install open-kioku-cli`.
+
 ## Links
 
 - Repository: https://github.com/shivyadavus/open-kioku
-- Releases: https://github.com/shivyadavus/open-kioku/releases
-- Demo: https://openkioku.com/
-- Security: https://github.com/shivyadavus/open-kioku/blob/main/SECURITY.md
+- Website and setup guides: https://www.openkioku.com/
+- Releases (binaries with checksums, SBOM, and provenance): https://github.com/shivyadavus/open-kioku/releases
+- Security model: https://github.com/shivyadavus/open-kioku/blob/main/docs/security-model.md
+
+If Open Kioku improves your agent workflow, consider starring the repository.
