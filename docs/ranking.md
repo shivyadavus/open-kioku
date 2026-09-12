@@ -95,6 +95,29 @@ rebased onto current main. CHANGELOG.md carries the full provenance. Each wideni
 evidence ref (`region:enclosing-symbol`, `region:ranked-unit`, `region:adjacent-unit`) on
 the unit.
 
+## Confidence breakdown
+
+The `confidence_breakdown` on a context pack or plan is separate from result ranking: it
+never reorders anything, and ranking never reads it. `ConfidenceBreakdown::from_signals`
+in `open-kioku-core` computes it from typed inputs (weights in parentheses):
+
+- `task_relevance` (0.20): share of the task's content terms present anywhere in the selected context.
+- `exact_references` (0.20): 1.0 when at least one selection is backed by exact provenance - an exact-authority retrieval trace, an indexed symbol occurrence from the impact engine, or SCIP-sourced evidence - and 0.25 otherwise. Prose is never consulted. The lexical stream's `query variant `...` matched local index` evidence line used to satisfy a substring test for `scip`, so a target file defining `scip_setup_report` made the whole pack `Exact`; the ranking crate had already removed the same leak from its own `exact_reference` signal.
+- `evidence_density` (0.10): distinct evidence records over twice the selected primary files, capped at 1.0. Counting evidence *lines* saturated it for any non-empty pack.
+- `validation_availability` (0.15): 1.0 when at least one validation target was selected, else 0.2.
+- `test_coverage` (0.10): 1.0 when a selected target carries a runnable command, 0.6 when targets need manual commands, 0.2 with none.
+- `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; `exact_references`, `validation`, and `runtime` absence is priced by the components above, and `history` and `boundary` items are reported but not priced.
+- `boundary_tightness` (0.15) and `runtime_corroboration` (0.05): the allowed-file bound and the typed `runtime_corroboration` score component on selected results.
+
+Caps apply after the weighted sum, in this order: 0.35 with no primary context; 0.55 when
+exact references, validation targets, and runtime signals are all absent; 0.74 without exact
+evidence; 0.30 when no task term appears in the selected context, or 0.50 when fewer than
+`WEAK_TASK_RELEVANCE` (0.34) of them do; 0.60 with counted negative evidence; 0.50 when
+every named task identifier is unmatched by the selected context; and 0.94 with any caveat,
+including a plan's evidence-quality caveats attached after scoring. The `Exact` label
+additionally requires `exact_reference_count > 0`; otherwise the label stops at `High`.
+`docs/context-pack-spec.md` defines the label semantics.
+
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal
 ablations with recall, MRR, and nDCG metrics.

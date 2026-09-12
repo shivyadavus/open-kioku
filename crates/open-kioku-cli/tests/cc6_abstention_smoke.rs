@@ -3,6 +3,9 @@ use serde_json::Value;
 use std::fs;
 
 const NO_MATCH_QUERY: &str = "zzqv_no_matching_repository_evidence_7f31b9";
+/// `alpha token` reaches the fixture's one function; the two identifiers exist nowhere.
+const UNKNOWN_IDENTIFIER_QUERY: &str =
+    "fix the null check in alpha token FrobnicateWidgetManager::reticulate_splines";
 
 fn initialized_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("temporary repository");
@@ -127,4 +130,69 @@ fn rendered_context_formats_keep_no_match_abstention_visible() {
             "{format} no-match output must not leak unrelated primary context: {rendered}"
         );
     }
+}
+
+#[test]
+fn context_names_unknown_task_identifiers_and_reports_low_confidence() {
+    let temp = initialized_fixture();
+    let repo = temp.path();
+
+    let output = cargo_bin_cmd!("ok")
+        .arg("--repo")
+        .arg(repo)
+        .args(["context", UNKNOWN_IDENTIFIER_QUERY, "--format", "json"])
+        .output()
+        .expect("run context command");
+    assert!(
+        output.status.success(),
+        "context command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pack: Value = serde_json::from_slice(&output.stdout).expect("context JSON");
+    assert!(
+        !pack["primary_files"]
+            .as_array()
+            .expect("primary_files array")
+            .is_empty(),
+        "the known term must still retrieve context; only the label must drop"
+    );
+    assert_eq!(
+        pack.pointer("/confidence_breakdown/overall_enum")
+            .and_then(Value::as_str),
+        Some("low"),
+        "{pack}"
+    );
+    let blockers = pack
+        .pointer("/confidence_breakdown/blockers")
+        .and_then(Value::as_array)
+        .expect("blockers array");
+    assert!(
+        blockers
+            .iter()
+            .any(|blocker| blocker.as_str().is_some_and(|blocker| {
+                blocker.contains("FrobnicateWidgetManager")
+                    && blocker.contains("reticulate_splines")
+            })),
+        "blockers must name the unknown identifiers: {blockers:?}"
+    );
+    let scopes = pack["negative_evidence"]
+        .as_array()
+        .expect("negative_evidence array")
+        .iter()
+        .filter_map(|item| item["scope"].as_str())
+        .collect::<Vec<_>>();
+    assert!(scopes.contains(&"anchor"), "{scopes:?}");
+
+    let output = cargo_bin_cmd!("ok")
+        .arg("--repo")
+        .arg(repo)
+        .args(["context", UNKNOWN_IDENTIFIER_QUERY, "--format", "markdown"])
+        .output()
+        .expect("run rendered context command");
+    let rendered = String::from_utf8(output.stdout).expect("utf-8 context output");
+    assert!(rendered.contains("- Overall: `Low`"), "{rendered}");
+    assert!(
+        rendered.contains("FrobnicateWidgetManager") && rendered.contains("reticulate_splines"),
+        "{rendered}"
+    );
 }

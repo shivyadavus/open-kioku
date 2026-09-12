@@ -195,7 +195,7 @@ impl<'a> ImpactEngine<'a> {
         let mut reasons = Vec::new();
         let exact_reference_count = direct
             .iter()
-            .filter(|result| result.match_reason.contains("exact symbol reference"))
+            .filter(|result| is_exact_reference_result(result))
             .count();
         if exact_reference_count > 0 {
             reasons.push(format!(
@@ -1155,6 +1155,18 @@ fn exact_reference_impacts(
     Ok(dedupe_results(results))
 }
 
+/// `match_reason` prefix of a result produced from an indexed symbol occurrence.
+const EXACT_REFERENCE_MATCH_REASON_PREFIX: &str = "exact symbol reference via ";
+
+/// Whether `result` is an indexed symbol reference rather than a lexical or heuristic hit.
+/// Consumers count exact references by this predicate instead of scanning result prose, so
+/// a lexical hit whose query words include "exact" or "scip" cannot pass as one.
+pub fn is_exact_reference_result(result: &SearchResult) -> bool {
+    result
+        .match_reason
+        .starts_with(EXACT_REFERENCE_MATCH_REASON_PREFIX)
+}
+
 fn occurrence_result(
     store: &dyn MetadataStore,
     files_by_id: &HashMap<FileId, File>,
@@ -1185,7 +1197,7 @@ fn occurrence_result(
         snippet,
         symbol: None,
         score,
-        match_reason: format!("exact symbol reference via {source}"),
+        match_reason: format!("{EXACT_REFERENCE_MATCH_REASON_PREFIX}{source}"),
         evidence: evidence.clone(),
         evidence_refs: evidence_ids.clone(),
         confidence: occurrence.confidence.score(),

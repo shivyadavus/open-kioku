@@ -9,7 +9,6 @@
   "structuredContent": {
     "confidence_breakdown": {
       "blockers": [
-        "4 negative evidence signal(s) lowered confidence",
         "no task term appears in the selected context"
       ],
       "caveats": [
@@ -36,7 +35,7 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
-          "rationale": "amount of independent indexed evidence near the selected context",
+          "rationale": "distinct evidence records over twice the selected primary files, capped at 1.0",
           "raw_value": 0.0,
           "signal": "evidence_density",
           "weight": 0.0
@@ -45,7 +44,7 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
-          "rationale": "explicit exact symbol references or SCIP signals",
+          "rationale": "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence",
           "raw_value": 0.0,
           "signal": "exact_references",
           "weight": 0.0
@@ -81,7 +80,7 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
-          "rationale": "selected tests with runnable commands",
+          "rationale": "at least one selected validation target carries a runnable command",
           "raw_value": 0.0,
           "signal": "test_coverage",
           "weight": 0.0
@@ -90,7 +89,7 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
-          "rationale": "presence of validation targets for the likely change",
+          "rationale": "at least one validation target was selected near the primary context",
           "raw_value": 0.0,
           "signal": "validation_availability",
           "weight": 0.0
@@ -99,7 +98,7 @@
       "overall_enum": "low",
       "overall_score": 0.0
     },
-    "confidence_summary": "overall Low (0.30) from task relevance, evidence density, references, validation, boundaries, runtime, test coverage, and negative evidence; blocker: 4 negative evidence signal(s) lowered confidence; caveat: exact symbol/reference evidence is absent",
+    "confidence_summary": "overall Low (0.30) from task relevance, evidence density, references, validation, boundaries, runtime, test coverage, and negative evidence; blocker: no task term appears in the selected context; caveat: exact symbol/reference evidence is absent",
     "evidence": [
       {
         "confidence": "medium",
@@ -629,8 +628,9 @@
       {
         "confidence": 0.0,
         "inspected_sources": [
-          "search_result.evidence",
-          "search_result.match_reason"
+          "retrieval_trace.authority",
+          "impact.match_reason",
+          "evidence.source_type"
         ],
         "query": "add a subtract function next to add",
         "reason": "no explicit exact symbol reference or SCIP evidence was found",
@@ -652,7 +652,7 @@
         "confidence": 0.0,
         "inspected_sources": [
           "runtime_signals",
-          "search_result.evidence"
+          "search_result.score_breakdown"
         ],
         "query": "add a subtract function next to add",
         "reason": "no runtime trace, incident, or error artifact corroborated the selected context",
