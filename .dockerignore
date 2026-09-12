@@ -1,0 +1,4 @@
+# Local runtime state and build output must never enter the image.
+.ok/
+target/
+node_modules/
