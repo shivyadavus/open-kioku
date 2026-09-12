@@ -43,6 +43,34 @@ language coverage, local-mode network denial, snapshot export/import rebuilds,
 semantic disabled state, and parser/runtime secret redaction. These explicit
 commands make skipped coverage visible when a test is renamed or removed.
 
+## Release Workflow Gates
+
+`.github/workflows/release.yml` gates its own run before spending build time,
+because every publish failure it has had so far was a credential failure that
+surfaced only after the builds:
+
+- `preflight` runs `scripts/validate-versions.sh` and `npm whoami` against
+  `NPM_TOKEN`. npm reports a dead token as `E404 Not Found - PUT` on a package
+  that exists, so the check exists to turn that into a plain answer.
+- `preflight-crates` authenticates `CARGO_REGISTRY_TOKEN` against crates.io
+  with a read-only request, `GET /api/v1/crates?following=1`, the one GET that
+  accepts an API token (`/api/v1/me` accepts only a browser session). crates.io
+  authenticates before it checks scopes, so a live token answers `200` (legacy
+  token) or a scope refusal (scoped token), and a revoked, expired, or never
+  issued token answers `403 authentication failed`, which is what the 4.0.0
+  release hit in `publish-crates` after the tag and GitHub release were
+  public. The secret is an environment secret in the `crates-io` environment,
+  so the job declares that environment, exactly as `publish-crates` does. The
+  check proves the token is live; only the publish itself exercises the
+  publish scope.
+
+After the builds, the `publish` job pins the sha256 of every binary into
+`release-metadata.json`, `Formula/open-kioku.rb`, and the root `Dockerfile` in
+one commit, verifies the built binaries against those pins with
+`scripts/verify-release-artifact-hashes.py`, and tags that commit. The
+Dockerfile pin matters because MCP directories build the image from the
+release tag and verify the downloaded binary against `OK_SHA256`.
+
 ## Local Processing Threat Model
 
 The local processing threat model is documented in

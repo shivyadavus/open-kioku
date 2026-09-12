@@ -102,6 +102,17 @@ if [[ -f "$FORMULA" ]]; then
   echo "  ✓ Formula/open-kioku.rb"
 fi
 
+# ── Dockerfile: OK_VERSION only ──────────────────────────────────────────────
+# OK_SHA256 is written by the release workflow's hash-pin step once the
+# ok-linux-x86_64 binary exists; it cannot be synced from here. The Dockerfile
+# header documents why the two lines are allowed to disagree until that step.
+DOCKERFILE="$ROOT/Dockerfile"
+if [[ -f "$DOCKERFILE" ]]; then
+  sed -i.bak -E "s/^ARG OK_VERSION=.*/ARG OK_VERSION=$VERSION/" "$DOCKERFILE"
+  rm -f "${DOCKERFILE}.bak"
+  echo "  ✓ Dockerfile (OK_VERSION; OK_SHA256 is pinned by the release workflow)"
+fi
+
 # ── Release checklist ────────────────────────────────────────────────────────
 CHECKLIST="$ROOT/docs/release-checklist.md"
 if [[ -f "$CHECKLIST" ]]; then
