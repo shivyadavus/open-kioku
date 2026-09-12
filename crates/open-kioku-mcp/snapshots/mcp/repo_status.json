@@ -45,6 +45,7 @@
     "generation_id": null,
     "graph_rebuild_required": false,
     "index_mode": "full",
+    "indexed": true,
     "indexed_at": "<indexed_at>",
     "languages": [
       "rust"

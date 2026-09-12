@@ -10,7 +10,23 @@ fn source_root_hash(repo: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// The repository's index for a read command. A repository that has never been indexed is
+/// refused with the same sentence `ok status`, `ok doctor` and the MCP server use, and
+/// nothing is created on disk: an empty database written here used to make every later
+/// read report a legacy index awaiting rebuild instead.
 fn open_store(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {
+    let repo = repo.as_ref();
+    SqliteStore::open_repo_index(repo)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}",
+            open_kioku_storage::generations::not_indexed_message(repo)
+        )
+    })
+}
+
+/// The index for a command that writes it (`ok index`, `ok snapshot import`): created when
+/// absent, which is exactly what a read must never do.
+fn open_store_for_write(repo: impl AsRef<Path>) -> anyhow::Result<SqliteStore> {
     let location = open_kioku_storage::generations::resolve_index_location(repo.as_ref());
     Ok(SqliteStore::open(location.sqlite_path())?)
 }
@@ -758,9 +774,21 @@ fn normalize_to_repo_relative(repo_root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<String> {
+/// Resolve a path, symbol name, or explicit `file:`/`symbol:` node id to a graph node id.
+/// A name that resolves to nothing is an error: passing it through produced an empty path
+/// that read as "unconnected" when the truth was "not in the index". The MCP
+/// `dependency_path` tool applies the same check.
+fn resolve_graph_node<S>(store: &S, query: &str) -> anyhow::Result<String>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
     if query.starts_with("file:") || query.starts_with("symbol:") {
-        return Ok(query.to_string());
+        return match store.node_by_id(query)? {
+            Some(_) => Ok(query.to_string()),
+            None => anyhow::bail!(
+                "`{query}` is not a node in the indexed dependency graph; it may be excluded, unsupported, or added since the last `ok index`"
+            ),
+        };
     }
     if let Some(file) = store.get_file_by_path(Path::new(query))? {
         return Ok(format!("file:{}", file.path.display()));
@@ -772,7 +800,9 @@ fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<
     {
         return Ok(format!("symbol:{}", symbol.id.0));
     }
-    Ok(query.to_string())
+    anyhow::bail!(
+        "`{query}` is not an indexed file path or symbol name; it may be excluded, unsupported, or added since the last `ok index`"
+    )
 }
 
 fn output<T: serde::Serialize>(json: bool, value: &T, human: impl FnOnce()) -> anyhow::Result<()> {

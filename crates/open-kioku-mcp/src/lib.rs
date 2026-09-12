@@ -26,6 +26,7 @@ use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_
 use open_kioku_search_tantivy::{default_index_dir, TantivySearchIndex};
 use open_kioku_semantic::SemanticIndexManager;
 use open_kioku_sentry::{disabled_response, unimplemented_response, SentryConfig};
+use open_kioku_storage::generations::{not_indexed_message, not_indexed_status};
 use open_kioku_storage::{GraphStore, MetadataStore, OkStore, SearchIndex};
 use open_kioku_storage_sqlite::SqliteStore;
 use open_kioku_symbols::{SymbolEngine, SYMBOL_CONTEXT_SURROUNDING_LINES};
@@ -36,7 +37,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 const MAX_MCP_LIMIT: usize = 100;
 const MAX_MCP_FETCH: usize = 500;
@@ -162,25 +163,51 @@ struct JsonRpcResponse {
 }
 
 pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> {
-    let store_path = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
-    let mut store = SqliteStore::open(&store_path)?;
+    serve(
+        repo,
+        config,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+/// The session loop behind `serve_stdio`, generic over the transport so a test can drive a
+/// whole session through in-memory buffers and then inspect the repository on disk.
+///
+/// A repository that has never been indexed is served without a store: the handshake and the
+/// tool inventory still answer, `repo_status` says `indexed: false`, and every other tool
+/// call names `ok index`. Nothing is created on disk, so a read-only server cannot leave an
+/// empty database behind that later reads as an index awaiting rebuild.
+async fn serve<R, W>(
+    repo: PathBuf,
+    config: OkConfig,
+    reader: R,
+    mut writer: W,
+) -> anyhow::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut store = SqliteStore::open_repo_index(&repo)?;
     let mut last_request = Instant::now();
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-    let mut stdout = tokio::io::stdout();
+    let mut lines = reader.lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
-        if store_idle_expired(last_request) {
-            store = SqliteStore::open(&store_path)?;
+        // Reopen after idling so another process's `ok index` becomes visible, and keep
+        // looking while unindexed so an index built after startup is served without a
+        // restart; the unindexed probe is one `stat`.
+        if store.is_none() || store_idle_expired(last_request) {
+            store = SqliteStore::open_repo_index(&repo)?;
         }
         last_request = Instant::now();
-        if let Some(response) = handle_line(&repo, &store, &config, &line).await {
-            stdout
+        if let Some(response) = handle_line(&repo, store.as_ref(), &config, &line).await {
+            writer
                 .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
                 .await?;
-            stdout.flush().await?;
+            writer.flush().await?;
         }
     }
     Ok(())
@@ -188,7 +215,7 @@ pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> 
 
 async fn handle_line(
     repo: &Path,
-    store: &SqliteStore,
+    store: Option<&SqliteStore>,
     config: &OkConfig,
     line: &str,
 ) -> Option<JsonRpcResponse> {
@@ -205,7 +232,7 @@ async fn handle_line(
 
 async fn handle_request(
     repo: &Path,
-    store: &SqliteStore,
+    store: Option<&SqliteStore>,
     config: &OkConfig,
     request: JsonRpcRequest,
 ) -> Option<JsonRpcResponse> {
@@ -214,7 +241,7 @@ async fn handle_request(
 
 async fn handle_request_with_timeout(
     repo: &Path,
-    store: &SqliteStore,
+    store: Option<&SqliteStore>,
     config: &OkConfig,
     request: JsonRpcRequest,
     timeout: Duration,
@@ -231,7 +258,7 @@ async fn handle_request_with_timeout(
     };
     let result = tokio::time::timeout(
         timeout,
-        dispatch(repo, store, config, method, request.params),
+        dispatch_request(repo, store, config, method, request.params),
     )
     .await;
     match result {
@@ -299,6 +326,82 @@ fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()
     )
 }
 
+async fn dispatch_request(
+    repo: &Path,
+    store: Option<&SqliteStore>,
+    config: &OkConfig,
+    method: &str,
+    params: Value,
+) -> anyhow::Result<Value> {
+    match store {
+        Some(store) => dispatch(repo, store, config, method, params).await,
+        None => dispatch_unindexed(repo, config, method, params),
+    }
+}
+
+/// What the server answers while the repository has no index. The handshake and the tool
+/// inventory still work, so a client can connect and see what would be available;
+/// `repo_status` reports `indexed: false` with the command that changes it; every other tool
+/// is refused with that same sentence rather than answered from nothing, and a retired or
+/// unknown name is still told so, because "not indexed" would not be its fix.
+fn dispatch_unindexed(
+    repo: &Path,
+    config: &OkConfig,
+    method: &str,
+    params: Value,
+) -> anyhow::Result<Value> {
+    match method {
+        "initialize" => Ok(initialize_response(&params)),
+        "tools/list" => Ok(tools_list_response(config)),
+        "tools/call" => match params
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "repo_status" => Ok(tool_response(json!(not_indexed_status(repo)))),
+            other => Err(unindexed_method_error(repo, other)),
+        },
+        "repo_status" => Ok(json!(not_indexed_status(repo))),
+        other => Err(unindexed_method_error(repo, other)),
+    }
+}
+
+fn unindexed_method_error(repo: &Path, name: &str) -> anyhow::Error {
+    if retired_tool_guidance(name).is_none() && tool_category(name).is_some() {
+        return anyhow::anyhow!("{}", not_indexed_message(repo));
+    }
+    unknown_method_error(name)
+}
+
+fn unknown_method_error(name: &str) -> anyhow::Error {
+    match retired_tool_guidance(name) {
+        Some(guidance) => {
+            anyhow::anyhow!("`{name}` was retired from the MCP tool surface in 4.0.0: {guidance}")
+        }
+        None => anyhow::anyhow!("unknown MCP method or tool `{name}`"),
+    }
+}
+
+fn initialize_response(params: &Value) -> Value {
+    let client_version = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("2024-11-05");
+    json!({
+        "protocolVersion": client_version,
+        "serverInfo": {"name": "open-kioku", "version": env!("CARGO_PKG_VERSION")},
+        "capabilities": {"tools": {}}
+    })
+}
+
+fn tools_list_response(config: &OkConfig) -> Value {
+    let (tool_list, unstable) = tools(config);
+    json!({
+        "tools": tool_list,
+        "_unstable_experimental_tools": unstable
+    })
+}
+
 async fn dispatch(
     repo: &Path,
     store: &SqliteStore,
@@ -308,24 +411,8 @@ async fn dispatch(
 ) -> anyhow::Result<Value> {
     let gate = PolicyGate::new(config);
     match method {
-        "initialize" => {
-            let client_version = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("2024-11-05");
-            Ok(json!({
-                "protocolVersion": client_version,
-                "serverInfo": {"name": "open-kioku", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"tools": {}}
-            }))
-        }
-        "tools/list" => {
-            let (tool_list, unstable) = tools(config);
-            Ok(json!({
-                "tools": tool_list,
-                "_unstable_experimental_tools": unstable
-            }))
-        }
+        "initialize" => Ok(initialize_response(&params)),
+        "tools/list" => Ok(tools_list_response(config)),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -343,10 +430,19 @@ async fn dispatch(
             Ok(json!({"slept": true}))
         }
         "repo_status" => {
-            let manifest = store.manifest()?;
-            let compatibility = analysis_semantics_compatibility_for_store(store)?;
+            // A store without a manifest is not an index. `serve` never hands one over, but
+            // the answer for it is the unindexed status, not a serialized `null`.
+            let Some(manifest) = store.manifest()? else {
+                return Ok(json!(not_indexed_status(repo)));
+            };
+            let compatibility = open_kioku_core::classify_analysis_semantics(
+                manifest.analysis_semantics.as_ref(),
+                &open_kioku_core::AnalysisSemanticsState::current(),
+            );
             let mut status = serde_json::to_value(&manifest)?;
             if let Some(object) = status.as_object_mut() {
+                // The field an agent branches on; the unindexed answer carries `false`.
+                object.insert("indexed".into(), Value::Bool(true));
                 object.insert(
                     "analysis_semantics_status".into(),
                     serde_json::to_value(compatibility)?,
@@ -366,9 +462,7 @@ async fn dispatch(
                 );
                 // Same numbers as `ok --json status`: null when the manifest predates
                 // coverage recording, so absence is never mistaken for 100%.
-                let coverage = manifest
-                    .as_ref()
-                    .and_then(|manifest| manifest.quality.coverage.as_ref());
+                let coverage = manifest.quality.coverage.as_ref();
                 object.insert("coverage".into(), serde_json::to_value(coverage)?);
                 object.insert("languages".into(), json!(indexed_languages(store, coverage)?));
                 // The whole semantic status, not a readiness summary. An agent
@@ -460,8 +554,16 @@ async fn dispatch(
         }
         "retrieve_context" => {
             let handle = required_str(&params, "handle")?;
-            let retrieved =
-                ContextHandleStore::open_repo(repo)?.retrieve(&ContextHandleId::new(handle))?;
+            // An unknown handle is an error, not `null`: a null answer reads as an empty
+            // snippet, and the handle either came from this repository's compressed pack
+            // or it did not.
+            let retrieved = ContextHandleStore::open_repo(repo)?
+                .retrieve(&ContextHandleId::new(handle))?
+                .with_context(|| {
+                    format!(
+                        "no context handle `{handle}` is stored for this repository; handles come from build_context_pack with compress=true"
+                    )
+                })?;
             Ok(json!(retrieved))
         }
         "plan_change" => {
@@ -921,12 +1023,7 @@ async fn dispatch(
                 None => Ok(json!(disabled_response(method))),
             }
         }
-        other => match retired_tool_guidance(other) {
-            Some(guidance) => anyhow::bail!(
-                "`{other}` was retired from the MCP tool surface in 4.0.0: {guidance}"
-            ),
-            None => anyhow::bail!("unknown MCP method or tool `{other}`"),
-        },
+        other => Err(unknown_method_error(other)),
     }
 }
 
@@ -940,39 +1037,42 @@ fn call_tool<'a>(
     Box::pin(async move {
         dispatch(repo, store, config, name, args)
             .await
-            .map(|value| {
-                let mut text = if let Some(s) = value.as_str() {
-                    s.to_string()
-                } else {
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
-                };
-                let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
-                let rendered = value.is_string();
-                let structured_content = structured_content_for(value, &text, text_truncated);
-                // `isError` is optional in the MCP schema and defaults to false, but a client
-                // that reads it should not have to infer success from a missing field.
-                let mut response = json!({
-                    "content": [{"type": "text", "text": text}],
-                    "structuredContent": structured_content,
-                    "isError": false
-                });
-                if text_truncated {
-                    response["truncated"] = json!(true);
-                    response["warnings"] = json!([if rendered {
-                        format!(
-                            "rendered text was truncated to {} bytes; request format=json or a lower limit for the full result",
-                            MAX_TOOL_TEXT_BYTES
-                        )
-                    } else {
-                        format!(
-                            "tool text content was truncated to {} bytes; structuredContent carries the full result",
-                            MAX_TOOL_TEXT_BYTES
-                        )
-                    }]);
-                }
-                response
-            })
+            .map(tool_response)
     })
+}
+
+/// The `tools/call` envelope around one tool's value.
+fn tool_response(value: Value) -> Value {
+    let mut text = if let Some(s) = value.as_str() {
+        s.to_string()
+    } else {
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+    };
+    let text_truncated = truncate_utf8(&mut text, MAX_TOOL_TEXT_BYTES);
+    let rendered = value.is_string();
+    let structured_content = structured_content_for(value, &text, text_truncated);
+    // `isError` is optional in the MCP schema and defaults to false, but a client
+    // that reads it should not have to infer success from a missing field.
+    let mut response = json!({
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": structured_content,
+        "isError": false
+    });
+    if text_truncated {
+        response["truncated"] = json!(true);
+        response["warnings"] = json!([if rendered {
+            format!(
+                "rendered text was truncated to {} bytes; request format=json or a lower limit for the full result",
+                MAX_TOOL_TEXT_BYTES
+            )
+        } else {
+            format!(
+                "tool text content was truncated to {} bytes; structuredContent carries the full result",
+                MAX_TOOL_TEXT_BYTES
+            )
+        }]);
+    }
+    response
 }
 
 /// The `structuredContent` half of a tool response. JSON objects are returned as they are. A
@@ -1032,17 +1132,25 @@ fn regex_search_tool(store: &dyn MetadataStore, params: &Value) -> anyhow::Resul
     paged_slice_response_with_metadata("results", scan.results, metadata)
 }
 
+/// `query` (or the older `pattern` spelling), refused when blank: an empty query returned an
+/// empty success, which read as "nothing in the repository matches".
+fn search_query(params: &Value) -> anyhow::Result<&str> {
+    params
+        .get("query")
+        .or_else(|| params.get("pattern"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .context("`search_code` requires a non-empty `query`")
+}
+
 fn search_results(
     repo: &Path,
     store: &dyn MetadataStore,
     params: &Value,
     fetch_limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let query = params
-        .get("query")
-        .or_else(|| params.get("pattern"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let query = search_query(params)?;
     let mode = params.get("mode").and_then(Value::as_str).unwrap_or("code");
     let index_dir = default_index_dir(repo);
     if TantivySearchIndex::exists(&index_dir) {
@@ -1410,8 +1518,11 @@ fn runtime_provider(config: &open_kioku_config::RuntimeConfig) -> Option<String>
     }
 }
 
-fn tool_category(name: &str) -> &'static str {
-    match name {
+/// Routing category of every dispatchable tool, gated ones included; `None` for a name the
+/// server does not answer, which is how the unindexed path tells "known tool, no index" from
+/// "no such tool".
+fn tool_category(name: &str) -> Option<&'static str> {
+    Some(match name {
         "repo_status" | "list_files" => "repository",
         "search_code" | "regex_search" => "search",
         "search_symbols" | "get_definition" | "get_references" => "code-intelligence",
@@ -1422,8 +1533,8 @@ fn tool_category(name: &str) -> &'static str {
         "query_evidence_graph" => "evidence-graph",
         "remember_fact" | "search_memory" => "memory",
         "map_stacktrace_to_code" | "find_errors_for_symbol" | "find_recent_failures" => "runtime",
-        _ => "repository-intelligence",
-    }
+        _ => return None,
+    })
 }
 
 fn tool_description(name: &str, base: &str) -> String {
@@ -1523,7 +1634,7 @@ fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
             "outputSchema": tool_output_schema(),
             "annotations": tool_annotations(name),
             "_meta": {
-                "io.open-kioku/category": tool_category(name),
+                "io.open-kioku/category": tool_category(name).unwrap_or("repository-intelligence"),
                 "io.open-kioku/maturity": maturity
             }
         }));
@@ -2536,9 +2647,21 @@ fn confidence_arg(params: &Value) -> Confidence {
     }
 }
 
-fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<String> {
+/// Resolve a path, symbol name, or explicit `file:`/`symbol:` node id to a graph node id.
+/// A name that resolves to nothing is an error: passing it through produced an empty edge
+/// list that read as "these two are unconnected" when the truth was "this is not in the
+/// index". The same check backs `ok path`.
+fn resolve_graph_node<S>(store: &S, query: &str) -> anyhow::Result<String>
+where
+    S: MetadataStore + GraphStore + ?Sized,
+{
     if query.starts_with("file:") || query.starts_with("symbol:") {
-        return Ok(query.to_string());
+        return match store.node_by_id(query)? {
+            Some(_) => Ok(query.to_string()),
+            None => anyhow::bail!(
+                "`{query}` is not a node in the indexed dependency graph; it may be excluded, unsupported, or added since the last `ok index`"
+            ),
+        };
     }
     if let Some(file) = store.get_file_by_path(Path::new(query))? {
         return Ok(format!("file:{}", file.path.display()));
@@ -2550,7 +2673,9 @@ fn resolve_graph_node(store: &dyn MetadataStore, query: &str) -> anyhow::Result<
     {
         return Ok(format!("symbol:{}", symbol.id.0));
     }
-    Ok(query.to_string())
+    anyhow::bail!(
+        "`{query}` is not an indexed file path or symbol name; it may be excluded, unsupported, or added since the last `ok index`"
+    )
 }
 
 /// The three kinds of evidence an agent asks for about one resolved symbol,
@@ -2836,7 +2961,7 @@ mod tests {
 
         let string_id = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"req-1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
         )
@@ -2847,7 +2972,7 @@ mod tests {
 
         let numeric_id = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#,
         )
@@ -2858,7 +2983,7 @@ mod tests {
 
         let initialized_notification = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
         )
@@ -2867,7 +2992,7 @@ mod tests {
 
         let missing_method = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"missing-method","params":{}}"#,
         )
@@ -2876,7 +3001,7 @@ mod tests {
         assert_eq!(missing_method.id, Some(json!("missing-method")));
         assert_eq!(missing_method.error.unwrap()["code"], -32600);
 
-        let malformed = handle_line(Path::new("."), &store, &config, "{")
+        let malformed = handle_line(Path::new("."), Some(&store), &config, "{")
             .await
             .expect("parse errors should return an error response");
         assert_eq!(malformed.id, None);
@@ -2884,7 +3009,7 @@ mod tests {
 
         let malformed_unicode = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"bad-unicode","method":"initialize","params":{"client":"\uD800"}}"#,
         )
@@ -2895,7 +3020,7 @@ mod tests {
 
         let unknown_method = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"unknown-method","method":"missing_method","params":{}}"#,
         )
@@ -2906,7 +3031,7 @@ mod tests {
 
         let tool_error = handle_line(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
         )
@@ -2927,7 +3052,7 @@ mod tests {
         let config = OkConfig::default();
         let timeout = handle_request_with_timeout(
             Path::new("."),
-            &store,
+            Some(&store),
             &config,
             JsonRpcRequest {
                 id: Some(json!("timeout")),
@@ -3052,11 +3177,209 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
             ),
         ] {
-            let response = handle_line(&fixture.repo, &fixture.store, &fixture.config, line)
+            let response = handle_line(&fixture.repo, Some(&fixture.store), &fixture.config, line)
                 .await
                 .expect("snapshot request should return a response");
             assert_mcp_snapshot(name, &response);
         }
+    }
+
+    /// Every line a session sends is answered from no store at all, and the repository on
+    /// disk is exactly as it was: no `.ok`, no database. The handshake and the inventory
+    /// still answer so a client can connect and see what indexing would give it.
+    #[tokio::test]
+    async fn unindexed_repository_is_served_without_creating_an_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        let config = OkConfig::default();
+
+        let session = |lines: &[&str]| format!("{}\n", lines.join("\n"));
+        let drive = |input: String| {
+            let repo = repo.clone();
+            let config = config.clone();
+            async move {
+                let mut output = Vec::new();
+                serve(repo, config, BufReader::new(input.as_bytes()), &mut output)
+                    .await
+                    .expect("an unindexed repository is served, not refused");
+                String::from_utf8(output)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let handshake = drive(session(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        ]))
+        .await;
+        assert_eq!(handshake[0]["result"]["serverInfo"]["name"], "open-kioku");
+        assert_eq!(
+            handshake[1]["result"]["tools"].as_array().unwrap().len(),
+            16
+        );
+        assert!(
+            !repo.join(".ok").exists(),
+            "initialize and tools/list must not create .ok"
+        );
+
+        let calls = drive(session(&[
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"main"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_callers","arguments":{"query":"main"}}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"repo_status","params":{}}"#,
+        ]))
+        .await;
+        assert!(
+            !repo.join(".ok").exists(),
+            "tool calls on an unindexed repository must not create .ok"
+        );
+        let expected_next_step = format!("ok index {}", repo.display());
+
+        let status = &calls[0]["result"];
+        assert_eq!(status["isError"], false);
+        assert_eq!(status["structuredContent"]["indexed"], false);
+        assert_eq!(status["structuredContent"]["next_step"], expected_next_step);
+        let message = status["structuredContent"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("repository is not indexed"),
+            "{message}"
+        );
+        assert!(message.contains(&expected_next_step), "{message}");
+        assert_eq!(
+            status["structuredContent"]["index_path"],
+            json!(repo.join(".ok/index.sqlite"))
+        );
+
+        let search = &calls[1]["error"];
+        assert_eq!(search["code"], -32000);
+        assert_eq!(search["message"], not_indexed_message(&repo));
+        assert!(search["message"]
+            .as_str()
+            .unwrap()
+            .contains(&expected_next_step));
+
+        // Retired and unknown names keep their own answers: "not indexed" is not their fix.
+        assert!(calls[2]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("retired from the MCP tool surface"));
+        assert!(calls[3]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown MCP method or tool"));
+        assert_eq!(calls[4]["result"]["indexed"], false);
+        assert_eq!(calls[4]["result"]["next_step"], expected_next_step);
+    }
+
+    /// An index without a manifest is what a 4.0.0 read surface left behind; it is served as
+    /// unindexed, not as a legacy index awaiting rebuild.
+    #[tokio::test]
+    async fn empty_index_database_is_served_as_unindexed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        fs::create_dir_all(repo.join(".ok")).unwrap();
+        drop(SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap());
+        assert!(SqliteStore::open_repo_index(&repo).unwrap().is_none());
+
+        let mut output = Vec::new();
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_references","arguments":{"query":"main","kind":"all"}}}"#,
+            "\n"
+        );
+        serve(
+            repo.clone(),
+            OkConfig::default(),
+            BufReader::new(input.as_bytes()),
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let response: Value =
+            serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
+        let message = response["error"]["message"].as_str().unwrap();
+        assert_eq!(message, not_indexed_message(&repo));
+        assert!(!message.contains("legacy index"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn search_code_refuses_a_blank_query() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        for params in [json!({"query": ""}), json!({"query": "   "}), json!({})] {
+            let error = dispatch(
+                Path::new("."),
+                &store,
+                &config,
+                "search_code",
+                params.clone(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("requires a non-empty `query`"),
+                "{params}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_path_refuses_nodes_the_index_does_not_hold() {
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let manifest = fixture_manifest();
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        for (params, missing) in [
+            (
+                json!({"from": "nope.rs", "to": "also_nope.rs"}),
+                "`nope.rs`",
+            ),
+            (json!({"from": "file:nope.rs"}), "`file:nope.rs`"),
+        ] {
+            let error = dispatch(Path::new("."), &store, &config, "dependency_path", params)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(missing), "{error}");
+            assert!(error.contains("ok index"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retrieve_context_refuses_an_unknown_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let error = dispatch(
+            temp.path(),
+            &store,
+            &config,
+            "retrieve_context",
+            json!({"handle": "bogus"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no context handle `bogus`"), "{error}");
     }
 
     struct McpSnapshotFixture {

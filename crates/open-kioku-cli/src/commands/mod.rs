@@ -219,17 +219,27 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     println!("{rendered}");
                 }
             } else if cli.json {
-                let compatibility = analysis_semantics_compatibility_for_manifest(manifest.as_ref());
+                // The same object MCP `repo_status` returns: `indexed: false` with the next
+                // step for a repository nobody has indexed, never a bare `null`.
+                let Some(manifest) = manifest else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &open_kioku_storage::generations::not_indexed_status(&repo)
+                        )?
+                    );
+                    return Ok(());
+                };
+                let compatibility = analysis_semantics_compatibility_for_manifest(Some(&manifest));
                 let mut status = serde_json::to_value(&manifest)?;
                 if let Some(object) = status.as_object_mut() {
+                    object.insert("indexed".into(), serde_json::Value::Bool(true));
                     object.insert("analysis_semantics_status".into(), serde_json::to_value(compatibility)?);
                     // Mirrors the MCP `repo_status` tool: null when the manifest predates
                     // coverage recording, so a reader cannot mistake absence for 100%.
                     object.insert(
                         "coverage".into(),
-                        serde_json::to_value(
-                            manifest.as_ref().and_then(|manifest| manifest.quality.coverage.as_ref()),
-                        )?,
+                        serde_json::to_value(manifest.quality.coverage.as_ref())?,
                     );
                     // Also mirrored: the fingerprint above passes on a pre-4.0 index whose
                     // edges were discarded on open, so the marker is reported beside it.
@@ -272,7 +282,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     }
                 }
             } else {
-                println!("No index found. Run `ok index .`.");
+                println!(
+                    "{}",
+                    open_kioku_storage::generations::not_indexed_message(&repo)
+                );
             }
             if exit_code && !doctor.as_ref().map(|report| report.ok).unwrap_or(true) {
                 anyhow::bail!("Open Kioku status has failing readiness checks");
@@ -534,6 +547,12 @@ pub async fn run_cli() -> anyhow::Result<()> {
             semantic,
             hybrid,
         } => {
+            // A blank query answered `[]`, which read as "nothing matches"; the MCP
+            // `search_code` tool refuses it with the same words.
+            anyhow::ensure!(
+                !query.trim().is_empty(),
+                "`ok search` requires a non-empty query"
+            );
             let store = open_store(&repo)?;
             // Exact matching answers in its own shape: the corpus caveat has to
             // survive `--json`, where stdout is the whole answer and an empty
@@ -865,14 +884,17 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
         }
         Command::RetrieveContext { handle } => {
-            let retrieved =
-                ContextHandleStore::open_repo(&repo)?.retrieve(&ContextHandleId::new(handle))?;
+            // An unknown handle is an error, as it is for MCP `retrieve_context`: `null`
+            // under `--json` read as an empty snippet.
+            let retrieved = ContextHandleStore::open_repo(&repo)?
+                .retrieve(&ContextHandleId::new(&handle))?
+                .with_context(|| {
+                    format!(
+                        "no context handle `{handle}` is stored for this repository; handles come from `ok context --compressed`"
+                    )
+                })?;
             output(cli.json, &retrieved, || {
-                if let Some(retrieved) = &retrieved {
-                    println!("{}", retrieved.original);
-                } else {
-                    println!("No context handle found.");
-                }
+                println!("{}", retrieved.original);
             })?;
         }
         Command::Plan {

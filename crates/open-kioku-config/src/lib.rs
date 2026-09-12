@@ -170,12 +170,18 @@ pub struct RepoConfig {
     pub root: PathBuf,
 }
 
+/// How call, inheritance and type-use edges are resolved while indexing. The variant docs
+/// are also the comment `ok init` writes above `resolution_mode` in `ok.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionMode {
+    /// Symbol-registry resolution only; the resolution quality report is skipped.
     Legacy,
+    /// Runs the proof-gated resolver beside the registry, records its quality report and its
+    /// proven edges, and keeps the registry's CALLS facts in the graph. The default.
     #[default]
     Shadow,
+    /// The proof-gated resolver's proven CALLS edges replace the registry's.
     V2,
 }
 
@@ -267,17 +273,43 @@ pub struct SearchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankingConfig {
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub text_relevance: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub exact_reference: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub graph_proximity: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub boundary_fit: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub runtime_corroboration: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub git_cochange: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub validation_proximity: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub memory_signal: f32,
+    #[serde(serialize_with = "serialize_f32_decimal")]
     pub path_quality: f32,
-    #[serde(default = "default_semantic_similarity_weight")]
+    #[serde(
+        default = "default_semantic_similarity_weight",
+        serialize_with = "serialize_f32_decimal"
+    )]
     pub semantic_similarity: f32,
+}
+
+/// Serde widens `f32` to `f64` on the way out, so a weight declared as `0.35` would be
+/// written as `0.3499999940395355`. The f32's shortest round-trip decimal parses back to the
+/// identical f32, so that is what goes on the wire.
+fn serialize_f32_decimal<S: serde::Serializer>(
+    value: &f32,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let decimal = value
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or_else(|_| f64::from(*value));
+    serializer.serialize_f64(decimal)
 }
 
 impl Default for RankingConfig {
@@ -431,11 +463,20 @@ impl OkConfig {
     }
 
     pub fn write_default(path: impl AsRef<Path>) -> Result<()> {
-        let config = Self::default();
-        let raw =
-            toml::to_string_pretty(&config).map_err(|err| OkError::Config(err.to_string()))?;
-        fs::write(path, raw)?;
+        fs::write(path, Self::default_toml()?)?;
         Ok(())
+    }
+
+    /// The `ok.toml` that `ok init` and `ok setup agent --apply` write: the serialized
+    /// defaults, with the two adjustments serde cannot make on its own. `resolution_mode`
+    /// carries the comment its enum docs give it, and `[runtime]` keeps only `enabled = false`
+    /// with the provider fields shown as comments, so a file that says `provider = "sentry"`
+    /// does not read as a configured integration. `load_from_repo` restores the omitted
+    /// fields from their defaults.
+    pub fn default_toml() -> Result<String> {
+        let raw = toml::to_string_pretty(&Self::default())
+            .map_err(|err| OkError::Config(err.to_string()))?;
+        Ok(annotate_default_toml(&raw))
     }
 
     pub fn max_file_size_bytes(&self) -> Result<u64> {
@@ -585,6 +626,48 @@ fn default_semantic_ann_min_rows() -> usize {
     10_000
 }
 
+const RESOLUTION_MODE_COMMENT: &str = "\
+# How call, inheritance and type-use edges are resolved while indexing:
+#   \"legacy\": symbol-registry resolution only; the resolution quality report is skipped.
+#   \"shadow\": runs the proof-gated resolver beside the registry, records its quality report
+#             and its proven edges, and keeps the registry's CALLS facts in the graph.
+#   \"v2\":     the proof-gated resolver's proven CALLS edges replace the registry's.
+";
+
+const RUNTIME_SECTION_COMMENT: &str = "\
+# Runtime error provider, off until enabled. To turn it on, set enabled = true and add
+# provider = \"sentry\", organization, project, and auth_token_env = \"SENTRY_AUTH_TOKEN\".
+";
+
+/// Post-pass over the serialized defaults. It only edits lines the serializer is known to
+/// emit for `OkConfig::default()`; a round-trip test holds it to producing a file the loader
+/// reads back as the defaults.
+fn annotate_default_toml(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 1024);
+    let mut in_runtime = false;
+    for line in raw.lines() {
+        if line.starts_with('[') {
+            in_runtime = line == "[runtime]";
+            if in_runtime {
+                out.push_str(line);
+                out.push('\n');
+                out.push_str(RUNTIME_SECTION_COMMENT);
+                continue;
+            }
+        }
+        if in_runtime && (line.starts_with("provider = ") || line.starts_with("auth_token_env = "))
+        {
+            continue;
+        }
+        if line.starts_with("resolution_mode = ") {
+            out.push_str(RESOLUTION_MODE_COMMENT);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn default_architecture_rules() -> PathBuf {
     ".ok/architecture-rules.yml".into()
 }
@@ -712,6 +795,52 @@ paths = ["crates/api/**"]
         assert_eq!(loaded.repo.name, "open-kioku-repo");
         assert!(!loaded.security.allow_write);
         assert_eq!(loaded.scip.mode, ScipMode::Consume);
+    }
+
+    #[test]
+    fn default_toml_prints_declared_decimals_and_a_quiet_runtime_section() {
+        let raw = OkConfig::default_toml().unwrap();
+        assert!(raw.contains("graph_proximity = 0.35\n"), "{raw}");
+        assert!(raw.contains("memory_signal = 0.2\n"), "{raw}");
+        assert!(raw.contains("runtime_corroboration = 0.3\n"), "{raw}");
+        assert!(!raw.contains("0.3499999940395355"), "{raw}");
+        assert!(
+            raw.contains(
+                "# How call, inheritance and type-use edges are resolved while indexing:\n"
+            ),
+            "{raw}"
+        );
+        assert!(raw.contains("resolution_mode = \"shadow\"\n"), "{raw}");
+        let runtime = raw
+            .split("[runtime]\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n[").next())
+            .expect("a [runtime] section");
+        assert!(runtime.contains("enabled = false\n"), "{runtime}");
+        assert!(!runtime.contains("\nprovider = "), "{runtime}");
+        assert!(!runtime.contains("\nauth_token_env = "), "{runtime}");
+        assert!(runtime.contains("# provider = \"sentry\""), "{runtime}");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.toml"), &raw).unwrap();
+        let loaded = OkConfig::load_from_repo(dir.path()).unwrap();
+        let defaults = OkConfig::default();
+        assert_eq!(
+            loaded.ranking.graph_proximity,
+            defaults.ranking.graph_proximity
+        );
+        assert_eq!(loaded.ranking.memory_signal, defaults.ranking.memory_signal);
+        assert_eq!(
+            loaded.ranking.semantic_similarity,
+            defaults.ranking.semantic_similarity
+        );
+        assert_eq!(loaded.index.resolution_mode, ResolutionMode::Shadow);
+        assert!(!loaded.runtime.enabled);
+        assert_eq!(loaded.runtime.provider, defaults.runtime.provider);
+        assert_eq!(
+            loaded.runtime.auth_token_env,
+            defaults.runtime.auth_token_env
+        );
     }
 
     #[test]

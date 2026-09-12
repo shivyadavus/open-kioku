@@ -3555,3 +3555,235 @@ fn context_pack_widens_top_file_regions_and_costs_supporting_files_in_the_ledger
     );
     assert_eq!(selection["budget"]["region_files"].as_u64(), Some(3));
 }
+
+/// A repository nobody has indexed is told so in one sentence by every read surface, and
+/// none of them creates `.ok` on the way: an empty database left behind by a read used to
+/// make every later read report a legacy index awaiting rebuild instead.
+#[test]
+fn unindexed_repository_reads_say_not_indexed_and_create_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    // `ok doctor <repo>` canonicalizes the positional path; `--repo` is used as given. The
+    // sentence names the path, so hand every command the canonical one.
+    let repo = temp.path().canonicalize().unwrap();
+    let repo = repo.as_path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+    )
+    .unwrap();
+    let repo_arg = repo.display().to_string();
+    let next_step = format!("ok index {repo_arg}");
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("status");
+        command
+    });
+    assert!(
+        status.contains("repository is not indexed") && status.contains(&next_step),
+        "{status}"
+    );
+
+    let status_json = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status_json: serde_json::Value = serde_json::from_str(&status_json).unwrap();
+    assert_eq!(status_json["indexed"], false, "{status_json}");
+    assert_eq!(status_json["next_step"], next_step, "{status_json}");
+    assert!(status_json["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("repository is not indexed"));
+
+    for args in [
+        vec!["search", "Worker"],
+        vec!["context", "change Worker::run"],
+        vec!["impact", "--file", "src/lib.rs"],
+        vec!["plan", "change Worker::run"],
+    ] {
+        let (_stdout, stderr) = run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(&args);
+            command
+        });
+        assert!(
+            stderr.contains("repository is not indexed") && stderr.contains(&next_step),
+            "{args:?} must say the repository is not indexed, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains("legacy index"),
+            "{args:?} must not describe a never-indexed repository as a legacy index: {stderr}"
+        );
+    }
+
+    // The doctor's MCP probe spawns a real server; it must not index either.
+    let (doctor, _stderr) = run_failure({
+        let mut command = ok();
+        command.arg("doctor").arg(repo);
+        command
+    });
+    assert!(
+        doctor.contains("[fail] index") && doctor.contains("repository is not indexed"),
+        "{doctor}"
+    );
+    assert!(doctor.contains(&next_step), "{doctor}");
+
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command
+                .arg("mcp")
+                .arg("serve")
+                .arg("--repo")
+                .arg(repo)
+                .arg("--read-only");
+            command
+        },
+        concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"Worker"}}}"#,
+            "\n",
+        ),
+    );
+    let responses = mcp
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 4, "{mcp}");
+    assert_eq!(responses[0]["result"]["serverInfo"]["name"], "open-kioku");
+    assert!(responses[1]["result"]["tools"].is_array());
+    let repo_status = &responses[2]["result"];
+    assert_eq!(repo_status["isError"], false);
+    assert_eq!(repo_status["structuredContent"]["indexed"], false);
+    assert_eq!(repo_status["structuredContent"]["next_step"], next_step);
+    let search_error = responses[3]["error"]["message"].as_str().unwrap();
+    assert!(
+        search_error.contains("repository is not indexed"),
+        "{search_error}"
+    );
+    assert!(search_error.contains(&next_step), "{search_error}");
+    // Same sentence on both surfaces.
+    assert_eq!(search_error, status_json["message"].as_str().unwrap());
+
+    assert!(
+        !repo.join(".ok").exists(),
+        "no read surface may create .ok in an unindexed repository"
+    );
+}
+
+/// A `.mcp.json` entry the user wrote by hand (what `ok mcp install claude` prints) is
+/// adopted when it launches this repository's server, before anything is indexed, and the
+/// tracked file is not rewritten; an entry pointing elsewhere is refused before indexing.
+#[test]
+fn agent_setup_adopts_a_hand_written_entry_and_refuses_an_incompatible_one_before_indexing() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"onboarding-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn answer() -> u8 { 42 }\n").unwrap();
+    let hand_written = "{\n  \"mcpServers\": {\n    \"open-kioku\": {\n      \"command\": \"ok\",\n      \"args\": [\"mcp\", \"serve\", \"--repo\", \".\"],\n      \"env\": {}\n    }\n  }\n}\n";
+    fs::write(repo.join(".mcp.json"), hand_written).unwrap();
+
+    let applied = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("claude")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--apply");
+        command
+    });
+    assert!(applied.contains("[kept] config"), "{applied}");
+    assert!(applied.contains("existing entry preserved"), "{applied}");
+    assert!(applied.contains("[applied] skill"), "{applied}");
+    assert!(applied.contains("[passed] mcp_stdio"), "{applied}");
+    assert_eq!(
+        fs::read_to_string(repo.join(".mcp.json")).unwrap(),
+        hand_written,
+        "an adopted entry is not rewritten"
+    );
+    assert!(repo.join(".claude/skills/open-kioku/SKILL.md").is_file());
+    assert!(repo.join(".ok/index.sqlite").is_file());
+
+    let checked = run({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("claude")
+            .arg("--repo")
+            .arg(repo)
+            .arg("--check");
+        command
+    });
+    assert!(checked.contains("[passed] config"), "{checked}");
+    assert!(
+        checked.contains("Open Kioku is ready for this repository."),
+        "{checked}"
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let other_repo = other.path();
+    fs::create_dir_all(other_repo.join("src")).unwrap();
+    fs::write(
+        other_repo.join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .unwrap();
+    fs::write(
+        other_repo.join(".mcp.json"),
+        r#"{"mcpServers":{"open-kioku":{"command":"ok","args":["mcp","serve","--repo","/somewhere/else"]}}}"#,
+    )
+    .unwrap();
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("claude")
+            .arg("--repo")
+            .arg(other_repo)
+            .arg("--apply");
+        command
+    });
+    assert!(stderr.contains("`mcpServers.open-kioku`"), "{stderr}");
+    assert!(stderr.contains("serves `/somewhere/else`"), "{stderr}");
+    assert!(stderr.contains("\"--read-only\""), "{stderr}");
+    assert!(
+        !other_repo.join(".ok").exists(),
+        "an incompatible entry is refused before indexing"
+    );
+    assert!(!other_repo.join(".claude").exists());
+
+    let (check_stdout, check_stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("setup")
+            .arg("agent")
+            .arg("claude")
+            .arg("--repo")
+            .arg(other_repo)
+            .arg("--check");
+        command
+    });
+    assert!(check_stdout.contains("[mismatch] config"), "{check_stdout}");
+    assert!(check_stdout.contains("/somewhere/else"), "{check_stdout}");
+    assert!(
+        !check_stdout.contains("--apply") && !check_stderr.contains("--apply"),
+        "--check must not recommend a command that fails on this state:\n{check_stdout}\n{check_stderr}"
+    );
+}

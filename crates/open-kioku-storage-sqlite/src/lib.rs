@@ -141,18 +141,61 @@ struct SimilarityStatics {
 }
 
 impl SqliteStore {
+    /// Open the index at `path`, creating the file and its directory when absent. This is the
+    /// writer's open: `ok index`, `ok init`, snapshot import and the watcher go through it.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open_with_flags(
-            &path,
+        Self::open_with_flags(
+            path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(storage_err)?;
+    }
+
+    /// Open an index that already exists, creating neither the file nor its directory.
+    ///
+    /// Every read surface opens through here (or through `open_repo_index`), so a repository
+    /// that has never been indexed stays untouched on disk. When reads went through `open`, a
+    /// read-only MCP session or `ok search` left an empty `.ok/index.sqlite` behind, which
+    /// every later read reported as a legacy index awaiting rebuild rather than as a
+    /// repository nobody had indexed. The connection is still read-write: `initialize` runs
+    /// the idempotent schema statements and the legacy-layout reset records its marker.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(OkError::Index(format!(
+                "no index database at {}",
+                path.display()
+            )));
+        }
+        Self::open_with_flags(
+            path.to_path_buf(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    }
+
+    /// The repository's active index for reading, or `None` when the repository has never
+    /// been indexed: no database, or a database without a manifest, which is what a 4.0.0
+    /// read surface left behind. `Err` is reserved for an index that exists and cannot be
+    /// opened, so a caller can tell "not indexed" from "broken" and say the right thing.
+    pub fn open_repo_index(repo: &Path) -> Result<Option<Self>> {
+        let path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let store = Self::open_existing(path)?;
+        if store.manifest()?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(store))
+    }
+
+    fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
+        let connection = Connection::open_with_flags(&path, flags).map_err(storage_err)?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
             .map_err(storage_err)?;
