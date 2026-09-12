@@ -86,6 +86,11 @@ def main() -> int:
             ".sha256",
             "actions/attest-build-provenance",
             "softprops/action-gh-release",
+            # Both publishing credentials are verified before any build starts;
+            # the crates.io check needs the environment that holds its secret.
+            "Verify npm credentials",
+            "Verify crates.io credentials",
+            "environment: crates-io",
         ],
     )
     require_contains(

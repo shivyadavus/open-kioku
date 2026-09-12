@@ -18,6 +18,17 @@ scripts/verify-release-readiness.sh
 scripts/verify-npm-package.sh
 ```
 
+The release workflow repeats `scripts/validate-versions.sh` and then verifies
+both publishing credentials before any build starts, because a dead token only
+surfaces after the builds and, for crates.io, after the tag and GitHub release
+are already public. The `preflight` job runs `npm whoami` against `NPM_TOKEN`
+(a repository secret). The `preflight-crates` job authenticates
+`CARGO_REGISTRY_TOKEN` (an environment secret in the `crates-io` environment,
+which the job declares in order to read it) with a read-only crates.io
+request. A failed check names the secret, where it lives, and the
+`gh secret set` command that rotates it. Neither check can prove a token's
+publish scope; the registries only exercise that on the publish itself.
+
 For a release that changes the reusable GitHub Action, also run its independent
 `npm test` and `npm run check`, publish an immutable action tag, and verify the
 `v1` major tag points at that reviewed release. The action publishes no source
@@ -55,6 +66,21 @@ EXPECTED_VERSION=<VERSION> scripts/publish-crates.sh --publish
 ```
 
 Do not commit or upload the crates.io token.
+
+The workflow's `CARGO_REGISTRY_TOKEN` lives in the `crates-io` GitHub
+environment, not in the repository secrets; `gh secret list` will not show it
+without `--env crates-io`. Rotate it yourself, so the token never enters a
+transcript or a commit:
+
+```sh
+gh secret set CARGO_REGISTRY_TOKEN --repo shivyadavus/open-kioku --env crates-io
+```
+
+A `publish-crates` failure of `403 Forbidden: authentication failed` is this
+token being revoked, expired, or never issued. The `preflight-crates` job
+catches it before the builds; if it slips through anyway, publish locally as
+above and re-run the failed job, which skips crates that are already
+published.
 
 ## Install Channels
 
@@ -100,6 +126,15 @@ GitHub release notes, the release workflow, in-repo Homebrew formula URLs, cargo
 release trust artifacts after the platform binaries have been downloaded into
 `dist/`. GitHub Actions also publishes build provenance attestations for the
 four binary artifacts.
+
+The hash-pin commit (`release: pin <VERSION> artifact hashes`) writes the
+built binaries' sha256 values into `release-metadata.json`,
+`Formula/open-kioku.rb`, and the root `Dockerfile` (`OK_SHA256`, the
+`ok-linux-x86_64` hash; `OK_VERSION` is synced earlier with every other
+manifest). MCP directories build that image from the release tag, so the tag
+must be at or after this commit. `scripts/validate-release-metadata.py` fails
+when the Dockerfile disagrees with the workspace version or with the
+`ok-linux-x86_64` entry in `release-metadata.json`.
 
 ## Post-Publish Smoke
 

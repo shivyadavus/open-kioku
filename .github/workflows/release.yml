@@ -70,8 +70,71 @@ jobs:
             echo "fails on the first platform package, the token is missing scope grants."
           fi
 
+  # The crates.io credential gets the same treatment, for a worse failure: the
+  # 4.0.0 release built, tagged, and published the GitHub release, and only then
+  # did publish-crates fail with "403 Forbidden: authentication failed" on a
+  # stale CARGO_REGISTRY_TOKEN, so the 43 crates had to be published by hand.
+  #
+  # CARGO_REGISTRY_TOKEN is an environment secret, not a repository secret, so
+  # this job declares the same environment as publish-crates; without it the
+  # secret expression is empty and the only thing this check could ever report
+  # is "not set". The environment has no protection rules. If a required
+  # reviewer is ever added, the approval wait moves here, before the builds,
+  # which is where a wait belongs.
+  preflight-crates:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - name: Verify crates.io credentials
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set in the 'crates-io' environment of ${{ github.repository }}."
+            echo "Fix: gh secret set CARGO_REGISTRY_TOKEN --repo ${{ github.repository }} --env crates-io"
+            exit 1
+          fi
+          # crates.io has no whoami for API tokens: GET /api/v1/me accepts only a
+          # browser session. The crate search endpoint authenticates the token
+          # when asked to filter by followed crates (a read; the only write is
+          # the token's own last_used_at), and it authenticates before it checks
+          # scopes, so the response separates a dead token from a live one:
+          #   200                                           live legacy token (no endpoint scopes)
+          #   403 "does not have the required permissions"  live scoped token; the usual shape of a publish token
+          #   403 "authentication failed"                   revoked, expired, or never issued; what 4.0.0 hit
+          #   403 "this action requires authentication"     the header was not sent
+          # crates.io exercises the publish scope only on publish itself, so this
+          # proves the token is live, not that it can publish.
+          body="$(mktemp)"
+          status="$(curl --silent --show-error --retry 3 \
+            --output "$body" --write-out '%{http_code}' \
+            --header "Authorization: ${CARGO_REGISTRY_TOKEN}" \
+            --header "User-Agent: open-kioku-release-preflight (https://github.com/${{ github.repository }})" \
+            'https://crates.io/api/v1/crates?following=1&per_page=1' || true)"
+          detail="$(cat "$body")"
+          rm -f "$body"
+          if [ "$status" = "200" ]; then
+            echo "crates.io authenticated CARGO_REGISTRY_TOKEN (legacy token without endpoint scopes)."
+          elif [ "$status" = "403" ] && grep -q "does not have the required permissions" <<<"$detail"; then
+            echo "crates.io authenticated CARGO_REGISTRY_TOKEN (scoped token; the publish scope is checked by publish itself)."
+          else
+            echo "::error::crates.io did not authenticate CARGO_REGISTRY_TOKEN - the release would fail in publish-crates after the tag and GitHub release are public."
+            echo "crates.io responded HTTP ${status}: ${detail}"
+            echo ""
+            echo "The CARGO_REGISTRY_TOKEN secret lives in the 'crates-io' environment of"
+            echo "${{ github.repository }}, not in the repository secrets. 'authentication failed'"
+            echo "means the token is revoked, expired, or was never issued. Create a token at"
+            echo "https://crates.io/settings/tokens with the publish-update scope (publish-new as"
+            echo "well for a release that adds a crate), then:"
+            echo "  gh secret set CARGO_REGISTRY_TOKEN --repo ${{ github.repository }} --env crates-io"
+            echo "and dispatch this workflow again."
+            exit 1
+          fi
+
   build:
-    needs: preflight
+    needs: [preflight, preflight-crates]
     strategy:
       fail-fast: false
       matrix:
@@ -170,7 +233,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, re
+          import hashlib, json, re, tomllib
           from pathlib import Path
 
           names = [
@@ -200,6 +263,27 @@ jobs:
                   lines[index] = f'{indent}sha256 "{hashes[current]}"'
                   current = None
           formula_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+          # The Dockerfile pins the same ok-linux-x86_64 binary; MCP directories
+          # build the image from the release tag, so its hash is pinned in the
+          # same commit as release-metadata.json and the formula. OK_VERSION was
+          # already synced by scripts/sync-version.sh and is rewritten here too
+          # so the pair cannot disagree at the tag. A Dockerfile without both
+          # lines is a drift, not something to pin silently.
+          version = tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version']
+          dockerfile_path = Path('Dockerfile')
+          lines = dockerfile_path.read_text(encoding='utf-8').splitlines()
+          pinned = set()
+          for index, line in enumerate(lines):
+              if line.startswith('ARG OK_VERSION='):
+                  lines[index] = f'ARG OK_VERSION={version}'
+                  pinned.add('OK_VERSION')
+              elif line.startswith('ARG OK_SHA256='):
+                  lines[index] = f'ARG OK_SHA256={hashes["ok-linux-x86_64"]}'
+                  pinned.add('OK_SHA256')
+          if pinned != {'OK_VERSION', 'OK_SHA256'}:
+              raise SystemExit(f'Dockerfile is missing an ARG line to pin; found only {sorted(pinned)}')
+          dockerfile_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
           PY
           python3 scripts/verify-release-artifact-hashes.py dist
           scripts/validate-versions.sh
@@ -217,7 +301,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "release/v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add release-metadata.json Formula/open-kioku.rb
+          git add release-metadata.json Formula/open-kioku.rb Dockerfile
           git commit -m "release: pin ${VERSION} artifact hashes"
           git push origin HEAD:"$GITHUB_REF_NAME"
           echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
