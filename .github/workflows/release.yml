@@ -78,9 +78,7 @@ jobs:
   # CARGO_REGISTRY_TOKEN is an environment secret, not a repository secret, so
   # this job declares the same environment as publish-crates; without it the
   # secret expression is empty and the only thing this check could ever report
-  # is "not set". The environment has no protection rules. If a required
-  # reviewer is ever added, the approval wait moves here, before the builds,
-  # which is where a wait belongs.
+  # is "not set".
   preflight-crates:
     runs-on: ubuntu-latest
     environment: crates-io
