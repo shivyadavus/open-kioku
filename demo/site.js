@@ -29,7 +29,7 @@ const live=document.getElementById('live-proof');
 if(live){
   // Scene 1 is actual `ok context` output on this repository (README, "First Win"), trimmed.
   // Scene 2 is the verify failure from demo.tape (one drive-by edit outside the declared boundary).
-  // Scene 3 is the no-gold behaviour measured on the frozen fixture: 5 of 5 no-gold tasks come back Low.
+  // Scene 3 replays the frozen fixture's java-no-gold-password-reset case (benchmarks/retrieval-cases.json): 5 of 5 no-gold tasks come back Low.
   const scenes=[
     {cmd:'ok context "reap the doctor\'s MCP probe child process" --format markdown',lines:[
       ['section','CONFIDENCE'],
@@ -46,7 +46,7 @@ if(live){
       ['warn','[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary'],
       ['comment','# one edit inside the declared boundary, one drive-by outside it: the check fails'],
       ['comment','# a green exit code from a test runner is not proof the right files changed; this is']]},
-    {cmd:'ok context "migrate the billing webhooks" --format markdown',lines:[
+    {cmd:'ok context "password reset should email a one-time code and throttle repeated reset attempts" --format markdown',lines:[
       ['section','CONFIDENCE'],
       ['row','overall','<span class="warn">Low</span>'],
       ['out','candidates are still listed; the pack tells the caller not to trust them rather than returning nothing'],
