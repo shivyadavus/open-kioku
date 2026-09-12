@@ -180,6 +180,8 @@ pub const EXACT_REFERENCE_UNAVAILABLE_CAVEAT: &str =
 pub struct EvidenceQuality {
     pub index_mode: String,
     pub freshness: String,
+    /// True when this report found a typed exact reference (SCIP evidence or an
+    /// exact-authority selection), not whether the manifest holds SCIP references.
     pub exact_reference_available: bool,
     pub runtime_available: bool,
     pub history_available: bool,
