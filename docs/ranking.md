@@ -106,14 +106,17 @@ in `open-kioku-core` computes it from typed inputs (weights in parentheses):
 - `evidence_density` (0.10): distinct evidence records over twice the selected primary files, capped at 1.0. Counting evidence *lines* saturated it for any non-empty pack.
 - `validation_availability` (0.15): 1.0 when at least one validation target was selected, else 0.2.
 - `test_coverage` (0.10): 1.0 when a selected target carries a runnable command, 0.6 when targets need manual commands, 0.2 with none.
-- `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; the other scopes are reported but priced by the components above.
+- `negative_evidence` (0.15): 1.0 with no counted negative evidence, 0.3 with one or two items, 0.1 beyond. Counted items are the pack's `negative_evidence` entries in the `primary_context` and `anchor` scopes; `exact_references`, `validation`, and `runtime` absence is priced by the components above, and `history` and `boundary` items are reported but not priced.
 - `boundary_tightness` (0.15) and `runtime_corroboration` (0.05): the allowed-file bound and the typed `runtime_corroboration` score component on selected results.
 
-Caps apply after the weighted sum: 0.35 with no primary context, 0.74 without exact
-evidence, 0.60 with counted negative evidence, 0.50 when every named task identifier is
-unmatched by the selected context, 0.30 when no task term appears in it, and 0.94 with any
-caveat. The `Exact` label additionally requires `exact_reference_count > 0`; otherwise the
-label stops at `High`. `docs/context-pack-spec.md` defines the label semantics.
+Caps apply after the weighted sum, in this order: 0.35 with no primary context; 0.55 when
+exact references, validation targets, and runtime signals are all absent; 0.74 without exact
+evidence; 0.30 when no task term appears in the selected context, or 0.50 when fewer than
+`WEAK_TASK_RELEVANCE` (0.34) of them do; 0.60 with counted negative evidence; 0.50 when
+every named task identifier is unmatched by the selected context; and 0.94 with any caveat,
+including a plan's evidence-quality caveats attached after scoring. The `Exact` label
+additionally requires `exact_reference_count > 0`; otherwise the label stops at `High`.
+`docs/context-pack-spec.md` defines the label semantics.
 
 Use `ok search --explain-ranking "query"` to inspect dominant signals for each
 result. Use `ok eval` to compare baseline ranking, fused ranking, and signal

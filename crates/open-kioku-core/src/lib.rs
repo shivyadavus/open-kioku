@@ -134,12 +134,15 @@ pub mod negative_evidence_scope {
 impl NegativeEvidence {
     /// Whether this item is priced by the `negative_evidence` confidence component.
     ///
-    /// Absent exact references, validation, runtime, and history evidence each lower
-    /// confidence through their own component and cap already. Counting them here as well
-    /// priced one absence twice, which is how `ok plan` reported "3 negative evidence
-    /// signal(s)" for a task whose only defect was a repository without SCIP. What counts
-    /// here is evidence that retrieval itself missed: no primary context at all, or a task
-    /// identifier the selected context does not spell.
+    /// Absent exact references, validation, and runtime evidence each lower confidence
+    /// through their own component and cap already; counting them here as well priced one
+    /// absence twice, which is how `ok plan` reported "3 negative evidence signal(s)" for a
+    /// task whose only defect was a repository without SCIP. Absent history and a
+    /// docs-or-tests-only selection are reported but not priced: history contributes only
+    /// positive score components in plans, and the boundary item classifies what matched
+    /// rather than naming missing evidence. What counts here is evidence that retrieval
+    /// itself missed: no primary context at all, or a task identifier the selected context
+    /// does not spell.
     pub fn lowers_confidence(&self) -> bool {
         matches!(
             self.scope.as_str(),
@@ -167,6 +170,11 @@ pub fn distinct_evidence_count(evidence: &[Evidence]) -> usize {
 }
 
 const DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS: i64 = 7;
+
+/// The evidence-quality caveat for a manifest without SCIP exact references. Named so a
+/// report that found exact references through another typed channel can retract it.
+pub const EXACT_REFERENCE_UNAVAILABLE_CAVEAT: &str =
+    "exact symbol/reference evidence is unavailable";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EvidenceQuality {
@@ -249,6 +257,19 @@ impl EvidenceQuality {
         self.freshness == "fresh"
     }
 
+    /// The manifest flag only knows SCIP. A plan that counted exact references through
+    /// another typed channel - an exact-authority anchor or an indexed occurrence - records
+    /// that here, so one report cannot say `exact_references 1.00` and "exact evidence is
+    /// unavailable" in the same breath.
+    pub fn record_exact_references(&mut self, exact_reference_count: usize) {
+        if exact_reference_count == 0 || self.exact_reference_available {
+            return;
+        }
+        self.exact_reference_available = true;
+        self.caveats
+            .retain(|caveat| caveat != EXACT_REFERENCE_UNAVAILABLE_CAVEAT);
+    }
+
     pub fn is_stale(&self) -> bool {
         self.freshness == "stale"
     }
@@ -282,7 +303,7 @@ impl EvidenceQuality {
             _ => {}
         }
         if !self.exact_reference_available {
-            caveats.push("exact symbol/reference evidence is unavailable".into());
+            caveats.push(EXACT_REFERENCE_UNAVAILABLE_CAVEAT.into());
         }
         if !self.runtime_available {
             caveats.push("runtime evidence is unavailable".into());
@@ -602,10 +623,11 @@ fn task_content_terms(task: &str) -> Vec<String> {
     terms
 }
 
-/// Code identifiers a task names - mixed case, `snake_case`, `kebab-case`, or an
-/// upper-cased token with digits - as opposed to its prose. Ticket references (`ABC-123`)
-/// are not anchors. Shared by context and plan so both surfaces agree on what the task
-/// named and therefore on what counts as missing.
+/// Code identifiers a task names - a capital after the first character (`IssueToken`),
+/// `snake_case`, `kebab-case`, or an upper-cased token with digits - as opposed to its
+/// prose. A sentence-initial capital (`Reap the doctor's ...`) is not an identifier, and
+/// ticket references (`ABC-123`) are not anchors. Shared by context and plan so both
+/// surfaces agree on what the task named and therefore on what counts as missing.
 pub fn named_anchors(task: &str) -> Vec<String> {
     let mut anchors = Vec::new();
     for token in task.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
@@ -617,7 +639,10 @@ pub fn named_anchors(task: &str) -> Vec<String> {
         let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
         let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
         let has_separator = token.contains('_') || token.contains('-');
-        if ((has_lower && has_upper) || has_separator || (has_digit && has_upper))
+        // A capital after the first character is what separates `IssueToken` from a
+        // capitalized verb; `Reap` at the start of a sentence names nothing.
+        let has_internal_upper = token.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+        if ((has_lower && has_internal_upper) || has_separator || (has_digit && has_upper))
             && !anchors.iter().any(|existing| existing == token)
         {
             anchors.push(token.to_string());
@@ -894,18 +919,40 @@ impl ConfidenceBreakdown {
         // least one selection is backed by exact-authority evidence. The 0.74 cap above
         // already implies this; stating it keeps a future weight change from labelling
         // heuristic evidence `Exact` again.
-        let mut overall_enum = Confidence::from_score(overall_score);
-        if overall_enum == Confidence::Exact && input.exact_reference_count == 0 {
-            overall_enum = Confidence::High;
-        }
-
         Self {
-            overall_enum,
+            overall_enum: Self::label_for(overall_score, input.exact_reference_count),
             overall_score,
             components,
             blockers,
             caveats,
         }
+    }
+
+    fn label_for(overall_score: f32, exact_reference_count: usize) -> Confidence {
+        match Confidence::from_score(overall_score) {
+            Confidence::Exact if exact_reference_count == 0 => Confidence::High,
+            label => label,
+        }
+    }
+
+    /// Attach caveats a caller learned after scoring - a plan's evidence-quality caveats -
+    /// under the same rules `from_signals` applies to its own: any caveat caps the score at
+    /// 0.94 and the label is re-derived through the `Exact` gate. Appending them without
+    /// this left `Exact (1.00)` reachable above "index is stale".
+    pub fn add_caveats(
+        &mut self,
+        caveats: impl IntoIterator<Item = String>,
+        exact_reference_count: usize,
+    ) {
+        for caveat in caveats {
+            if !self.caveats.contains(&caveat) {
+                self.caveats.push(caveat);
+            }
+        }
+        if !self.caveats.is_empty() {
+            self.overall_score = self.overall_score.min(0.94);
+        }
+        self.overall_enum = Self::label_for(self.overall_score, exact_reference_count);
     }
 }
 
@@ -4128,9 +4175,9 @@ mod tests {
         count_resolution_notes, named_anchors, negative_evidence_signal_count,
         reconcile_score_breakdown, score_component_total, task_relevance_score,
         unmatched_named_anchors, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
-        Evidence, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord,
-        GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-        HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange,
+        Evidence, EvidenceQuality, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId,
+        GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
+        GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange,
         NegativeEvidence, NodeId, Owner, PathInterner, ScopeId, ScoreComponent, SearchResult,
         SharedPath, SharedStr, SourceRange, StringInterner, Symbol, SymbolId, Visibility,
         HISTORY_SCHEMA_VERSION,
@@ -4486,8 +4533,11 @@ mod tests {
             .any(|blocker| blocker.contains("FrobnicateWidgetManager")
                 && blocker.contains("reticulate_splines")));
 
+        // A partial miss is listed as `anchor` negative evidence, which the wiring counts:
+        // the 0.60 cap and the count blocker apply, but not the 0.50 all-unmatched cap.
         let some_missing = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
             unmatched_anchors: vec!["reticulate_splines".into()],
+            negative_evidence_count: 1,
             ..base
         });
         assert!(some_missing
@@ -4498,7 +4548,53 @@ mod tests {
             .caveats
             .iter()
             .any(|caveat| caveat.contains("1 of 2") && caveat.contains("reticulate_splines")));
-        assert!(some_missing.overall_score > 0.50);
+        assert!(some_missing.overall_score > 0.50 && some_missing.overall_score <= 0.60);
+        assert_eq!(some_missing.overall_enum, Confidence::Medium);
+    }
+
+    #[test]
+    fn late_caveats_cap_the_score_and_the_exact_label() {
+        let mut exact = ConfidenceBreakdown {
+            overall_enum: Confidence::Exact,
+            overall_score: 1.0,
+            ..Default::default()
+        };
+        exact.add_caveats(
+            [
+                "index is stale; re-index before relying on exact impact or verification gates"
+                    .to_string(),
+            ],
+            2,
+        );
+        assert!(exact.overall_score <= 0.94);
+        assert_eq!(exact.overall_enum, Confidence::High);
+
+        // The gate still applies when the caller has no exact evidence at all.
+        let mut ungated = ConfidenceBreakdown {
+            overall_enum: Confidence::Exact,
+            overall_score: 1.0,
+            ..Default::default()
+        };
+        ungated.add_caveats(std::iter::empty(), 0);
+        assert_eq!(ungated.overall_enum, Confidence::High);
+    }
+
+    #[test]
+    fn exact_references_found_elsewhere_retract_the_manifest_caveat() {
+        // A manifest without SCIP references: the flag is false and the caveat is present.
+        let mut quality = EvidenceQuality::from_manifest(None);
+        quality
+            .caveats
+            .push(super::EXACT_REFERENCE_UNAVAILABLE_CAVEAT.into());
+        assert!(!quality.exact_reference_available);
+        quality.record_exact_references(0);
+        assert!(!quality.exact_reference_available);
+        quality.record_exact_references(1);
+        assert!(quality.exact_reference_available);
+        assert!(!quality
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("exact") && caveat.contains("unavailable")));
     }
 
     #[test]
@@ -4534,6 +4630,13 @@ mod tests {
                 "FrobnicateWidgetManager".to_string(),
                 "reticulate_splines".to_string()
             ]
+        );
+        // A sentence-initial capital, an all-caps acronym, and prose are not identifiers.
+        assert!(named_anchors("Reap the doctor's MCP probe child process").is_empty());
+        assert!(named_anchors("Add HTTP 504 Gateway Timeout mapping").is_empty());
+        assert_eq!(
+            named_anchors("Fix FrobnicateWidgetManager"),
+            vec!["FrobnicateWidgetManager".to_string()]
         );
         let selected = vec![relevance_probe(
             "src/widgets.rs",

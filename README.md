@@ -38,7 +38,7 @@ Use `claude` instead of `cursor` for Claude Code. One command indexes the reposi
 ok context "reap the doctor's MCP probe child process" --format markdown
 ```
 
-This is the actual output on this repository, trimmed (`…` marks cut lines). The commit that made this change touched exactly one file, and it is the first result:
+This is the actual output on this repository, trimmed: `…` marks cut lines, and each primary unit is collapsed to its line range and first line. The commit that made this change touched exactly one file, and it is the first result:
 
 ```markdown
 # Task: reap the doctor's MCP probe child process
@@ -49,12 +49,16 @@ This is the actual output on this repository, trimmed (`…` marks cut lines). T
   - exact symbol/reference evidence is absent
   - runtime corroboration is absent
 - Components:
+  …
   - `exact_references` score `0.25`, weight `0.20`, contribution `0.05`
-  - `task_relevance` score `0.83`, weight `0.20`, contribution `0.17`
+  …
+  - `task_relevance` score `1.00`, weight `0.20`, contribution `0.20`
   …
 ## Retrieval
+…
 - Attempted: `lexical, document, exact_semantic, graph, validation, git_history, runtime`
 - Succeeded: `lexical, document, exact_semantic, graph, validation, git_history`
+…
 - Exact-authority selections: `0`; ambiguity/unresolved signals: `0`
 - Retrieval confidence: `Medium` (qualitative ContextPack confidence, not a calibrated probability)
 - Caveats:
@@ -63,12 +67,12 @@ This is the actual output on this repository, trimmed (`…` marks cut lines). T
 ## Primary Context
 ### crates/open-kioku-cli/src/reports/status_setup_doctor.rs
 Lines 1-107  `fn file_path_for_symbol(store: &dyn MetadataStore, symbol: &Symbol) -> anyhow::Result<PathBuf> {`
-### crates/open-kioku-cli/src/commands/onboarding.rs
-Lines 2-35   `struct AgentSetupReport {`
+### crates/open-kioku-core/src/process.rs
+Lines 66-180  `fn proc_status_peak_rss_bytes() -> Option<u64> {`
 …
 ```
 
-The label is `Medium`, not higher, and the pack says why twice: this repository has no SCIP index and no runtime artifacts, so the `exact_references` component is `0.25` and `Exact-authority selections` is `0` (the primary units whose retrieval resolved an exact symbol anchor). `Exact` is reserved for packs with at least one such selection; a lexical match, however good, does not earn it. Every pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
+The label is `Medium`, not higher, for one reason the pack states: the task names no identifier the index resolves exactly and this repository has no SCIP index, so `exact_reference_count` is 0 (`exact_references` scores `0.25`; `Exact-authority selections` is `0`), which caps the score at 0.74 and the label at Medium. Runtime artifacts are absent too; that is the second caveat, and it lowers the score, not the band. `Exact` is reserved for packs with at least one exact-authority selection; a lexical match, however good, does not earn it. The task is phrased as the fixing commit's subject, so git history corroborates the first file alongside the lexical match. Every pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
 
 ## What You Get
 
@@ -118,7 +122,7 @@ These baselines were frozen from a hosted Linux runner matrix on 2026-09-08 and 
 
 Two more measured facts:
 
-- **When the task has no answer.** On the 30-case frozen fixture, all five no-gold tasks come back at `Low` confidence instead of being presented as answers (no-gold false-positive rate 0.0; the CI ceiling is 0.25). A low-confidence pack still lists candidates; it tells the caller not to trust them rather than returning nothing. [`benchmarks/retrieval-baseline.json`](benchmarks/retrieval-baseline.json)
+- **When the task has no answer.** On the 30-case frozen fixture, none of the five no-gold tasks is presented as an answer: the no-gold false-positive rate is 0.0 (the CI ceiling is 0.25), and the advisory routed context-pack strategy in the same run (`cc4:routed_contextpack`) returns none of them above `Low`. A low-confidence pack still lists candidates; it tells the caller not to trust them rather than returning nothing. [`benchmarks/retrieval-baseline.json`](benchmarks/retrieval-baseline.json)
 - **Optional local neural embeddings.** The default local neural profile (a 149M-parameter int8 model, pinned by digest) improved every metric on the Go and TypeScript corpora against a same-day control, by about +0.025 MRR, on 4-vCPU / 16 GB hosted runners. Real but modest; the lexical ranking fixes landed the same day were worth about four times as much. [`docs/embedding-providers.md`](docs/embedding-providers.md)
 
 ## Measured at Scale

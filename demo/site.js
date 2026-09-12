@@ -29,11 +29,11 @@ const live=document.getElementById('live-proof');
 if(live){
   // Scene 1 is actual `ok context` output on this repository (README, "First Win"), trimmed.
   // Scene 2 is the verify failure from demo.tape (one drive-by edit outside the declared boundary).
-  // Scene 3 replays the frozen fixture's java-no-gold-password-reset case (benchmarks/retrieval-cases.json): 5 of 5 no-gold tasks come back Low.
+  // Scene 3 replays the frozen fixture's java-no-gold-password-reset case (benchmarks/retrieval-cases.json): 0 of 5 no-gold tasks are presented as answers.
   const scenes=[
     {cmd:'ok context "reap the doctor\'s MCP probe child process" --format markdown',lines:[
       ['section','CONFIDENCE'],
-      ['row','overall','<span class="warn">Medium</span> (0.74) · exact_references 0.25 · task_relevance 0.83 …'],
+      ['row','overall','<span class="warn">Medium</span> (0.74) · exact_references 0.25 · task_relevance 1.00 …'],
       ['row','caveats','<span class="warn">exact symbol/reference evidence is absent · runtime corroboration is absent</span>'],
       ['section','RETRIEVAL'],
       ['row','attempted','lexical · document · exact_semantic · graph · validation · git_history · runtime'],
@@ -42,9 +42,9 @@ if(live){
       ['row','caveats','<span class="warn">no runtime traces, logs, or incidents are ingested for this repository</span>'],
       ['section','PRIMARY CONTEXT'],
       ['row','1','<span class="json-string">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 1-107'],
-      ['row','2','<span class="json-string">crates/open-kioku-cli/src/commands/onboarding.rs</span> lines 2-35'],
+      ['row','2','<span class="json-string">crates/open-kioku-core/src/process.rs</span> lines 66-180'],
       ['comment','# the commit that made this change touched exactly one file; it is the first result'],
-      ['comment','# no SCIP index and no runtime artifacts here, so the label is Medium, not Exact']]},
+      ['comment','# the task names no identifier the index resolves exactly and there is no SCIP index: exact_reference_count 0, label capped at Medium']]},
     {cmd:'ok verify --plan plan.json --git',lines:[
       ['warn','[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary'],
       ['comment','# one edit inside the declared boundary, one drive-by outside it: the check fails'],
@@ -53,7 +53,7 @@ if(live){
       ['section','CONFIDENCE'],
       ['row','overall','<span class="warn">Low</span>'],
       ['out','candidates are still listed; the pack tells the caller not to trust them rather than returning nothing'],
-      ['comment','# on the frozen 30-case fixture, 5 of 5 no-gold tasks come back Low (benchmarks/retrieval-baseline.json)']]}
+      ['comment','# on the frozen 30-case fixture, 0 of 5 no-gold tasks are presented as answers (no-gold FP 0.0, benchmarks/retrieval-baseline.json); the routed pack strategy returns none above Low']]}
   ];
   const esc=t=>t;
   function renderScene(i,typed){

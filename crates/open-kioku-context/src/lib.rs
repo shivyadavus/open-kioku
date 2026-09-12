@@ -6359,6 +6359,48 @@ mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.starts_with("1 negative evidence signal")));
+
+        // A partial miss: the `anchor` item is still listed and counted (0.60 cap, count
+        // blocker), but the all-unmatched 0.50 cap and its named blocker do not apply.
+        let mut partial = lexical_hit("src/widgets.rs", "lexical match", "lexical evidence");
+        partial.snippet = "impl FrobnicateWidgetManager { fn frobnicate(&self) {} }".into();
+        let partial = vec![partial];
+        let unmatched = open_kioku_core::unmatched_named_anchors(task, &partial);
+        assert_eq!(unmatched, vec!["reticulate_splines".to_string()]);
+        let negative = negative_evidence_for_context(NegativeEvidenceInputs {
+            task,
+            primary_files: &partial,
+            supporting_files: &[],
+            tests: &[],
+            runtime_signals: &[],
+            exact_reference_count: 0,
+            unmatched_anchors: &unmatched,
+        });
+        assert_eq!(
+            open_kioku_core::negative_evidence_signal_count(&negative),
+            1
+        );
+        let breakdown = confidence_for_context(ContextConfidenceInputs {
+            task,
+            primary_files: &partial,
+            supporting_files: &[],
+            tests: &[],
+            negative_evidence: &negative,
+            exact_reference_count: 0,
+            unmatched_anchors: &unmatched,
+            allowed_file_count: 1,
+            evidence_count: 1,
+            runtime_signal_count_value: 0,
+        });
+        assert!(breakdown.overall_score <= 0.60, "{breakdown:?}");
+        assert!(breakdown
+            .blockers
+            .iter()
+            .all(|blocker| !blocker.contains("reticulate_splines")));
+        assert!(breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("1 of 2") && caveat.contains("reticulate_splines")));
     }
 
     #[test]

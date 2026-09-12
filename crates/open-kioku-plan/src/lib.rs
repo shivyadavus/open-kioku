@@ -420,8 +420,24 @@ impl<'a> PlanEngine<'a> {
             primary_context.is_empty(),
             &unmatched_anchors,
         );
-        let evidence_quality =
+        let evidence = context
+            .evidence
+            .iter()
+            .chain(impact.evidence.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let exact_reference_count = exact_reference_count(
+            &context.retrieval_diagnostics,
+            &primary_context,
+            &impact,
+            &evidence,
+        );
+        let mut evidence_quality =
             evidence_quality_for_store(self.store, context.architecture_policy.as_ref())?;
+        // The manifest flag is SCIP-only; the plan may have found exact references through
+        // an exact-authority anchor or an indexed occurrence, and must not report both
+        // `exact_references 1.00` and "exact evidence is unavailable".
+        evidence_quality.record_exact_references(exact_reference_count);
         apply_evidence_quality_caveats(&mut risk, &evidence_quality);
         let relevant_symbols = context
             .primary_symbols
@@ -442,18 +458,6 @@ impl<'a> PlanEngine<'a> {
             impact_target,
             !self.memory_facts.is_empty(),
             self.memory_enabled,
-        );
-        let evidence = context
-            .evidence
-            .iter()
-            .chain(impact.evidence.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let exact_reference_count = exact_reference_count(
-            &context.retrieval_diagnostics,
-            &primary_context,
-            &impact,
-            &evidence,
         );
         // Negative evidence is built first: the confidence breakdown counts the items it
         // lists, so the blocker it reports is traceable to the list the plan publishes.
@@ -490,7 +494,11 @@ impl<'a> PlanEngine<'a> {
             evidence: &evidence,
             context_runtime_signal_count: context.runtime_signals.len(),
         });
-        apply_evidence_quality_to_confidence(&mut confidence_breakdown, &evidence_quality);
+        apply_evidence_quality_to_confidence(
+            &mut confidence_breakdown,
+            &evidence_quality,
+            exact_reference_count,
+        );
         let mut confidence_summary = confidence_summary(&confidence_breakdown);
         // RI3.7: the plan states its relationship claims with their authority split rather
         // than presenting heuristic dependents as certainty.
@@ -1742,15 +1750,15 @@ fn apply_evidence_quality_caveats(risk: &mut RiskReport, quality: &EvidenceQuali
     }
 }
 
+/// Quality caveats arrive after `from_signals` scored the plan, so they go through the same
+/// caveat cap and label gate; appended raw they priced nothing, and `Exact` stayed reachable
+/// above "index is stale".
 fn apply_evidence_quality_to_confidence(
     confidence: &mut ConfidenceBreakdown,
     quality: &EvidenceQuality,
+    exact_reference_count: usize,
 ) {
-    for caveat in &quality.caveats {
-        if !confidence.caveats.contains(caveat) {
-            confidence.caveats.push(caveat.clone());
-        }
-    }
+    confidence.add_caveats(quality.caveats.iter().cloned(), exact_reference_count);
 }
 
 fn push_quality_caveat(quality: &mut EvidenceQuality, caveat: String) {
@@ -3475,6 +3483,93 @@ mod tests {
                     .unwrap_or(false)),
             }
         }
+    }
+
+    #[test]
+    fn plan_with_an_exact_anchor_does_not_also_call_exact_evidence_unavailable() {
+        let store = test_store();
+        let mut context = ContextPackBuilder::new(&store).build("token", 10).unwrap();
+        let first = context.primary_files[0].clone();
+        let key = open_kioku_core::RetrievalUnitKey::from_result(&first);
+        match context
+            .retrieval_diagnostics
+            .traces
+            .iter_mut()
+            .find(|trace| trace.unit_key.as_ref() == Some(&key))
+        {
+            Some(trace) => trace.authority = open_kioku_core::RetrievalAuthority::Exact,
+            None => context
+                .retrieval_diagnostics
+                .traces
+                .push(open_kioku_core::RetrievalTrace {
+                    path: first.path.clone(),
+                    unit_key: Some(key),
+                    fused_score: 1.0,
+                    authority: open_kioku_core::RetrievalAuthority::Exact,
+                    contributions: Vec::new(),
+                }),
+        }
+
+        let plan = PlanEngine::new(&store)
+            .plan_from_context("token", 10, context)
+            .unwrap();
+
+        let component = plan
+            .confidence_breakdown
+            .components
+            .iter()
+            .find(|component| component.signal == "exact_references")
+            .expect("exact_references component");
+        assert!((component.raw_value - 1.0).abs() < f32::EPSILON, "{plan:?}");
+        assert!(plan.evidence_quality.exact_reference_available);
+        assert!(
+            !plan
+                .confidence_breakdown
+                .caveats
+                .iter()
+                .chain(plan.evidence_quality.caveats.iter())
+                .chain(plan.risk.reasons.iter())
+                .any(|text| text.contains("exact") && text.contains("unavailable")),
+            "{:?}",
+            plan.confidence_breakdown.caveats
+        );
+    }
+
+    #[test]
+    fn evidence_quality_caveats_cap_confidence_below_exact() {
+        let mut confidence = ConfidenceBreakdown {
+            overall_enum: Confidence::Exact,
+            overall_score: 1.0,
+            ..Default::default()
+        };
+        let mut quality = EvidenceQuality::from_manifest(None);
+        quality.freshness = "stale".into();
+        push_quality_caveat(
+            &mut quality,
+            "index is stale; re-index before relying on exact impact or verification gates".into(),
+        );
+        apply_evidence_quality_to_confidence(&mut confidence, &quality, 2);
+        assert!(confidence.overall_score <= 0.94);
+        assert_eq!(confidence.overall_enum, Confidence::High);
+        assert!(confidence
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("index is stale")));
+
+        // End to end on a stale store the plan carries the caveat and never reads Exact.
+        let store = test_store_with_analysis_facts_quality_and_indexed_at(
+            Vec::new(),
+            open_kioku_core::IndexQuality::default(),
+            Utc::now() - chrono::Duration::days(14),
+        );
+        let plan = PlanEngine::new(&store).plan("token", 10).unwrap();
+        assert!(plan.confidence_breakdown.overall_score <= 0.94);
+        assert_ne!(plan.confidence_breakdown.overall_enum, Confidence::Exact);
+        assert!(plan
+            .confidence_breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("index is stale")));
     }
 
     #[test]
