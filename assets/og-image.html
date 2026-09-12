@@ -7,7 +7,8 @@
       --hide-scrollbars --force-device-scale-factor=2 --window-size=1200,630 \
       --screenshot=demo/og-image.png "file://$PWD/assets/og-image.html"
 
-  Numbers must match demo/proof/large-java-2026-08-31-main.json and the site copy.
+  The tool count must match the `tools_ro` inventory (scripts/validate-docs.sh holds README and
+  docs/mcp-tools.md to it); re-render when it changes.
 -->
 <html lang="en"><head><meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -35,5 +36,5 @@ h1{font-family:var(--display);font-weight:800;font-size:108px;line-height:.94;le
 <h1><span class="grad">Evidence</span><br>before edits.</h1>
 <p class="lead">Your coding agent <b>shows its evidence</b> before it edits, and its diff is <b>verified against the plan</b> it declared. Local-first; nothing leaves your machine.</p>
 </div>
-<div class="chips"><div class="chip"><b>0.02–0.05s</b> exact lookup</div><div class="chip"><b>1.52M</b> proof-typed edges</div><div class="chip"><b>100%</b> local · no source upload</div></div>
+<div class="chips"><div class="chip"><b>16</b> MCP tools · one question each</div><div class="chip"><b>plan → edit → verify</b> the real diff</div><div class="chip"><b>100%</b> local · no source upload</div></div>
 </body></html>
