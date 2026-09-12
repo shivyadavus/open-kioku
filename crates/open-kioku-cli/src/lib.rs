@@ -21,9 +21,9 @@ use open_kioku_core::{
     HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage, IndexManifest, IndexMode,
     NodeId, Owner, OwnerSuggestion, OwnershipEvidence, OwnershipReport, OwnershipSourceType,
     PlanReport, PolicyCheckReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
-    ProvenanceTouch, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
+    ProvenanceTouch, QualityNote, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
     ReviewerSuggestionReport, ScoreComponent, SearchResult, SimilarChangeQuery,
-    SimilarChangeReport, Symbol, SymbolId, SymbolProvenance, TestTarget,
+    SimilarChangeReport, StatusDetail, Symbol, SymbolId, SymbolProvenance, TestTarget,
     INDEX_COVERAGE_WARN_PERCENT,
 };
 use open_kioku_graph::InMemoryGraph;
@@ -166,16 +166,27 @@ mod tests {
     #[test]
     fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
         let notes = (0..105)
-            .map(|index| format!("quality note {index:03}"))
+            .map(|index| {
+                QualityNote::new(
+                    open_kioku_core::QualityNoteKind::SymbolRegistryCaveat,
+                    format!("quality note {index:03}"),
+                )
+            })
             .collect::<Vec<_>>();
         let mut output = String::new();
 
-        append_status_quality_notes(&mut output, &notes);
+        append_status_quality_notes(&mut output, &notes, StatusDetail::Summary);
 
         assert!(output.contains("quality note 099"));
         assert!(!output.contains("quality note 100"));
         assert!(output.contains("5 additional quality notes omitted"));
-        assert!(output.contains("ok status --json"));
+        assert!(output.contains("ok status --markdown --full"));
+        assert!(output.contains("symbol_registry_caveat: 105"));
+
+        let mut full = String::new();
+        append_status_quality_notes(&mut full, &notes, StatusDetail::Full);
+        assert!(full.contains("quality note 104"));
+        assert!(!full.contains("omitted"));
     }
 
     #[test]

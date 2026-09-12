@@ -7,9 +7,9 @@ use open_kioku_core::{
     AnalysisFact, CodeChunk, Confidence, DocumentSection, DocumentType, EvidenceSourceType, File,
     FileId, GitCochangeEdge, GitCommitId, GitSymbolTouch, GraphEdgeType, GraphNodeType,
     HistoryRecordId, HistorySnapshot, Import, IndexCoverage, IndexManifest, IndexMode,
-    IndexPhaseReport, IndexQuality, Language, LineRange, Repository, RepositoryId, SkipReason,
-    SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence, TestTarget,
-    HISTORY_SCHEMA_VERSION,
+    IndexPhaseReport, IndexQuality, Language, LineRange, QualityNote, QualityNoteKind, Repository,
+    RepositoryId, SkipReason, SkipSource, SkippedPath, Symbol, SymbolId, SymbolOccurrence,
+    TestTarget, HISTORY_SCHEMA_VERSION,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_languages::{
@@ -222,10 +222,13 @@ fn elapsed_micros(started: Instant) -> u64 {
 fn attach_resolution_quality(quality: &mut IndexQuality, report: Option<ResolutionQualityReport>) {
     if let Some(report) = report.as_ref() {
         if report.candidate_cap_hits > 0 {
-            quality.quality_notes.push(format!(
-                "semantic relationship candidate cap ({}) hit for {} occurrence(s); authoritative emission was suppressed for every capped occurrence",
-                open_kioku_resolution::MAX_RESOLUTION_CANDIDATES,
-                report.candidate_cap_hits
+            quality.quality_notes.push(QualityNote::new(
+                QualityNoteKind::RelationshipResolution,
+                format!(
+                    "semantic relationship candidate cap ({}) hit for {} occurrence(s); authoritative emission was suppressed for every capped occurrence",
+                    open_kioku_resolution::MAX_RESOLUTION_CANDIDATES,
+                    report.candidate_cap_hits
+                ),
             ));
             quality.quality_notes.sort();
             quality.quality_notes.dedup();
@@ -441,10 +444,7 @@ impl Indexer {
                 test_count: 0,
                 import_count: 0,
                 analysis: AnalysisCounts::default(),
-                quality_notes: &[
-                    "cross-project mode: source parsing skipped; link already-indexed projects only"
-                        .into(),
-                ],
+                quality_notes: &mode_quality_notes(mode),
                 mode,
                 phase_reports: &phase_reports,
                 skipped_paths: &[],
@@ -1628,8 +1628,28 @@ impl ScanLedger {
         );
         if is_supported_code(language) {
             self.coverage.record_skipped(language, reason);
+            if reason.is_policy() {
+                // The directory is named only when the path itself may be shown.
+                let top_dir = safe_to_show
+                    .then(|| top_level_dir(path.strip_prefix(root).unwrap_or(path)))
+                    .flatten();
+                self.coverage
+                    .record_policy_exclusion(source, top_dir.as_deref());
+            }
         }
     }
+}
+
+/// The first component of a repository-relative path, or `.` for a file at the root;
+/// what a policy-exclusion summary names so `1,485 hidden` reads as `under .claude/`.
+fn top_level_dir(rel: &Path) -> Option<String> {
+    let mut components = rel.components();
+    let first = components.next()?;
+    Some(if components.next().is_none() {
+        ".".to_owned()
+    } else {
+        first.as_os_str().to_string_lossy().into_owned()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1790,7 +1810,7 @@ struct IndexQualityInput<'a> {
     test_count: usize,
     import_count: usize,
     analysis: AnalysisCounts,
-    quality_notes: &'a [String],
+    quality_notes: &'a [QualityNote],
     mode: IndexMode,
     phase_reports: &'a [IndexPhaseReport],
     skipped_paths: &'a [SkippedPath],
@@ -1801,9 +1821,12 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
     let mut quality_notes = Vec::new();
     quality_notes.extend(input.quality_notes.iter().cloned());
     if !input.skipped_paths.is_empty() {
-        quality_notes.push(format!(
-            "discovery skipped {} path(s); inspect skip_counts/skipped_paths before treating evidence as complete",
-            input.skipped_paths.len()
+        quality_notes.push(QualityNote::new(
+            QualityNoteKind::Discovery,
+            format!(
+                "discovery skipped {} path(s); inspect skip_counts/skipped_paths before treating evidence as complete",
+                input.skipped_paths.len()
+            ),
         ));
     }
     let root = input.root;
@@ -1897,13 +1920,16 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
     if let Some(report) = input.scip_report {
         if report.imported_paths.is_empty() {
-            quality_notes.push("SCIP was enabled but no SCIP index was imported".into());
+            quality_notes.push(QualityNote::new(
+                QualityNoteKind::Scip,
+                "SCIP was enabled but no SCIP index was imported",
+            ));
         }
         if report.exact_references == 0 {
-            quality_notes.push(
-                "exact reference coverage is unavailable; impact and test selection are heuristic"
-                    .into(),
-            );
+            quality_notes.push(QualityNote::new(
+                QualityNoteKind::ExactReferences,
+                "exact reference coverage is unavailable; impact and test selection are heuristic",
+            ));
         }
         for attempt in &report.generator_attempts {
             if !matches!(
@@ -1911,9 +1937,12 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
                 open_kioku_scip::ScipGeneratorStatus::Generated
                     | open_kioku_scip::ScipGeneratorStatus::Skipped
             ) {
-                quality_notes.push(format!(
-                    "SCIP {} generation {:?}: {}",
-                    attempt.language, attempt.status, attempt.message
+                quality_notes.push(QualityNote::new(
+                    QualityNoteKind::Scip,
+                    format!(
+                        "SCIP {} generation {:?}: {}",
+                        attempt.language, attempt.status, attempt.message
+                    ),
                 ));
             }
         }
@@ -1945,8 +1974,10 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         }
     } else {
         if !config.scip.enabled {
-            quality_notes
-                .push("SCIP disabled; symbol references use tree-sitter/import heuristics".into());
+            quality_notes.push(QualityNote::new(
+                QualityNoteKind::Scip,
+                "SCIP disabled; symbol references use tree-sitter/import heuristics",
+            ));
         }
         IndexQuality {
             index_mode: input.mode,
@@ -2476,21 +2507,20 @@ fn should_emit_progress(done: usize, total: usize) -> bool {
     done == total || done % 500 == 0
 }
 
-fn mode_quality_notes(mode: IndexMode) -> Vec<String> {
-    match mode {
-        IndexMode::Full => Vec::new(),
-        IndexMode::Balanced => vec![
+fn mode_quality_notes(mode: IndexMode) -> Vec<QualityNote> {
+    let message = match mode {
+        IndexMode::Full => return Vec::new(),
+        IndexMode::Balanced => {
             "balanced mode: trust-critical passes enabled; expensive optional passes may be skipped when configured"
-                .into(),
-        ],
-        IndexMode::Fast => vec![
+        }
+        IndexMode::Fast => {
             "fast mode: code analysis may skip docs/examples/generated/vendor/testdata/unsupported/oversized paths; allowed documentation is indexed separately in the lightweight document corpus"
-                .into(),
-        ],
-        IndexMode::CrossProject => vec![
-            "cross-project mode: source parsing skipped; link already-indexed projects only".into(),
-        ],
-    }
+        }
+        IndexMode::CrossProject => {
+            "cross-project mode: source parsing skipped; link already-indexed projects only"
+        }
+    };
+    vec![QualityNote::new(QualityNoteKind::IndexMode, message)]
 }
 
 const MAX_DOCUMENT_SECTION_LINES: usize = 120;
@@ -3088,7 +3118,7 @@ mod tests {
     use open_kioku_core::{
         CodeChunk, Confidence, EvidenceSourceType, File, FileId, GitChangeKind, GitCommitId,
         GitCommitRecord, GitFileTouch, HistoryRecordId, IndexMode, Language, LineRange, Owner,
-        RepositoryId, SkipReason, SkipSource, Symbol, SymbolId, SymbolKind,
+        QualityNoteKind, RepositoryId, SkipReason, SkipSource, Symbol, SymbolId, SymbolKind,
     };
     use std::process::Command;
 
@@ -3128,9 +3158,12 @@ mod tests {
             Some(2)
         );
         assert!(quality.quality_notes.iter().any(|note| {
-            note.contains("candidate cap")
-                && note.contains("2 occurrence(s)")
-                && note.contains("authoritative emission was suppressed")
+            note.kind == QualityNoteKind::RelationshipResolution
+                && note.message.contains("candidate cap")
+                && note.message.contains("2 occurrence(s)")
+                && note
+                    .message
+                    .contains("authoritative emission was suppressed")
         }));
     }
 
@@ -3310,7 +3343,8 @@ class Util {
             .quality
             .quality_notes
             .iter()
-            .any(|note| note.contains("fast mode")));
+            .any(|note| note.kind == QualityNoteKind::IndexMode
+                && note.message.contains("fast mode")));
         assert!(fast
             .manifest
             .phase_reports
@@ -3349,7 +3383,7 @@ class Util {
             .quality
             .quality_notes
             .iter()
-            .any(|note| note.contains("balanced mode")));
+            .any(|note| note.message.contains("balanced mode")));
     }
 
     #[test]
@@ -3376,7 +3410,8 @@ class Util {
             .quality
             .quality_notes
             .iter()
-            .any(|note| note.contains("source parsing skipped")));
+            .any(|note| note.kind == QualityNoteKind::IndexMode
+                && note.message.contains("source parsing skipped")));
     }
 
     #[test]
@@ -3470,7 +3505,8 @@ class Util {
         assert!(quality
             .quality_notes
             .iter()
-            .any(|note| note.contains("discovery skipped")));
+            .any(|note| note.kind == QualityNoteKind::Discovery
+                && note.message.contains("discovery skipped")));
     }
 
     fn assert_skip(

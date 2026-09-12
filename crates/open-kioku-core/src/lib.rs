@@ -357,7 +357,7 @@ fn count_resolution_notes(quality: &IndexQuality, source: &str, needle: &str) ->
         .quality_notes
         .iter()
         .filter(|note| {
-            let note = note.to_ascii_lowercase();
+            let note = note.message.to_ascii_lowercase();
             note.contains(&source) && note.contains(&needle)
         })
         .count()
@@ -365,12 +365,17 @@ fn count_resolution_notes(quality: &IndexQuality, source: &str, needle: &str) ->
 
 fn failed_optional_passes(quality: &IndexQuality) -> Vec<String> {
     let mut passes = Vec::new();
-    for note in quality.quality_notes.iter().chain(
-        quality
-            .phase_reports
-            .iter()
-            .flat_map(|report| report.warnings.iter()),
-    ) {
+    for note in quality
+        .quality_notes
+        .iter()
+        .map(|note| &note.message)
+        .chain(
+            quality
+                .phase_reports
+                .iter()
+                .flat_map(|report| report.warnings.iter()),
+        )
+    {
         let lowered = note.to_ascii_lowercase();
         if lowered.contains("failed")
             || lowered.contains("timed out")
@@ -2787,6 +2792,66 @@ impl SkipReason {
             Self::Error => "error",
         }
     }
+
+    /// A skip a policy chose — ignore rules, the hidden-file rule, security and
+    /// vendor rules, the index mode — as opposed to one the index did not intend
+    /// (`too-large`, `binary`, `error`, `unsupported-language`). Policy exclusions are
+    /// reported beside the coverage ratio, never inside its denominator: on a
+    /// repository whose git-ignored agent worktrees live under a hidden directory,
+    /// 1,485 hidden `.rs` files read as 24.9% coverage of a fully indexed tree.
+    pub fn is_policy(self) -> bool {
+        matches!(
+            self,
+            Self::Ignored
+                | Self::Denied
+                | Self::Hidden
+                | Self::Generated
+                | Self::Vendor
+                | Self::FastMode
+                | Self::SecretPolicy
+                | Self::SymlinkPolicy
+        )
+    }
+}
+
+impl SkipSource {
+    /// The `ok.toml` key, ignore file, or flag that governs skips from this source, when
+    /// one exists; advice that names `[index] exclude` for a `hidden` skip sends the
+    /// reader to the wrong key.
+    pub fn governing_setting(self) -> Option<&'static str> {
+        match self {
+            Self::HiddenPolicy => Some("`[security] allow_hidden_files`"),
+            Self::ConfigExclude => Some("`[index] exclude`"),
+            Self::GitIgnore => Some("`.gitignore`"),
+            Self::OkIgnore => Some("`.okignore`"),
+            Self::SecurityPolicy => Some("`[paths] deny` or the built-in secret-path rule"),
+            Self::SizeLimit => Some("`[index] max_file_size`"),
+            Self::FastMode => Some("`ok index --mode full`"),
+            Self::Detector
+            | Self::SymlinkPolicy
+            | Self::LanguageSupport
+            | Self::Filesystem
+            | Self::Parser => None,
+        }
+    }
+
+    /// Label for summaries (`hidden-policy`, `git-ignore`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SecurityPolicy => "security-policy",
+            Self::HiddenPolicy => "hidden-policy",
+            Self::ConfigExclude => "config-exclude",
+            Self::GitIgnore => "git-ignore",
+            Self::OkIgnore => "ok-ignore",
+            Self::Detector => "detector",
+            Self::FastMode => "fast-mode",
+            Self::SizeLimit => "size-limit",
+            Self::SymlinkPolicy => "symlink-policy",
+            Self::LanguageSupport => "language-support",
+            Self::Filesystem => "filesystem",
+            Self::Parser => "parser",
+        }
+    }
 }
 
 /// Coverage of one recognised language: files discovery saw on disk versus files the
@@ -2804,8 +2869,26 @@ pub struct LanguageCoverage {
 }
 
 impl LanguageCoverage {
+    /// Discovered files a policy excluded (`SkipReason::is_policy`), derived from
+    /// `skipped` so a manifest written before the distinction existed reads the same way.
+    pub fn excluded_by_policy(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|(reason, _)| reason.is_policy())
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Files the index would consider under the current policy: the coverage
+    /// denominator.
+    pub fn considered(&self) -> usize {
+        self.discovered.saturating_sub(self.excluded_by_policy())
+    }
+
+    /// `indexed` over `considered`; `None` when policy left nothing to consider.
     pub fn percent(&self) -> Option<f64> {
-        (self.discovered > 0).then(|| self.indexed as f64 * 100.0 / self.discovered as f64)
+        let considered = self.considered();
+        (considered > 0).then(|| self.indexed as f64 * 100.0 / considered as f64)
     }
 }
 
@@ -2831,6 +2914,10 @@ pub const INDEX_COVERAGE_MISSING_FILES_WARN: usize = 20;
 /// were never discovered. Files whose language is unknown are not source files and
 /// are not counted; their skips remain in `skip_counts`. Files admitted to the
 /// document corpus count as indexed.
+///
+/// The ratio is `indexed` over `considered()`: discovered files minus those a policy
+/// excluded (`SkipReason::is_policy`). Policy exclusions stay in `skipped` and are
+/// reported beside the ratio with their governing setting and top directories.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct IndexCoverage {
     pub discovered: usize,
@@ -2848,6 +2935,15 @@ pub struct IndexCoverage {
     /// Directory reads that failed (`skip_counts.error`); their files are unknown.
     #[serde(default)]
     pub walk_errors: usize,
+    /// Policy-excluded source files by the rule that excluded them, so advice can name
+    /// the setting that governs the dominant one. Empty on manifests written before it
+    /// was recorded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub policy_excluded_by_source: BTreeMap<SkipSource, usize>,
+    /// Policy-excluded source files by top-level directory (`.claude`, `.github`);
+    /// files at the root count under `.`. Redacted paths are not recorded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub policy_excluded_dirs: BTreeMap<String, usize>,
 }
 
 impl IndexCoverage {
@@ -2905,19 +3001,61 @@ impl IndexCoverage {
             .or_default() += 1;
     }
 
-    /// The all-languages ratio, reported everywhere. `None` when nothing was
-    /// discovered: a ratio over zero files is not evidence.
-    pub fn percent(&self) -> Option<f64> {
-        (self.discovered > 0).then(|| self.indexed as f64 * 100.0 / self.discovered as f64)
+    /// The detail `record_skipped` cannot carry for a policy skip: which rule chose it
+    /// and where the file lives. `top_dir` is the first path component, or `None` for a
+    /// redacted path.
+    pub fn record_policy_exclusion(&mut self, source: SkipSource, top_dir: Option<&str>) {
+        *self.policy_excluded_by_source.entry(source).or_default() += 1;
+        if let Some(dir) = top_dir {
+            *self.policy_excluded_dirs.entry(dir.to_owned()).or_default() += 1;
+        }
     }
 
-    /// `(discovered, indexed)` over programming languages only.
+    /// Discovered files a policy excluded, across every recognised language.
+    pub fn excluded_by_policy(&self) -> usize {
+        self.skipped
+            .iter()
+            .filter(|(reason, _)| reason.is_policy())
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Files the index would consider under the current policy: the denominator.
+    pub fn considered(&self) -> usize {
+        self.discovered.saturating_sub(self.excluded_by_policy())
+    }
+
+    /// The all-languages ratio, reported everywhere. `None` when nothing was
+    /// discovered or policy left nothing to consider: a ratio over zero files is not
+    /// evidence.
+    pub fn percent(&self) -> Option<f64> {
+        let considered = self.considered();
+        (considered > 0).then(|| self.indexed as f64 * 100.0 / considered as f64)
+    }
+
+    /// `(considered, indexed)` over programming languages only.
     pub fn programming_totals(&self) -> (usize, usize) {
         self.by_language
             .iter()
             .filter(|(language, _)| language_key_is_programming(language))
-            .fold((0, 0), |(discovered, indexed), (_, coverage)| {
-                (discovered + coverage.discovered, indexed + coverage.indexed)
+            .fold((0, 0), |(considered, indexed), (_, coverage)| {
+                (
+                    considered + coverage.considered(),
+                    indexed + coverage.indexed,
+                )
+            })
+    }
+
+    /// `(discovered, excluded by policy)` over programming languages only.
+    pub fn programming_policy_totals(&self) -> (usize, usize) {
+        self.by_language
+            .iter()
+            .filter(|(language, _)| language_key_is_programming(language))
+            .fold((0, 0), |(discovered, excluded), (_, coverage)| {
+                (
+                    discovered + coverage.discovered,
+                    excluded + coverage.excluded_by_policy(),
+                )
             })
     }
 
@@ -2925,8 +3063,8 @@ impl IndexCoverage {
     /// drag the all-languages ratio under the threshold on almost every repository; a
     /// warning that always fires stops being read, so the verdict follows the source.
     pub fn programming_percent(&self) -> Option<f64> {
-        let (discovered, indexed) = self.programming_totals();
-        (discovered > 0).then(|| indexed as f64 * 100.0 / discovered as f64)
+        let (considered, indexed) = self.programming_totals();
+        (considered > 0).then(|| indexed as f64 * 100.0 / considered as f64)
     }
 
     pub fn below_warn_threshold(&self) -> bool {
@@ -2939,17 +3077,81 @@ impl IndexCoverage {
         self.walk_errors > 0 || self.pruned_dirs > 0
     }
 
-    /// Skip reasons by descending count, ties broken by reason order, at most `limit`.
+    /// Non-policy skip reasons — the omissions the ratio is judged on — by descending
+    /// count, ties broken by reason order, at most `limit`.
     pub fn top_skip_reasons(&self, limit: usize) -> Vec<(SkipReason, usize)> {
         let mut reasons = self
             .skipped
             .iter()
-            .filter(|(_, count)| **count > 0)
+            .filter(|(reason, count)| !reason.is_policy() && **count > 0)
             .map(|(reason, count)| (*reason, *count))
             .collect::<Vec<_>>();
         reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         reasons.truncate(limit);
         reasons
+    }
+
+    /// Policy skip reasons by descending count, ties broken by reason order.
+    pub fn policy_skip_reasons(&self) -> Vec<(SkipReason, usize)> {
+        let mut reasons = self
+            .skipped
+            .iter()
+            .filter(|(reason, count)| reason.is_policy() && **count > 0)
+            .map(|(reason, count)| (*reason, *count))
+            .collect::<Vec<_>>();
+        reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        reasons
+    }
+
+    /// Top-level directories holding the most policy-excluded source files, most first,
+    /// at most `limit`.
+    pub fn top_policy_excluded_dirs(&self, limit: usize) -> Vec<(&str, usize)> {
+        let mut dirs = self
+            .policy_excluded_dirs
+            .iter()
+            .map(|(dir, count)| (dir.as_str(), *count))
+            .collect::<Vec<_>>();
+        dirs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        dirs.truncate(limit);
+        dirs
+    }
+
+    /// The policy source that excluded the most source files, with its count; `None`
+    /// on a manifest that predates source recording or excluded nothing.
+    pub fn dominant_policy_source(&self) -> Option<(SkipSource, usize)> {
+        self.policy_excluded_by_source
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+            .map(|(source, count)| (*source, *count))
+    }
+
+    /// What the headline's policy count is made of: `2,903 hidden, 8 ignored; 2,900
+    /// under .claude/, 8 under .github/; `[security] allow_hidden_files` governs the
+    /// largest share`. `None` when policy excluded nothing.
+    pub fn policy_exclusion_detail(&self) -> Option<String> {
+        if self.excluded_by_policy() == 0 {
+            return None;
+        }
+        let mut detail = format_skip_reasons(&self.policy_skip_reasons());
+        let dirs = self.top_policy_excluded_dirs(3);
+        if !dirs.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(
+                &dirs
+                    .iter()
+                    .map(|(dir, count)| format!("{} under {dir}/", group_thousands(*count)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        if let Some(setting) = self
+            .dominant_policy_source()
+            .and_then(|(source, _)| source.governing_setting())
+        {
+            detail.push_str(&format!("; {setting} governs the largest share"));
+        }
+        Some(detail)
     }
 
     /// Programming languages that warrant a warning, as `(language, percent, files
@@ -2966,8 +3168,9 @@ impl IndexCoverage {
             .filter(|(language, _)| language_key_is_programming(language))
             .filter_map(|(language, coverage)| {
                 let percent = coverage.percent()?;
-                let missing = coverage.discovered.saturating_sub(coverage.indexed);
-                let by_ratio = coverage.discovered >= INDEX_COVERAGE_LANGUAGE_FLOOR
+                let considered = coverage.considered();
+                let missing = considered.saturating_sub(coverage.indexed);
+                let by_ratio = considered >= INDEX_COVERAGE_LANGUAGE_FLOOR
                     && percent < INDEX_COVERAGE_WARN_PERCENT;
                 let by_count = missing >= INDEX_COVERAGE_MISSING_FILES_WARN;
                 (by_ratio || by_count).then_some((language.as_str(), percent, missing))
@@ -2978,34 +3181,53 @@ impl IndexCoverage {
     }
 
     /// The counts, judged ratio first: `921 of 922 programming-language files indexed
-    /// (99.9%); 1,417 of 1,461 recognised files overall`. Shared by the index summary
-    /// line and the doctor check so the two can never disagree.
+    /// (99.9%); 1,417 of 1,461 recognised files indexed (97.0%) overall; 2,911 excluded
+    /// by policy`. Denominators are files considered under the current policy; the
+    /// policy count follows so the reader knows what was set aside. Shared by the
+    /// index summary line and the doctor check so the two can never disagree.
     pub fn headline(&self) -> String {
-        let Some(overall) = self.percent() else {
+        if self.discovered == 0 {
             return "no source files discovered".into();
+        }
+        let policy = match self.excluded_by_policy() {
+            0 => String::new(),
+            excluded => format!("; {} excluded by policy", group_thousands(excluded)),
+        };
+        let Some(overall) = self.percent() else {
+            return format!("no source files considered under the current policy{policy}");
         };
         let overall = format!(
             "{} of {} recognised files indexed ({overall:.1}%)",
             group_thousands(self.indexed),
-            group_thousands(self.discovered)
+            group_thousands(self.considered())
         );
-        let (discovered, indexed) = self.programming_totals();
+        let (considered, indexed) = self.programming_totals();
         match self.programming_percent() {
             Some(percent) => format!(
-                "{} of {} programming-language files indexed ({percent:.1}%); {overall} overall",
+                "{} of {} programming-language files indexed ({percent:.1}%); {overall} overall{policy}",
                 group_thousands(indexed),
-                group_thousands(discovered)
+                group_thousands(considered)
             ),
-            None => format!("no programming-language files discovered; {overall}"),
+            None if self.programming_policy_totals().0 == 0 => {
+                format!("no programming-language files discovered; {overall}{policy}")
+            }
+            None => format!(
+                "no programming-language files considered under the current policy; {overall}{policy}"
+            ),
         }
     }
 
-    /// One line: the headline plus what was skipped and what the ratio cannot see.
+    /// One line: the headline, the policy exclusions with their top directories and
+    /// governing setting, what else was skipped, and what the ratio cannot see.
     pub fn summary_line(&self) -> String {
-        if self.percent().is_none() {
+        if self.discovered == 0 {
             return "no source files discovered".into();
         }
         let mut line = self.headline();
+        // The headline ends with the policy count exactly when there is detail to add.
+        if let Some(detail) = self.policy_exclusion_detail() {
+            line.push_str(&format!(" ({detail})"));
+        }
         let skipped = self.top_skip_reasons(usize::MAX);
         if !skipped.is_empty() {
             line.push_str("; skipped: ");
@@ -3123,6 +3345,201 @@ pub struct ResolutionQualityReport {
     pub by_relationship: BTreeMap<String, RelationshipResolutionQuality>,
 }
 
+/// Where a quality note came from. The kind is assigned by the producer, never
+/// recovered from the message text, and is what `repo_status` groups counts by.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityNoteKind {
+    /// Discovery skipped paths; the counts are in `skip_counts`.
+    Discovery,
+    /// SCIP import, generation, or availability.
+    Scip,
+    /// Exact reference evidence is unavailable, so impact and tests are heuristic.
+    ExactReferences,
+    /// What the chosen index mode does not do.
+    IndexMode,
+    /// One import the resolver could not settle with certainty.
+    ImportResolverCaveat,
+    /// The resolver stopped reading manifests or aliases at a cap.
+    ImportResolverCap,
+    /// One token the symbol registry resolved ambiguously.
+    SymbolRegistryCaveat,
+    /// One token the symbol registry could not resolve at all.
+    SymbolRegistryUnresolved,
+    /// Relationship resolution hit its candidate cap and suppressed emission.
+    RelationshipResolution,
+    /// A note from a manifest written before notes carried a kind.
+    Unclassified,
+}
+
+/// One quality note: a kind for grouping and the human-readable message. Manifests
+/// written before 4.1 stored bare strings; those deserialize as `Unclassified`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+pub struct QualityNote {
+    pub kind: QualityNoteKind,
+    pub message: String,
+}
+
+impl QualityNote {
+    pub fn new(kind: QualityNoteKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for QualityNote {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Legacy(String),
+            Typed {
+                kind: QualityNoteKind,
+                message: String,
+            },
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::Legacy(message) => Self::new(QualityNoteKind::Unclassified, message),
+            Stored::Typed { kind, message } => Self { kind, message },
+        })
+    }
+}
+
+/// How much of the manifest's per-item lists a status payload carries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusDetail {
+    /// Counts by kind or reason plus a bounded sample; the default.
+    #[default]
+    Summary,
+    /// Every quality note and skipped path, as the manifest stores them.
+    Full,
+}
+
+impl StatusDetail {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "summary" => Some(Self::Summary),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+/// How many notes or paths a summary carries verbatim. On a 380-file repository the
+/// full lists were 1.4 MB of a 1.5 MB status payload, most of it one caveat repeated
+/// per symbol; the counts say the same thing and the sample shows what one looks like.
+pub const STATUS_SAMPLE_LIMIT: usize = 20;
+
+/// `quality_notes` as `repo_status` and `ok --json status` carry it by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QualityNotesSummary {
+    pub total: usize,
+    pub by_kind: BTreeMap<QualityNoteKind, usize>,
+    /// Round-robin across kinds so a kind with one note is never crowded out by a
+    /// kind with thousands.
+    pub sample: Vec<QualityNote>,
+}
+
+/// `skipped_paths` as `repo_status` and `ok --json status` carry it by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkippedPathsSummary {
+    pub total: usize,
+    pub by_reason: BTreeMap<SkipReason, usize>,
+    /// Round-robin across reasons, in stored order within each reason.
+    pub sample: Vec<SkippedPath>,
+}
+
+/// Up to `limit` items, one from each group in turn, preserving order within a group.
+fn round_robin_sample<'a, T: Clone + 'a, K: Ord>(
+    items: impl IntoIterator<Item = &'a T>,
+    key: impl Fn(&T) -> K,
+    limit: usize,
+) -> Vec<T> {
+    let mut groups: BTreeMap<K, Vec<&T>> = BTreeMap::new();
+    for item in items {
+        groups.entry(key(item)).or_default().push(item);
+    }
+    let mut cursors = groups
+        .values()
+        .map(|group| group.iter())
+        .collect::<Vec<_>>();
+    let mut sample = Vec::with_capacity(limit.min(cursors.len()));
+    'rounds: loop {
+        let mut progressed = false;
+        for cursor in &mut cursors {
+            if sample.len() >= limit {
+                break 'rounds;
+            }
+            if let Some(item) = cursor.next() {
+                sample.push((*item).clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    sample
+}
+
+impl IndexQuality {
+    pub fn quality_notes_summary(&self, sample_limit: usize) -> QualityNotesSummary {
+        let mut by_kind = BTreeMap::new();
+        for note in &self.quality_notes {
+            *by_kind.entry(note.kind).or_default() += 1;
+        }
+        QualityNotesSummary {
+            total: self.quality_notes.len(),
+            by_kind,
+            sample: round_robin_sample(&self.quality_notes, |note| note.kind, sample_limit),
+        }
+    }
+
+    pub fn skipped_paths_summary(&self, sample_limit: usize) -> SkippedPathsSummary {
+        let mut by_reason = BTreeMap::new();
+        for skipped in &self.skipped_paths {
+            *by_reason.entry(skipped.reason).or_default() += 1;
+        }
+        SkippedPathsSummary {
+            total: self.skipped_paths.len(),
+            by_reason,
+            sample: round_robin_sample(&self.skipped_paths, |path| path.reason, sample_limit),
+        }
+    }
+}
+
+impl IndexManifest {
+    /// The manifest as a status payload: the whole record, with `quality.quality_notes`
+    /// and `quality.skipped_paths` replaced by their summaries unless `Full` is asked
+    /// for. Both `ok --json status` and MCP `repo_status` start from this so the two
+    /// cannot drift; the manifest itself keeps the full lists.
+    pub fn status_value(&self, detail: StatusDetail) -> serde_json::Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self)?;
+        if detail == StatusDetail::Full {
+            return Ok(value);
+        }
+        if let Some(quality) = value
+            .get_mut("quality")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            quality.insert(
+                "quality_notes".into(),
+                serde_json::to_value(self.quality.quality_notes_summary(STATUS_SAMPLE_LIMIT))?,
+            );
+            quality.insert(
+                "skipped_paths".into(),
+                serde_json::to_value(self.quality.skipped_paths_summary(STATUS_SAMPLE_LIMIT))?,
+            );
+        }
+        Ok(value)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct IndexQuality {
     #[serde(default)]
@@ -3165,7 +3582,10 @@ pub struct IndexQuality {
     /// rather than treat absence as full coverage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<IndexCoverage>,
-    pub quality_notes: Vec<String>,
+    /// Every note, typed by producer. Status payloads summarize this list; see
+    /// `IndexManifest::status_value`.
+    #[serde(default)]
+    pub quality_notes: Vec<QualityNote>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -4179,13 +4599,16 @@ mod tests {
         unmatched_named_anchors, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
         Evidence, EvidenceQuality, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId,
         GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
-        GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange,
-        NegativeEvidence, NodeId, Owner, PathInterner, ScopeId, ScoreComponent, SearchResult,
-        SharedPath, SharedStr, SourceRange, StringInterner, Symbol, SymbolId, Visibility,
-        HISTORY_SCHEMA_VERSION,
+        GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage,
+        IndexManifest, IndexMode, IndexQuality, Language, LineRange, NegativeEvidence, NodeId,
+        Owner, PathInterner, QualityNote, QualityNoteKind, Repository, RepositoryId, ScopeId,
+        ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason, SkipSource, SkippedPath,
+        SourceRange, StatusDetail, StringInterner, Symbol, SymbolId, Visibility,
+        HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     #[test]
     fn shared_path_serializes_exactly_as_a_pathbuf() {
@@ -4332,10 +4755,18 @@ mod tests {
     fn quality_counts_only_import_resolver_notes() {
         let quality = IndexQuality {
             quality_notes: vec![
-                "import resolver caveat in src/lib.rs for `crate::missing`: unresolved import"
-                    .into(),
-                "symbol registry unresolved `documentation_word` in chunk abc".into(),
-                "ambiguous wording in a non-resolver diagnostic".into(),
+                QualityNote::new(
+                    QualityNoteKind::ImportResolverCaveat,
+                    "import resolver caveat in src/lib.rs for `crate::missing`: unresolved import",
+                ),
+                QualityNote::new(
+                    QualityNoteKind::SymbolRegistryUnresolved,
+                    "symbol registry unresolved `documentation_word` in chunk abc",
+                ),
+                QualityNote::new(
+                    QualityNoteKind::Unclassified,
+                    "ambiguous wording in a non-resolver diagnostic",
+                ),
             ],
             ..Default::default()
         };
@@ -4347,6 +4778,170 @@ mod tests {
         assert_eq!(
             count_resolution_notes(&quality, "import resolver caveat", "ambiguous import"),
             0
+        );
+    }
+
+    #[test]
+    fn quality_note_deserializes_legacy_strings_as_unclassified() {
+        let notes: Vec<QualityNote> = serde_json::from_str(
+            r#"["SCIP disabled; heuristics", {"kind": "scip", "message": "typed"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            notes,
+            vec![
+                QualityNote::new(QualityNoteKind::Unclassified, "SCIP disabled; heuristics"),
+                QualityNote::new(QualityNoteKind::Scip, "typed"),
+            ]
+        );
+        let json = serde_json::to_value(&notes[1]).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "scip", "message": "typed"})
+        );
+    }
+
+    #[test]
+    fn status_summary_bounds_notes_and_paths_and_samples_across_groups() {
+        let mut quality = IndexQuality::default();
+        for index in 0..1_000 {
+            quality.quality_notes.push(QualityNote::new(
+                QualityNoteKind::SymbolRegistryCaveat,
+                format!("symbol registry caveat for `t{index}`"),
+            ));
+        }
+        quality.quality_notes.push(QualityNote::new(
+            QualityNoteKind::Scip,
+            "SCIP disabled; symbol references use tree-sitter/import heuristics",
+        ));
+        for index in 0..500 {
+            quality.skipped_paths.push(SkippedPath {
+                path: PathBuf::from(format!(".claude/w{index}.rs")),
+                reason: SkipReason::Hidden,
+                source: SkipSource::HiddenPolicy,
+                safe_to_show: true,
+            });
+        }
+        quality.skipped_paths.push(SkippedPath {
+            path: PathBuf::from("big.rs"),
+            reason: SkipReason::TooLarge,
+            source: SkipSource::SizeLimit,
+            safe_to_show: true,
+        });
+
+        let notes = quality.quality_notes_summary(STATUS_SAMPLE_LIMIT);
+        assert_eq!(notes.total, 1_001);
+        assert_eq!(notes.by_kind[&QualityNoteKind::SymbolRegistryCaveat], 1_000);
+        assert_eq!(notes.by_kind[&QualityNoteKind::Scip], 1);
+        assert_eq!(notes.sample.len(), STATUS_SAMPLE_LIMIT);
+        // The lone SCIP note is in the sample even though it is one in a thousand.
+        assert!(notes
+            .sample
+            .iter()
+            .any(|note| note.kind == QualityNoteKind::Scip));
+
+        let paths = quality.skipped_paths_summary(STATUS_SAMPLE_LIMIT);
+        assert_eq!(paths.total, 501);
+        assert_eq!(paths.by_reason[&SkipReason::Hidden], 500);
+        assert_eq!(paths.by_reason[&SkipReason::TooLarge], 1);
+        assert_eq!(paths.sample.len(), STATUS_SAMPLE_LIMIT);
+        assert!(paths
+            .sample
+            .iter()
+            .any(|path| path.reason == SkipReason::TooLarge));
+
+        let manifest = IndexManifest {
+            repository: Repository {
+                id: RepositoryId::new("repo"),
+                name: "repo".into(),
+                root: PathBuf::from("."),
+                branch: None,
+                commit: None,
+                indexed_at: None,
+            },
+            file_count: 0,
+            symbol_count: 0,
+            chunk_count: 0,
+            indexed_at: Utc::now(),
+            schema_version: 2,
+            analysis_semantics: None,
+            index_mode: IndexMode::Full,
+            phase_reports: Vec::new(),
+            quality,
+        };
+        let summary = manifest.status_value(StatusDetail::Summary).unwrap();
+        assert_eq!(summary["quality"]["quality_notes"]["total"], 1_001);
+        assert_eq!(summary["quality"]["skipped_paths"]["total"], 501);
+        let full = manifest.status_value(StatusDetail::Full).unwrap();
+        assert_eq!(
+            full["quality"]["quality_notes"].as_array().unwrap().len(),
+            1_001
+        );
+        assert_eq!(
+            full["quality"]["skipped_paths"].as_array().unwrap().len(),
+            501
+        );
+        assert_eq!(
+            full["quality"]["skip_counts"],
+            summary["quality"]["skip_counts"]
+        );
+    }
+
+    #[test]
+    fn coverage_ratio_excludes_policy_skips_from_the_denominator() {
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..241 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_indexed(&Language::Rust, false);
+        }
+        for _ in 0..1_485 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, SkipReason::Hidden);
+            coverage.record_policy_exclusion(SkipSource::HiddenPolicy, Some(".claude"));
+        }
+        coverage.record_discovered(&Language::Rust);
+        coverage.record_skipped(&Language::Rust, SkipReason::TooLarge);
+
+        assert_eq!(coverage.discovered, 1_727);
+        assert_eq!(coverage.excluded_by_policy(), 1_485);
+        assert_eq!(coverage.considered(), 242);
+        assert_eq!(coverage.programming_totals(), (242, 241));
+        assert!(!coverage.below_warn_threshold());
+        assert!(coverage.languages_below_warn_threshold().is_empty());
+        assert_eq!(
+            coverage.top_skip_reasons(3),
+            vec![(SkipReason::TooLarge, 1)]
+        );
+        assert_eq!(
+            coverage.policy_skip_reasons(),
+            vec![(SkipReason::Hidden, 1_485)]
+        );
+        assert_eq!(
+            coverage.dominant_policy_source(),
+            Some((SkipSource::HiddenPolicy, 1_485))
+        );
+        let line = coverage.summary_line();
+        assert!(
+            line.starts_with("241 of 242 programming-language files indexed (99.6%)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("1,485 excluded by policy (1,485 hidden; 1,485 under .claude/; `[security] allow_hidden_files` governs the largest share)"),
+            "{line}"
+        );
+        assert!(line.ends_with("; skipped: 1 too-large"), "{line}");
+
+        // A manifest written before the source map existed still reads the same ratio.
+        let legacy: IndexCoverage = serde_json::from_value(serde_json::json!({
+            "discovered": 10, "indexed": 2, "skipped": {"hidden": 8},
+            "by_language": {"rust": {"discovered": 10, "indexed": 2, "skipped": {"hidden": 8}}}
+        }))
+        .unwrap();
+        assert_eq!(legacy.percent(), Some(100.0));
+        assert!(legacy.dominant_policy_source().is_none());
+        assert_eq!(
+            legacy.policy_exclusion_detail().as_deref(),
+            Some("8 hidden")
         );
     }
 
@@ -4958,21 +5553,32 @@ mod index_coverage_tests {
         coverage.record_indexed(&Language::Java, false);
         coverage.record_indexed(&Language::Java, true);
         coverage.record_skipped(&Language::Java, SkipReason::SecretPolicy);
+        coverage.record_policy_exclusion(SkipSource::SecurityPolicy, Some("config"));
         coverage.record_discovered(&Language::Python);
         coverage.record_skipped(&Language::Python, SkipReason::TooLarge);
+        coverage.record_discovered(&Language::Python);
+        coverage.record_skipped(&Language::Python, SkipReason::Error);
 
-        assert_eq!(coverage.discovered, 4);
+        assert_eq!(coverage.discovered, 5);
         assert_eq!(coverage.indexed, 2);
         assert_eq!(coverage.generated, 1);
         assert_eq!(coverage.by_language["java"].indexed, 2);
         assert_eq!(coverage.by_language["java"].generated, 1);
+        assert_eq!(coverage.by_language["java"].excluded_by_policy(), 1);
+        assert_eq!(coverage.by_language["java"].considered(), 2);
         assert_eq!(coverage.by_language["python"].percent(), Some(0.0));
-        // Ties fall back to declaration order, so the output is deterministic.
+        // Ties fall back to declaration order, so the output is deterministic; policy
+        // skips are listed separately from the omissions the ratio is judged on.
         assert_eq!(
             coverage.top_skip_reasons(3),
-            vec![(SkipReason::TooLarge, 1), (SkipReason::SecretPolicy, 1)]
+            vec![(SkipReason::TooLarge, 1), (SkipReason::Error, 1)]
         );
-        // Every file here is a programming-language file, so both ratios agree.
+        assert_eq!(
+            coverage.policy_skip_reasons(),
+            vec![(SkipReason::SecretPolicy, 1)]
+        );
+        // Every file here is a programming-language file, so both ratios agree; the
+        // secret-policy skip is outside the denominator.
         assert_eq!(coverage.programming_totals(), (4, 2));
         assert!(coverage.below_warn_threshold());
         // Four files are under the per-language floor: the overall ratio warns, the
@@ -4980,7 +5586,7 @@ mod index_coverage_tests {
         assert!(coverage.languages_below_warn_threshold().is_empty());
         assert_eq!(
             coverage.summary_line(),
-            "2 of 4 programming-language files indexed (50.0%); 2 of 4 recognised files indexed (50.0%) overall; skipped: 1 too-large, 1 secret-policy"
+            "2 of 4 programming-language files indexed (50.0%); 2 of 4 recognised files indexed (50.0%) overall; 1 excluded by policy (1 secret-policy; 1 under config/; `[paths] deny` or the built-in secret-path rule governs the largest share); skipped: 1 too-large, 1 error"
         );
 
         let quality = IndexQuality {
@@ -4995,7 +5601,7 @@ mod index_coverage_tests {
     #[test]
     fn language_warning_targets_programming_languages_and_absolute_losses() {
         let mut coverage = IndexCoverage::default();
-        let mut add = |language: &Language, discovered: usize, indexed: usize| {
+        let mut add = |language: &Language, discovered: usize, indexed: usize, reason| {
             for _ in 0..discovered {
                 coverage.record_discovered(language);
             }
@@ -5003,17 +5609,19 @@ mod index_coverage_tests {
                 coverage.record_indexed(language, false);
             }
             for _ in indexed..discovered {
-                coverage.record_skipped(language, SkipReason::Hidden);
+                coverage.record_skipped(language, reason);
             }
         };
         // The motivating incident: 25 of 10,012 is 99.75% and still a dropped package.
-        add(&Language::Java, 10_012, 9_987);
+        add(&Language::Java, 10_012, 9_987, SkipReason::TooLarge);
         // Under the ratio with enough files to mean it.
-        add(&Language::Python, 100, 90);
-        // Under the floor: one hidden file, no verdict.
-        add(&Language::Rust, 4, 1);
+        add(&Language::Python, 100, 90, SkipReason::Error);
+        // Under the floor: one unreadable file, no verdict.
+        add(&Language::Rust, 4, 1, SkipReason::Error);
         // Config formats never qualify however low they sit.
-        add(&Language::Yaml, 900, 100);
+        add(&Language::Yaml, 900, 100, SkipReason::TooLarge);
+        // Policy exclusions are not omissions: 300 hidden Go files leave 700 of 700.
+        add(&Language::Go, 1_000, 700, SkipReason::Hidden);
 
         assert_eq!(
             coverage.languages_below_warn_threshold(),
@@ -5022,6 +5630,7 @@ mod index_coverage_tests {
                 ("python", 90.0, 10)
             ]
         );
+        assert_eq!(coverage.by_language["go"].percent(), Some(100.0));
     }
 
     #[test]
@@ -5055,18 +5664,20 @@ mod index_coverage_tests {
             coverage.record_skipped(&Language::Yaml, SkipReason::Hidden);
         }
 
-        assert_eq!(coverage.percent(), Some(90.0));
+        // Hidden files are a policy exclusion: reported, outside both denominators.
+        assert_eq!(coverage.percent(), Some(100.0));
         assert_eq!(coverage.programming_percent(), Some(100.0));
+        assert_eq!(coverage.excluded_by_policy(), 100);
         assert!(!coverage.below_warn_threshold());
         assert!(coverage.languages_below_warn_threshold().is_empty());
         assert_eq!(
             coverage.summary_line(),
-            "900 of 900 programming-language files indexed (100.0%); 900 of 1,000 recognised files indexed (90.0%) overall; skipped: 100 hidden"
+            "900 of 900 programming-language files indexed (100.0%); 900 of 900 recognised files indexed (100.0%) overall; 100 excluded by policy (100 hidden)"
         );
 
         // A source file going missing still warns, at the same overall ratio.
         coverage.record_discovered(&Language::TypeScript);
-        coverage.record_skipped(&Language::TypeScript, SkipReason::SecretPolicy);
+        coverage.record_skipped(&Language::TypeScript, SkipReason::TooLarge);
         for _ in 0..19 {
             coverage.record_discovered(&Language::TypeScript);
             coverage.record_indexed(&Language::TypeScript, false);
@@ -5091,6 +5702,15 @@ mod index_coverage_tests {
         assert_eq!(
             coverage.summary_line(),
             "no programming-language files discovered; 10 of 10 recognised files indexed (100.0%)"
+        );
+
+        // Source that exists but is entirely policy-excluded is a different statement.
+        coverage.record_discovered(&Language::Rust);
+        coverage.record_skipped(&Language::Rust, SkipReason::Hidden);
+        assert_eq!(coverage.programming_percent(), None);
+        assert_eq!(
+            coverage.summary_line(),
+            "no programming-language files considered under the current policy; 10 of 10 recognised files indexed (100.0%); 1 excluded by policy (1 hidden)"
         );
     }
 

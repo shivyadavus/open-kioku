@@ -22,6 +22,8 @@ parameter named below says otherwise.
 
 1. **`repo_status`** — confirm the repository is indexed. Read `coverage` before
    trusting an absence: it says how much of the repository the index actually holds.
+   `quality.quality_notes` and `quality.skipped_paths` are counts plus a small sample;
+   pass `detail: "full"` only when you need every entry.
 2. **`search_code`** — find where the thing is handled. `mode` picks the evidence:
    `code` (lexical BM25, the default), `graph`, `semantic`, `hybrid`. Semantic and
    hybrid fall back to lexical when the vector index is not ready and report that

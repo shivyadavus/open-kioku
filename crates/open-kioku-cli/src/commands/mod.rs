@@ -189,9 +189,15 @@ pub async fn run_cli() -> anyhow::Result<()> {
             markdown,
             write,
             exit_code,
+            full,
         } => {
             let repo = resolve_repo(&repo, command_repo);
             let manifest = load_index_manifest(&repo)?;
+            let detail = if full {
+                StatusDetail::Full
+            } else {
+                StatusDetail::Summary
+            };
             let doctor = if markdown || write.is_some() || exit_code {
                 Some(doctor_report(&repo))
             } else {
@@ -201,7 +207,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 let doctor_ref = doctor
                     .as_ref()
                     .expect("doctor report should be available for status snapshot");
-                let rendered = render_status_markdown(&repo, manifest.as_ref(), doctor_ref);
+                let rendered =
+                    render_status_markdown(&repo, manifest.as_ref(), doctor_ref, detail);
                 if let Some(path) = write {
                     fs::write(&path, rendered)?;
                     if cli.json {
@@ -231,7 +238,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     return Ok(());
                 };
                 let compatibility = analysis_semantics_compatibility_for_manifest(Some(&manifest));
-                let mut status = serde_json::to_value(&manifest)?;
+                // Summarized lists unless `--full`; the same builder MCP `repo_status` uses.
+                let mut status = manifest.status_value(detail)?;
                 if let Some(object) = status.as_object_mut() {
                     object.insert("indexed".into(), serde_json::Value::Bool(true));
                     object.insert("analysis_semantics_status".into(), serde_json::to_value(compatibility)?);
@@ -281,6 +289,22 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         println!("{line}");
                     }
                 }
+                if full {
+                    let quality = &manifest.quality;
+                    println!("Quality notes ({}):", quality.quality_notes.len());
+                    for note in &quality.quality_notes {
+                        println!("- [{}] {}", note_kind_label(note), note.message);
+                    }
+                    println!("Skipped paths ({}):", quality.skipped_paths.len());
+                    for skipped in &quality.skipped_paths {
+                        println!(
+                            "- {} ({}, {})",
+                            skipped.path.display(),
+                            skipped.reason.label(),
+                            skipped.source.label()
+                        );
+                    }
+                }
             } else {
                 println!(
                     "{}",
@@ -314,6 +338,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     println!("\nCoverage by language:");
                     for line in coverage_table_lines(coverage) {
                         println!("  {line}");
+                    }
+                    for line in coverage_policy_lines(coverage) {
+                        println!("{line}");
                     }
                 }
                 let passes = report

@@ -88,19 +88,43 @@ fn analysis_semantics_compatibility_for_manifest(
 
 const STATUS_QUALITY_NOTES_LIMIT: usize = 100;
 
-fn append_status_quality_notes(out: &mut String, notes: &[String]) {
+/// The serialized `snake_case` name of a note's kind, as `repo_status` groups by.
+fn note_kind_label(note: &QualityNote) -> String {
+    serde_json::to_value(note.kind)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{:?}", note.kind))
+}
+
+fn append_status_quality_notes(out: &mut String, notes: &[QualityNote], detail: StatusDetail) {
     if notes.is_empty() {
         return;
     }
 
-    out.push_str("\nQuality notes:\n");
-    for note in notes.iter().take(STATUS_QUALITY_NOTES_LIMIT) {
-        out.push_str(&format!("- {note}\n"));
+    let mut by_kind = BTreeMap::new();
+    for note in notes {
+        *by_kind.entry(note_kind_label(note)).or_insert(0usize) += 1;
     }
-    let omitted = notes.len().saturating_sub(STATUS_QUALITY_NOTES_LIMIT);
+    out.push_str(&format!(
+        "\nQuality notes ({}): {}\n\n",
+        notes.len(),
+        by_kind
+            .iter()
+            .map(|(kind, count)| format!("{kind}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let limit = match detail {
+        StatusDetail::Summary => STATUS_QUALITY_NOTES_LIMIT,
+        StatusDetail::Full => usize::MAX,
+    };
+    for note in notes.iter().take(limit) {
+        out.push_str(&format!("- [{}] {}\n", note_kind_label(note), note.message));
+    }
+    let omitted = notes.len().saturating_sub(limit);
     if omitted > 0 {
         out.push_str(&format!(
-            "- {omitted} additional quality notes omitted; use `ok status --json` for complete details.\n"
+            "- {omitted} additional quality notes omitted; use `ok status --markdown --full` or `ok status --json --full` for every note.\n"
         ));
     }
 }
@@ -109,6 +133,7 @@ fn render_status_markdown(
     repo: &Path,
     manifest: Option<&IndexManifest>,
     doctor: &DoctorReport,
+    detail: StatusDetail,
 ) -> String {
     let mut out = String::new();
     out.push_str("# Open Kioku Status\n\n");
@@ -147,6 +172,15 @@ fn render_status_markdown(
             "| Skipped paths | {} |\n",
             manifest.quality.skipped_paths.len()
         ));
+        if let Some(excluded) = manifest
+            .quality
+            .coverage
+            .as_ref()
+            .map(IndexCoverage::excluded_by_policy)
+            .filter(|excluded| *excluded > 0)
+        {
+            out.push_str(&format!("| Excluded by policy | {excluded} |\n"));
+        }
         out.push_str(&format!(
             "| Coverage | {} |\n",
             manifest
@@ -216,7 +250,21 @@ fn render_status_markdown(
                 out.push_str(&format!("- {}\n", note));
             }
         }
-        append_status_quality_notes(&mut out, &manifest.quality.quality_notes);
+        append_status_quality_notes(&mut out, &manifest.quality.quality_notes, detail);
+        if detail == StatusDetail::Full && !manifest.quality.skipped_paths.is_empty() {
+            out.push_str(&format!(
+                "\nSkipped paths ({}):\n\n",
+                manifest.quality.skipped_paths.len()
+            ));
+            for skipped in &manifest.quality.skipped_paths {
+                out.push_str(&format!(
+                    "- `{}` ({}, {})\n",
+                    skipped.path.display(),
+                    skipped.reason.label(),
+                    skipped.source.label()
+                ));
+            }
+        }
     } else {
         out.push_str(
             "No index manifest was found. Run `ok index .` before handing this repo to an agent.\n",
@@ -1445,6 +1493,10 @@ fn coverage_check(
         );
     }
     let mut message = coverage.headline();
+    // The headline ends with the policy count exactly when there is detail to add.
+    if let Some(detail) = coverage.policy_exclusion_detail() {
+        message.push_str(&format!(" ({detail})"));
+    }
     let top = coverage.top_skip_reasons(3);
     if !top.is_empty() {
         message.push_str("; top skip reasons: ");
@@ -1478,10 +1530,7 @@ fn coverage_check(
                 status: CheckStatus::Warn,
                 message,
             },
-            Some(
-                "Review `ok --json status` `coverage.by_language` and the skip reasons; adjust `[index] exclude`, `.okignore`, or `max_file_size` if the omissions are unintended."
-                    .into(),
-            ),
+            Some(coverage_next_step(coverage)),
         );
     }
     (
@@ -1494,11 +1543,70 @@ fn coverage_check(
     )
 }
 
+/// The advice for a coverage warning names the key that governs the dominant omission
+/// when one exists. Only `too-large` has one among the reasons the ratio is judged on:
+/// `binary`, `error`, and `unsupported-language` are facts about the files, and policy
+/// exclusions (`hidden`, `ignored`, ...) are outside the ratio and name their own
+/// setting in the check message.
+fn coverage_next_step(coverage: &IndexCoverage) -> String {
+    match coverage.top_skip_reasons(1).first() {
+        Some((open_kioku_core::SkipReason::TooLarge, count)) => format!(
+            "Coverage: {} source file(s) were skipped as too-large; `[index] max_file_size` governs that. Raise it if the omissions are unintended, then run `ok index .`.",
+            group_thousands(*count)
+        ),
+        Some((reason, count)) => format!(
+            "Coverage: {} source file(s) were skipped as {}; no ok.toml key governs that reason, so review the files under `ok --json status` `coverage.by_language` and `quality.skipped_paths`.",
+            group_thousands(*count),
+            reason.label()
+        ),
+        None => "Coverage: review `ok --json status` `coverage.by_language`; the missing files were not attributed to a skip reason, so check the walk errors and per-language counts.".into(),
+    }
+}
+
+/// What the ratio set aside, after the table: the policy count by reason, where the
+/// files live, and which setting governs the largest share.
+fn coverage_policy_lines(coverage: &IndexCoverage) -> Vec<String> {
+    let excluded = coverage.excluded_by_policy();
+    if excluded == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "\nExcluded by policy: {} ({})",
+        group_thousands(excluded),
+        format_skip_reasons(&coverage.policy_skip_reasons())
+    )];
+    let dirs = coverage.top_policy_excluded_dirs(3);
+    if !dirs.is_empty() {
+        lines.push(format!(
+            "  top directories: {}",
+            dirs.iter()
+                .map(|(dir, count)| format!("{} under {dir}/", group_thousands(*count)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some((source, count)) = coverage.dominant_policy_source() {
+        lines.push(match source.governing_setting() {
+            Some(setting) => format!(
+                "  governing setting: {setting} ({} files, {})",
+                group_thousands(count),
+                source.label()
+            ),
+            None => format!(
+                "  largest share: {} files ({}); no ok.toml key governs it",
+                group_thousands(count),
+                source.label()
+            ),
+        });
+    }
+    lines
+}
+
 /// Fixed-width rows for the terminal; the same numbers `ok doctor --json` carries.
 fn coverage_table_lines(coverage: &IndexCoverage) -> Vec<String> {
     let mut lines = vec![format!(
-        "{:<12} {:>10} {:>9} {:>8} {:>9}  {}",
-        "language", "discovered", "indexed", "coverage", "generated", "skipped"
+        "{:<12} {:>10} {:>9} {:>9} {:>8} {:>9}  {}",
+        "language", "discovered", "excluded", "indexed", "coverage", "generated", "skipped"
     )];
     for (language, entry) in &coverage.by_language {
         let percent = entry
@@ -1526,18 +1634,20 @@ fn coverage_table_lines(coverage: &IndexCoverage) -> Vec<String> {
             format_skip_reasons(&skipped)
         };
         lines.push(format!(
-            "{:<12} {:>10} {:>9} {:>7}{flag:<1} {:>9}  {skipped}",
+            "{:<12} {:>10} {:>9} {:>9} {:>7}{flag:<1} {:>9}  {skipped}",
             language,
             group_thousands(entry.discovered),
+            group_thousands(entry.excluded_by_policy()),
             group_thousands(entry.indexed),
             percent,
             group_thousands(entry.generated),
         ));
     }
     lines.push(format!(
-        "{:<12} {:>10} {:>9} {:>8} {:>9}  {}",
+        "{:<12} {:>10} {:>9} {:>9} {:>8} {:>9}  {}",
         "total",
         group_thousands(coverage.discovered),
+        group_thousands(coverage.excluded_by_policy()),
         group_thousands(coverage.indexed),
         coverage
             .percent()
@@ -1545,7 +1655,8 @@ fn coverage_table_lines(coverage: &IndexCoverage) -> Vec<String> {
             .unwrap_or_else(|| "-".into()),
         group_thousands(coverage.generated),
         {
-            let all = coverage.top_skip_reasons(usize::MAX);
+            let mut all = coverage.top_skip_reasons(usize::MAX);
+            all.extend(coverage.policy_skip_reasons());
             if all.is_empty() {
                 "-".to_string()
             } else {
