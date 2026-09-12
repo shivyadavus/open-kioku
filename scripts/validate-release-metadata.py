@@ -134,6 +134,41 @@ def check_formula(metadata: dict, version: str, errors: list[str]) -> None:
             fail(f"{formula_path.relative_to(ROOT)} missing sha256 for {name}", errors)
 
 
+def check_dockerfile(metadata: dict, version: str, errors: list[str]) -> None:
+    """The root Dockerfile pins ok-linux-x86_64 by version and sha256.
+
+    OK_VERSION is synced with every other manifest; OK_SHA256 is written by the
+    release workflow's hash-pin step. Both must agree with release-metadata.json,
+    which the same step pins in the same commit, so a hand edit or a skipped pin
+    fails here rather than in a directory's image build.
+    """
+    dockerfile_path = ROOT / "Dockerfile"
+    if not dockerfile_path.exists():
+        fail("Dockerfile is missing", errors)
+        return
+    text = load_text(dockerfile_path)
+    rel = dockerfile_path.relative_to(ROOT)
+
+    versions = re.findall(r"^ARG OK_VERSION=(\S*)$", text, flags=re.MULTILINE)
+    if len(versions) != 1:
+        fail(f"{rel} must declare exactly one ARG OK_VERSION line, found {len(versions)}", errors)
+    elif versions[0] != version:
+        fail(f"{rel} OK_VERSION {versions[0]!r} does not match {version}", errors)
+
+    expected_sha = binary_artifacts(metadata).get("ok-linux-x86_64")
+    shas = re.findall(r"^ARG OK_SHA256=(\S*)$", text, flags=re.MULTILINE)
+    if len(shas) != 1:
+        fail(f"{rel} must declare exactly one ARG OK_SHA256 line, found {len(shas)}", errors)
+    elif not expected_sha or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        fail("release metadata missing sha256 for Dockerfile artifact ok-linux-x86_64", errors)
+    elif shas[0] != expected_sha:
+        fail(f"{rel} OK_SHA256 does not match release-metadata.json sha256 for ok-linux-x86_64", errors)
+
+    url = f"{metadata['repository']}/releases/download/v${{OK_VERSION}}/ok-linux-x86_64"
+    if url not in text:
+        fail(f"{rel} does not download {url}", errors)
+
+
 def check_binstall(metadata: dict, errors: list[str]) -> None:
     cli_toml = load_text(ROOT / "crates/open-kioku-cli/Cargo.toml")
     expected = {
@@ -178,6 +213,9 @@ def check_release_workflow(metadata: dict, errors: list[str]) -> None:
         "actions/attest-build-provenance",
         "softprops/action-gh-release",
         "npm publish --access public",
+        # The hash-pin step must rewrite and commit the Dockerfile pin.
+        "ARG OK_SHA256=",
+        "git add release-metadata.json Formula/open-kioku.rb Dockerfile",
     ]
     for step in required_steps:
         if step not in workflow:
@@ -278,6 +316,7 @@ def main() -> int:
     check_json_version(ROOT / ".codex-plugin/plugin.json", version, errors)
     check_npm_packages(metadata, version, errors)
     check_formula(metadata, version, errors)
+    check_dockerfile(metadata, version, errors)
     check_binstall(metadata, errors)
     check_release_workflow(metadata, errors)
     check_release_notes(metadata, version, errors)
