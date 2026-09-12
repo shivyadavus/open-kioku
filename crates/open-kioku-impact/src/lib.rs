@@ -244,6 +244,14 @@ impl<'a> ImpactEngine<'a> {
         if path.to_string_lossy().contains("api") {
             reasons.push("API-layer path suggests public integration surface".into());
         }
+        // A target the index does not hold cannot be measured. Saying so in the risk
+        // report keeps `level: low` from reading as "nothing depends on this file".
+        if file.is_none() {
+            reasons.push(format!(
+                "`{}` is not in the index; it may be excluded, unsupported, or added since the last `ok index`, so no dependents could be measured",
+                path.display()
+            ));
+        }
         if reasons.is_empty() {
             reasons.push("limited indexed downstream references found".into());
         }
@@ -285,7 +293,9 @@ impl<'a> ImpactEngine<'a> {
             } else {
                 Confidence::Low
             },
-            message: if exact_reference_count > 0 {
+            message: if file.is_none() {
+                "impact target is not in the index; no symbols or references were available".into()
+            } else if exact_reference_count > 0 {
                 "impact report derived from exact indexed symbol references and lexical references"
                     .into()
             } else {
@@ -331,7 +341,11 @@ impl<'a> ImpactEngine<'a> {
             proven_impact,
             possible_impact,
             risk_report: RiskReport {
-                level: if score > 0.6 {
+                // A target the index does not hold was not measured; a score of zero for it
+                // is absence, not low risk, and `level` is the field consumers branch on.
+                level: if file.is_none() {
+                    "unknown"
+                } else if score > 0.6 {
                     "high"
                 } else if score > 0.25 {
                     "medium"
@@ -2381,5 +2395,32 @@ mod tests {
             .unwrap();
         assert!(report.proven_impact.is_empty());
         assert!(report.possible_impact.is_empty());
+    }
+
+    #[test]
+    fn unindexed_target_is_named_in_the_risk_report() {
+        let store = make_store();
+        let report = ImpactEngine::new(&store)
+            .for_file(Path::new("does/not/exist.rs"))
+            .unwrap();
+        assert_eq!(report.risk_report.level, "unknown");
+        assert!(
+            report
+                .risk_report
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("`does/not/exist.rs` is not in the index")),
+            "{:?}",
+            report.risk_report.reasons
+        );
+        assert!(!report
+            .risk_report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("limited indexed downstream references")));
+        assert!(report
+            .evidence
+            .iter()
+            .any(|evidence| evidence.message.contains("not in the index")));
     }
 }

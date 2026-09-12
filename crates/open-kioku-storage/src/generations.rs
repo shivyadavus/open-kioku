@@ -105,6 +105,41 @@ fn generation_dir(repo: &Path, generation_id: &str) -> PathBuf {
 /// manifest wins; anything else falls back to the legacy layout. The fallback is
 /// deliberate fail-open-to-legacy: a corrupt pointer must degrade to the old behavior
 /// (which may then report a missing index) rather than fail every command.
+/// What every read surface says about a repository that has never been indexed.
+///
+/// `ok status`, `ok doctor`, `ok search`, `ok context` and the MCP server's `repo_status` and
+/// tool errors all print this sentence, so an agent reading one and a user reading another
+/// see the same next step. It is deliberately distinct from the message for an index that
+/// exists but awaits `ok index` after a format change; the store raises that one and names
+/// the format, and merging the two would hide which of the two situations the user is in.
+pub fn not_indexed_message(repo: &Path) -> String {
+    let repo = repo.display();
+    format!(
+        "repository is not indexed: {repo} has no local index; run `ok index {repo}` \
+         (or `ok setup agent <claude|cursor> --repo {repo} --apply`) to build it"
+    )
+}
+
+/// The status object `ok --json status` and MCP `repo_status` return for a repository that
+/// has never been indexed, in place of the manifest an indexed repository returns. `indexed`
+/// is the field an agent should branch on; `next_step` is the command that changes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotIndexedStatus {
+    pub indexed: bool,
+    pub index_path: PathBuf,
+    pub message: String,
+    pub next_step: String,
+}
+
+pub fn not_indexed_status(repo: &Path) -> NotIndexedStatus {
+    NotIndexedStatus {
+        indexed: false,
+        index_path: resolve_index_location(repo).sqlite_path(),
+        message: not_indexed_message(repo),
+        next_step: format!("ok index {}", repo.display()),
+    }
+}
+
 pub fn resolve_index_location(repo: &Path) -> IndexLocation {
     let legacy = IndexLocation {
         root: repo.join(".ok"),

@@ -26,7 +26,7 @@ fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
     if !index_path.exists() {
         return Ok(None);
     }
-    Ok(SqliteStore::open(&index_path)?.manifest()?)
+    Ok(SqliteStore::open_existing(&index_path)?.manifest()?)
 }
 
 /// Whether the repository's index has a graph awaiting `ok index`. `false` without an index:
@@ -37,7 +37,7 @@ fn index_graph_rebuild_required(repo: &Path) -> anyhow::Result<bool> {
     if !index_path.exists() {
         return Ok(false);
     }
-    Ok(SqliteStore::open(&index_path)?.graph_rebuild_required()?)
+    Ok(SqliteStore::open_existing(&index_path)?.graph_rebuild_required()?)
 }
 
 const GRAPH_REBUILD_REQUIRED_MESSAGE: &str =
@@ -73,7 +73,7 @@ fn semantic_lifecycle_status(repo: &Path) -> Option<open_kioku_semantic::Semanti
         return None;
     }
     let config = OkConfig::load_from_repo(repo).ok()?;
-    let store = SqliteStore::open(&index_path).ok()?;
+    let store = SqliteStore::open_existing(&index_path).ok()?;
     Some(SemanticIndexManager::new(repo, &store, &config.semantic).status())
 }
 
@@ -1065,7 +1065,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     let index_path =
         open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     if index_path.exists() {
-        match SqliteStore::open(&index_path).and_then(|store| store.manifest()) {
+        match SqliteStore::open_existing(&index_path).and_then(|store| store.manifest()) {
             Ok(Some(manifest)) => checks.push(DoctorCheck {
                 name: "index",
                 status: CheckStatus::Pass,
@@ -1074,13 +1074,18 @@ fn doctor_report(repo: &Path) -> DoctorReport {
                     manifest.file_count, manifest.symbol_count, manifest.indexed_at
                 ),
             }),
+            // A database without a manifest is what a 4.0.0 read surface left behind; it is
+            // the unindexed case, in the unindexed words, not a warning about a manifest.
             Ok(None) => {
                 checks.push(DoctorCheck {
                     name: "index",
-                    status: CheckStatus::Warn,
-                    message: "index database exists but has no manifest".into(),
+                    status: CheckStatus::Fail,
+                    message: open_kioku_storage::generations::not_indexed_message(&repo),
                 });
-                next_steps.push("Run `ok index .` to build a fresh index.".into());
+                next_steps.push(format!(
+                    "Run `ok index {}` before connecting an MCP client.",
+                    repo.display()
+                ));
             }
             Err(err) => {
                 checks.push(DoctorCheck {
@@ -1095,9 +1100,12 @@ fn doctor_report(repo: &Path) -> DoctorReport {
         checks.push(DoctorCheck {
             name: "index",
             status: CheckStatus::Fail,
-            message: ".ok/index.sqlite is missing".into(),
+            message: open_kioku_storage::generations::not_indexed_message(&repo),
         });
-        next_steps.push("Run `ok index .` before connecting an MCP client.".into());
+        next_steps.push(format!(
+            "Run `ok index {}` before connecting an MCP client.",
+            repo.display()
+        ));
     }
 
     // The index check above opens the store, which is the call that discards a pre-4.0 edge
@@ -1231,7 +1239,7 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     }
 
     if index_path.exists() {
-        if let Ok(store) = SqliteStore::open(&index_path) {
+        if let Ok(store) = SqliteStore::open_existing(&index_path) {
             if let Ok(Some(manifest)) = store.manifest() {
                 let quality = &manifest.quality;
                 if quality.scip_indexes_imported > 0 && quality.scip_exact_references > 0 {

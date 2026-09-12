@@ -53,7 +53,7 @@ fn index_repo_with_config(
             snapshot.analysis_facts.len()
         ),
     );
-    let store = open_store(repo)?;
+    let store = open_store_for_write(repo)?;
     store.replace_index_with_documents(
         IndexData {
             manifest: &snapshot.manifest,

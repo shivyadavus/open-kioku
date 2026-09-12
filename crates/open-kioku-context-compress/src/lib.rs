@@ -108,6 +108,17 @@ impl ContextHandleStore {
         Self::open(default_context_path(repo))
     }
 
+    /// The repository's handle store if a compressed pack has ever been written, `None`
+    /// otherwise. Reads go through here so that looking up a handle never creates
+    /// `.ok/context.sqlite`; `open_repo` is for the writer.
+    pub fn open_repo_existing(repo: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = default_context_path(repo);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Self::open(path).map(Some)
+    }
+
     /// Compresses a context pack into handles, persisting each original.
     ///
     /// Every primary file (kind `"primary"`), supporting file (kind

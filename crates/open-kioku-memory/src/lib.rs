@@ -29,6 +29,30 @@ impl RepoMemoryStore {
         Self::open(default_memory_path(repo))
     }
 
+    /// The repository's memory store if a fact has ever been remembered, `None` otherwise.
+    /// Reads go through here so that a search never creates `.ok/memory.sqlite`;
+    /// `open_repo` is for `remember`.
+    pub fn open_repo_existing(repo: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = default_memory_path(repo);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Self::open(path).map(Some)
+    }
+
+    /// Facts matching `query` from the repository's store, or none when no store exists;
+    /// the read-side counterpart of `open_repo` for callers that only search.
+    pub fn search_repo(
+        repo: impl AsRef<Path>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemorySearchResult>> {
+        match Self::open_repo_existing(repo)? {
+            Some(store) => store.search(query, limit),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn remember(&self, text: &str, source: &str, confidence: Confidence) -> Result<MemoryFact> {
         let text = text.trim();
         if text.is_empty() {

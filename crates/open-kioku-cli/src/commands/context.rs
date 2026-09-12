@@ -174,5 +174,5 @@ fn ownership_memory_facts(
             .iter()
             .map(|component| component.component_id.clone()),
     );
-    Ok(RepoMemoryStore::open_repo(repo)?.search(&query_terms.join(" "), 20)?)
+    Ok(RepoMemoryStore::search_repo(repo, &query_terms.join(" "), 20)?)
 }

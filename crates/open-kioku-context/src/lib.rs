@@ -297,10 +297,16 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
     }
-    if diagnostics.selection.budget.max_tokens > 0 {
+    let budget = &diagnostics.selection.budget;
+    if budget.max_tokens > 0 && !budget.has_token_ceiling() {
+        out.push_str(&format!(
+            "- Context budget: no token ceiling; file limit `{}` primary files; selected estimate `{}`\n",
+            budget.max_primary_files, diagnostics.selection.estimated_tokens_selected
+        ));
+    } else if budget.max_tokens > 0 {
         out.push_str(&format!(
             "- Context budget: `{}` tokens (`{}` available after reserves); selected estimate `{}`\n",
-            diagnostics.selection.budget.max_tokens,
+            budget.max_tokens,
             diagnostics.selection.available_context_tokens,
             diagnostics.selection.estimated_tokens_selected
         ));
@@ -384,10 +390,16 @@ fn write_prompt_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalD
             retrieval_source_list(&diagnostics.sources_succeeded)
         ));
     }
-    if diagnostics.selection.budget.max_tokens > 0 {
+    let budget = &diagnostics.selection.budget;
+    if budget.max_tokens > 0 && !budget.has_token_ceiling() {
+        out.push_str(&format!(
+            "CONTEXT_BUDGET: max=none file_limit={} selected_estimate={}\n",
+            budget.max_primary_files, diagnostics.selection.estimated_tokens_selected
+        ));
+    } else if budget.max_tokens > 0 {
         out.push_str(&format!(
             "CONTEXT_BUDGET: max={} available={} selected_estimate={}\n",
-            diagnostics.selection.budget.max_tokens,
+            budget.max_tokens,
             diagnostics.selection.available_context_tokens,
             diagnostics.selection.estimated_tokens_selected
         ));
@@ -1209,7 +1221,7 @@ fn select_context_units(
 }
 
 fn is_file_limit_compatibility_budget(budget: &ContextBudget) -> bool {
-    budget.max_tokens >= usize::MAX / 8 && budget.max_per_file >= usize::MAX / 8
+    !budget.has_token_ceiling()
 }
 
 fn retrieval_authority_for_result(
@@ -4693,6 +4705,44 @@ mod tests {
         assert!(prompt.contains("CONTEXT_BUDGET: max=1000 available=800"));
         assert!(prompt.contains("RETRIEVAL_ABSTENTION_REASON: positive_budget_control"));
         assert!(prompt.contains("CONTEXT_HIGH_VALUE_OMISSION: control omission"));
+    }
+
+    /// The file-limit budget the CLI and MCP default path uses carries a sentinel in
+    /// `max_tokens`; the renderers must say so rather than print it as a budget.
+    #[test]
+    fn file_limit_budget_renders_as_no_token_ceiling() {
+        let diagnostics = RetrievalDiagnostics {
+            selection: open_kioku_core::ContextSelectionDiagnostics {
+                budget: ContextBudget::from_file_limit(20),
+                available_context_tokens: usize::MAX / 4,
+                estimated_tokens_selected: 42,
+                // The retrieval section is only written when there is telemetry to report.
+                retrieval_confidence: Some(Confidence::High),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut markdown = String::new();
+        write_markdown_retrieval_diagnostics(&mut markdown, &diagnostics);
+        assert!(
+            markdown.contains(
+                "Context budget: no token ceiling; file limit `20` primary files; selected estimate `42`"
+            ),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains(&(usize::MAX / 4).to_string()),
+            "{markdown}"
+        );
+
+        let mut prompt = String::new();
+        write_prompt_retrieval_diagnostics(&mut prompt, &diagnostics);
+        assert!(
+            prompt.contains("CONTEXT_BUDGET: max=none file_limit=20 selected_estimate=42"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(&(usize::MAX / 4).to_string()), "{prompt}");
     }
 
     #[test]

@@ -185,7 +185,7 @@ fn snapshot_import(repo: &Path) -> anyhow::Result<SnapshotImportReport> {
 
     let index_path = index_sqlite_path(&repo);
     promote_snapshot_db(&repo, &temp_db)?;
-    let store = open_store(&repo)?;
+    let store = open_store_for_write(&repo)?;
     rebuild_search_from_store(&repo, &store)?;
 
     Ok(SnapshotImportReport {
