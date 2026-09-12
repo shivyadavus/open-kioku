@@ -634,9 +634,11 @@ const RESOLUTION_MODE_COMMENT: &str = "\
 #   \"v2\":     the proof-gated resolver's proven CALLS edges replace the registry's.
 ";
 
+// Generated comments are indexed like any other TOML text, so they stay terse: every extra
+// English word here is a lexical term a context pack can match against.
 const RUNTIME_SECTION_COMMENT: &str = "\
-# Runtime error provider, off until enabled. To turn it on, set enabled = true and add
-# provider = \"sentry\", organization, project, and auth_token_env = \"SENTRY_AUTH_TOKEN\".
+# Runtime error provider; inert while enabled = false. Enabling it requires
+# provider = \"sentry\", organization, project and auth_token_env = \"SENTRY_AUTH_TOKEN\".
 ";
 
 /// Post-pass over the serialized defaults. It only edits lines the serializer is known to

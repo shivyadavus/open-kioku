@@ -157,7 +157,7 @@ surface in 4.0.0: moved to the CLI: `ok history churn --path`, `--module`, or
 | `get_definition` | Where is this symbol defined, and what does it say? | `include_body` |
 | `get_references` | What else touches this symbol? | `kind`: `references`, `callers`, `callees`, `implementations`, `all` |
 | `dependency_path` | How are these two connected, or what is next to this one? | `from`, optional `to` |
-| `impact_analysis` | What breaks if I change this file? | `path` (a path the index does not hold is named in `risk_report.reasons`, since no dependents could be measured) |
+| `impact_analysis` | What breaks if I change this file? | `path` (a path the index does not hold reports `risk_report.level: "unknown"` and is named in `risk_report.reasons`, since no dependents could be measured) |
 | `explain_flow` | Which call paths start at an indexed endpoint? | `limit` |
 | `build_context_pack` | What do I need in context for this task? | `compress` |
 | `retrieve_context` | What was behind this handle? | `handle` |

@@ -3619,6 +3619,33 @@ fn unindexed_repository_reads_say_not_indexed_and_create_nothing() {
         );
     }
 
+    // Neither command needs the index, so neither may create the sidecar stores under
+    // `.ok` while answering from nothing.
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .args(["retrieve-context", "bogus"]);
+        command
+    });
+    assert!(stderr.contains("no context handle `bogus`"), "{stderr}");
+    for args in [
+        vec!["memory", "recent"],
+        vec!["memory", "search", "anything"],
+    ] {
+        let stdout = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").args(&args);
+            command
+        });
+        assert_eq!(stdout.trim(), "[]", "{args:?}: {stdout}");
+    }
+    assert!(
+        !repo.join(".ok").exists(),
+        "retrieve-context and memory reads must not create .ok"
+    );
+
     // The doctor's MCP probe spawns a real server; it must not index either.
     let (doctor, _stderr) = run_failure({
         let mut command = ok();

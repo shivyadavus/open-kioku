@@ -557,8 +557,10 @@ async fn dispatch(
             // An unknown handle is an error, not `null`: a null answer reads as an empty
             // snippet, and the handle either came from this repository's compressed pack
             // or it did not.
-            let retrieved = ContextHandleStore::open_repo(repo)?
-                .retrieve(&ContextHandleId::new(handle))?
+            let retrieved = ContextHandleStore::open_repo_existing(repo)?
+                .map(|store| store.retrieve(&ContextHandleId::new(handle)))
+                .transpose()?
+                .flatten()
                 .with_context(|| {
                     format!(
                         "no context handle `{handle}` is stored for this repository; handles come from build_context_pack with compress=true"
@@ -615,7 +617,7 @@ async fn dispatch(
             } else {
                 task.to_string()
             };
-            let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
+            let memory_facts = RepoMemoryStore::search_repo(repo, &task, 8)?;
             let limit = limit(&params);
             let context = build_context_for_task(repo, store, config, &task, limit)?;
             let report = PlanEngine::new(store as &dyn OkStore)
@@ -652,9 +654,11 @@ async fn dispatch(
         }
         "search_memory" => {
             let query = required_str(&params, "query")?;
-            Ok(json!(
-                RepoMemoryStore::open_repo(repo)?.search(query, limit(&params))?
-            ))
+            Ok(json!(RepoMemoryStore::search_repo(
+                repo,
+                query,
+                limit(&params)
+            )?))
         }
         "impact_analysis" => {
             require_authoritative_relationships(store)?;
@@ -2075,7 +2079,7 @@ fn contract_plan_from_params(
         task = task_with_changed_ranges(repo, &task, since)?;
     }
     let limit = limit(params);
-    let memory_facts = RepoMemoryStore::open_repo(repo)?.search(&task, 8)?;
+    let memory_facts = RepoMemoryStore::search_repo(repo, &task, 8)?;
     let mut context = ContextPackBuilder::new(store as &dyn OkStore)
         .with_history_store(Some(store))
         .build(&task, limit)?;
@@ -3380,6 +3384,51 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("no context handle `bogus`"), "{error}");
+        assert!(
+            !temp.path().join(".ok").exists(),
+            "looking up a handle must not create .ok/context.sqlite"
+        );
+    }
+
+    #[tokio::test]
+    async fn impact_analysis_on_an_unindexed_path_reports_unknown_risk() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(":memory:").unwrap();
+        let config = OkConfig::default();
+        let manifest = fixture_manifest();
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[],
+                symbols: &[],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        let report = dispatch(
+            temp.path(),
+            &store,
+            &config,
+            "impact_analysis",
+            json!({"path": "does/not/exist.rs"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["risk_report"]["level"], "unknown", "{report}");
+        assert!(report["risk_report"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .unwrap()
+                .contains("`does/not/exist.rs` is not in the index")));
     }
 
     struct McpSnapshotFixture {

@@ -391,9 +391,10 @@ fn inspect_mcp_server_entry(
 }
 
 /// Why `existing` cannot stand in for the managed entry, or `None` when it launches
-/// `ok mcp serve` for `repo`. `ok mcp serve` forces read-only mode whatever flags it is
-/// given, so any invocation of it is a read-only server; what has to match is the binary,
-/// the subcommand, and the repository.
+/// `ok mcp serve` for `repo` with the managed entry's posture. `ok mcp serve` forces
+/// read-only mode whatever flags it is given, but `--deny-network=false`,
+/// `--approval-required=false` and `--allow-command` loosen the posture the `[kept]`
+/// detail vouches for, so only the flags that cannot are accepted.
 fn describe_incompatible_server(existing: &serde_json::Value, repo: &Path) -> Option<String> {
     let Some(command) = existing.get("command").and_then(serde_json::Value::as_str) else {
         return Some("has no string `command`".into());
@@ -415,8 +416,8 @@ fn describe_incompatible_server(existing: &serde_json::Value, repo: &Path) -> Op
     else {
         return Some("has a non-string entry in `args`".into());
     };
-    // `--repo` is accepted before or after `mcp serve`; `--allow-command` is the only other
-    // flag that takes a value. What is left must be exactly the subcommand.
+    // `--repo` is accepted before or after `mcp serve`. Every other flag is either one of
+    // the two that cannot weaken the posture or grounds for refusal; nothing is skipped.
     let mut positional = Vec::new();
     let mut served_repo: Option<&str> = None;
     let mut index = 0;
@@ -424,13 +425,16 @@ fn describe_incompatible_server(existing: &serde_json::Value, repo: &Path) -> Op
         let arg = args[index];
         if let Some(value) = arg.strip_prefix("--repo=") {
             served_repo = Some(value);
-        } else if arg == "--repo" || arg == "--allow-command" {
+        } else if arg == "--repo" {
             index += 1;
-            let value = args.get(index).copied();
-            if arg == "--repo" {
-                served_repo = value;
-            }
-        } else if !arg.starts_with('-') {
+            served_repo = args.get(index).copied();
+        } else if arg == "--read-only" || arg == "--hide-experimental" {
+            // Neither changes what the server may do.
+        } else if arg.starts_with('-') {
+            return Some(format!(
+                "passes `{arg}`, which the managed entry does not"
+            ));
+        } else {
             positional.push(arg);
         }
         index += 1;
@@ -934,6 +938,7 @@ mod onboarding_tests {
             serde_json::json!(["mcp", "serve", "--repo", repo.display().to_string(), "--read-only"]),
             serde_json::json!(["--repo", ".", "mcp", "serve"]),
             serde_json::json!(["mcp", "serve"]),
+            serde_json::json!(["mcp", "serve", "--repo=.", "--read-only", "--hide-experimental"]),
         ] {
             let path = write_mcp_json(
                 repo,
@@ -971,6 +976,19 @@ mod onboarding_tests {
             (
                 serde_json::json!({"command": "ok", "args": ["daemon", "start"]}),
                 "rather than `ok mcp serve`",
+            ),
+            // Read-only by construction, but not the posture the `[kept]` detail vouches for.
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--deny-network=false", "--approval-required=false", "--allow-command", "cargo"]}),
+                "passes `--deny-network=false`, which the managed entry does not",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--allow-command", "cargo"]}),
+                "passes `--allow-command`, which the managed entry does not",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--approval-required=false"]}),
+                "passes `--approval-required=false`, which the managed entry does not",
             ),
             (serde_json::json!("ok mcp serve"), "has no string `command`"),
         ] {

@@ -886,8 +886,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Command::RetrieveContext { handle } => {
             // An unknown handle is an error, as it is for MCP `retrieve_context`: `null`
             // under `--json` read as an empty snippet.
-            let retrieved = ContextHandleStore::open_repo(&repo)?
-                .retrieve(&ContextHandleId::new(&handle))?
+            let retrieved = ContextHandleStore::open_repo_existing(&repo)?
+                .map(|store| store.retrieve(&ContextHandleId::new(&handle)))
+                .transpose()?
+                .flatten()
                 .with_context(|| {
                     format!(
                         "no context handle `{handle}` is stored for this repository; handles come from `ok context --compressed`"
@@ -921,7 +923,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let report = PlanEngine::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(&store))
-                .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
+                .with_memory_facts(RepoMemoryStore::search_repo(&repo, &task, 8)?)
                 .with_memory_enabled(OkConfig::load_from_repo(&repo)?.memory.enabled)
                 .plan_from_context(&task, limit, context)?;
             let format = if cli.json { PlanFormat::Json } else { format };
@@ -955,7 +957,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let plan = PlanEngine::new(&store as &dyn OkStore)
                 .with_search_index(search_index.as_ref().map(|idx| idx as &dyn SearchIndex))
                 .with_history_store(Some(&store))
-                .with_memory_facts(RepoMemoryStore::open_repo(&repo)?.search(&task, 8)?)
+                .with_memory_facts(RepoMemoryStore::search_repo(&repo, &task, 8)?)
                 .with_memory_enabled(OkConfig::load_from_repo(&repo)?.memory.enabled)
                 .plan_from_context(&task, limit, context)?;
             let report = PreflightReport::from_plan(&plan);
@@ -1362,7 +1364,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
         },
         Command::History { command } => {
-            let store = open_store(&repo)?;
+            // The benches below build their own in-memory stores from checked-in cases, so
+            // only the subcommands that read this repository's history open its index.
             match command {
                 HistoryCommand::Similar {
                     task,
@@ -1370,6 +1373,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     symbols,
                     limit,
                 } => {
+                    let store = open_store(&repo)?;
                     let query = SimilarChangeQuery {
                         task,
                         paths,
@@ -1387,6 +1391,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     module,
                     symbol,
                 } => {
+                    let store = open_store(&repo)?;
                     let provided = usize::from(path.is_some())
                         + usize::from(module.is_some())
                         + usize::from(symbol.is_some());
@@ -1410,6 +1415,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     }
                 }
                 HistoryCommand::Ownership { path } => {
+                    let store = open_store(&repo)?;
                     let components = ownership_components(&repo, &store, &path)?;
                     let memory_facts = ownership_memory_facts(&repo, &path, &components)?;
                     let report =
@@ -1427,6 +1433,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     }
                 }
                 HistoryCommand::Reviewers { path } => {
+                    let store = open_store(&repo)?;
                     let components = ownership_components(&repo, &store, &path)?;
                     let memory_facts = ownership_memory_facts(&repo, &path, &components)?;
                     let ownership =
@@ -1533,6 +1540,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     symbol,
                     limit,
                 } => {
+                    let store = open_store(&repo)?;
                     if let Some(path) = path {
                         let provenance = store.provenance_for_path(&path, limit)?;
                         if cli.json {
@@ -1561,14 +1569,19 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
         }
         Command::Memory { command } => {
-            let memory = RepoMemoryStore::open_repo(&repo)?;
+            // Only `remember` creates the store; a search or listing on a repository with no
+            // remembered facts answers from nothing and writes nothing under `.ok`.
             match command {
                 MemoryCommand::Remember {
                     text,
                     source,
                     confidence,
                 } => {
-                    let fact = memory.remember(&text, &source, confidence.into())?;
+                    let fact = RepoMemoryStore::open_repo(&repo)?.remember(
+                        &text,
+                        &source,
+                        confidence.into(),
+                    )?;
                     output(cli.json, &fact, || {
                         println!(
                             "{}",
@@ -1577,7 +1590,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     })?;
                 }
                 MemoryCommand::Search { query, limit } => {
-                    let results = memory.search(&query, limit)?;
+                    let results = RepoMemoryStore::search_repo(&repo, &query, limit)?;
                     output(cli.json, &results, || {
                         if results.is_empty() {
                             println!("No repo memory matched.");
@@ -1592,8 +1605,14 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     })?;
                 }
                 MemoryCommand::Recent { limit } => {
-                    let facts = memory.recent(limit)?;
+                    let facts = match RepoMemoryStore::open_repo_existing(&repo)? {
+                        Some(memory) => memory.recent(limit)?,
+                        None => Vec::new(),
+                    };
                     output(cli.json, &facts, || {
+                        if facts.is_empty() {
+                            println!("No repo memory is stored for this repository.");
+                        }
                         for fact in &facts {
                             println!("{} [{}]", fact.text, fact.source);
                         }

@@ -341,7 +341,11 @@ impl<'a> ImpactEngine<'a> {
             proven_impact,
             possible_impact,
             risk_report: RiskReport {
-                level: if score > 0.6 {
+                // A target the index does not hold was not measured; a score of zero for it
+                // is absence, not low risk, and `level` is the field consumers branch on.
+                level: if file.is_none() {
+                    "unknown"
+                } else if score > 0.6 {
                     "high"
                 } else if score > 0.25 {
                     "medium"
@@ -2399,6 +2403,7 @@ mod tests {
         let report = ImpactEngine::new(&store)
             .for_file(Path::new("does/not/exist.rs"))
             .unwrap();
+        assert_eq!(report.risk_report.level, "unknown");
         assert!(
             report
                 .risk_report
