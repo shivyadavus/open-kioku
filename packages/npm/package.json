@@ -1,7 +1,7 @@
 {
   "name": "open-kioku",
   "version": "4.0.0",
-  "description": "Local-first code intelligence for AI agents. Plan before edit. Verify after edit.",
+  "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local-first repository intelligence for AI coding agents; nothing leaves your machine.",
   "mcpName": "open-kioku",
   "bin": {
     "ok": "./bin/ok.js",
