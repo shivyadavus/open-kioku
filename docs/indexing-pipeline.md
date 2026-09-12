@@ -28,7 +28,12 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   every file whose language is recognised;
 - `by_language`: the same four numbers per language key (`java`, `python`,
   `type_script`, ...);
-- `pruned_dirs` and `walk_errors`: what the ratio cannot see, counted beside it.
+- `pruned_dirs` and `walk_errors`: what the ratio cannot see, counted beside it;
+- `policy_excluded_by_source` and `policy_excluded_dirs`: the files a policy excluded,
+  by the rule that excluded them (`hidden_policy`, `git_ignore`, `ok_ignore`,
+  `config_exclude`, `security_policy`, `detector`, `fast_mode`, `symlink_policy`) and by
+  top-level directory (`.claude`, `.github`; `.` for files at the root). Both are empty on
+  a manifest written before they were recorded; every other number reads the same way.
 
 What is counted:
 
@@ -44,6 +49,21 @@ What is counted:
   corpus) or attributed to exactly one skip reason: `ignored`, `denied`, `hidden`,
   `binary`, `too_large`, `generated`, `vendor`, `fast_mode`, `secret_policy`,
   `symlink_policy`, `error`. Per language, `discovered == indexed + sum(skipped)`.
+- A skip is either a *policy exclusion* — `hidden`, `ignored`, `denied`,
+  `secret_policy`, `vendor`, `generated`, `fast_mode`, `symlink_policy`: a rule chose it
+  (`SkipReason::is_policy`) — or an *omission* the index did not intend: `too_large`,
+  `binary`, `error`, `unsupported_language`. The ratio is `indexed` over *considered*,
+  which is `discovered` minus the policy exclusions, per language and overall. A
+  git-ignored agent worktree under `.claude/` is therefore reported, not counted as
+  missing: on this repository 1,485 hidden `.rs` files had read as 24.9% coverage of a
+  fully indexed tree. Policy exclusions are still every bit as visible — the summary
+  line, the doctor check, and `ok doctor`'s table carry the count by reason, the top
+  directories, and the setting that governs the largest share (`hidden` names
+  `[security] allow_hidden_files`; `ignored` names `.gitignore`, `.okignore`, or
+  `[index] exclude`; `denied` names `[paths] deny`; `fast_mode` names
+  `ok index --mode full`). Only `too_large` among the judged omissions has a setting,
+  `[index] max_file_size`, and the doctor's next step names it when that reason
+  dominates.
 - `generated` counts indexed files flagged `is_generated`: source files that look
   generated are indexed and flagged, so they stay in coverage. Only document-corpus files
   the generated-content detector rejects are skipped as `generated`.
@@ -58,16 +78,20 @@ files sink the all-languages ratio on almost every repository, and a warning tha
 always fires stops being read.
 
 Where it surfaces: `ok index` ends with one line
-(`coverage: 9,982 of 10,012 programming-language files indexed (99.7%); 12,004 of 12,140 recognised files indexed (98.9%) overall; skipped: 25 secret-policy, 5 too-large`);
-`ok doctor` prints the per-language table for every language and warns, with the top
-three skip reasons, when the programming-language ratio falls under 98%, when a
-programming language with at least 50 discovered files falls under 98%, when a
-programming language is missing 20 or more files regardless of percentage, or when any
-walk error occurred. Pruned directories and walk errors are appended to the summary
+(`coverage: 9,982 of 9,987 programming-language files indexed (99.9%); 12,004 of 12,115 recognised files indexed (99.1%) overall; 25 excluded by policy (25 secret-policy; 25 under config/; `[paths] deny` or the built-in secret-path rule governs the largest share); skipped: 5 too-large`);
+`ok doctor` prints the per-language table for every language (with an `excluded`
+column for policy exclusions, and the ratio over the considered files), then an
+`Excluded by policy` block with the top directories and governing setting, and warns,
+with the top three judged skip reasons, when the programming-language ratio falls under
+98%, when a programming language with at least 50 considered files falls under 98%,
+when a programming language is missing 20 or more considered files regardless of
+percentage, or when any walk error occurred. Pruned directories and walk errors are appended to the summary
 line whenever nonzero; pruned directories alone do not force a warning, since `target/`
 and `node_modules/` are pruned on nearly every repository. A repository with no
 recognised programming source reports `no programming-language files discovered` rather
 than implying a verdict. `ok status --markdown` carries the summary line. A manifest written before coverage was recorded reports `null`, and
 `ok doctor` says so rather than assuming full coverage. The commit-derived benchmark
-records the same line beside every accuracy number (`docs/retrieval-benchmark.md`).
+records the same line beside every accuracy number (`docs/retrieval-benchmark.md`);
+lines recorded before policy exclusions left the denominator read lower on repositories
+with hidden or ignored source, and are not comparable to lines recorded after.
 

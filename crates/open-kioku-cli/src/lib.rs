@@ -21,9 +21,9 @@ use open_kioku_core::{
     HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage, IndexManifest, IndexMode,
     NodeId, Owner, OwnerSuggestion, OwnershipEvidence, OwnershipReport, OwnershipSourceType,
     PlanReport, PolicyCheckReport, PolicyComponentMatch, PolicyExemptionEvidence, PolicyViolation,
-    ProvenanceTouch, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
+    ProvenanceTouch, QualityNote, ReviewerAvailability, ReviewerEvidence, ReviewerRole,
     ReviewerSuggestionReport, ScoreComponent, SearchResult, SimilarChangeQuery,
-    SimilarChangeReport, Symbol, SymbolId, SymbolProvenance, TestTarget,
+    SimilarChangeReport, StatusDetail, Symbol, SymbolId, SymbolProvenance, TestTarget,
     INDEX_COVERAGE_WARN_PERCENT,
 };
 use open_kioku_graph::InMemoryGraph;
@@ -132,19 +132,98 @@ mod tests {
         );
     }
 
+    /// `ok --help` shipped with 24 of 38 commands blank and whole option lists undescribed.
+    /// The walk covers the entire command tree, so a new subcommand or flag cannot land
+    /// without saying what it does.
+    #[test]
+    fn every_command_and_option_carries_help_text() {
+        use clap::CommandFactory;
+
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.get_help().is_none() {
+                    missing.push(format!("{path} --{}", arg.get_id()));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                let name = format!("{path} {}", subcommand.get_name());
+                if subcommand.get_about().is_none() {
+                    missing.push(name.clone());
+                }
+                walk(subcommand, &name, missing);
+            }
+        }
+
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "ok", &mut missing);
+        assert!(
+            missing.is_empty(),
+            "commands or options without help text:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// A `.gitignore`d `src/` leaves nothing to judge; the check must say which rule
+    /// emptied the ratio rather than "no source files discovered".
+    #[test]
+    fn doctor_coverage_names_the_setting_when_policy_excluded_every_source_file() {
+        use open_kioku_core::{Language, SkipReason, SkipSource};
+
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..3 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
+            coverage.record_policy_exclusion(SkipSource::GitIgnore, Some("src"));
+        }
+
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(matches!(check.status, CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "no source files considered under the current policy; 3 excluded by policy (3 ignored; 3 under src/; `.gitignore` governs the largest share)"
+        );
+        let step = step.expect("an emptied ratio carries a next step");
+        assert!(step.contains("`.gitignore` governs that"), "{step}");
+
+        // Config files alone do not make a verdict: the programming ratio is still empty.
+        coverage.record_discovered(&Language::Toml);
+        coverage.record_indexed(&Language::Toml, false);
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(matches!(check.status, CheckStatus::Warn));
+        assert!(
+            check
+                .message
+                .starts_with("no programming-language files considered under the current policy; 1 of 1 recognised files indexed (100.0%)"),
+            "{}",
+            check.message
+        );
+        assert!(step.is_some());
+    }
+
     #[test]
     fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
         let notes = (0..105)
-            .map(|index| format!("quality note {index:03}"))
+            .map(|index| {
+                QualityNote::new(
+                    open_kioku_core::QualityNoteKind::SymbolRegistryCaveat,
+                    format!("quality note {index:03}"),
+                )
+            })
             .collect::<Vec<_>>();
         let mut output = String::new();
 
-        append_status_quality_notes(&mut output, &notes);
+        append_status_quality_notes(&mut output, &notes, StatusDetail::Summary);
 
         assert!(output.contains("quality note 099"));
         assert!(!output.contains("quality note 100"));
         assert!(output.contains("5 additional quality notes omitted"));
-        assert!(output.contains("ok status --json"));
+        assert!(output.contains("ok status --markdown --full"));
+        assert!(output.contains("symbol_registry_caveat: 105"));
+
+        let mut full = String::new();
+        append_status_quality_notes(&mut full, &notes, StatusDetail::Full);
+        assert!(full.contains("quality note 104"));
+        assert!(!full.contains("omitted"));
     }
 
     #[test]

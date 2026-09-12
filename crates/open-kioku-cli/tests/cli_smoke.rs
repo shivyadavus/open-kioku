@@ -1737,7 +1737,11 @@ fn index_mode_is_reported_by_index_and_status_json() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|note| note.as_str().unwrap_or_default().contains("fast mode")));
+        .any(|note| note["kind"] == "index_mode"
+            && note["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fast mode")));
 
     let status = run({
         let mut command = ok();
@@ -1747,11 +1751,46 @@ fn index_mode_is_reported_by_index_and_status_json() {
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     assert_eq!(status["index_mode"], "fast");
     assert_eq!(status["quality"]["skip_counts"]["fast_mode"], 1);
-    assert!(status["quality"]["skipped_paths"]
+    // Status carries counts plus a sample; `--full` carries the manifest's lists.
+    assert_eq!(status["quality"]["skipped_paths"]["total"], 1);
+    assert_eq!(
+        status["quality"]["skipped_paths"]["by_reason"]["fast_mode"],
+        1
+    );
+    assert!(status["quality"]["skipped_paths"]["sample"]
         .as_array()
         .unwrap()
         .iter()
         .any(|path| path["reason"] == "fast_mode" && path["source"] == "fast_mode"));
+    assert_eq!(
+        status["quality"]["quality_notes"]["by_kind"]["index_mode"],
+        1
+    );
+    let sample_len = status["quality"]["quality_notes"]["sample"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(sample_len <= 20, "{sample_len}");
+    assert!(
+        status["quality"]["quality_notes"]["total"]
+            .as_u64()
+            .unwrap()
+            >= sample_len as u64
+    );
+    let full = run({
+        let mut command = ok();
+        command.arg("--json").arg("status").arg(repo).arg("--full");
+        command
+    });
+    let full: serde_json::Value = serde_json::from_str(&full).unwrap();
+    assert_eq!(
+        full["quality"]["skipped_paths"],
+        indexed["quality"]["skipped_paths"]
+    );
+    assert_eq!(
+        full["quality"]["quality_notes"],
+        indexed["quality"]["quality_notes"]
+    );
 
     let (_, stderr) = run_failure({
         let mut command = ok();
@@ -3389,6 +3428,58 @@ fn reviewer_benchmark_corpus_passes() {
 }
 
 #[test]
+fn doctor_reports_a_source_tree_excluded_by_policy_with_its_governing_setting() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+    fs::write(repo.join(".gitignore"), "src/\n").unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "coverage")
+        .expect("doctor has a coverage check");
+    assert_eq!(check["status"], "warn");
+    let message = check["message"].as_str().unwrap();
+    // ok.toml is the one recognised file left; the source tree is named as excluded,
+    // with the rule that excluded it, rather than reported as never discovered.
+    assert!(
+        message.starts_with("no programming-language files considered under the current policy"),
+        "{message}"
+    );
+    assert!(
+        message.contains("1 excluded by policy (1 ignored; 1 under src/; `.gitignore` governs the largest share)"),
+        "{message}"
+    );
+    let step = doctor["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step.as_str())
+        .find(|step| step.starts_with("Coverage:"))
+        .expect("an emptied ratio carries a next step");
+    assert!(step.contains("`.gitignore` governs that"), "{step}");
+}
+
+#[test]
 fn index_reports_coverage_in_summary_status_and_doctor() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
@@ -3396,10 +3487,12 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     fs::create_dir_all(repo.join("vendor")).unwrap();
     fs::create_dir_all(repo.join("config")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
-    // Dropped by the vendor detector and the secret-path rule respectively: the two
-    // kinds of omission coverage exists to make visible.
+    // Excluded by the vendor detector and the secret-path rule respectively: policy
+    // exclusions, reported beside the ratio. The binary file is the omission the ratio
+    // is judged on.
     fs::write(repo.join("vendor/dep.rs"), "pub fn vendored() {}\n").unwrap();
     fs::write(repo.join("config/secrets.json"), "{}\n").unwrap();
+    fs::write(repo.join("src/blob.rs"), b"pub fn blob() {}\0").unwrap();
 
     run({
         let mut command = ok();
@@ -3415,18 +3508,20 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
         .lines()
         .find(|line| line.starts_with("coverage: "))
         .expect("index prints a coverage line");
-    // The judged ratio counts source only (1 of 2 Rust files); the all-languages
-    // ratio is reported beside it and includes the skipped JSON file.
+    // The judged ratio counts source the policy would consider (1 of 2 Rust files; the
+    // vendored one is excluded); the all-languages ratio is reported beside it.
     assert!(
         coverage_line.contains("1 of 2 programming-language files indexed (50.0%)"),
         "{coverage_line}"
     );
     assert!(
-        coverage_line.contains("recognised files indexed"),
+        coverage_line.contains("2 of 3 recognised files indexed (66.7%) overall; 2 excluded by policy (1 vendor, 1 secret-policy; 1 under vendor/"),
         "{coverage_line}"
     );
-    assert!(coverage_line.contains("1 secret-policy"));
-    assert!(coverage_line.contains("1 vendor"));
+    assert!(
+        coverage_line.contains("skipped: 1 binary"),
+        "{coverage_line}"
+    );
 
     let status = run({
         let mut command = ok();
@@ -3435,11 +3530,17 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     });
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     let rust = &status["coverage"]["by_language"]["rust"];
-    assert_eq!(rust["discovered"], 2);
+    assert_eq!(rust["discovered"], 3);
     assert_eq!(rust["indexed"], 1);
     assert_eq!(rust["skipped"]["vendor"], 1);
+    assert_eq!(rust["skipped"]["binary"], 1);
     assert_eq!(
         status["coverage"]["by_language"]["json"]["skipped"]["secret_policy"],
+        1
+    );
+    assert_eq!(status["coverage"]["policy_excluded_dirs"]["vendor"], 1);
+    assert_eq!(
+        status["coverage"]["policy_excluded_by_source"]["security_policy"],
         1
     );
     assert_eq!(status["quality"]["coverage"]["by_language"]["rust"], *rust);
@@ -3459,7 +3560,8 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
         .expect("doctor has a coverage check");
     assert_eq!(check["status"], "warn");
     let message = check["message"].as_str().unwrap();
-    assert!(message.contains("top skip reasons:"), "{message}");
+    assert!(message.contains("top skip reasons: 1 binary"), "{message}");
+    assert!(message.contains("2 excluded by policy"), "{message}");
     // Two Rust files are under the per-language floor, so no language is named; the
     // programming-language ratio itself (1 of 2) is what warns.
     assert!(
@@ -3467,6 +3569,16 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
         "{message}"
     );
     assert!(!message.contains("under 98%:"), "{message}");
+    // The advice names the omission the ratio was judged on, not an unrelated key.
+    let step = doctor["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step.as_str())
+        .find(|step| step.starts_with("Coverage:"))
+        .expect("coverage warning carries a next step");
+    assert!(step.contains("skipped as binary"), "{step}");
+    assert!(!step.contains("[index] exclude"), "{step}");
 
     let doctor_text = run({
         let mut command = ok();
@@ -3477,6 +3589,14 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     assert!(doctor_text
         .lines()
         .any(|line| line.trim_start().starts_with("rust ") && line.contains("50.0%!")));
+    assert!(
+        doctor_text.contains("Excluded by policy: 2 (1 vendor, 1 secret-policy)"),
+        "{doctor_text}"
+    );
+    assert!(
+        doctor_text.contains("governing setting: `[paths] deny` or the built-in secret-path rule"),
+        "{doctor_text}"
+    );
 }
 
 #[test]

@@ -15,6 +15,7 @@ use open_kioku_contract::{
 };
 use open_kioku_core::{
     Confidence, ContextHandleId, GraphEdgeType, GraphNodeType, PlanReport, PolicyCheckReport,
+    StatusDetail,
 };
 use open_kioku_impact::ImpactEngine;
 use open_kioku_memory::RepoMemoryStore;
@@ -430,6 +431,17 @@ async fn dispatch(
             Ok(json!({"slept": true}))
         }
         "repo_status" => {
+            // `quality.quality_notes` and `quality.skipped_paths` are counts plus a bounded
+            // sample unless `detail: "full"`: on a 380-file repository the full lists were
+            // 1.4 MB of a 1.5 MB payload, sent before an agent's first real question. The
+            // manifest keeps every entry; `ok --json status --full` is the CLI equivalent.
+            // Validated before the unindexed answer so a bad value is an error either way.
+            let detail = match optional_str(&params, "detail")? {
+                None => StatusDetail::Summary,
+                Some(value) => StatusDetail::parse(value).ok_or_else(|| {
+                    anyhow::anyhow!("unsupported detail `{value}`; expected summary or full")
+                })?,
+            };
             // A store without a manifest is not an index. `serve` never hands one over, but
             // the answer for it is the unindexed status, not a serialized `null`.
             let Some(manifest) = store.manifest()? else {
@@ -439,7 +451,7 @@ async fn dispatch(
                 manifest.analysis_semantics.as_ref(),
                 &open_kioku_core::AnalysisSemanticsState::current(),
             );
-            let mut status = serde_json::to_value(&manifest)?;
+            let mut status = manifest.status_value(detail)?;
             if let Some(object) = status.as_object_mut() {
                 // The field an agent branches on; the unindexed answer carries `false`.
                 object.insert("indexed".into(), Value::Bool(true));
@@ -1578,7 +1590,7 @@ fn tool_description(name: &str, base: &str) -> String {
 /// from.
 fn tools(config: &OkConfig) -> (Vec<Value>, Vec<String>) {
     let read_only_tools: &[(&str, &str, Value)] = &[
-        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files discovered versus indexed per language, each discovered file's omission attributed to a skip reason, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements).", json!({"type":"object","properties":{}})),
+        ("repo_status", "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default.", json!({"type":"object","properties":{"detail":{"type":"string","enum":["summary","full"],"description":"How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is a tool error."}}})),
         ("list_files", "List indexed files with relative path, size in bytes, and language, or pass one `path` to get that file's indexed detail instead: its file record plus every code chunk covering it, with line ranges. A path that is not indexed returns a null file and an explicit caveat rather than an empty success.", json!({"type":"object","properties":{"path":{"type":"string","description":"Repository-relative path of a single file to describe in detail (e.g. 'src/main.rs'). When set, `limit` and `offset` are ignored and the response carries the file record and its chunks."},"limit":{"type":"integer","description":"Maximum number of files to return when listing. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching files to skip when listing. Defaults to 0."}}})),
         ("search_code", "Search indexed code through one of four evidence modes: lexical BM25 over code chunks, indexed graph-node documents, the local semantic vector index, or a hybrid merge of lexical and semantic candidates deduplicated by path and re-sorted by combined score. Semantic and hybrid modes report `semantic_status` and fall back to lexical-only results when the vector index is not ready. Every result carries path, line range, snippet, score, per-signal score_breakdown, and evidence_refs.", json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"The search query: terms, identifiers, routes, config keys, or a natural-language description when mode is semantic or hybrid."},"mode":{"type":"string","enum":["code","graph","semantic","hybrid"],"description":"Which evidence to search. 'code' (default) is lexical BM25 over indexed chunks and file paths; 'graph' searches indexed graph-node documents; 'semantic' searches the local vector index; 'hybrid' merges lexical and semantic candidates. An unknown mode is a tool error."},"limit":{"type":"integer","description":"Maximum number of search results to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching search results to skip. Defaults to 0."}}})),
         ("regex_search", "Match a regular expression line by line against indexed chunk text, in path order, returning exact single-line hits with file path, line number, and the matching line. Regions the indexer did not chunk are not searched, and the response carries that caveat plus a warning when the bounded walk stopped early.", json!({"type":"object","required":["pattern"],"properties":{"pattern":{"type":"string","description":"A valid regular expression pattern (Rust regex syntax) matched against each indexed source line. An unparseable pattern is returned as a tool error. Example: 'fn\\s+main' to find main function declarations."},"limit":{"type":"integer","description":"Maximum number of matching lines to return. Defaults to 20, capped at 100."},"offset":{"type":"integer","description":"Number of matching lines to skip before returning results. Defaults to 0."}}})),
@@ -3082,6 +3094,10 @@ mod tests {
             (
                 "repo_status.json",
                 r#"{"jsonrpc":"2.0","id":"repo-status","method":"repo_status","params":{}}"#,
+            ),
+            (
+                "repo_status_full.json",
+                r#"{"jsonrpc":"2.0","id":"repo-status-full","method":"repo_status","params":{"detail":"full"}}"#,
             ),
             (
                 "evidence_schema.json",

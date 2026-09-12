@@ -1,5 +1,5 @@
 use open_kioku_config::OkConfig;
-use open_kioku_core::SkipReason;
+use open_kioku_core::{SkipReason, SkipSource};
 use open_kioku_ingest::Indexer;
 use std::fs;
 use std::path::Path;
@@ -46,7 +46,10 @@ fn coverage_attributes_every_source_file_to_indexed_or_a_skip_reason() {
     assert_eq!(java.indexed, 4);
     assert_eq!(java.generated, 1);
     assert_eq!(java.skipped[&SkipReason::Vendor], 1);
-    assert_eq!(java.percent(), Some(80.0));
+    // The vendor rule is policy: reported, but not a missing file.
+    assert_eq!(java.excluded_by_policy(), 1);
+    assert_eq!(java.considered(), 4);
+    assert_eq!(java.percent(), Some(100.0));
 
     let json = &coverage.by_language["json"];
     assert_eq!(json.discovered, 1);
@@ -76,11 +79,85 @@ fn coverage_attributes_every_source_file_to_indexed_or_a_skip_reason() {
     assert_eq!(coverage.indexed, 6);
     assert_eq!(coverage.generated, 1);
     assert_eq!(coverage.skipped[&SkipReason::SecretPolicy], 1);
-    assert!(coverage.below_warn_threshold());
+    assert_eq!(coverage.excluded_by_policy(), 2);
+    assert!(!coverage.below_warn_threshold());
+    assert!(coverage.top_skip_reasons(3).is_empty());
     assert_eq!(
-        coverage.top_skip_reasons(3),
+        coverage.policy_skip_reasons(),
         vec![(SkipReason::Vendor, 1), (SkipReason::SecretPolicy, 1)]
     );
+    assert_eq!(coverage.policy_excluded_dirs["vendor"], 1);
+    // The secret-policy path is redacted, so its directory is not recorded either.
+    assert!(!coverage.policy_excluded_dirs.contains_key("config"));
+    assert_eq!(
+        coverage.policy_excluded_by_source[&SkipSource::SecurityPolicy],
+        1
+    );
+}
+
+/// Source under a hidden directory is excluded by policy, not missing: it is reported
+/// with its directory and the setting that governs it, and never lowers the ratio.
+/// On this repository, git-ignored agent worktrees under `.claude/` had read as 24.9%
+/// coverage of a fully indexed tree.
+#[test]
+fn hidden_directories_are_policy_exclusions_outside_the_coverage_ratio() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "src/lib.rs", "pub fn live() {}\n");
+    write(root, "src/main.rs", "fn main() {}\n");
+    for index in 0..30 {
+        write(
+            root,
+            &format!(".claude/worktrees/agent/src/f{index}.rs"),
+            "pub fn f() {}\n",
+        );
+    }
+    write(root, ".github/workflows/ci.yml", "on: push\n");
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot
+        .manifest
+        .quality
+        .coverage
+        .as_ref()
+        .expect("a full index records coverage");
+
+    let rust = &coverage.by_language["rust"];
+    assert_eq!(rust.discovered, 32);
+    assert_eq!(rust.indexed, 2);
+    assert_eq!(rust.skipped[&SkipReason::Hidden], 30);
+    assert_eq!(rust.excluded_by_policy(), 30);
+    assert_eq!(rust.percent(), Some(100.0));
+    assert_eq!(coverage.programming_totals(), (2, 2));
+    assert_eq!(coverage.programming_percent(), Some(100.0));
+    assert!(!coverage.below_warn_threshold());
+    assert!(coverage.languages_below_warn_threshold().is_empty());
+    assert_eq!(coverage.excluded_by_policy(), 31);
+    assert_eq!(
+        coverage.policy_excluded_by_source[&SkipSource::HiddenPolicy],
+        31
+    );
+    assert_eq!(coverage.policy_excluded_dirs[".claude"], 30);
+    assert_eq!(coverage.policy_excluded_dirs[".github"], 1);
+    assert_eq!(
+        coverage.dominant_policy_source(),
+        Some((SkipSource::HiddenPolicy, 31))
+    );
+    assert_eq!(
+        coverage.summary_line(),
+        "2 of 2 programming-language files indexed (100.0%); 2 of 2 recognised files indexed (100.0%) overall; 31 excluded by policy (31 hidden; 30 under .claude/, 1 under .github/; `[security] allow_hidden_files` governs the largest share)"
+    );
+
+    // The named setting is the one that changes the answer.
+    config.security.allow_hidden_files = true;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    assert_eq!(coverage.by_language["rust"].indexed, 32);
+    assert_eq!(coverage.excluded_by_policy(), 0);
+    assert!(coverage.policy_excluded_dirs.is_empty());
 }
 
 fn write(root: &Path, path: &str, content: &str) {
