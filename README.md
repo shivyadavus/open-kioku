@@ -75,6 +75,10 @@ ok verify --plan plan.json --git                               # the real diff a
 
 `ok plan` (or the `plan_change` MCP tool) returns primary context with provenance, impact candidates split into structurally proven and heuristic, validation targets tiered by evidence, an edit boundary (allowed, caution, forbidden paths), and explicit caveats. `ok verify` reads the actual changed files and reports, for example, `[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary`. A green exit code from a test runner is not proof the right files changed; this is.
 
+<p align="center">
+  <img src="assets/demo-verify.gif" alt="Terminal recording: the allowed files from plan.json, one edit inside that boundary, one edit outside it, then ok verify prints Verification: Fail, reports [out_of_boundary] go/shipping/carrier.go, and exits 1." width="920">
+</p>
+
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
 ## What Changed in 4.0.0
