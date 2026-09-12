@@ -66,7 +66,7 @@ A Context Pack is the agent-ready bundle returned before edits:
     {
       "query": "Add retry handling for failed API imports",
       "scope": "runtime",
-      "inspected_sources": ["runtime_signals", "search_result.evidence"],
+      "inspected_sources": ["runtime_signals", "search_result.score_breakdown"],
       "reason": "no runtime trace, incident, or error artifact corroborated the selected context",
       "confidence": 0.75,
       "suggested_next_probe": "Import or configure runtime artifacts, then rerun `ok plan`."
@@ -84,7 +84,7 @@ A Context Pack is the agent-ready bundle returned before edits:
         "weight": 0.2,
         "contribution": 0.05,
         "evidence_ids": [],
-        "rationale": "explicit exact symbol references or SCIP signals"
+        "rationale": "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence"
       }
     ],
     "blockers": [],
@@ -92,6 +92,19 @@ A Context Pack is the agent-ready bundle returned before edits:
   }
 }
 ```
+
+## Confidence
+
+`confidence_breakdown` is computed by `ConfidenceBreakdown::from_signals` in `open-kioku-core` from typed inputs only; no input is derived by scanning result prose, and `ok context` and `ok plan` feed the same functions the same way.
+
+- `overall_enum` labels the weighted score: `Low` below 0.55, `Medium` from 0.55, `High` from 0.75, `Exact` from 0.95. **`Exact` is a provenance claim, not a score band**: it is reachable only when `exact_reference_count > 0`, and otherwise the label caps at `High` whatever the score. Without exact evidence the score itself is capped at 0.74, so the two rules agree; the label gate is stated so a weight change cannot reintroduce an `Exact` label over heuristic evidence.
+- `exact_reference_count` counts selections backed by exact provenance: a primary unit whose retrieval trace carries `authority: exact` (the same set `retrieval_diagnostics.selection.exact_evidence_count` reports), a supporting or impact result the impact engine produced from an indexed symbol occurrence, or an evidence record with `source_type: scip`. A plan's structurally proven dependents (`impact.proven_impact`) are graph facts about the target's callers, reported in the summary and priced by impact risk; they are not exact-reference evidence for the selected context. A lexical hit whose evidence line quotes a query variant containing `scip` or `exact` is not one.
+- `negative_evidence_count`, and the blocker `N negative evidence signal(s) lowered confidence`, is the number of items in the pack's own `negative_evidence` list whose scope is `primary_context` or `anchor`. Items in the `exact_references`, `validation`, and `runtime` scopes are still reported, and their absence is priced by the `exact_references`, `validation_availability`/`test_coverage`, and `runtime_corroboration` components and their caps rather than counted a second time here. Items in the `history` and `boundary` scopes are reported, not priced: history contributes only positive score components in plans, and the boundary item classifies what matched (docs and tests only) rather than naming missing evidence.
+- Named identifiers in the task (`IssueTokenService`, `reticulate_splines`; a capital after the first character, a `_`/`-` separator, or digits with a capital; sentence-initial capitals such as `Reap` and ticket references are excluded) that none of the top five primary results spells are `anchor` negative evidence carrying the names, and that item is counted: the 0.60 cap and the count blocker apply whenever any named identifier is unmatched. When every named identifier is unmatched the score additionally caps at 0.50 and a blocker names them; when some are, a caveat names the missing ones.
+- `evidence_density` measures distinct evidence records over twice the selected primary files; `validation_availability` is whether at least one validation target was selected; `test_coverage` is whether at least one selected target carries a runnable command. They describe completeness of the pack, not its relevance to the task, which `task_relevance` measures.
+- In a plan, `evidence_quality.caveats` are attached after scoring through `ConfidenceBreakdown::add_caveats`, under the same rules as the breakdown's own caveats: any caveat caps the score at 0.94 and the label is re-derived through the `Exact` gate. `evidence_quality.exact_reference_available` comes from the manifest's SCIP count; when the plan counted exact references through another typed source, the flag is set and the `exact symbol/reference evidence is unavailable` caveat is withdrawn, so a plan never reports `exact_references 1.00` beside it.
+
+In the Markdown rendering, `Exact-authority selections: N` under Retrieval is the count of primary units with exact retrieval authority, and `Retrieval confidence: <label>` on the next line is the pack's `overall_enum`. They are different things: the first is provenance of individual units, the second the label of the whole pack, and a pack with `Exact-authority selections: 0` can never read `Retrieval confidence: Exact`.
 
 ## Selection and region widening
 
