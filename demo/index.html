@@ -47,15 +47,17 @@
 <aside class="console" id="console" aria-label="Actual ok context output on the Open Kioku repository, trimmed"><div class="console-bar"><span class="led" aria-hidden="true"></span><span class="console-title">~/open-kioku · ok context · actual output, trimmed</span><span class="console-ticks" aria-hidden="true"></span></div>
 <div class="console-body"><div class="cl cmd"><span class="prompt">$</span> <span class="cmd-text">ok context "reap the doctor's MCP probe child process" --format markdown</span></div>
 <div class="cl term-section">CONFIDENCE</div>
-<div class="cl term-row"><span class="dim">overall</span><span><span class="good">Exact</span> (1.00) · exact_references 1.00 · task_relevance 0.83 …</span></div>
+<div class="cl term-row"><span class="dim">overall</span><span><span class="warn">Medium</span> (0.74) · exact_references 0.25 · task_relevance 0.83 …</span></div>
+<div class="cl term-row"><span class="dim">caveats</span><span class="warn">exact symbol/reference evidence is absent · runtime corroboration is absent</span></div>
 <div class="cl term-section">RETRIEVAL</div>
 <div class="cl term-row"><span class="dim">attempted</span><span>lexical · document · exact_semantic · graph · validation · git_history · runtime</span></div>
-<div class="cl term-row"><span class="dim">succeeded</span><span>lexical · document · exact_semantic · graph · validation</span></div>
+<div class="cl term-row"><span class="dim">succeeded</span><span>lexical · document · exact_semantic · graph · validation · git_history</span></div>
+<div class="cl term-row"><span class="dim">exact-authority</span><span>0 selections · retrieval confidence Medium</span></div>
 <div class="cl term-row"><span class="dim">caveats</span><span class="warn">no runtime traces, logs, or incidents are ingested for this repository</span></div>
 <div class="cl term-section">PRIMARY CONTEXT</div>
-<div class="cl term-row"><span class="dim">1</span><span><span class="tag">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 932-1298 · <code>fn doctor_report</code></span></div>
-<div class="cl term-row"><span class="dim">2</span><span>crates/open-kioku-cli/src/commands/onboarding.rs lines 554-610 · <code>fn mcp_server_reachable</code></span></div>
-<div class="cl out">The commit that made this change touched exactly one file. It is the first result.</div>
+<div class="cl term-row"><span class="dim">1</span><span><span class="tag">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 1-107 · <code>fn file_path_for_symbol</code></span></div>
+<div class="cl term-row"><span class="dim">2</span><span>crates/open-kioku-cli/src/commands/onboarding.rs lines 2-35 · <code>struct AgentSetupReport</code></span></div>
+<div class="cl out">The commit that made this change touched exactly one file. It is the first result. No SCIP index and no runtime artifacts, so the label is Medium, not Exact.</div>
 <div class="cl cmd mt"><span class="prompt">$</span> <span class="dim"># then, on any task: the plan declares the boundary, verify checks the real diff</span></div>
 <div class="cl cmd"><span class="prompt">$</span> <span class="cmd-text">ok plan "change token expiration" --format json > plan.json</span></div>
 <div class="cl cmd"><span class="prompt">$</span> <span class="cmd-text">ok verify --plan plan.json --git</span></div>

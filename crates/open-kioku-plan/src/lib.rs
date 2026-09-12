@@ -413,7 +413,7 @@ impl<'a> PlanEngine<'a> {
         for test in &mut validation {
             test.reconcile_score_breakdown();
         }
-        let unmatched_anchors = unmatched_named_anchors(task, &primary_context);
+        let unmatched_anchors = open_kioku_core::unmatched_named_anchors(task, &primary_context);
         let mut risk = merge_risk(
             &context.risk_report,
             &impact.risk_report,
@@ -449,13 +449,22 @@ impl<'a> PlanEngine<'a> {
             .chain(impact.evidence.iter())
             .cloned()
             .collect::<Vec<_>>();
+        let exact_reference_count = exact_reference_count(
+            &context.retrieval_diagnostics,
+            &primary_context,
+            &impact,
+            &evidence,
+        );
+        // Negative evidence is built first: the confidence breakdown counts the items it
+        // lists, so the blocker it reports is traceable to the list the plan publishes.
         let negative_evidence = negative_evidence_for_plan(
             task,
             &context,
             &primary_context,
             &impact,
             &validation,
-            &risk,
+            exact_reference_count,
+            &unmatched_anchors,
         );
         let history_components =
             history_score_components_for_plan(&primary_context, &impact, &validation);
@@ -474,7 +483,9 @@ impl<'a> PlanEngine<'a> {
             primary_context: &primary_context,
             impact: &impact,
             validation: &validation,
-            risk: &risk,
+            negative_evidence: &negative_evidence,
+            exact_reference_count,
+            unmatched_anchors: &unmatched_anchors,
             boundary: &recommended_change_boundary,
             evidence: &evidence,
             context_runtime_signal_count: context.runtime_signals.len(),
@@ -797,7 +808,9 @@ struct PlanConfidenceInputs<'a> {
     primary_context: &'a [SearchResult],
     impact: &'a ImpactReport,
     validation: &'a [TestTarget],
-    risk: &'a RiskReport,
+    negative_evidence: &'a [NegativeEvidence],
+    exact_reference_count: usize,
+    unmatched_anchors: &'a [String],
     boundary: &'a ChangeBoundary,
     evidence: &'a [open_kioku_core::Evidence],
     context_runtime_signal_count: usize,
@@ -809,7 +822,9 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
         primary_context,
         impact,
         validation,
-        risk,
+        negative_evidence,
+        exact_reference_count,
+        unmatched_anchors,
         boundary,
         evidence,
         context_runtime_signal_count,
@@ -817,14 +832,14 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
     ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
         task_relevance: open_kioku_core::task_relevance_score(task, primary_context),
         primary_file_count: primary_context.len(),
-        evidence_count: evidence.len(),
-        exact_reference_count: exact_reference_count(primary_context, impact),
+        evidence_count: open_kioku_core::distinct_evidence_count(evidence),
+        exact_reference_count,
         validation_count: validation.len(),
         validation_with_command_count: validation
             .iter()
             .filter(|test| test.command.is_some())
             .count(),
-        negative_evidence_count: negative_evidence_count(risk),
+        negative_evidence_count: open_kioku_core::negative_evidence_signal_count(negative_evidence),
         allowed_file_count: boundary.allowed_files.len(),
         runtime_signal_count: context_runtime_signal_count
             + runtime_signal_count(primary_context)
@@ -834,6 +849,8 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
                 .iter()
                 .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Runtime)
                 .count(),
+        named_anchor_count: open_kioku_core::named_anchors(task).len(),
+        unmatched_anchors: unmatched_anchors.to_vec(),
     })
 }
 
@@ -843,7 +860,8 @@ fn negative_evidence_for_plan(
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     validation: &[TestTarget],
-    risk: &RiskReport,
+    exact_reference_count: usize,
+    unmatched_anchors: &[String],
 ) -> Vec<NegativeEvidence> {
     let mut items = context.negative_evidence.clone();
     if history_signal_count(primary_context)
@@ -884,16 +902,16 @@ fn negative_evidence_for_plan(
             },
         );
     }
-    if exact_reference_count(primary_context, impact) == 0 {
+    if exact_reference_count == 0 {
         push_unique_negative_evidence(
             &mut items,
             NegativeEvidence {
                 query: task.into(),
                 scope: "exact_references".into(),
                 inspected_sources: vec![
-                    "primary_context.evidence".into(),
-                    "impact.evidence".into(),
-                    "match_reason".into(),
+                    "retrieval_trace.authority".into(),
+                    "impact.match_reason".into(),
+                    "evidence.source_type".into(),
                 ],
                 reason: "plan has no explicit exact symbol reference or SCIP evidence".into(),
                 confidence: 0.85,
@@ -959,23 +977,27 @@ fn negative_evidence_for_plan(
             },
         );
     }
-    for reason in &risk.reasons {
-        let lower = reason.to_ascii_lowercase();
-        if lower.contains("low confidence") || lower.contains("no matching") {
-            push_unique_negative_evidence(
-                &mut items,
-                NegativeEvidence {
-                    query: task.into(),
-                    scope: "risk".into(),
-                    inspected_sources: vec!["risk.reasons".into()],
-                    reason: reason.clone(),
-                    confidence: 0.85,
-                    suggested_next_probe: Some(
-                        "Resolve missing named anchors before editing.".into(),
-                    ),
-                },
-            );
-        }
+    if !unmatched_anchors.is_empty() {
+        push_unique_negative_evidence(
+            &mut items,
+            NegativeEvidence {
+                query: task.into(),
+                scope: open_kioku_core::negative_evidence_scope::ANCHOR.into(),
+                inspected_sources: vec![
+                    "primary_context.paths".into(),
+                    "primary_context.snippets".into(),
+                    "primary_context.symbols".into(),
+                ],
+                reason: format!(
+                    "task identifier(s) spelled by no selected context: {}",
+                    unmatched_anchors.join(", ")
+                ),
+                confidence: 0.85,
+                suggested_next_probe: Some(
+                    "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into(),
+                ),
+            },
+        );
     }
     items.sort_by(|a, b| {
         a.scope
@@ -1006,40 +1028,41 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
     parts.join("; ")
 }
 
-fn exact_reference_count(primary_context: &[SearchResult], impact: &ImpactReport) -> usize {
-    primary_context
-        .iter()
-        .chain(impact.direct_impacts.iter())
-        .chain(impact.indirect_impacts.iter())
-        .filter(|result| has_exact_reference_signal(result))
-        .count()
-}
-
-fn has_exact_reference_signal(result: &SearchResult) -> bool {
-    result
-        .evidence
-        .iter()
-        .any(|evidence| contains_exact_reference(evidence))
-        || contains_exact_reference(&result.match_reason)
-}
-
-fn contains_exact_reference(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("exact reference")
-        || lower.contains("exact symbol reference")
-        || lower.contains("scip")
+/// Exact references a plan can point at: exact-authority selections in the pack, indexed
+/// symbol references among the impacts, and SCIP-sourced evidence. Result prose is never
+/// consulted; a substring test for "scip" used to fire on a lexical impact hit whose query
+/// variant named the target file's `scip_setup_report`. `impact.proven_impact` is
+/// deliberately not a source: a proven `Calls` edge is a graph fact about the target's
+/// dependents (often the target file itself), reported in the summary and priced by impact
+/// risk, and it says nothing about whether the selected context anchors the task.
+fn exact_reference_count(
+    diagnostics: &open_kioku_core::RetrievalDiagnostics,
+    primary_context: &[SearchResult],
+    impact: &ImpactReport,
+    evidence: &[open_kioku_core::Evidence],
+) -> usize {
+    open_kioku_context::exact_authority_selection_count(diagnostics, primary_context)
+        + impact
+            .direct_impacts
+            .iter()
+            .chain(impact.indirect_impacts.iter())
+            .filter(|result| open_kioku_impact::is_exact_reference_result(result))
+            .count()
+        + evidence
+            .iter()
+            .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Scip)
+            .count()
 }
 
 fn runtime_signal_count(results: &[SearchResult]) -> usize {
     results
         .iter()
         .filter(|result| {
+            // The typed score component only; the evidence line runtime annotation also
+            // writes is prose that a lexical hit for a task mentioning "runtime" shares.
             result.score_breakdown.iter().any(|component| {
                 component.signal == "runtime_corroboration" && component.contribution > 0.0
-            }) || result
-                .evidence
-                .iter()
-                .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
+            })
         })
         .count()
 }
@@ -1122,22 +1145,6 @@ fn history_signal_cap(signal: &str) -> f32 {
     }
 }
 
-fn negative_evidence_count(risk: &RiskReport) -> usize {
-    risk.reasons
-        .iter()
-        .filter(|reason| {
-            let lower = reason.to_ascii_lowercase();
-            lower.contains("low confidence")
-                || lower.contains("no matching")
-                || lower.contains("missing")
-                || lower.contains("absent")
-                || lower.contains("unavailable")
-                || lower.contains("weak")
-                || lower.contains("unknown")
-        })
-        .count()
-}
-
 fn docs_or_tests_only(results: &[SearchResult]) -> bool {
     !results.is_empty()
         && results
@@ -1152,91 +1159,6 @@ fn is_docs_or_test_path(path: &str) -> bool {
         || lower.ends_with(".md")
         || lower.ends_with(".mdx")
         || open_kioku_core::is_test_path(path)
-}
-
-fn unmatched_named_anchors(task: &str, primary_context: &[SearchResult]) -> Vec<String> {
-    let anchors = named_anchors(task);
-    if anchors.is_empty() || primary_context.is_empty() {
-        return Vec::new();
-    }
-    let top_context = primary_context
-        .iter()
-        .take(5)
-        .map(|result| {
-            format!(
-                "{} {} {} {}",
-                result.path.display(),
-                result.snippet,
-                result
-                    .symbol
-                    .as_ref()
-                    .map(|symbol| symbol.name.as_str())
-                    .unwrap_or_default(),
-                result
-                    .symbol
-                    .as_ref()
-                    .map(|symbol| symbol.qualified_name.as_str())
-                    .unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    anchors
-        .into_iter()
-        .filter(|anchor| {
-            let lower = anchor.to_ascii_lowercase();
-            !top_context.contains(&lower) && !top_context.contains(&normalize_anchor(anchor))
-        })
-        .collect()
-}
-
-fn named_anchors(task: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    for token in task.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
-        let token = token.trim_matches('-');
-        if token.len() < 3 || is_ticket_anchor(token) {
-            continue;
-        }
-        let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
-        let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
-        let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
-        let has_separator = token.contains('_') || token.contains('-');
-        if ((has_lower && has_upper) || has_separator || (has_digit && has_upper))
-            && !anchors.iter().any(|existing| existing == token)
-        {
-            anchors.push(token.to_string());
-        }
-    }
-    anchors
-}
-
-fn is_ticket_anchor(value: &str) -> bool {
-    let Some((prefix, number)) = value.split_once('-') else {
-        return false;
-    };
-    prefix.len() >= 2
-        && prefix.chars().all(|ch| ch.is_ascii_uppercase())
-        && number.len() >= 2
-        && number.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn normalize_anchor(value: &str) -> String {
-    let mut out = String::new();
-    let mut previous_lower_or_digit = false;
-    for ch in value.chars() {
-        if ch == '_' || ch == '-' {
-            out.push(' ');
-            previous_lower_or_digit = false;
-            continue;
-        }
-        if ch.is_ascii_uppercase() && previous_lower_or_digit {
-            out.push(' ');
-        }
-        out.push(ch.to_ascii_lowercase());
-        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn change_boundary(
@@ -2928,18 +2850,25 @@ mod tests {
             score_breakdown: Vec::new(),
         };
 
-        let items =
-            negative_evidence_for_plan("token", &context, &primary_context, &impact, &[], &risk);
+        let items = negative_evidence_for_plan(
+            "token",
+            &context,
+            &primary_context,
+            &impact,
+            &[],
+            0,
+            &["TokenIssuer".to_string()],
+        );
         let scopes = items
             .iter()
             .map(|item| item.scope.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
         for expected in [
+            "anchor",
             "boundary",
             "exact_references",
             "history",
-            "risk",
             "runtime",
             "validation",
         ] {
@@ -3422,5 +3351,154 @@ mod tests {
         assert!(rendered.contains("exact_references"));
         assert!(rendered.contains("signals:"));
         assert!(rendered.contains("score:"));
+    }
+
+    fn lexical_impact(
+        task: &str,
+        primary_context: Vec<SearchResult>,
+        impact_hit: SearchResult,
+    ) -> (ContextPack, ImpactReport) {
+        let context = ContextPack {
+            task: task.into(),
+            primary_files: primary_context,
+            ..Default::default()
+        };
+        let impact = ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
+            target: "src/status_setup_doctor.rs".into(),
+            direct_impacts: vec![impact_hit],
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        (context, impact)
+    }
+
+    #[test]
+    fn scip_in_an_impact_query_variant_does_not_grant_plan_exact_confidence() {
+        // Impact queries are built from the target file's symbol names; a file defining
+        // `scip_setup_report` stamps this line on every lexical dependent it finds.
+        let task = "wire scip setup into doctor";
+        let variant = "query variant `scip OR setup OR reports` matched local index";
+        let mut impact_hit = test_search_result("src/onboarding.rs");
+        impact_hit.match_reason = variant.into();
+        impact_hit.evidence = vec![variant.into()];
+        let primary_context = vec![test_search_result("src/status_setup_doctor.rs")];
+        let (context, impact) = lexical_impact(task, primary_context.clone(), impact_hit);
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+
+        let exact = exact_reference_count(&diagnostics, &primary_context, &impact, &[]);
+        assert_eq!(exact, 0);
+        let negative =
+            negative_evidence_for_plan(task, &context, &primary_context, &impact, &[], exact, &[]);
+        assert!(negative.iter().any(|item| item.scope == "exact_references"));
+        let breakdown = confidence_for_plan(PlanConfidenceInputs {
+            task,
+            primary_context: &primary_context,
+            impact: &impact,
+            validation: &[],
+            negative_evidence: &negative,
+            exact_reference_count: exact,
+            unmatched_anchors: &[],
+            boundary: &ChangeBoundary::default(),
+            evidence: &[],
+            context_runtime_signal_count: 0,
+        });
+        assert_ne!(breakdown.overall_enum, Confidence::Exact);
+        assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");
+        assert!(breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat == "exact symbol/reference evidence is absent"));
+        let component = breakdown
+            .components
+            .iter()
+            .find(|component| component.signal == "exact_references")
+            .expect("exact_references component");
+        assert!((component.raw_value - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn indexed_symbol_references_count_as_exact_but_proven_dependents_do_not() {
+        let mut reference_hit = test_search_result("src/publisher.rs");
+        reference_hit.match_reason = "exact symbol reference via tree-sitter".into();
+        let (_, mut impact) = lexical_impact("token", Vec::new(), reference_hit);
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+
+        impact.direct_impacts.clear();
+        impact
+            .proven_impact
+            .push(open_kioku_core::RelationshipImpact {
+                path: PathBuf::from("src/publisher.rs"),
+                symbol: Some("publish".into()),
+                source: "issue_token".into(),
+                edge_type: open_kioku_core::GraphEdgeType::Calls,
+                authority: open_kioku_core::RelationshipAuthority::Authoritative,
+                proof_kinds: Vec::new(),
+                ambiguous: false,
+                reason: "calls edge into `issue_token` (exact call site)".into(),
+            });
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 0);
+    }
+
+    #[test]
+    fn plan_and_context_negative_evidence_counts_are_traceable_and_agree() {
+        let store = test_store();
+        let task = "token";
+        let context = ContextPackBuilder::new(&store).build(task, 10).unwrap();
+        let plan = PlanEngine::new(&store).plan(task, 10).unwrap();
+
+        let context_count =
+            open_kioku_core::negative_evidence_signal_count(&context.negative_evidence);
+        let plan_count = open_kioku_core::negative_evidence_signal_count(&plan.negative_evidence);
+        assert_eq!(context_count, plan_count);
+        for (breakdown, count) in [
+            (&context.confidence_breakdown, context_count),
+            (&plan.confidence_breakdown, plan_count),
+        ] {
+            let blocker = breakdown
+                .blockers
+                .iter()
+                .find(|blocker| blocker.contains("negative evidence signal"));
+            match count {
+                0 => assert!(blocker.is_none(), "{blocker:?}"),
+                n => assert!(blocker
+                    .map(|blocker| blocker.starts_with(&format!("{n} negative evidence signal")))
+                    .unwrap_or(false)),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_reports_unknown_task_identifiers_as_low_confidence_with_names() {
+        let store = test_store();
+        let plan = PlanEngine::new(&store)
+            .plan(
+                "fix the null check in token FrobnicateWidgetManager::reticulate_splines",
+                10,
+            )
+            .unwrap();
+
+        assert!(!plan.primary_context.is_empty());
+        assert_eq!(plan.confidence_breakdown.overall_enum, Confidence::Low);
+        assert!(plan.confidence_breakdown.overall_score <= 0.50);
+        assert!(plan
+            .confidence_breakdown
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("FrobnicateWidgetManager")
+                && blocker.contains("reticulate_splines")));
+        assert!(plan
+            .negative_evidence
+            .iter()
+            .any(|item| item.scope == "anchor"));
     }
 }

@@ -33,15 +33,18 @@ if(live){
   const scenes=[
     {cmd:'ok context "reap the doctor\'s MCP probe child process" --format markdown',lines:[
       ['section','CONFIDENCE'],
-      ['row','overall','<span class="good">Exact</span> (1.00) · exact_references 1.00 · task_relevance 0.83 …'],
+      ['row','overall','<span class="warn">Medium</span> (0.74) · exact_references 0.25 · task_relevance 0.83 …'],
+      ['row','caveats','<span class="warn">exact symbol/reference evidence is absent · runtime corroboration is absent</span>'],
       ['section','RETRIEVAL'],
       ['row','attempted','lexical · document · exact_semantic · graph · validation · git_history · runtime'],
-      ['row','succeeded','lexical · document · exact_semantic · graph · validation'],
+      ['row','succeeded','lexical · document · exact_semantic · graph · validation · git_history'],
+      ['row','exact-authority','0 selections · retrieval confidence Medium'],
       ['row','caveats','<span class="warn">no runtime traces, logs, or incidents are ingested for this repository</span>'],
       ['section','PRIMARY CONTEXT'],
-      ['row','1','<span class="json-string">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 932-1298'],
-      ['row','2','<span class="json-string">crates/open-kioku-cli/src/commands/onboarding.rs</span> lines 554-610'],
-      ['comment','# the commit that made this change touched exactly one file; it is the first result']]},
+      ['row','1','<span class="json-string">crates/open-kioku-cli/src/reports/status_setup_doctor.rs</span> lines 1-107'],
+      ['row','2','<span class="json-string">crates/open-kioku-cli/src/commands/onboarding.rs</span> lines 2-35'],
+      ['comment','# the commit that made this change touched exactly one file; it is the first result'],
+      ['comment','# no SCIP index and no runtime artifacts here, so the label is Medium, not Exact']]},
     {cmd:'ok verify --plan plan.json --git',lines:[
       ['warn','[out_of_boundary] go/shipping/carrier.go: path is outside the saved plan boundary'],
       ['comment','# one edit inside the declared boundary, one drive-by outside it: the check fails'],

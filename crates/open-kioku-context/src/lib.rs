@@ -1,11 +1,12 @@
 use chrono::Utc;
 use open_kioku_core::{
-    AnalysisFact, ChangeBoundary, CodeChunk, Confidence, ConfidenceBreakdown,
-    ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit, ContextUnitKind,
-    Evidence, EvidenceId, EvidenceSourceType, File, FileRange, GraphEdge, GraphEdgeType,
-    GraphNodeType, HistorySignalQuery, NegativeEvidence, RetrievalAuthority, RetrievalDiagnostics,
-    RetrievalSourceCount, RetrievalSourceKind, RetrievalTrace, RetrievalUnitKey, RiskReport,
-    RuntimeSignal, ScoreComponent, SearchResult, Symbol, ValidationPlan,
+    negative_evidence_scope, AnalysisFact, ChangeBoundary, CodeChunk, Confidence,
+    ConfidenceBreakdown, ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit,
+    ContextUnitKind, Evidence, EvidenceId, EvidenceSourceType, File, FileRange, GraphEdge,
+    GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence, RetrievalAuthority,
+    RetrievalDiagnostics, RetrievalSourceCount, RetrievalSourceKind, RetrievalTrace,
+    RetrievalUnitKey, RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol,
+    ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -175,6 +176,33 @@ fn retrieval_trace_for_result<'a>(
     }
 }
 
+/// Selected results whose retrieval trace carries exact authority: a symbol anchor that
+/// resolved uniquely, never a lexical or corroborating hit. The confidence breakdown and the
+/// selection telemetry count this same set, so `exact_evidence_count` and the
+/// `exact_references` component cannot disagree about whether exact evidence exists.
+fn exact_authority_units(
+    diagnostics: &RetrievalDiagnostics,
+    selected: &[SearchResult],
+) -> std::collections::BTreeSet<RetrievalUnitKey> {
+    selected
+        .iter()
+        .filter_map(|result| {
+            let trace = retrieval_trace_for_result(diagnostics, result)?;
+            (trace.authority == RetrievalAuthority::Exact)
+                .then(|| RetrievalUnitKey::from_result(result))
+        })
+        .collect()
+}
+
+/// How many of `selected` are backed by an exact-authority retrieval trace. Plans count
+/// exact references over the same set the pack reported as `exact_evidence_count`.
+pub fn exact_authority_selection_count(
+    diagnostics: &RetrievalDiagnostics,
+    selected: &[SearchResult],
+) -> usize {
+    exact_authority_units(diagnostics, selected).len()
+}
+
 fn refresh_context_pack_retrieval_telemetry(
     diagnostics: &mut RetrievalDiagnostics,
     selected: &[SearchResult],
@@ -187,7 +215,7 @@ fn refresh_context_pack_retrieval_telemetry(
     let mut source_paths =
         std::collections::BTreeMap::<RetrievalSourceKind, std::collections::BTreeSet<String>>::new(
         );
-    let mut exact_units = std::collections::BTreeSet::new();
+    let exact_units = exact_authority_units(diagnostics, selected);
     let mut traced_selected_units = std::collections::BTreeSet::new();
 
     for result in selected {
@@ -195,10 +223,7 @@ fn refresh_context_pack_retrieval_telemetry(
         let Some(trace) = retrieval_trace_for_result(diagnostics, result) else {
             continue;
         };
-        traced_selected_units.insert(unit.clone());
-        if trace.authority == RetrievalAuthority::Exact {
-            exact_units.insert(unit);
-        }
+        traced_selected_units.insert(unit);
         let path = normalize_path(&result.path);
         for contribution in &trace.contributions {
             source_paths
@@ -329,7 +354,7 @@ fn write_markdown_retrieval_diagnostics(out: &mut String, diagnostics: &Retrieva
             out.push_str(&format!("- Selected source mix: `{source_mix}`\n"));
         }
         out.push_str(&format!(
-            "- Exact-evidence selections: `{}`; ambiguity/unresolved signals: `{}`\n",
+            "- Exact-authority selections: `{}`; ambiguity/unresolved signals: `{}`\n",
             diagnostics.selection.exact_evidence_count,
             diagnostics.selection.ambiguity_unresolved_count
         ));
@@ -826,14 +851,34 @@ impl<'a> ContextPackBuilder<'a> {
             .take(8)
             .map(|result| result.path.clone())
             .collect::<Vec<_>>();
+        let exact_reference_count = exact_reference_count(
+            &retrieval_diagnostics,
+            &primary_files,
+            &supporting_files,
+            &evidence,
+        );
+        let unmatched_anchors = open_kioku_core::unmatched_named_anchors(task, &primary_files);
+        // Negative evidence is built first: the confidence breakdown counts the items it
+        // lists, so the blocker it reports is traceable to the list the pack publishes.
+        let negative_evidence = negative_evidence_for_context(NegativeEvidenceInputs {
+            task,
+            primary_files: &primary_files,
+            supporting_files: &supporting_files,
+            tests: &tests,
+            runtime_signals: &runtime_signals,
+            exact_reference_count,
+            unmatched_anchors: &unmatched_anchors,
+        });
         let mut confidence_breakdown = confidence_for_context(ContextConfidenceInputs {
             task,
             primary_files: &primary_files,
             supporting_files: &supporting_files,
             tests: &tests,
-            risk: &impact.risk_report,
+            negative_evidence: &negative_evidence,
+            exact_reference_count,
+            unmatched_anchors: &unmatched_anchors,
             allowed_file_count: allowed_files.len(),
-            evidence_count: evidence.len(),
+            evidence_count: open_kioku_core::distinct_evidence_count(&evidence),
             runtime_signal_count_value: runtime_signals.len(),
         });
         if let Some(missing) = retrieval_diagnostics
@@ -846,14 +891,6 @@ impl<'a> ContextPackBuilder<'a> {
                 "context retrieval blocked because task-family required evidence was missing: {missing}"
             ));
         }
-        let negative_evidence = negative_evidence_for_context(
-            task,
-            &primary_files,
-            &supporting_files,
-            &tests,
-            &impact.risk_report,
-            &runtime_signals,
-        );
         let boundary_evidence_refs = primary_files
             .iter()
             .flat_map(|result| result.derived_evidence_ids())
@@ -1486,32 +1523,67 @@ fn has_runtime_corroboration(result: &SearchResult) -> bool {
     })
 }
 
-fn negative_evidence_for_context(
-    task: &str,
-    primary_files: &[SearchResult],
-    supporting_files: &[SearchResult],
-    tests: &[open_kioku_core::TestTarget],
-    risk: &RiskReport,
-    runtime_signals: &[RuntimeSignal],
-) -> Vec<NegativeEvidence> {
+/// Inputs to the context negative-evidence list. The exact-reference count and the unmatched
+/// anchors are computed once by the caller and shared with the confidence breakdown, so the
+/// list and the breakdown cannot describe different evidence.
+struct NegativeEvidenceInputs<'a> {
+    task: &'a str,
+    primary_files: &'a [SearchResult],
+    supporting_files: &'a [SearchResult],
+    tests: &'a [open_kioku_core::TestTarget],
+    runtime_signals: &'a [RuntimeSignal],
+    exact_reference_count: usize,
+    unmatched_anchors: &'a [String],
+}
+
+fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
+    let NegativeEvidenceInputs {
+        task,
+        primary_files,
+        supporting_files,
+        tests,
+        runtime_signals,
+        exact_reference_count,
+        unmatched_anchors,
+    } = inputs;
     let mut items = Vec::new();
     if primary_files.is_empty() {
         items.push(NegativeEvidence {
             query: task.into(),
-            scope: "primary_context".into(),
+            scope: negative_evidence_scope::PRIMARY_CONTEXT.into(),
             inspected_sources: vec!["lexical_search".into(), "ranking_fusion".into()],
             reason: "no primary context matched the task".into(),
             confidence: 0.95,
             suggested_next_probe: Some("Run `ok search <task> --explain-ranking` with named symbols or paths from the ticket.".into()),
         });
     }
-    if exact_reference_count(primary_files, supporting_files) == 0 {
+    if !unmatched_anchors.is_empty() {
         items.push(NegativeEvidence {
             query: task.into(),
-            scope: "exact_references".into(),
+            scope: negative_evidence_scope::ANCHOR.into(),
             inspected_sources: vec![
-                "search_result.evidence".into(),
-                "search_result.match_reason".into(),
+                "primary_context.paths".into(),
+                "primary_context.snippets".into(),
+                "primary_context.symbols".into(),
+            ],
+            reason: format!(
+                "task identifier(s) spelled by no selected context: {}",
+                unmatched_anchors.join(", ")
+            ),
+            confidence: 0.85,
+            suggested_next_probe: Some(
+                "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into(),
+            ),
+        });
+    }
+    if exact_reference_count == 0 {
+        items.push(NegativeEvidence {
+            query: task.into(),
+            scope: negative_evidence_scope::EXACT_REFERENCES.into(),
+            inspected_sources: vec![
+                "retrieval_trace.authority".into(),
+                "impact.match_reason".into(),
+                "evidence.source_type".into(),
             ],
             reason: "no explicit exact symbol reference or SCIP evidence was found".into(),
             confidence: 0.85,
@@ -1523,7 +1595,7 @@ fn negative_evidence_for_context(
     if tests.is_empty() {
         items.push(NegativeEvidence {
             query: task.into(),
-            scope: "validation".into(),
+            scope: negative_evidence_scope::VALIDATION.into(),
             inspected_sources: vec!["indexed_tests".into(), "test_selector".into()],
             reason: "no nearby validation target was selected".into(),
             confidence: 0.80,
@@ -1538,8 +1610,11 @@ fn negative_evidence_for_context(
     if runtime_signals.is_empty() && runtime_signal_count(primary_files, supporting_files) == 0 {
         items.push(NegativeEvidence {
             query: task.into(),
-            scope: "runtime".into(),
-            inspected_sources: vec!["runtime_signals".into(), "search_result.evidence".into()],
+            scope: negative_evidence_scope::RUNTIME.into(),
+            inspected_sources: vec![
+                "runtime_signals".into(),
+                "search_result.score_breakdown".into(),
+            ],
             reason:
                 "no runtime trace, incident, or error artifact corroborated the selected context"
                     .into(),
@@ -1552,7 +1627,7 @@ fn negative_evidence_for_context(
     if docs_or_tests_only(primary_files) {
         items.push(NegativeEvidence {
             query: task.into(),
-            scope: "boundary".into(),
+            scope: negative_evidence_scope::BOUNDARY.into(),
             inspected_sources: vec!["primary_context.paths".into()],
             reason: "task anchors only matched docs or test fixtures, not source edit targets"
                 .into(),
@@ -1561,21 +1636,6 @@ fn negative_evidence_for_context(
                 "Search for the production symbol or source path named by the ticket.".into(),
             ),
         });
-    }
-    for reason in &risk.reasons {
-        let lower = reason.to_ascii_lowercase();
-        if lower.contains("low confidence") || lower.contains("no matching") {
-            items.push(NegativeEvidence {
-                query: task.into(),
-                scope: "risk".into(),
-                inspected_sources: vec!["risk_report.reasons".into()],
-                reason: reason.clone(),
-                confidence: 0.85,
-                suggested_next_probe: Some(
-                    "Resolve the missing task anchor before editing.".into(),
-                ),
-            });
-        }
     }
     items
 }
@@ -1590,7 +1650,9 @@ struct ContextConfidenceInputs<'a> {
     primary_files: &'a [SearchResult],
     supporting_files: &'a [SearchResult],
     tests: &'a [open_kioku_core::TestTarget],
-    risk: &'a RiskReport,
+    negative_evidence: &'a [NegativeEvidence],
+    exact_reference_count: usize,
+    unmatched_anchors: &'a [String],
     allowed_file_count: usize,
     evidence_count: usize,
     runtime_signal_count_value: usize,
@@ -1602,7 +1664,9 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         primary_files,
         supporting_files,
         tests,
-        risk,
+        negative_evidence,
+        exact_reference_count,
+        unmatched_anchors,
         allowed_file_count,
         evidence_count,
         runtime_signal_count_value,
@@ -1614,13 +1678,15 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         task_relevance: open_kioku_core::task_relevance_score(task, &selected),
         primary_file_count: primary_files.len(),
         evidence_count,
-        exact_reference_count: exact_reference_count(primary_files, supporting_files),
+        exact_reference_count,
         validation_count: tests.len(),
         validation_with_command_count: tests.iter().filter(|test| test.command.is_some()).count(),
-        negative_evidence_count: negative_evidence_count(risk),
+        negative_evidence_count: open_kioku_core::negative_evidence_signal_count(negative_evidence),
         allowed_file_count,
         runtime_signal_count: runtime_signal_count_value
             + runtime_signal_count(primary_files, supporting_files),
+        named_anchor_count: open_kioku_core::named_anchors(task).len(),
+        unmatched_anchors: unmatched_anchors.to_vec(),
     })
 }
 
@@ -1638,46 +1704,41 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
     parts.join("; ")
 }
 
+/// Selections backed by exact provenance. Every source is typed: the retrieval trace's
+/// authority, the impact engine's own reference predicate, or the evidence record's source
+/// type. Result prose is never consulted; a substring test for "scip" used to fire on a
+/// lexical hit whose query variant named the target file's `scip_setup_report`, and the pack
+/// reported `Exact` beside `exact_evidence_count: 0`.
 fn exact_reference_count(
+    diagnostics: &RetrievalDiagnostics,
     primary_files: &[SearchResult],
     supporting_files: &[SearchResult],
+    evidence: &[Evidence],
 ) -> usize {
-    primary_files
-        .iter()
-        .chain(supporting_files.iter())
-        .filter(|result| has_exact_reference_signal(result))
-        .count()
-}
-
-fn has_exact_reference_signal(result: &SearchResult) -> bool {
-    result
-        .evidence
-        .iter()
-        .any(|evidence| contains_exact_reference(evidence))
-        || contains_exact_reference(&result.match_reason)
-}
-
-fn contains_exact_reference(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("exact reference")
-        || lower.contains("exact symbol reference")
-        || lower.contains("scip")
+    exact_authority_units(diagnostics, primary_files).len()
+        + supporting_files
+            .iter()
+            .filter(|result| open_kioku_impact::is_exact_reference_result(result))
+            .count()
+        + evidence
+            .iter()
+            .filter(|item| item.source_type == EvidenceSourceType::Scip)
+            .count()
 }
 
 fn runtime_signal_count(
     primary_files: &[SearchResult],
     supporting_files: &[SearchResult],
 ) -> usize {
+    // The typed score component only. Runtime annotation always adds one, and the evidence
+    // line it also adds is prose that a lexical hit for a task mentioning "runtime" shares.
     primary_files
         .iter()
         .chain(supporting_files.iter())
         .filter(|result| {
             result.score_breakdown.iter().any(|component| {
                 component.signal == "runtime_corroboration" && component.contribution > 0.0
-            }) || result
-                .evidence
-                .iter()
-                .any(|evidence| evidence.to_ascii_lowercase().contains("runtime"))
+            })
         })
         .count()
 }
@@ -2146,22 +2207,6 @@ fn validated_candidate_path_scope(
     validated.sort();
     caveats.sort();
     (validated, caveats)
-}
-
-fn negative_evidence_count(risk: &RiskReport) -> usize {
-    risk.reasons
-        .iter()
-        .filter(|reason| {
-            let lower = reason.to_ascii_lowercase();
-            lower.contains("low confidence")
-                || lower.contains("no matching")
-                || lower.contains("missing")
-                || lower.contains("absent")
-                || lower.contains("unavailable")
-                || lower.contains("weak")
-                || lower.contains("unknown")
-        })
-        .count()
 }
 
 fn docs_or_tests_only(results: &[SearchResult]) -> bool {
@@ -4658,7 +4703,7 @@ mod tests {
             .contains("src/high_value.rs:10-20 exact evidence omitted by zero-token budget"));
         assert!(markdown.contains("Retrieval confidence: `Low`"));
         assert!(
-            markdown.contains("Exact-evidence selections: `1`; ambiguity/unresolved signals: `2`")
+            markdown.contains("Exact-authority selections: `1`; ambiguity/unresolved signals: `2`")
         );
         assert!(!markdown.contains("Context budget:"));
 
@@ -6158,6 +6203,169 @@ mod tests {
         let caveats = intent.vocabulary_caveats();
         assert_eq!(caveats.len(), 1, "{caveats:?}");
         assert!(caveats[0].contains("`QuantumFluxCapacitor`"));
+    }
+
+    fn lexical_hit(path: &str, match_reason: &str, evidence: &str) -> SearchResult {
+        SearchResult {
+            path: std::path::PathBuf::from(path),
+            line_range: Some(LineRange { start: 1, end: 3 }),
+            snippet: "fn scip_setup_report() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: match_reason.into(),
+            evidence: vec![evidence.into()],
+            evidence_refs: vec![format!("evidence:{path}")],
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn scip_in_a_query_variant_evidence_line_does_not_grant_exact_confidence() {
+        // Impact builds lexical queries from the target file's symbol names, so a file
+        // defining `scip_setup_report` yields this evidence line on every lexical hit.
+        let task = "wire scip setup into doctor";
+        let variant = "query variant `scip OR setup OR doctor` matched local index";
+        let primary = vec![lexical_hit("src/status_setup_doctor.rs", variant, variant)];
+        let supporting = vec![lexical_hit(
+            "src/onboarding.rs",
+            variant,
+            "exact reference wording inside a lexical evidence line",
+        )];
+        let diagnostics = RetrievalDiagnostics::default();
+        let exact = exact_reference_count(&diagnostics, &primary, &supporting, &[]);
+        assert_eq!(exact, 0);
+
+        let negative = negative_evidence_for_context(NegativeEvidenceInputs {
+            task,
+            primary_files: &primary,
+            supporting_files: &supporting,
+            tests: &[],
+            runtime_signals: &[],
+            exact_reference_count: exact,
+            unmatched_anchors: &[],
+        });
+        assert!(negative
+            .iter()
+            .any(|item| item.scope == negative_evidence_scope::EXACT_REFERENCES));
+
+        let breakdown = confidence_for_context(ContextConfidenceInputs {
+            task,
+            primary_files: &primary,
+            supporting_files: &supporting,
+            tests: &[],
+            negative_evidence: &negative,
+            exact_reference_count: exact,
+            unmatched_anchors: &[],
+            allowed_file_count: 1,
+            evidence_count: 2,
+            runtime_signal_count_value: 0,
+        });
+        assert_ne!(breakdown.overall_enum, Confidence::Exact);
+        assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");
+        assert!(breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat == "exact symbol/reference evidence is absent"));
+        let component = breakdown
+            .components
+            .iter()
+            .find(|component| component.signal == "exact_references")
+            .expect("exact_references component");
+        assert!((component.raw_value - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn exact_authority_trace_counts_as_exact_reference_but_corroborating_does_not() {
+        let primary = vec![lexical_hit(
+            "src/auth.rs",
+            "exact semantic symbol anchor `issue_token`",
+            "symbol anchor",
+        )];
+        let mut diagnostics = RetrievalDiagnostics::default();
+        diagnostics.traces.push(RetrievalTrace {
+            path: std::path::PathBuf::from("src/auth.rs"),
+            unit_key: Some(RetrievalUnitKey::from_result(&primary[0])),
+            fused_score: 1.0,
+            authority: RetrievalAuthority::Exact,
+            contributions: Vec::new(),
+        });
+        assert_eq!(exact_reference_count(&diagnostics, &primary, &[], &[]), 1);
+
+        // An ambiguous anchor is retained as a corroborating possibility, not as proof.
+        diagnostics.traces[0].authority = RetrievalAuthority::Corroborating;
+        assert_eq!(exact_reference_count(&diagnostics, &primary, &[], &[]), 0);
+    }
+
+    #[test]
+    fn unmatched_task_identifiers_are_anchor_negative_evidence_and_low_confidence() {
+        let task = "fix the null check in FrobnicateWidgetManager::reticulate_splines";
+        let primary = vec![lexical_hit(
+            "src/auth.rs",
+            "lexical match",
+            "query variant `null OR check` matched local index",
+        )];
+        let unmatched = open_kioku_core::unmatched_named_anchors(task, &primary);
+        assert_eq!(
+            unmatched,
+            vec![
+                "FrobnicateWidgetManager".to_string(),
+                "reticulate_splines".to_string()
+            ]
+        );
+        let negative = negative_evidence_for_context(NegativeEvidenceInputs {
+            task,
+            primary_files: &primary,
+            supporting_files: &[],
+            tests: &[],
+            runtime_signals: &[],
+            exact_reference_count: 0,
+            unmatched_anchors: &unmatched,
+        });
+        let anchor = negative
+            .iter()
+            .find(|item| item.scope == negative_evidence_scope::ANCHOR)
+            .expect("anchor negative evidence");
+        assert!(
+            anchor.reason.contains("FrobnicateWidgetManager")
+                && anchor.reason.contains("reticulate_splines")
+        );
+        assert_eq!(
+            open_kioku_core::negative_evidence_signal_count(&negative),
+            1
+        );
+
+        let breakdown = confidence_for_context(ContextConfidenceInputs {
+            task,
+            primary_files: &primary,
+            supporting_files: &[],
+            tests: &[],
+            negative_evidence: &negative,
+            exact_reference_count: 0,
+            unmatched_anchors: &unmatched,
+            allowed_file_count: 1,
+            evidence_count: 1,
+            runtime_signal_count_value: 0,
+        });
+        assert_eq!(breakdown.overall_enum, Confidence::Low);
+        assert!(breakdown.overall_score <= 0.50, "{breakdown:?}");
+        assert!(breakdown
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("FrobnicateWidgetManager")
+                && blocker.contains("reticulate_splines")));
+        // The negative-evidence blocker counts exactly the listed anchor item.
+        assert!(breakdown
+            .blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("1 negative evidence signal")));
+    }
+
+    #[test]
+    fn runtime_word_in_a_lexical_evidence_line_is_not_runtime_corroboration() {
+        let variant = "query variant `runtime OR panic` matched local index";
+        let primary = vec![lexical_hit("src/runtime.rs", variant, variant)];
+        assert_eq!(runtime_signal_count(&primary, &[]), 0);
     }
 }
 

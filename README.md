@@ -44,26 +44,31 @@ This is the actual output on this repository, trimmed (`…` marks cut lines). T
 # Task: reap the doctor's MCP probe child process
 
 ## Confidence
-- Overall: `Exact` (`1.00`)
-  - `exact_references` score `1.00`, weight `0.20`, contribution `0.20`
+- Overall: `Medium` (`0.74`)
+- Caveats:
+  - exact symbol/reference evidence is absent
+  - runtime corroboration is absent
+- Components:
+  - `exact_references` score `0.25`, weight `0.20`, contribution `0.05`
   - `task_relevance` score `0.83`, weight `0.20`, contribution `0.17`
   …
 ## Retrieval
 - Attempted: `lexical, document, exact_semantic, graph, validation, git_history, runtime`
-- Succeeded: `lexical, document, exact_semantic, graph, validation`
-- Retrieval confidence: `Exact` (qualitative ContextPack confidence, not a calibrated probability)
+- Succeeded: `lexical, document, exact_semantic, graph, validation, git_history`
+- Exact-authority selections: `0`; ambiguity/unresolved signals: `0`
+- Retrieval confidence: `Medium` (qualitative ContextPack confidence, not a calibrated probability)
 - Caveats:
   - no runtime traces, logs, or incidents are ingested for this repository
   …
 ## Primary Context
 ### crates/open-kioku-cli/src/reports/status_setup_doctor.rs
-Lines 932-1298  `fn doctor_report(repo: &Path) -> DoctorReport {`
+Lines 1-107  `fn file_path_for_symbol(store: &dyn MetadataStore, symbol: &Symbol) -> anyhow::Result<PathBuf> {`
 ### crates/open-kioku-cli/src/commands/onboarding.rs
-Lines 554-610   `fn mcp_server_reachable(repo: &Path) -> anyhow::Result<bool> {`
+Lines 2-35   `struct AgentSetupReport {`
 …
 ```
 
-Every pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
+The label is `Medium`, not higher, and the pack says why twice: this repository has no SCIP index and no runtime artifacts, so the `exact_references` component is `0.25` and `Exact-authority selections` is `0` (the primary units whose retrieval resolved an exact symbol anchor). `Exact` is reserved for packs with at least one such selection; a lexical match, however good, does not earn it. Every pack says which evidence streams ran, which succeeded, and what is missing. Missing evidence lowers the stated confidence; it is never papered over.
 
 ## What You Get
 

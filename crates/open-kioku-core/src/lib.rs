@@ -118,6 +118,54 @@ pub struct NegativeEvidence {
     pub suggested_next_probe: Option<String>,
 }
 
+/// Scopes of [`NegativeEvidence`] items shared by context packs and plans. The scope is
+/// the stable key a reader traces a confidence blocker back to.
+pub mod negative_evidence_scope {
+    pub const PRIMARY_CONTEXT: &str = "primary_context";
+    pub const EXACT_REFERENCES: &str = "exact_references";
+    pub const VALIDATION: &str = "validation";
+    pub const RUNTIME: &str = "runtime";
+    pub const HISTORY: &str = "history";
+    pub const BOUNDARY: &str = "boundary";
+    /// A named identifier in the task that no selected context spells.
+    pub const ANCHOR: &str = "anchor";
+}
+
+impl NegativeEvidence {
+    /// Whether this item is priced by the `negative_evidence` confidence component.
+    ///
+    /// Absent exact references, validation, runtime, and history evidence each lower
+    /// confidence through their own component and cap already. Counting them here as well
+    /// priced one absence twice, which is how `ok plan` reported "3 negative evidence
+    /// signal(s)" for a task whose only defect was a repository without SCIP. What counts
+    /// here is evidence that retrieval itself missed: no primary context at all, or a task
+    /// identifier the selected context does not spell.
+    pub fn lowers_confidence(&self) -> bool {
+        matches!(
+            self.scope.as_str(),
+            negative_evidence_scope::PRIMARY_CONTEXT | negative_evidence_scope::ANCHOR
+        )
+    }
+}
+
+/// The `negative_evidence_count` confidence input for a pack or plan: the items of its
+/// reported `negative_evidence` list that [`NegativeEvidence::lowers_confidence`]. Context
+/// and plan both derive the count from the list they publish, so the blocker
+/// "N negative evidence signal(s) lowered confidence" is always traceable to N listed items.
+pub fn negative_evidence_signal_count(items: &[NegativeEvidence]) -> usize {
+    items.iter().filter(|item| item.lowers_confidence()).count()
+}
+
+/// Distinct evidence records in a pack or plan. `evidence` carries one entry per evidence
+/// line of each result, so its length grows with matched query variants, not with evidence.
+pub fn distinct_evidence_count(evidence: &[Evidence]) -> usize {
+    evidence
+        .iter()
+        .map(|item| &item.id)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
 const DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -332,16 +380,29 @@ impl Default for ConfidenceBreakdown {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfidenceSignalInput {
     pub primary_file_count: usize,
+    /// Distinct evidence records attached to the pack, not evidence lines: a result carries
+    /// one line per matched query variant, so counting lines saturated the density signal
+    /// for any non-empty pack.
     pub evidence_count: usize,
+    /// Selections backed by exact provenance: an exact-authority retrieval trace, an
+    /// indexed symbol reference, or SCIP-sourced evidence. Never derived from result prose.
     pub exact_reference_count: usize,
     pub validation_count: usize,
     pub validation_with_command_count: usize,
+    /// See [`negative_evidence_signal_count`].
     pub negative_evidence_count: usize,
     pub allowed_file_count: usize,
     pub runtime_signal_count: usize,
+    /// Named identifiers in the task (`IssueTokenService`, `reticulate_splines`) as
+    /// [`named_anchors`] extracts them. Zero for a prose-only task.
+    pub named_anchor_count: usize,
+    /// The named identifiers no selected context spells, per [`unmatched_named_anchors`].
+    /// When every named identifier is unmatched the repository does not know the thing the
+    /// task is about, and no structural completeness may present that as Medium.
+    pub unmatched_anchors: Vec<String>,
     /// Fraction of the task's content terms that appear anywhere in the selected
     /// context, in 0..=1. See [`task_relevance_score`].
     ///
@@ -541,6 +602,99 @@ fn task_content_terms(task: &str) -> Vec<String> {
     terms
 }
 
+/// Code identifiers a task names - mixed case, `snake_case`, `kebab-case`, or an
+/// upper-cased token with digits - as opposed to its prose. Ticket references (`ABC-123`)
+/// are not anchors. Shared by context and plan so both surfaces agree on what the task
+/// named and therefore on what counts as missing.
+pub fn named_anchors(task: &str) -> Vec<String> {
+    let mut anchors = Vec::new();
+    for token in task.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
+        let token = token.trim_matches('-');
+        if token.len() < 3 || is_ticket_anchor(token) {
+            continue;
+        }
+        let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
+        let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
+        let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+        let has_separator = token.contains('_') || token.contains('-');
+        if ((has_lower && has_upper) || has_separator || (has_digit && has_upper))
+            && !anchors.iter().any(|existing| existing == token)
+        {
+            anchors.push(token.to_string());
+        }
+    }
+    anchors
+}
+
+/// The [`named_anchors`] of `task` that none of the top five selected results spells, in
+/// its path, snippet, or symbol names, either verbatim or split into words
+/// (`IssueTokenService` matches `issue token service`). Empty when the task names nothing
+/// or nothing was selected: an empty selection is reported on its own.
+pub fn unmatched_named_anchors(task: &str, selected: &[SearchResult]) -> Vec<String> {
+    let anchors = named_anchors(task);
+    if anchors.is_empty() || selected.is_empty() {
+        return Vec::new();
+    }
+    let top_context = selected
+        .iter()
+        .take(5)
+        .map(|result| {
+            format!(
+                "{} {} {} {}",
+                result.path.display(),
+                result.snippet,
+                result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.name.as_str())
+                    .unwrap_or_default(),
+                result
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| symbol.qualified_name.as_str())
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    anchors
+        .into_iter()
+        .filter(|anchor| {
+            let lower = anchor.to_ascii_lowercase();
+            !top_context.contains(&lower) && !top_context.contains(&normalize_anchor(anchor))
+        })
+        .collect()
+}
+
+fn is_ticket_anchor(value: &str) -> bool {
+    let Some((prefix, number)) = value.split_once('-') else {
+        return false;
+    };
+    prefix.len() >= 2
+        && prefix.chars().all(|ch| ch.is_ascii_uppercase())
+        && number.len() >= 2
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn normalize_anchor(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' {
+            out.push(' ');
+            previous_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lower_or_digit {
+            out.push(' ');
+        }
+        out.push(ch.to_ascii_lowercase());
+        previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl ConfidenceBreakdown {
     pub fn from_signals(input: ConfidenceSignalInput) -> Self {
         let mut blockers = Vec::new();
@@ -553,6 +707,22 @@ impl ConfidenceBreakdown {
             blockers.push(format!(
                 "{} negative evidence signal(s) lowered confidence",
                 input.negative_evidence_count
+            ));
+        }
+        let every_anchor_unmatched = input.named_anchor_count > 0
+            && input.unmatched_anchors.len() >= input.named_anchor_count;
+        if every_anchor_unmatched {
+            blockers.push(format!(
+                "{} task identifier(s) name nothing in the selected context: {}",
+                input.unmatched_anchors.len(),
+                input.unmatched_anchors.join(", ")
+            ));
+        } else if !input.unmatched_anchors.is_empty() {
+            caveats.push(format!(
+                "{} of {} task identifier(s) name nothing in the selected context: {}",
+                input.unmatched_anchors.len(),
+                input.named_anchor_count,
+                input.unmatched_anchors.join(", ")
             ));
         }
         if input.exact_reference_count == 0 {
@@ -632,19 +802,19 @@ impl ConfidenceBreakdown {
                 "evidence_density",
                 evidence_density,
                 0.10,
-                "amount of independent indexed evidence near the selected context",
+                "distinct evidence records over twice the selected primary files, capped at 1.0",
             ),
             confidence_component(
                 "exact_references",
                 exact_reference,
                 0.20,
-                "explicit exact symbol references or SCIP signals",
+                "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence",
             ),
             confidence_component(
                 "validation_availability",
                 validation_availability,
                 0.15,
-                "presence of validation targets for the likely change",
+                "at least one validation target was selected near the primary context",
             ),
             confidence_component(
                 "negative_evidence",
@@ -668,7 +838,7 @@ impl ConfidenceBreakdown {
                 "test_coverage",
                 test_coverage,
                 0.10,
-                "selected tests with runnable commands",
+                "at least one selected validation target carries a runnable command",
             ),
         ];
         components.sort_by(|a, b| a.signal.cmp(&b.signal));
@@ -705,6 +875,12 @@ impl ConfidenceBreakdown {
         if input.negative_evidence_count > 0 {
             overall_score = overall_score.min(0.60);
         }
+        // Below Medium, above the no-term floor: the task's every identifier is unknown to
+        // the selected context, which is worse than a right file without SCIP and better
+        // than a task with no words in the repository at all.
+        if every_anchor_unmatched {
+            overall_score = overall_score.min(0.50);
+        }
 
         blockers.sort();
         blockers.dedup();
@@ -714,8 +890,17 @@ impl ConfidenceBreakdown {
             overall_score = overall_score.min(0.94);
         }
 
+        // `Exact` is a provenance claim, not a score band: it is reachable only when at
+        // least one selection is backed by exact-authority evidence. The 0.74 cap above
+        // already implies this; stating it keeps a future weight change from labelling
+        // heuristic evidence `Exact` again.
+        let mut overall_enum = Confidence::from_score(overall_score);
+        if overall_enum == Confidence::Exact && input.exact_reference_count == 0 {
+            overall_enum = Confidence::High;
+        }
+
         Self {
-            overall_enum: Confidence::from_score(overall_score),
+            overall_enum,
             overall_score,
             components,
             blockers,
@@ -3900,6 +4085,7 @@ mod tests {
             allowed_file_count: 3,
             runtime_signal_count: 4,
             task_relevance: 0.0,
+            ..Default::default()
         });
         assert_eq!(
             irrelevant.overall_enum,
@@ -3928,6 +4114,7 @@ mod tests {
             allowed_file_count: 2,
             runtime_signal_count: 2,
             task_relevance: 1.0,
+            ..Default::default()
         });
         assert!(
             no_exact.overall_score <= 0.74,
@@ -3938,13 +4125,15 @@ mod tests {
     }
 
     use super::{
-        count_resolution_notes, reconcile_score_breakdown, score_component_total,
-        task_relevance_score, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
+        count_resolution_notes, named_anchors, negative_evidence_signal_count,
+        reconcile_score_breakdown, score_component_total, task_relevance_score,
+        unmatched_named_anchors, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
         Evidence, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId, GitCommitRecord,
         GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode, GraphNodeType,
-        HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange, NodeId, Owner,
-        PathInterner, ScopeId, ScoreComponent, SearchResult, SharedPath, SharedStr, SourceRange,
-        StringInterner, Symbol, SymbolId, Visibility, HISTORY_SCHEMA_VERSION,
+        HistoryRecordId, HistorySnapshot, HistorySummary, IndexQuality, LineRange,
+        NegativeEvidence, NodeId, Owner, PathInterner, ScopeId, ScoreComponent, SearchResult,
+        SharedPath, SharedStr, SourceRange, StringInterner, Symbol, SymbolId, Visibility,
+        HISTORY_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -4163,9 +4352,10 @@ mod tests {
             allowed_file_count: 2,
             runtime_signal_count: 1,
             task_relevance: 1.0,
+            ..Default::default()
         };
 
-        let first = ConfidenceBreakdown::from_signals(input);
+        let first = ConfidenceBreakdown::from_signals(input.clone());
         let second = ConfidenceBreakdown::from_signals(input);
 
         assert_eq!(first.overall_enum, second.overall_enum);
@@ -4187,6 +4377,7 @@ mod tests {
             allowed_file_count: 1,
             runtime_signal_count: 1,
             task_relevance: 1.0,
+            ..Default::default()
         });
         let thin = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
             primary_file_count: 1,
@@ -4198,6 +4389,7 @@ mod tests {
             allowed_file_count: 1,
             runtime_signal_count: 0,
             task_relevance: 1.0,
+            ..Default::default()
         });
 
         assert!(thin.overall_score < grounded.overall_score);
@@ -4228,11 +4420,131 @@ mod tests {
             allowed_file_count: 3,
             runtime_signal_count: 1,
             task_relevance: 1.0,
+            ..Default::default()
         });
 
         assert!(breakdown.overall_score <= 0.60);
         assert_ne!(breakdown.overall_enum, Confidence::High);
         assert!(!breakdown.blockers.is_empty());
+    }
+
+    #[test]
+    fn exact_label_requires_exact_reference_evidence() {
+        // Every completeness signal maxed and nothing to caveat: the only thing missing is
+        // exact provenance. The label must stop at High, and the score under 0.75.
+        let complete = ConfidenceSignalInput {
+            primary_file_count: 2,
+            evidence_count: 8,
+            exact_reference_count: 0,
+            validation_count: 2,
+            validation_with_command_count: 2,
+            negative_evidence_count: 0,
+            allowed_file_count: 2,
+            runtime_signal_count: 1,
+            task_relevance: 1.0,
+            ..Default::default()
+        };
+        let without_exact = ConfidenceBreakdown::from_signals(complete.clone());
+        assert_ne!(without_exact.overall_enum, Confidence::Exact);
+        assert!(without_exact.overall_score <= 0.74, "{without_exact:?}");
+        assert!(without_exact
+            .caveats
+            .iter()
+            .any(|caveat| caveat == "exact symbol/reference evidence is absent"));
+
+        let with_exact = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            exact_reference_count: 1,
+            ..complete
+        });
+        assert_eq!(with_exact.overall_enum, Confidence::Exact);
+    }
+
+    #[test]
+    fn unmatched_task_identifiers_cap_confidence_below_medium_and_name_them() {
+        let base = ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 2,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            negative_evidence_count: 0,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+            task_relevance: 0.8,
+            named_anchor_count: 2,
+            unmatched_anchors: vec![
+                "FrobnicateWidgetManager".into(),
+                "reticulate_splines".into(),
+            ],
+        };
+        let all_missing = ConfidenceBreakdown::from_signals(base.clone());
+        assert_eq!(all_missing.overall_enum, Confidence::Low);
+        assert!(all_missing.overall_score <= 0.50, "{all_missing:?}");
+        assert!(all_missing
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("FrobnicateWidgetManager")
+                && blocker.contains("reticulate_splines")));
+
+        let some_missing = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            unmatched_anchors: vec!["reticulate_splines".into()],
+            ..base
+        });
+        assert!(some_missing
+            .blockers
+            .iter()
+            .all(|blocker| !blocker.contains("reticulate_splines")));
+        assert!(some_missing
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("1 of 2") && caveat.contains("reticulate_splines")));
+        assert!(some_missing.overall_score > 0.50);
+    }
+
+    #[test]
+    fn negative_evidence_signal_count_counts_retrieval_misses_only() {
+        let item = |scope: &str| NegativeEvidence {
+            query: "task".into(),
+            scope: scope.into(),
+            inspected_sources: Vec::new(),
+            reason: scope.into(),
+            confidence: 0.8,
+            suggested_next_probe: None,
+        };
+        let items = [
+            "exact_references",
+            "runtime",
+            "validation",
+            "history",
+            "boundary",
+            "anchor",
+            "primary_context",
+        ]
+        .map(item);
+        // Absent exact/runtime/validation/history evidence is priced by its own component.
+        assert_eq!(negative_evidence_signal_count(&items), 2);
+    }
+
+    #[test]
+    fn named_anchors_are_code_identifiers_and_unmatched_ones_are_reported() {
+        let task = "fix the null check in FrobnicateWidgetManager::reticulate_splines for ABC-123";
+        assert_eq!(
+            named_anchors(task),
+            vec![
+                "FrobnicateWidgetManager".to_string(),
+                "reticulate_splines".to_string()
+            ]
+        );
+        let selected = vec![relevance_probe(
+            "src/widgets.rs",
+            "impl FrobnicateWidgetManager { fn frobnicate(&self) {} }",
+        )];
+        assert_eq!(
+            unmatched_named_anchors(task, &selected),
+            vec!["reticulate_splines".to_string()]
+        );
+        assert!(unmatched_named_anchors(task, &[]).is_empty());
+        assert!(unmatched_named_anchors("make it faster", &selected).is_empty());
     }
 
     #[test]
