@@ -1,8 +1,11 @@
 #[derive(Parser)]
 #[command(name = "ok", version, about = "Open Kioku code-intelligence platform")]
 struct Cli {
+    /// Print machine-readable JSON instead of text, for every command that supports it.
     #[arg(long, global = true)]
     json: bool,
+    /// Repository root to operate on. A command's own repository argument overrides it when
+    /// that argument is not the default `.`.
     #[arg(long, global = true, default_value = ".")]
     repo: PathBuf,
     #[command(subcommand)]
@@ -11,28 +14,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create ok.toml and the .ok data directory for a repository.
     Init {
+        /// Repository to initialize.
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
+    /// Build or rebuild the local index: symbols, references, graph, tests, and lexical search.
+    #[command(after_help = "Examples:
+  ok index .
+  ok index . --with-scip auto
+  ok index . --mode fast
+  ok index . --mode cross-project --workspace ../workspace")]
     Index {
+        /// Repository to index.
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// SCIP handling: off, consume an existing index, auto (generate when a generator is
+        /// installed), or required (fail without one). Defaults to the ok.toml setting.
         #[arg(long = "with-scip", value_parser = ["off", "consume", "auto", "required"])]
         with_scip: Option<String>,
+        /// Index mode: full, balanced, fast, or cross-project.
         #[arg(long, default_value = "full")]
         mode: String,
+        /// Workspace directory to link already-indexed projects into (cross-project mode).
         #[arg(long, value_name = "WORKSPACE")]
         workspace: Option<PathBuf>,
+        /// Bootstrap from an exported index snapshot before indexing; `auto` uses the
+        /// snapshot under .ok when one is present and falls back to a full index otherwise.
         #[arg(long = "from-snapshot", value_parser = ["auto"])]
         from_snapshot: Option<String>,
     },
+    /// Export, import, or check a portable index snapshot for team and CI reuse.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
     /// Keep the local index current while repository files change.
     Watch {
+        /// Repository to watch.
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
@@ -42,6 +62,7 @@ enum Command {
   ok status --json
   ok status --markdown --write ok-status.md")]
     Status {
+        /// Repository to report on.
         #[arg(default_value = ".")]
         repo: PathBuf,
         /// Render a portable Markdown status snapshot.
@@ -53,20 +74,31 @@ enum Command {
         /// Exit non-zero when readiness checks fail.
         #[arg(long, default_value_t = false)]
         exit_code: bool,
+        /// Carry every quality note and skipped path instead of counts plus a bounded
+        /// sample (the default in every output mode).
+        #[arg(long, default_value_t = false)]
+        full: bool,
     },
+    /// Check index readiness, coverage, configuration, and integrations, with next steps.
     Doctor {
+        /// Repository to check.
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = DoctorFormat::Text)]
         format: DoctorFormat,
     },
+    /// Audit the install, or connect a coding-agent client to this repository's MCP server.
     Setup {
         #[command(subcommand)]
         command: SetupCommand,
     },
+    /// Create a small sample repository to try Open Kioku on.
     Demo {
+        /// Where to create it; defaults to ./open-kioku-demo.
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Replace an existing directory at that path.
         #[arg(long, default_value_t = false)]
         force: bool,
     },
@@ -77,11 +109,16 @@ enum Command {
   ok search \"fn issue_token\" --regex
   ok search issue_token --json")]
     Search {
+        /// Search terms, identifiers, routes, or config keys; a regular expression with --regex.
         query: String,
+        /// Maximum results to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Evidence to search: code (lexical BM25 over chunks and paths) or graph (indexed
+        /// graph-node documents).
         #[arg(long, value_enum, default_value_t = SearchKind::Code)]
         kind: SearchKind,
+        /// Print the per-signal score breakdown behind each result.
         #[arg(long, default_value_t = false)]
         explain_ranking: bool,
         /// Treat the query as a regular expression and return exact line matches
@@ -92,116 +129,186 @@ enum Command {
         /// by precedence.
         #[arg(long, default_value_t = false, conflicts_with_all = ["kind", "semantic", "hybrid"])]
         regex: bool,
+        /// Search the local semantic vector index instead of lexical BM25 (needs `ok semantic index`).
         #[arg(long, default_value_t = false)]
         semantic: bool,
+        /// Merge lexical and semantic candidates, deduplicated by path and re-sorted by combined score.
         #[arg(long, default_value_t = false)]
         hybrid: bool,
     },
+    /// Build, inspect, or remove the optional local semantic vector index.
     Semantic {
         #[command(subcommand)]
         command: SemanticCommand,
     },
+    /// Look up indexed symbols: find by name, definition, definition context, or references.
     Symbol {
         #[command(subcommand)]
         command: SymbolCommand,
     },
+    /// Explain an indexed file or symbol from stored evidence.
     Explain {
         #[command(subcommand)]
         command: ExplainCommand,
     },
+    /// Analyze the blast radius of changing a file, a symbol, or a Git range.
     Impact(ImpactArgs),
+    /// Trace the shortest dependency path between two files or symbols in the persisted graph.
     Path {
+        /// Starting file path or symbol name.
         from: String,
+        /// Target file path or symbol name.
         to: String,
     },
+    /// Rank the test files most relevant to a changed file, with the evidence behind each.
     Tests {
+        /// Repository-relative path of the changed file.
         #[arg(long)]
         changed: PathBuf,
     },
+    /// Assemble a ranked, bounded context pack of files, symbols, tests, and history for a task.
+    #[command(after_help = "Examples:
+  ok context \"add rate limiting to the token endpoint\" --format markdown
+  ok --json context \"add rate limiting to the token endpoint\"")]
     Context {
+        /// What you are about to do, in natural language.
         task: String,
+        /// Output format. Defaults to json; markdown carries the same evidence at a fraction
+        /// of the size and is what an agent should read.
         #[arg(long, value_enum, default_value_t = ContextPackFormat::Json)]
         format: ContextPackFormat,
+        /// Store snippets under .ok and return handles that `ok retrieve-context` expands.
         #[arg(long, default_value_t = false)]
         compressed: bool,
     },
+    /// Expand a handle from `ok context --compressed` into its original snippet.
     RetrieveContext {
+        /// Handle id from a compressed context pack.
         handle: String,
     },
+    /// Produce an evidence-backed pre-edit plan: files to edit, impact, edit boundaries, and tests.
+    #[command(after_help = "Examples:
+  ok plan \"change token expiration\"
+  ok plan \"change token expiration\" --format json > plan.json
+  ok plan \"change token expiration\" --since HEAD~1 --verify-evidence fail")]
     Plan {
+        /// The change to plan, in natural language.
         task: String,
+        /// Output format. Save json to pass to `ok verify --plan`.
         #[arg(long, value_enum, default_value_t = PlanFormat::Text)]
         format: PlanFormat,
+        /// Maximum context results the plan is built from.
         #[arg(long, default_value_t = 12)]
         limit: usize,
+        /// Git revision or range whose changed files and line ranges (git diff --unified=0)
+        /// are added to the planning context.
         #[arg(long, value_name = "REV")]
         since: Option<String>,
+        /// Check that every evidence reference in the plan resolves against the index:
+        /// off, warn (report unresolved references), or fail (exit non-zero on any).
         #[arg(long, value_enum, default_value_t = EvidenceVerifyMode::Off)]
         verify_evidence: EvidenceVerifyMode,
     },
     /// Return a concise evidence-backed decision before starting a multi-file edit.
     Preflight {
+        /// The change to assess, in natural language.
         task: String,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = PreflightFormat::Text)]
         format: PreflightFormat,
+        /// Maximum context results the decision is built from.
         #[arg(long, default_value_t = 12)]
         limit: usize,
+        /// Git revision or range whose changed files are added to the context.
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
     /// Verify changed files against a saved JSON plan boundary.
     VerifyBoundary {
+        /// Saved plan from `ok plan --format json`.
         #[arg(long, value_name = "PLAN_JSON")]
         plan: PathBuf,
+        /// Changed file path; repeat for each file.
         #[arg(long = "changed", required = true, value_name = "PATH")]
         changed: Vec<PathBuf>,
+        /// Evidence reference id supporting the change; repeat for each.
         #[arg(long = "evidence-ref", value_name = "REF")]
         evidence_refs: Vec<String>,
     },
     /// Verify an actual diff against a saved JSON plan.
+    #[command(after_help = "Examples:
+  ok verify --plan plan.json --git
+  ok verify --plan plan.json --since-plan HEAD~1 --check-api-surface
+  ok verify --plan plan.json --diff change.patch --run-commands --write-attestation")]
     Verify {
+        /// Saved plan from `ok plan --format json`.
         #[arg(long, value_name = "PLAN_JSON")]
         plan: PathBuf,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = VerifyReportFormat::Text)]
         format: VerifyReportFormat,
+        /// Unified diff file to verify. Omit to derive the change with --git, --since-plan,
+        /// or --changed.
         #[arg(long, value_name = "UNIFIED_DIFF")]
         diff: Option<PathBuf>,
+        /// Derive the diff from the working tree with git.
         #[arg(long, default_value_t = false)]
         git: bool,
+        /// Git revision or range to diff (git diff --unified=0) for the changed files.
         #[arg(long = "since-plan", value_name = "REV")]
         since_plan: Option<String>,
+        /// Changed file path, when no diff is given; repeat for each file.
         #[arg(long = "changed", value_name = "PATH")]
         changed: Vec<PathBuf>,
+        /// Evidence reference id supporting the change; repeat for each.
         #[arg(long = "evidence-ref", value_name = "REF")]
         evidence_refs: Vec<String>,
+        /// Reject evidence references that are not in the saved plan.
         #[arg(long, default_value_t = false)]
         traceability_strict: bool,
+        /// Flag public API additions, removals, and signature changes as warnings.
         #[arg(long = "check-api-surface", default_value_t = false)]
         check_api_surface: bool,
+        /// Flag dependency-graph changes and forbidden dependency additions under the
+        /// architecture policy (a configured policy enables this anyway).
         #[arg(long = "check-deps", default_value_t = false)]
         check_deps: bool,
+        /// Execute the plan's validation commands locally and record their exit codes.
         #[arg(long, default_value_t = false)]
         run_commands: bool,
+        /// With --run-commands, persist timestamped pass/fail attestation records under
+        /// .ok/contracts/validation.
         #[arg(long = "write-attestation", default_value_t = false)]
         write_attestation: bool,
     },
+    /// Create, verify, explain, show, or export a versioned change contract.
     Contract {
         #[command(subcommand)]
         command: ContractCommand,
     },
+    /// Index a repository and report indexing and search timings, with optional quality cases.
     Bench(BenchArgs),
+    /// Run the frozen workflow benchmark corpus (context, tests, impact, verification).
     WorkflowBench(WorkflowBenchArgs),
+    /// Run the frozen retrieval benchmark corpus against the checked-in quality baseline.
     RetrievalBench(RetrievalBenchArgs),
+    /// Score relationship-resolution observations against a versioned conformance corpus.
     RelationshipBench(RelationshipBenchArgs),
+    /// Run the contract benchmark corpus: generated boundaries and verification verdicts.
     ContractBench(ContractBenchArgs),
+    /// Score search, context, and test selection against golden cases for a repository.
     Eval(EvalArgs),
+    /// Index a repository and produce a shareable proof report of plan and verification quality.
     Prove(ProveArgs),
+    /// List, add, link, or explain architecture decision records stored in the repository.
     Adr {
         #[command(subcommand)]
         command: AdrCommand,
     },
+    /// Render the local trust-workflow UI (plan, evidence, verification) as HTML, Markdown, or JSON.
     Ui(UiArgs),
 
+    /// Detect components and boundaries, check the architecture policy, and report drift.
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommand,
@@ -211,22 +318,27 @@ enum Command {
         #[command(subcommand)]
         command: HistoryCommand,
     },
+    /// Plan a patch from stored evidence; nothing is written.
     Patch {
         #[command(subcommand)]
         command: PatchCommand,
     },
+    /// Record and search durable repository-scoped facts in the local memory store.
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Print a client's MCP configuration, or serve the read-only stdio JSON-RPC MCP server.
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Check or set up the SCIP generators that provide exact references.
     Scip {
         #[command(subcommand)]
         command: ScipCommand,
     },
+    /// Print the evidence-graph schema or run a read-only graph query.
     Graph {
         #[command(subcommand)]
         command: GraphCommand,
@@ -235,19 +347,27 @@ enum Command {
 
 #[derive(Subcommand)]
 enum GraphCommand {
+    /// Print the versioned evidence-graph schema: node types, edge types, properties, capabilities.
     Schema {
+        /// Output format: json or markdown.
         #[arg(long, default_value = "json")]
         format: String,
     },
+    /// Run a read-only query in the constrained Cypher-like DSL.
     Query {
+        /// Query text, for example `MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 1`.
         #[arg(long)]
         dsl: String,
+        /// Maximum rows to return.
         #[arg(long, default_value = "50")]
         limit: usize,
+        /// Maximum traversal depth for path patterns.
         #[arg(long, default_value = "3")]
         max_depth: usize,
+        /// Query timeout in milliseconds.
         #[arg(long, default_value = "5000")]
         timeout_ms: u64,
+        /// Output format: json or text.
         #[arg(long, default_value = "json")]
         format: String,
     },
@@ -255,11 +375,15 @@ enum GraphCommand {
 
 #[derive(Subcommand)]
 enum SnapshotCommand {
+    /// Export the current index as a compressed snapshot plus metadata under .ok.
     Export {
+        /// Compression trade-off: best (smallest artifact) or fast.
         #[arg(long, value_enum, default_value_t = SnapshotQuality::Best)]
         quality: SnapshotQuality,
     },
+    /// Import the snapshot under .ok, replacing the current index and rebuilding search.
     Import,
+    /// Validate the snapshot artifact and metadata under .ok without importing them.
     Doctor,
 }
 
@@ -458,19 +582,28 @@ impl From<ConfidenceArg> for Confidence {
 
 #[derive(Subcommand)]
 enum MemoryCommand {
+    /// Append a durable fact to the repository memory store.
     Remember {
+        /// The fact to record.
         text: String,
+        /// Where the fact came from.
         #[arg(long, default_value = "cli")]
         source: String,
+        /// Confidence to record with the fact.
         #[arg(long, value_enum, default_value_t = ConfidenceArg::Medium)]
         confidence: ConfidenceArg,
     },
+    /// Search stored facts by keyword, entity, or text.
     Search {
+        /// Search text.
         query: String,
+        /// Maximum facts to return.
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// List the most recently stored facts.
     Recent {
+        /// Maximum facts to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -484,27 +617,36 @@ enum SearchKind {
 
 #[derive(Subcommand)]
 enum SemanticCommand {
+    /// Report the semantic index state, provider, model, vector counts, and rebuild requirements.
     Status {
+        /// Repository whose semantic index to report on.
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
+    /// Build or update the semantic vector index from the code index.
     Index {
+        /// Repository to embed.
         #[arg(default_value = ".")]
         repo: PathBuf,
         /// Explicitly permit downloading a configured local neural model into .ok/models.
         #[arg(long, default_value_t = false)]
         allow_model_download: bool,
     },
+    /// Rebuild the semantic vector index from scratch.
     Rebuild {
+        /// Repository to embed.
         #[arg(default_value = ".")]
         repo: PathBuf,
         /// Explicitly permit downloading a configured local neural model into .ok/models.
         #[arg(long, default_value_t = false)]
         allow_model_download: bool,
     },
+    /// Remove the semantic vector index.
     Clean {
+        /// Repository whose semantic index to remove.
         #[arg(default_value = ".")]
         repo: PathBuf,
+        /// Also remove the embedding cache and downloaded model files.
         #[arg(long, default_value_t = false)]
         include_cache: bool,
     },
@@ -514,6 +656,7 @@ enum SemanticCommand {
 enum SetupCommand {
     /// Audit install readiness across index, security, MCP, and client surfaces.
     Audit {
+        /// Repository to audit.
         #[arg(default_value = ".")]
         repo: PathBuf,
         /// Render a portable Markdown setup report.
@@ -859,17 +1002,40 @@ enum DoctorFormat {
 
 #[derive(Subcommand)]
 enum SymbolCommand {
-    Find { name: String },
-    Definition { name: String },
+    /// Search indexed symbols by name substring.
+    Find {
+        /// Name or name fragment to match.
+        name: String,
+    },
+    /// Print the definition record for a symbol.
+    Definition {
+        /// Exact or partial symbol name.
+        name: String,
+    },
     /// Print the definition body and surrounding indexed lines for a symbol.
-    Context { name: String },
-    Refs { name: String },
+    Context {
+        /// Exact or partial symbol name.
+        name: String,
+    },
+    /// List indexed references to a symbol.
+    Refs {
+        /// Exact or partial symbol name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum ExplainCommand {
-    File { path: PathBuf },
-    Symbol { name: String },
+    /// Explain what an indexed file defines, imports, and is depended on by.
+    File {
+        /// Repository-relative file path.
+        path: PathBuf,
+    },
+    /// Explain a symbol from its definition, references, and callers.
+    Symbol {
+        /// Exact or partial symbol name.
+        name: String,
+    },
 }
 
 #[derive(Args)]
@@ -879,27 +1045,40 @@ enum ExplainCommand {
   ok impact --symbol issue_token --json
   ok impact --since HEAD~1")]
 struct ImpactArgs {
+    /// Repository-relative file to analyze.
     #[arg(long)]
     file: Option<PathBuf>,
+    /// Symbol name to analyze.
     #[arg(long)]
     symbol: Option<String>,
+    /// Git revision or range whose changed files are analyzed.
     #[arg(long, value_name = "REV")]
     since: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum ArchitectureCommand {
+    /// Architecture trust report: components, dependency edges, endpoints, hotspots, and caveats.
     Overview,
+    /// The same trust report, read for its dependency clusters.
     Clusters,
+    /// The same trust report, read for its high-change and high-risk files.
     Hotspots,
+    /// The same trust report, read for departures from the detected components.
     Drift,
+    /// Detect components and boundaries from the indexed dependency graph.
     Detect,
+    /// The same trust report, read for component boundaries and the edges crossing them.
     Boundaries,
     /// Components, configured policy, and the evaluated policy check in one report.
     Summary,
+    /// Architecture-policy violations with the evidence behind each; needs a configured policy.
     Violations,
+    /// Run the architecture-policy benchmark corpus.
     Bench(ArchitectureBenchArgs),
+    /// Report cross-project links across a linked workspace.
     Fleet {
+        /// Workspace directory created by `ok index --mode cross-project --workspace`.
         #[arg(long, value_name = "WORKSPACE")]
         workspace: PathBuf,
     },
@@ -912,52 +1091,78 @@ enum ArchitectureCommand {
 
 #[derive(Subcommand)]
 enum AdrCommand {
+    /// List the stored architecture decision records.
     List {
+        /// Output format.
         #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
         format: AdrFormat,
     },
+    /// Record a new decision with the components, boundaries, files, routes, contracts, and
+    /// validation rules it governs.
     Add {
+        /// Decision title.
         title: String,
+        /// Decision status.
         #[arg(long, default_value = "accepted")]
         status: String,
+        /// Decision text.
         #[arg(long)]
         decision: Option<String>,
+        /// Governed component; repeat for each.
         #[arg(long = "component")]
         components: Vec<String>,
+        /// Governed boundary; repeat for each.
         #[arg(long = "boundary")]
         boundaries: Vec<String>,
+        /// Governed file; repeat for each.
         #[arg(long = "file")]
         files: Vec<PathBuf>,
+        /// Governed route; repeat for each.
         #[arg(long = "route")]
         routes: Vec<String>,
+        /// Governed contract; repeat for each.
         #[arg(long = "contract")]
         contracts: Vec<String>,
+        /// Validation rule the decision imposes; repeat for each.
         #[arg(long = "validation-rule")]
         validation_rules: Vec<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
         format: AdrFormat,
     },
+    /// Attach governance facts to an existing decision record.
     Link {
+        /// Decision record to link; defaults to the most recent.
         #[arg(value_name = "ADR_ID")]
         id: Option<String>,
+        /// Governed component; repeat for each.
         #[arg(long = "component")]
         components: Vec<String>,
+        /// Governed boundary; repeat for each.
         #[arg(long = "boundary")]
         boundaries: Vec<String>,
+        /// Governed file; repeat for each.
         #[arg(long = "file")]
         files: Vec<PathBuf>,
+        /// Governed route; repeat for each.
         #[arg(long = "route")]
         routes: Vec<String>,
+        /// Governed contract; repeat for each.
         #[arg(long = "contract")]
         contracts: Vec<String>,
+        /// Validation rule the decision imposes; repeat for each.
         #[arg(long = "validation-rule")]
         validation_rules: Vec<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
         format: AdrFormat,
     },
+    /// Show which decision records govern a task.
     Explain {
+        /// Task text to match against decisions and their governance facts.
         #[arg(long)]
         task: String,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = AdrFormat::Text)]
         format: AdrFormat,
     },
@@ -965,22 +1170,32 @@ enum AdrCommand {
 
 #[derive(Subcommand)]
 enum ArchitecturePolicyCommand {
+    /// Validate the repository's architecture policy file.
     Validate {
+        /// Policy file to validate instead of the repository's own.
         #[arg(long, value_name = "POLICY_TOML")]
         path: Option<PathBuf>,
+        /// Output format; defaults to text, or json under --json.
         #[arg(long, value_enum)]
         format: Option<ArchitecturePolicyFormat>,
     },
+    /// Print the loaded architecture policy.
     Print,
+    /// Evaluate the policy against the indexed dependency graph.
     Check {
+        /// Output format; defaults to text, or json under --json.
         #[arg(long, value_enum)]
         format: Option<ArchitecturePolicyFormat>,
     },
+    /// Explain which policy components and rules apply to a file or symbol.
     Explain {
+        /// Repository-relative file to explain.
         #[arg(long, conflicts_with = "symbol")]
         file: Option<PathBuf>,
+        /// Symbol name to explain.
         #[arg(long, conflicts_with = "file")]
         symbol: Option<String>,
+        /// Output format; defaults to text, or json under --json.
         #[arg(long, value_enum)]
         format: Option<ArchitecturePolicyFormat>,
     },
@@ -990,70 +1205,102 @@ enum ArchitecturePolicyCommand {
 enum ContractCommand {
     /// Create and optionally store a change contract from a task or saved plan.
     Create {
+        /// The change to contract, in natural language; omit when --plan or --plan-json
+        /// supplies a plan.
         #[arg(value_name = "TASK")]
         task: Option<String>,
+        /// Saved plan (from `ok plan --format json`) to build the contract from.
         #[arg(long, value_name = "PLAN_JSON")]
         plan: Option<PathBuf>,
+        /// Inline JSON plan to build the contract from.
         #[arg(long = "plan-json", value_name = "JSON")]
         plan_json: Option<String>,
+        /// Maximum context results the plan is built from.
         #[arg(long, default_value_t = 12)]
         limit: usize,
+        /// Return the contract without writing it under .ok/contracts.
         #[arg(long = "no-store", default_value_t = false)]
         no_store: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = ContractFormat::Json)]
         format: ContractFormat,
     },
     /// Verify changes against a stored or inline change contract.
     Verify {
+        /// Stored contract id under .ok/contracts; verification records are appended to it.
         #[arg(long, value_name = "CONTRACT_ID")]
         id: Option<String>,
+        /// Contract JSON file to verify against.
         #[arg(long, value_name = "CONTRACT_JSON")]
         contract: Option<PathBuf>,
+        /// Inline contract JSON to verify against.
         #[arg(long = "contract-json", value_name = "JSON")]
         contract_json: Option<String>,
+        /// Unified diff file to verify. Omit to derive the change with --git, --since-plan,
+        /// or --changed.
         #[arg(long, value_name = "UNIFIED_DIFF")]
         diff: Option<PathBuf>,
+        /// Derive the diff from the working tree with git.
         #[arg(long, default_value_t = false)]
         git: bool,
+        /// Git revision or range to diff (git diff --unified=0) for the changed files.
         #[arg(long = "since-plan", value_name = "REV")]
         since_plan: Option<String>,
+        /// Changed file path, when no diff is given; repeat for each file.
         #[arg(long = "changed", value_name = "PATH")]
         changed: Vec<PathBuf>,
+        /// Evidence reference id supporting the change; repeat for each.
         #[arg(long = "evidence-ref", value_name = "REF")]
         evidence_refs: Vec<String>,
+        /// Reject evidence references that are not in the contract.
         #[arg(long, default_value_t = false)]
         traceability_strict: bool,
+        /// Flag public API additions, removals, and signature changes as warnings.
         #[arg(long = "check-api-surface", default_value_t = false)]
         check_api_surface: bool,
+        /// Flag dependency-graph changes and forbidden dependency additions under the
+        /// architecture policy (a configured policy enables this anyway).
         #[arg(long = "check-deps", default_value_t = false)]
         check_deps: bool,
+        /// Execute the contract's validation commands locally and record their exit codes.
         #[arg(long, default_value_t = false)]
         run_commands: bool,
+        /// With --run-commands and a stored contract id, persist timestamped pass/fail
+        /// attestation records under .ok/contracts/validation.
         #[arg(long = "write-attestation", default_value_t = false)]
         write_attestation: bool,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = ContractFormat::Json)]
         format: ContractFormat,
     },
     /// Explain the constraints, evidence, and traceability in a contract.
     Explain {
+        /// Stored contract id under .ok/contracts.
         #[arg(long, value_name = "CONTRACT_ID")]
         id: Option<String>,
+        /// Contract JSON file to explain.
         #[arg(long, value_name = "CONTRACT_JSON")]
         contract: Option<PathBuf>,
+        /// Inline contract JSON to explain.
         #[arg(long = "contract-json", value_name = "JSON")]
         contract_json: Option<String>,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = ContractFormat::Markdown)]
         format: ContractFormat,
     },
     /// Show a stored contract by id.
     Show {
+        /// Stored contract id under .ok/contracts.
         id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = ContractFormat::Json)]
         format: ContractFormat,
     },
     /// Export a stored contract as JSON, Markdown, or TOON.
     Export {
+        /// Stored contract id under .ok/contracts.
         id: String,
+        /// Output format.
         #[arg(long, value_enum, default_value_t = ContractFormat::Json)]
         format: ContractFormat,
     },
@@ -1086,13 +1333,16 @@ enum HistoryCommand {
         /// Symbol name, qualified name, or symbol ID to match. Repeat for multiple symbols.
         #[arg(long = "symbol")]
         symbols: Vec<String>,
+        /// Maximum matches to return.
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
     /// Show materialized churn and hotspot stats for a file, module, or symbol.
     Churn {
+        /// Repository-relative file path.
         #[arg(long, conflicts_with_all = ["module", "symbol"])]
         path: Option<PathBuf>,
+        /// Repository-relative module directory.
         #[arg(long, conflicts_with_all = ["path", "symbol"])]
         module: Option<PathBuf>,
         /// Exact symbol name, qualified name, or symbol ID.
@@ -1101,11 +1351,13 @@ enum HistoryCommand {
     },
     /// Resolve path ownership from CODEOWNERS, local git history, and repo memory.
     Ownership {
+        /// Repository-relative path.
         #[arg(long)]
         path: PathBuf,
     },
     /// Suggest reviewers from stored review evidence, ownership, and author history.
     Reviewers {
+        /// Repository-relative path.
         #[arg(long)]
         path: PathBuf,
     },
@@ -1115,12 +1367,15 @@ enum HistoryCommand {
     SimilarBench(SimilarHistoryBenchArgs),
     /// Run the unified public history API benchmark corpus.
     Bench(HistoryBenchArgs),
+    /// Show the typed Git provenance records for a path or symbol.
     Provenance {
+        /// Repository-relative path.
         #[arg(long, required_unless_present = "symbol", conflicts_with = "symbol")]
         path: Option<PathBuf>,
         /// Exact symbol name, qualified name, or symbol ID.
         #[arg(long, required_unless_present = "path", conflicts_with = "path")]
         symbol: Option<String>,
+        /// Maximum records to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
@@ -1128,29 +1383,45 @@ enum HistoryCommand {
 
 #[derive(Subcommand)]
 enum PatchCommand {
+    /// Plan a patch for a task from stored evidence; nothing is written.
     Plan {
+        /// The change to plan, in natural language.
         task: String,
     },
 }
 
 #[derive(Subcommand)]
 enum McpCommand {
+    /// Print the MCP server entry for a client; `ok setup agent --apply` writes it for you.
     Install {
+        /// Client to print configuration for.
         client: McpClient,
+        /// Repository the server entry will serve.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Serve the read-only stdio JSON-RPC MCP server for a repository.
+    #[command(after_help = "Examples:
+  ok mcp serve --repo .
+  ok mcp serve --repo . --hide-experimental")]
     Serve {
+        /// Repository to serve.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Refuse tool calls that write; pass --read-only=false to allow them.
         #[arg(long, default_value_t = true)]
         read_only: bool,
+        /// Require approval before any command executes; pass --approval-required=false
+        /// to waive it.
         #[arg(long, default_value_t = true)]
         approval_required: bool,
+        /// Command permitted to run during verification; repeat for each.
         #[arg(long = "allow-command")]
         allow_command: Vec<String>,
+        /// Deny network access, failing closed; pass --deny-network=false to allow it.
         #[arg(long, default_value_t = true)]
         deny_network: bool,
+        /// Omit experimental tools from tools/list.
         #[arg(long, default_value_t = false)]
         hide_experimental: bool,
     },
@@ -1158,11 +1429,15 @@ enum McpCommand {
 
 #[derive(Subcommand)]
 enum ScipCommand {
+    /// Report which SCIP generators are installed and what the index would consume.
     Doctor {
+        /// Repository to check.
         #[arg(default_value = ".")]
         repo: PathBuf,
     },
+    /// Show how to install the SCIP generators this repository's languages need; installs nothing.
     Setup {
+        /// Repository to check.
         #[arg(default_value = ".")]
         repo: PathBuf,
     },

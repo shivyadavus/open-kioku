@@ -1,7 +1,7 @@
 use open_kioku_core::{
     identity, AnalysisFact, CodeChunk, Confidence, EvidenceSourceType, FileId, GraphEdgeType,
-    GraphNodeType, ImportResolution, ResolutionStatus, StringInterner, Symbol, SymbolId,
-    SymbolKind,
+    GraphNodeType, ImportResolution, QualityNote, QualityNoteKind, ResolutionStatus,
+    StringInterner, Symbol, SymbolId, SymbolKind,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct SymbolRegistry {
 #[derive(Debug, Clone, Default)]
 pub struct RegistryReport {
     pub analysis_facts: Vec<AnalysisFact>,
-    pub quality_notes: Vec<String>,
+    pub quality_notes: Vec<QualityNote>,
     pub heuristic_hints: Vec<HeuristicRelationshipHint>,
 }
 
@@ -338,9 +338,12 @@ pub fn resolve_symbol_edges(
                     facts.push(fact);
                 } else if unresolved_count.load(Ordering::Relaxed) < MAX_UNRESOLVED_NOTES {
                     unresolved_count.fetch_add(1, Ordering::Relaxed);
-                    notes.push(format!(
-                        "symbol registry unresolved `{}` in chunk {}",
-                        token_use.token, chunk.id
+                    notes.push(QualityNote::new(
+                        QualityNoteKind::SymbolRegistryUnresolved,
+                        format!(
+                            "symbol registry unresolved `{}` in chunk {}",
+                            token_use.token, chunk.id
+                        ),
                     ));
                 }
             }
@@ -450,11 +453,14 @@ fn fact_for_resolution(
     })
 }
 
-fn quality_note(token: &str, resolution: &Resolution) -> Option<String> {
+fn quality_note(token: &str, resolution: &Resolution) -> Option<QualityNote> {
     resolution.ambiguity_reason.as_ref().map(|reason| {
-        format!(
-            "symbol registry caveat for `{token}` via {}: {reason}",
-            resolution.strategy
+        QualityNote::new(
+            QualityNoteKind::SymbolRegistryCaveat,
+            format!(
+                "symbol registry caveat for `{token}` via {}: {reason}",
+                resolution.strategy
+            ),
         )
     })
 }
@@ -783,14 +789,14 @@ mod tests {
             &[],
             false,
         );
+        assert!(report.quality_notes.iter().any(|note| {
+            note.kind == QualityNoteKind::SymbolRegistryCaveat
+                && note.message.contains("common name `render`")
+        }));
         assert!(report
             .quality_notes
             .iter()
-            .any(|note| note.contains("common name `render`")));
-        assert!(report
-            .quality_notes
-            .iter()
-            .any(|note| note.contains("2 candidates matched")));
+            .any(|note| note.message.contains("2 candidates matched")));
     }
 
     #[test]
@@ -809,10 +815,10 @@ mod tests {
             false,
         );
         assert!(report.analysis_facts.is_empty());
-        assert!(report
-            .quality_notes
-            .iter()
-            .any(|note| note.contains("missingCall")));
+        assert!(report.quality_notes.iter().any(|note| {
+            note.kind == QualityNoteKind::SymbolRegistryUnresolved
+                && note.message.contains("missingCall")
+        }));
     }
 
     #[test]

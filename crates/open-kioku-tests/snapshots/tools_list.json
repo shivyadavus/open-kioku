@@ -15,10 +15,19 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files discovered versus indexed per language, each discovered file's omission attributed to a skip reason, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). Use first to check whether the local index exists, how much of the repository it covers, which languages it holds, and whether the semantic index is ready, before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
+        "description": "Retrieve the current repository index metadata, including file count, symbol count, chunk count, the exact timestamp when the repository was last indexed, the languages the index holds, index coverage (source files considered under the current policy versus indexed per language, each omission attributed to a skip reason, policy exclusions such as hidden or ignored files counted beside the ratio with their top directories and governing setting, plus counts of directories pruned by name and walk errors the ratio cannot see; null when the index predates coverage recording), and local semantic index lifecycle health (state, ANN activity, and rebuild requirements). `quality.quality_notes` and `quality.skipped_paths` are `{total, by_kind|by_reason, sample}` summaries by default. Use first to check whether the local index exists, how much of the repository it covers, which languages it holds, and whether the semantic index is ready, before calling search, symbol, or graph tools. This is read-only and only inspects repository metadata.",
         "experimental": false,
         "inputSchema": {
-          "properties": {},
+          "properties": {
+            "detail": {
+              "description": "How much of the manifest's per-item lists to return. 'summary' (default) replaces quality.quality_notes with {total, by_kind, sample} and quality.skipped_paths with {total, by_reason, sample}, each sample at most 20 entries drawn across every kind or reason; 'full' returns every note and skipped path as the manifest stores them. An unknown value is a tool error.",
+              "enum": [
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "maturity": "stable",

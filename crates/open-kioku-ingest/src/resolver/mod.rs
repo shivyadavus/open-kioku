@@ -1,6 +1,7 @@
 use open_kioku_core::{
     identity, AnalysisFact, Confidence, EvidenceSourceType, File, FileId, GraphEdgeType,
-    GraphNodeType, Import, ImportResolution, Language, ResolutionStatus, Symbol, SymbolId,
+    GraphNodeType, Import, ImportResolution, Language, QualityNote, QualityNoteKind,
+    ResolutionStatus, Symbol, SymbolId,
 };
 use open_kioku_errors::{OkError, Result};
 use serde_json::Value;
@@ -16,7 +17,7 @@ const MAX_ALIAS_ENTRIES: usize = 512;
 pub struct ResolverReport {
     pub resolutions: Vec<ImportResolution>,
     pub analysis_facts: Vec<AnalysisFact>,
-    pub quality_notes: Vec<String>,
+    pub quality_notes: Vec<QualityNote>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +31,7 @@ struct ManifestIndex {
     ts_configs: Vec<TsConfig>,
     packages: HashSet<String>,
     go_modules: Vec<String>,
-    quality_notes: Vec<String>,
+    quality_notes: Vec<QualityNote>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,11 +77,14 @@ pub fn resolve_imports(
         };
         let resolution = resolve_one(source_file, import, &file_index, &manifests);
         if !resolution.caveats.is_empty() {
-            report.quality_notes.push(format!(
-                "import resolver caveat in {} for `{}`: {}",
-                source_file.path.display(),
-                import.imported,
-                resolution.caveats.join("; ")
+            report.quality_notes.push(QualityNote::new(
+                QualityNoteKind::ImportResolverCaveat,
+                format!(
+                    "import resolver caveat in {} for `{}`: {}",
+                    source_file.path.display(),
+                    import.imported,
+                    resolution.caveats.join("; ")
+                ),
             ));
         }
         if let Some(fact) = analysis_fact_for_resolution(source_file, &resolution, &file_index) {
@@ -405,8 +409,11 @@ impl ManifestIndex {
             };
             if is_manifest_name(name) {
                 if config_count >= MAX_CONFIGS {
-                    index.quality_notes.push(format!(
-                        "import resolver config cap hit at {MAX_CONFIGS} manifest/config files"
+                    index.quality_notes.push(QualityNote::new(
+                        QualityNoteKind::ImportResolverCap,
+                        format!(
+                            "import resolver config cap hit at {MAX_CONFIGS} manifest/config files"
+                        ),
                     ));
                     break;
                 }
@@ -434,8 +441,9 @@ impl ManifestIndex {
             }
             "tsconfig.json" | "jsconfig.json" => {
                 if *alias_count >= MAX_ALIAS_ENTRIES {
-                    self.quality_notes.push(format!(
-                        "import resolver alias cap hit at {MAX_ALIAS_ENTRIES} entries"
+                    self.quality_notes.push(QualityNote::new(
+                        QualityNoteKind::ImportResolverCap,
+                        format!("import resolver alias cap hit at {MAX_ALIAS_ENTRIES} entries"),
                     ));
                     return;
                 }
@@ -443,8 +451,9 @@ impl ManifestIndex {
                 {
                     *alias_count += config.aliases.len();
                     if *alias_count > MAX_ALIAS_ENTRIES {
-                        self.quality_notes.push(format!(
-                            "import resolver alias cap hit at {MAX_ALIAS_ENTRIES} entries"
+                        self.quality_notes.push(QualityNote::new(
+                            QualityNoteKind::ImportResolverCap,
+                            format!("import resolver alias cap hit at {MAX_ALIAS_ENTRIES} entries"),
                         ));
                     } else {
                         self.ts_configs.push(config);
@@ -1017,7 +1026,8 @@ mod tests {
         assert!(report
             .quality_notes
             .iter()
-            .any(|note| note.contains("config cap hit")));
+            .any(|note| note.kind == QualityNoteKind::ImportResolverCap
+                && note.message.contains("config cap hit")));
     }
 
     #[test]

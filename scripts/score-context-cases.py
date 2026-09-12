@@ -192,31 +192,53 @@ def index_coverage(ok, repo):
 
 PROGRAMMING_LANGUAGES = ("rust", "java", "type_script", "java_script", "python", "go", "sql")
 
+# Skips a policy chose (`SkipReason::is_policy` in open-kioku-core). They are reported
+# beside the ratio and left out of its denominator, as `ok index` and `ok doctor` do.
+POLICY_SKIP_REASONS = ("ignored", "denied", "hidden", "generated", "vendor", "fast_mode",
+                       "secret_policy", "symlink_policy")
+
+
+def considered(entry):
+    """Discovered files minus policy exclusions: the coverage denominator."""
+    skipped = entry.get("skipped", {})
+    excluded = sum(n for reason, n in skipped.items() if reason in POLICY_SKIP_REASONS)
+    return entry.get("discovered", 0) - excluded, excluded
+
 
 def coverage_line(coverage, error=None):
-    """`921 of 922 programming-language files indexed (99.9%); 1,417 of 1,461 recognised files indexed (97.0%) overall; skipped: ...`
+    """`921 of 922 programming-language files indexed (99.9%); 1,417 of 1,461 recognised files indexed (97.0%) overall; 40 excluded by policy (40 hidden); skipped: ...`
 
     The programming-language ratio comes first because that is the one `ok doctor`
-    judges; config and prose files are reported in the overall figure beside it.
+    judges; config and prose files are reported in the overall figure beside it. Both
+    denominators are the files the index would consider under the current policy, the
+    same definition `ok index` prints (docs/indexing-pipeline.md, "Coverage").
     """
     if error:
         return f"status unavailable ({error})"
     if not coverage or not coverage.get("discovered"):
         return "not recorded"
-    discovered, indexed = coverage["discovered"], coverage["indexed"]
-    overall = f"{indexed:,} of {discovered:,} recognised files indexed ({100.0 * indexed / discovered:.1f}%)"
+    indexed = coverage["indexed"]
+    all_considered, excluded = considered(coverage)
+    if not all_considered:
+        return f"no source files considered under the current policy; {excluded:,} excluded by policy"
+    overall = f"{indexed:,} of {all_considered:,} recognised files indexed ({100.0 * indexed / all_considered:.1f}%)"
     by_language = coverage.get("by_language", {})
     source = [v for k, v in by_language.items() if k in PROGRAMMING_LANGUAGES]
-    src_discovered = sum(v.get("discovered", 0) for v in source)
+    src_considered = sum(considered(v)[0] for v in source)
     src_indexed = sum(v.get("indexed", 0) for v in source)
-    if src_discovered:
-        line = (f"{src_indexed:,} of {src_discovered:,} programming-language files indexed "
-                f"({100.0 * src_indexed / src_discovered:.1f}%); {overall} overall")
+    if src_considered:
+        line = (f"{src_indexed:,} of {src_considered:,} programming-language files indexed "
+                f"({100.0 * src_indexed / src_considered:.1f}%); {overall} overall")
     else:
-        line = f"no programming-language files discovered; {overall}"
+        line = f"no programming-language files considered; {overall}"
     skipped = sorted(coverage.get("skipped", {}).items(), key=lambda kv: (-kv[1], kv[0]))
-    if skipped:
-        line += "; skipped: " + ", ".join(f"{n:,} {reason.replace('_', '-')}" for reason, n in skipped)
+    policy = [(reason, n) for reason, n in skipped if reason in POLICY_SKIP_REASONS]
+    judged = [(reason, n) for reason, n in skipped if reason not in POLICY_SKIP_REASONS]
+    if policy:
+        line += f"; {excluded:,} excluded by policy (" + ", ".join(
+            f"{n:,} {reason.replace('_', '-')}" for reason, n in policy) + ")"
+    if judged:
+        line += "; skipped: " + ", ".join(f"{n:,} {reason.replace('_', '-')}" for reason, n in judged)
     if coverage.get("pruned_dirs"):
         line += f"; {coverage['pruned_dirs']:,} directories pruned by name"
     if coverage.get("walk_errors"):
