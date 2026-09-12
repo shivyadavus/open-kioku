@@ -1,3 +1,4 @@
+# Short cut (about 12 seconds, plan boundary -> two edits -> verify fails): demo-verify.tape
 # Renders assets/demo.gif with VHS (https://github.com/charmbracelet/vhs):
 #
 #   vhs demo.tape
