@@ -5,6 +5,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- `ok mcp serve` and every CLI read command (`ok status`, `ok doctor`, `ok search`, `ok context`, `ok impact`, `ok plan`, `ok retrieve-context`, `ok memory search|recent`) no longer create `.ok/index.sqlite`, `.ok/context.sqlite` or `.ok/memory.sqlite` on a repository that has never been indexed; `SqliteStore::open_existing`/`open_repo_index`, `ContextHandleStore::open_repo_existing` and `RepoMemoryStore::open_repo_existing` are the non-creating opens, and `SqliteStore::open` remains the writers'. `repo_status` and `ok --json status` return `{indexed: false, index_path, message, next_step}` for such a repository; the indexed answer gains `indexed: true`; every other tool call and read command fails with the same message, which names `ok index <repo>`. `initialize` and `tools/list` still answer. A database without a manifest is reported as unindexed; the pre-4.0 "rebuild" message is unchanged for a real legacy index. An index built while the server runs is served from the next request.
+- `ok setup agent --apply` inspects the client's `open-kioku` entry before indexing: an entry that launches `ok mcp serve` for this repository with at most `--repo`, `--read-only` and `--hide-experimental` is kept unchanged (`[kept] config … existing entry preserved`); any other entry, including one passing `--deny-network=false`, `--approval-required=false` or `--allow-command`, is refused before anything is indexed or written, naming `mcpServers.open-kioku` and the compatible value. `--check` reports `[mismatch]` for a conflicting entry or a foreign guidance file and no longer recommends `--apply` in that state.
+- Markdown, text and TOON context packs render the file-limit budget as `no token ceiling; file limit N` instead of the `max_tokens` sentinel; `ContextBudget::has_token_ceiling` is the check, and the JSON field is unchanged.
+- `impact_analysis` on a path the index does not hold reports `risk_report.level: "unknown"` and names the path in `risk_report.reasons` and its evidence message; `search_code` rejects a blank `query`; `dependency_path` rejects a `from` or `to` that resolves to no indexed file, symbol or graph node; `retrieve_context` rejects an unknown handle. `ok impact`, `ok search`, `ok path` and `ok retrieve-context` apply the same checks. The `{"value": …}` wrapper is unchanged.
+- `ok init` and `ok setup agent --apply` write `ok.toml` with the `[ranking]` f32 weights as their shortest decimal (`graph_proximity = 0.35`; the weights now serialize that way in every output), `[runtime]` reduced to `enabled = false` with the provider fields as comments, and a comment documenting `resolution_mode`'s `legacy`, `shadow` and `v2`. The loader reads the file back as the defaults.
+
 ## [4.0.0] — 2026-09-11
 
 Two things need doing on upgrade, both detailed first below: **run `ok index` to rebuild every existing index**, and **reconfigure any agent that names an MCP tool by one of the retired names** (`ok setup agent --apply` rewrites its own guidance for you).

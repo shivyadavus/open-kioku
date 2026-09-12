@@ -45,13 +45,14 @@ fn setup_agent(args: SetupAgentArgs, cli_json: bool, global_repo: &Path) -> anyh
     if args.check {
         let report = check_agent_setup(client, &repo)?;
         let ready = report.ready;
+        let next_step = report.next_step.clone();
         print_agent_setup_report(&report, cli_json)?;
         if !ready {
+            // The report already worked out whether `--apply` would succeed on this state
+            // or what has to change first; repeat that rather than a fixed command.
             anyhow::bail!(
-                "Open Kioku is not ready for {}; run `ok setup agent {} --repo {} --apply`",
-                client.as_str(),
-                client.as_str(),
-                repo.display()
+                "Open Kioku is not ready for {}: {next_step}",
+                client.as_str()
             );
         }
         return Ok(());
@@ -114,18 +115,63 @@ fn apply_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
     let expected_server = expected_mcp_server(repo);
     let state_path = onboarding_state_path(repo, client);
 
-    // Index before touching agent configuration. A failed index must never leave
+    // Decide what will happen to the client configuration and the guidance file before
+    // indexing, so a refusal costs nothing: indexing is the expensive step, and no index
+    // repairs a conflicting entry.
+    let entry = inspect_mcp_server_entry(&layout.config_path, repo, &expected_server)?;
+    if let McpServerEntry::Incompatible(conflict) = &entry {
+        anyhow::bail!("{}", conflict.apply_message(client, repo));
+    }
+    if let SkillFile::Foreign = inspect_skill_file(&layout.skill_path)? {
+        anyhow::bail!(
+            "{} already exists and is not Open Kioku-managed; preserve it and configure manually",
+            layout.skill_path.display()
+        );
+    }
+
+    // Index before writing agent configuration. A failed index must never leave
     // the client pointing at a repository that cannot serve MCP requests.
     if !repo.join("ok.toml").exists() {
         OkConfig::write_default(repo.join("ok.toml"))?;
     }
     let snapshot = index_repo(repo)?;
 
-    let (config_changed, backup_path) = merge_managed_mcp_server(
-        &layout.config_path,
-        &expected_server,
-        layout.backup_path.as_deref(),
-    )?;
+    let (config_status, config_detail, config_changed, backup_path) = match &entry {
+        McpServerEntry::Absent => {
+            let (changed, backup) = merge_managed_mcp_server(
+                &layout.config_path,
+                &expected_server,
+                layout.backup_path.as_deref(),
+            )?;
+            (
+                if changed { "applied" } else { "unchanged" },
+                format!("managed `open-kioku` entry at {}", layout.config_path.display()),
+                changed,
+                backup,
+            )
+        }
+        McpServerEntry::Managed => (
+            "unchanged",
+            format!("managed `open-kioku` entry at {}", layout.config_path.display()),
+            false,
+            None,
+        ),
+        // A hand-written entry that already launches this repository's read-only server is
+        // kept byte for byte: rewriting a tracked `.mcp.json` to say the same thing would
+        // only dirty the working tree.
+        McpServerEntry::Adopted => (
+            "kept",
+            format!(
+                "existing `open-kioku` entry at {} launches `ok mcp serve` for this repository read-only; existing entry preserved",
+                layout.config_path.display()
+            ),
+            false,
+            None,
+        ),
+        McpServerEntry::Incompatible(conflict) => {
+            anyhow::bail!("{}", conflict.apply_message(client, repo))
+        }
+    };
     let skill_changed = match write_managed_skill(&layout.skill_path, client) {
         Ok(changed) => changed,
         Err(error) => {
@@ -148,11 +194,7 @@ fn apply_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
 
     let reachable = mcp_server_reachable(repo)?;
     let mut checks = vec![
-        agent_setup_check(
-            "config",
-            if config_changed { "applied" } else { "unchanged" },
-            format!("managed `open-kioku` entry at {}", layout.config_path.display()),
-        ),
+        agent_setup_check("config", config_status, config_detail),
         agent_setup_check(
             "skill",
             if skill_changed { "applied" } else { "unchanged" },
@@ -207,11 +249,39 @@ fn apply_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
 fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetupReport> {
     let layout = agent_setup_layout(client, repo)?;
     let expected_server = expected_mcp_server(repo);
-    let config_ready = managed_mcp_server_matches(&layout.config_path, &expected_server)?;
-    let skill_ready = managed_skill_matches(&layout.skill_path)?;
-    let index_ready = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path().is_file();
+    let entry = inspect_mcp_server_entry(&layout.config_path, repo, &expected_server)?;
+    let (config_status, config_detail, config_ready) = match &entry {
+        McpServerEntry::Absent => ("missing", "no `open-kioku` MCP entry".to_string(), false),
+        McpServerEntry::Managed => ("passed", "managed MCP entry".to_string(), true),
+        McpServerEntry::Adopted => (
+            "passed",
+            "existing `open-kioku` entry launches `ok mcp serve` for this repository read-only; existing entry preserved".to_string(),
+            true,
+        ),
+        McpServerEntry::Incompatible(conflict) => {
+            ("mismatch", conflict.check_detail(&layout.config_path), false)
+        }
+    };
+    let skill = inspect_skill_file(&layout.skill_path)?;
+    let (skill_status, skill_detail, skill_ready) = match skill {
+        SkillFile::Missing => ("missing", "managed pre-edit guidance".to_string(), false),
+        SkillFile::Managed => ("passed", "managed pre-edit guidance".to_string(), true),
+        SkillFile::Foreign => (
+            "mismatch",
+            format!(
+                "{} exists and is not Open Kioku-managed; move it aside or merge the guidance by hand",
+                layout.skill_path.display()
+            ),
+            false,
+        ),
+    };
+    let index_ready = SqliteStore::open_repo_index(repo)?.is_some();
     let mcp_ready = if index_ready { mcp_server_reachable(repo)? } else { false };
     let ready = config_ready && skill_ready && index_ready && mcp_ready;
+    // `--apply` refuses the two mismatch states before it does anything, so recommending it
+    // there would send the user in a loop; the detail lines above name the actual edit.
+    let blocked_by_conflict = matches!(entry, McpServerEntry::Incompatible(_))
+        || matches!(skill, SkillFile::Foreign);
     Ok(AgentSetupReport {
         client: client.as_str().into(),
         repo: repo.to_path_buf(),
@@ -223,13 +293,19 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
         skill_path: layout.skill_path,
         backup_path: layout.backup_path,
         checks: vec![
-            agent_setup_check("config", check_status(config_ready), "managed MCP entry"),
-            agent_setup_check("skill", check_status(skill_ready), "managed pre-edit guidance"),
+            agent_setup_check("config", config_status, config_detail),
+            agent_setup_check("skill", skill_status, skill_detail),
             agent_setup_check("index", check_status(index_ready), "local SQLite index"),
             agent_setup_check("mcp_stdio", check_status(mcp_ready), "MCP initialize response"),
         ],
         next_step: if ready {
             "Open Kioku is ready for this repository.".into()
+        } else if blocked_by_conflict {
+            format!(
+                "Resolve the [mismatch] entries above by hand, then run `ok setup agent {} --repo {} --check` again.",
+                client.as_str(),
+                repo.display()
+            )
         } else {
             format!(
                 "Run `ok setup agent {} --repo {} --apply` to repair the missing setup.",
@@ -237,6 +313,167 @@ fn check_agent_setup(client: McpClient, repo: &Path) -> anyhow::Result<AgentSetu
                 repo.display()
             )
         },
+    })
+}
+
+/// What `apply` and `check` find at the client's `open-kioku` entry, decided before anything
+/// is indexed or written.
+#[derive(Debug, Clone, PartialEq)]
+enum McpServerEntry {
+    Absent,
+    /// Byte for byte the entry Open Kioku writes.
+    Managed,
+    /// Written by someone else, but it launches `ok mcp serve` for this repository, which
+    /// is read-only by construction; it is kept as it is.
+    Adopted,
+    Incompatible(McpEntryConflict),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct McpEntryConflict {
+    /// What the existing entry does instead of serving this repository.
+    problem: String,
+    /// The value `mcpServers.open-kioku` would need, pretty-printed.
+    edit: String,
+}
+
+impl McpEntryConflict {
+    fn apply_message(&self, client: McpClient, repo: &Path) -> String {
+        format!(
+            "the `mcpServers.open-kioku` entry {problem}; Open Kioku did not write it and will not overwrite it. \
+             To make it compatible, set `mcpServers.open-kioku` to:\n{edit}\n\
+             Nothing was indexed or written. Once the entry launches `ok mcp serve --repo {repo}` it is kept as-is, \
+             and rerunning `ok setup agent {client} --repo {repo} --apply` writes the guidance file and the index.",
+            problem = self.problem,
+            edit = self.edit,
+            repo = repo.display(),
+            client = client.as_str(),
+        )
+    }
+
+    fn check_detail(&self, config_path: &Path) -> String {
+        format!(
+            "`mcpServers.open-kioku` in {} {}; set it to {}",
+            config_path.display(),
+            self.problem,
+            self.edit.split_whitespace().collect::<Vec<_>>().join(" ")
+        )
+    }
+}
+
+fn inspect_mcp_server_entry(
+    config_path: &Path,
+    repo: &Path,
+    expected_server: &serde_json::Value,
+) -> anyhow::Result<McpServerEntry> {
+    if !config_path.exists() {
+        return Ok(McpServerEntry::Absent);
+    }
+    ensure_safe_target(config_path)?;
+    let config: serde_json::Value = serde_json::from_slice(&fs::read(config_path)?)
+        .with_context(|| format!("invalid MCP JSON at {}", config_path.display()))?;
+    let Some(existing) = config
+        .get("mcpServers")
+        .and_then(|servers| servers.get("open-kioku"))
+    else {
+        return Ok(McpServerEntry::Absent);
+    };
+    if existing == expected_server {
+        return Ok(McpServerEntry::Managed);
+    }
+    Ok(match describe_incompatible_server(existing, repo) {
+        None => McpServerEntry::Adopted,
+        Some(problem) => McpServerEntry::Incompatible(McpEntryConflict {
+            problem,
+            edit: serde_json::to_string_pretty(expected_server)?,
+        }),
+    })
+}
+
+/// Why `existing` cannot stand in for the managed entry, or `None` when it launches
+/// `ok mcp serve` for `repo` with the managed entry's posture. `ok mcp serve` forces
+/// read-only mode whatever flags it is given, but `--deny-network=false`,
+/// `--approval-required=false` and `--allow-command` loosen the posture the `[kept]`
+/// detail vouches for, so only the flags that cannot are accepted.
+fn describe_incompatible_server(existing: &serde_json::Value, repo: &Path) -> Option<String> {
+    let Some(command) = existing.get("command").and_then(serde_json::Value::as_str) else {
+        return Some("has no string `command`".into());
+    };
+    let launches_ok = command == "ok"
+        || Path::new(command)
+            .file_name()
+            .is_some_and(|name| name == "ok" || name == "ok.exe");
+    if !launches_ok {
+        return Some(format!("launches `{command}` instead of `ok`"));
+    }
+    let Some(args) = existing.get("args").and_then(serde_json::Value::as_array) else {
+        return Some("has no `args` array".into());
+    };
+    let Some(args) = args
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Some("has a non-string entry in `args`".into());
+    };
+    // `--repo` is accepted before or after `mcp serve`. Every other flag is either one of
+    // the two that cannot weaken the posture or grounds for refusal; nothing is skipped.
+    let mut positional = Vec::new();
+    let mut served_repo: Option<&str> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if let Some(value) = arg.strip_prefix("--repo=") {
+            served_repo = Some(value);
+        } else if arg == "--repo" {
+            index += 1;
+            served_repo = args.get(index).copied();
+        } else if arg == "--read-only" || arg == "--hide-experimental" {
+            // Neither changes what the server may do.
+        } else if arg.starts_with('-') {
+            return Some(format!(
+                "passes `{arg}`, which the managed entry does not"
+            ));
+        } else {
+            positional.push(arg);
+        }
+        index += 1;
+    }
+    if positional != ["mcp", "serve"] {
+        return Some(format!(
+            "runs `ok {}` rather than `ok mcp serve`",
+            args.join(" ")
+        ));
+    }
+    // Clients launch the server from the workspace root, so a missing or relative `--repo`
+    // is resolved against this repository, not against the config file's directory.
+    let served = served_repo.unwrap_or(".");
+    let served_path = repo.join(served);
+    let same_repo = match (served_path.canonicalize(), repo.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => served_path == repo,
+    };
+    (!same_repo).then(|| format!("serves `{served}` rather than this repository"))
+}
+
+/// What is at the guidance path before `apply` touches it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SkillFile {
+    Missing,
+    Managed,
+    /// Someone else's file; it is never overwritten.
+    Foreign,
+}
+
+fn inspect_skill_file(path: &Path) -> anyhow::Result<SkillFile> {
+    if !path.exists() {
+        return Ok(SkillFile::Missing);
+    }
+    ensure_safe_target(path)?;
+    Ok(if fs::read_to_string(path)?.contains(MANAGED_SKILL_MARKER) {
+        SkillFile::Managed
+    } else {
+        SkillFile::Foreign
     })
 }
 
@@ -384,19 +621,6 @@ fn merge_managed_mcp_server(
     Ok((true, backup))
 }
 
-fn managed_mcp_server_matches(config_path: &Path, expected_server: &serde_json::Value) -> anyhow::Result<bool> {
-    if !config_path.exists() {
-        return Ok(false);
-    }
-    ensure_safe_target(config_path)?;
-    let config: serde_json::Value = serde_json::from_slice(&fs::read(config_path)?)
-        .with_context(|| format!("invalid MCP JSON at {}", config_path.display()))?;
-    Ok(config
-        .get("mcpServers")
-        .and_then(|servers| servers.get("open-kioku"))
-        == Some(expected_server))
-}
-
 fn remove_managed_mcp_server(
     config_path: &Path,
     expected_server: &serde_json::Value,
@@ -435,10 +659,6 @@ fn write_managed_skill(path: &Path, client: McpClient) -> anyhow::Result<bool> {
     }
     atomic_write_bytes(path, desired.as_bytes())?;
     Ok(true)
-}
-
-fn managed_skill_matches(path: &Path) -> anyhow::Result<bool> {
-    Ok(path.exists() && fs::read_to_string(path)?.contains(MANAGED_SKILL_MARKER))
 }
 
 fn remove_managed_skill(path: &Path) -> anyhow::Result<bool> {
@@ -693,6 +913,132 @@ mod onboarding_tests {
             .unwrap_err()
             .to_string()
             .contains("did not create"));
+    }
+
+    fn write_mcp_json(repo: &Path, server: serde_json::Value) -> PathBuf {
+        let path = repo.join(".mcp.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"open-kioku": server}}))
+                .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn hand_written_entry_serving_this_repository_is_adopted() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let expected = expected_mcp_server(repo);
+        // What `ok mcp install claude` prints and a user pastes: no `--read-only`, an `env`
+        // key, and the repository as `.`.
+        for args in [
+            serde_json::json!(["mcp", "serve", "--repo", "."]),
+            serde_json::json!(["mcp", "serve", "--repo", repo.display().to_string(), "--read-only"]),
+            serde_json::json!(["--repo", ".", "mcp", "serve"]),
+            serde_json::json!(["mcp", "serve"]),
+            serde_json::json!(["mcp", "serve", "--repo=.", "--read-only", "--hide-experimental"]),
+        ] {
+            let path = write_mcp_json(
+                repo,
+                serde_json::json!({"command": "ok", "args": args, "env": {}}),
+            );
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                inspect_mcp_server_entry(&path, repo, &expected).unwrap(),
+                McpServerEntry::Adopted,
+                "{args}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before, "inspection must not rewrite");
+        }
+        let path = write_mcp_json(repo, expected.clone());
+        assert_eq!(
+            inspect_mcp_server_entry(&path, repo, &expected).unwrap(),
+            McpServerEntry::Managed
+        );
+    }
+
+    #[test]
+    fn incompatible_entry_names_the_key_and_the_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let expected = expected_mcp_server(repo);
+        for (server, problem) in [
+            (
+                serde_json::json!({"command": "npx", "args": ["open-kioku"]}),
+                "launches `npx` instead of `ok`",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", "/somewhere/else"]}),
+                "serves `/somewhere/else` rather than this repository",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["daemon", "start"]}),
+                "rather than `ok mcp serve`",
+            ),
+            // Read-only by construction, but not the posture the `[kept]` detail vouches for.
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--deny-network=false", "--approval-required=false", "--allow-command", "cargo"]}),
+                "passes `--deny-network=false`, which the managed entry does not",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--allow-command", "cargo"]}),
+                "passes `--allow-command`, which the managed entry does not",
+            ),
+            (
+                serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", ".", "--approval-required=false"]}),
+                "passes `--approval-required=false`, which the managed entry does not",
+            ),
+            (serde_json::json!("ok mcp serve"), "has no string `command`"),
+        ] {
+            let path = write_mcp_json(repo, server.clone());
+            let McpServerEntry::Incompatible(conflict) =
+                inspect_mcp_server_entry(&path, repo, &expected).unwrap()
+            else {
+                panic!("{server} must be incompatible");
+            };
+            assert!(conflict.problem.contains(problem), "{}", conflict.problem);
+            let message = conflict.apply_message(McpClient::Claude, repo);
+            assert!(message.contains("`mcpServers.open-kioku`"), "{message}");
+            assert!(message.contains("\"--read-only\""), "{message}");
+            assert!(message.contains("Nothing was indexed or written"), "{message}");
+            assert!(!repo.join(".ok").exists());
+        }
+    }
+
+    #[test]
+    fn check_after_adopt_passes_config_and_never_recommends_a_failing_apply() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        write_mcp_json(
+            repo,
+            serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", "."], "env": {}}),
+        );
+        let report = check_agent_setup(McpClient::Claude, repo).unwrap();
+        let config = report.checks.iter().find(|check| check.name == "config").unwrap();
+        assert_eq!(config.status, "passed");
+        assert!(config.detail.contains("existing entry preserved"), "{}", config.detail);
+        assert!(!report.ready);
+        assert!(report.next_step.contains("--apply"), "{}", report.next_step);
+
+        write_mcp_json(
+            repo,
+            serde_json::json!({"command": "ok", "args": ["mcp", "serve", "--repo", "/somewhere/else"]}),
+        );
+        let report = check_agent_setup(McpClient::Claude, repo).unwrap();
+        let config = report.checks.iter().find(|check| check.name == "config").unwrap();
+        assert_eq!(config.status, "mismatch");
+        assert!(config.detail.contains("`mcpServers.open-kioku`"), "{}", config.detail);
+        assert!(config.detail.contains("/somewhere/else"), "{}", config.detail);
+        assert!(!report.next_step.contains("--apply"), "{}", report.next_step);
+
+        fs::create_dir_all(repo.join(".claude/skills/open-kioku")).unwrap();
+        fs::write(repo.join(".claude/skills/open-kioku/SKILL.md"), "# mine\n").unwrap();
+        let report = check_agent_setup(McpClient::Claude, repo).unwrap();
+        let skill = report.checks.iter().find(|check| check.name == "skill").unwrap();
+        assert_eq!(skill.status, "mismatch");
+        assert!(!report.next_step.contains("--apply"), "{}", report.next_step);
     }
 
     #[test]
