@@ -431,6 +431,17 @@ async fn dispatch(
             Ok(json!({"slept": true}))
         }
         "repo_status" => {
+            // `quality.quality_notes` and `quality.skipped_paths` are counts plus a bounded
+            // sample unless `detail: "full"`: on a 380-file repository the full lists were
+            // 1.4 MB of a 1.5 MB payload, sent before an agent's first real question. The
+            // manifest keeps every entry; `ok --json status --full` is the CLI equivalent.
+            // Validated before the unindexed answer so a bad value is an error either way.
+            let detail = match optional_str(&params, "detail")? {
+                None => StatusDetail::Summary,
+                Some(value) => StatusDetail::parse(value).ok_or_else(|| {
+                    anyhow::anyhow!("unsupported detail `{value}`; expected summary or full")
+                })?,
+            };
             // A store without a manifest is not an index. `serve` never hands one over, but
             // the answer for it is the unindexed status, not a serialized `null`.
             let Some(manifest) = store.manifest()? else {
@@ -440,16 +451,6 @@ async fn dispatch(
                 manifest.analysis_semantics.as_ref(),
                 &open_kioku_core::AnalysisSemanticsState::current(),
             );
-            // `quality.quality_notes` and `quality.skipped_paths` are counts plus a bounded
-            // sample unless `detail: "full"`: on a 380-file repository the full lists were
-            // 1.4 MB of a 1.5 MB payload, sent before an agent's first real question. The
-            // manifest keeps every entry; `ok --json status --full` is the CLI equivalent.
-            let detail = match optional_str(&params, "detail")? {
-                None => StatusDetail::Summary,
-                Some(value) => StatusDetail::parse(value).ok_or_else(|| {
-                    anyhow::anyhow!("unsupported detail `{value}`; expected summary or full")
-                })?,
-            };
             let mut status = manifest.status_value(detail)?;
             if let Some(object) = status.as_object_mut() {
                 // The field an agent branches on; the unindexed answer carries `false`.

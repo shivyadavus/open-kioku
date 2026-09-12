@@ -1918,7 +1918,7 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
         ));
     }
     let scip_mode = format!("{:?}", config.scip.mode).to_ascii_lowercase();
-    if let Some(report) = input.scip_report {
+    let mut quality = if let Some(report) = input.scip_report {
         if report.imported_paths.is_empty() {
             quality_notes.push(QualityNote::new(
                 QualityNoteKind::Scip,
@@ -2005,7 +2005,16 @@ fn index_quality(input: IndexQualityInput<'_>) -> IndexQuality {
             coverage: input.coverage,
             quality_notes,
         }
-    }
+    };
+    // Stored order was the discovery walk (readdir order) and rayon completion order.
+    // The status sample takes the first entries of each kind and reason, so the lists
+    // are sorted once here to read the same on every machine and run.
+    quality.quality_notes.sort();
+    quality.quality_notes.dedup();
+    quality
+        .skipped_paths
+        .sort_by(|a, b| a.path.cmp(&b.path).then(a.reason.cmp(&b.reason)));
+    quality
 }
 
 struct GitHistoryIngest {

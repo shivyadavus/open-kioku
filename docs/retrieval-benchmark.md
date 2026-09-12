@@ -276,7 +276,7 @@ versus indexed, with policy exclusions and skip reasons beside the ratio), the j
 summary shows it next to R@5, R@20, and MRR for each corpus, and the baseline compare
 prints both sides. It is informational, not a gate: a ranking number read without
 knowing that a tenth of the corpus was never indexed is not a number. The definition
-is `docs/indexing-pipeline.md`, "Coverage": since 4.1 the denominator excludes files a
+is `docs/indexing-pipeline.md`, "Coverage": since that change the denominator excludes files a
 policy skipped (`hidden`, `ignored`, `vendor`, ...), which are reported instead of
 counted as missing, so a line recorded by an earlier build reads lower on a repository
 with hidden or ignored source and is not comparable to one recorded now.

@@ -163,6 +163,43 @@ mod tests {
         );
     }
 
+    /// A `.gitignore`d `src/` leaves nothing to judge; the check must say which rule
+    /// emptied the ratio rather than "no source files discovered".
+    #[test]
+    fn doctor_coverage_names_the_setting_when_policy_excluded_every_source_file() {
+        use open_kioku_core::{Language, SkipReason, SkipSource};
+
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..3 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
+            coverage.record_policy_exclusion(SkipSource::GitIgnore, Some("src"));
+        }
+
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(matches!(check.status, CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "no source files considered under the current policy; 3 excluded by policy (3 ignored; 3 under src/; `.gitignore` governs the largest share)"
+        );
+        let step = step.expect("an emptied ratio carries a next step");
+        assert!(step.contains("`.gitignore` governs that"), "{step}");
+
+        // Config files alone do not make a verdict: the programming ratio is still empty.
+        coverage.record_discovered(&Language::Toml);
+        coverage.record_indexed(&Language::Toml, false);
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(matches!(check.status, CheckStatus::Warn));
+        assert!(
+            check
+                .message
+                .starts_with("no programming-language files considered under the current policy; 1 of 1 recognised files indexed (100.0%)"),
+            "{}",
+            check.message
+        );
+        assert!(step.is_some());
+    }
+
     #[test]
     fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
         let notes = (0..105)

@@ -1482,7 +1482,7 @@ fn coverage_check(
             Some("Run `ok index .` to record which source files the index skipped and why.".into()),
         );
     };
-    if coverage.percent().is_none() {
+    if coverage.discovered == 0 {
         return (
             DoctorCheck {
                 name: "coverage",
@@ -1505,6 +1505,22 @@ fn coverage_check(
     for caveat in coverage.blind_spot_caveats() {
         message.push_str("; ");
         message.push_str(&caveat);
+    }
+    // Discovery found source and policy set every file of it aside (a `.gitignore`d
+    // `src/`, a tree under a hidden directory): the ratio has no verdict, and the
+    // reader needs the setting that emptied it, not "no source files discovered".
+    let (programming_discovered, _) = coverage.programming_policy_totals();
+    if coverage.percent().is_none()
+        || (programming_discovered > 0 && coverage.programming_percent().is_none())
+    {
+        return (
+            DoctorCheck {
+                name: "coverage",
+                status: CheckStatus::Warn,
+                message,
+            },
+            Some(policy_exclusion_next_step(coverage)),
+        );
     }
     let low = coverage.languages_below_warn_threshold();
     if coverage.below_warn_threshold() || !low.is_empty() || coverage.walk_errors > 0 {
@@ -1541,6 +1557,25 @@ fn coverage_check(
         },
         None,
     )
+}
+
+/// Every discovered source file was set aside by policy: name the setting that did it.
+fn policy_exclusion_next_step(coverage: &IndexCoverage) -> String {
+    match coverage.dominant_policy_source() {
+        Some((source, count)) => match source.governing_setting() {
+            Some(setting) => format!(
+                "Coverage: every source file discovery found was excluded by policy ({} by {}); {setting} governs that. Change it if those files should be indexed, then run `ok index .`.",
+                group_thousands(count),
+                source.label()
+            ),
+            None => format!(
+                "Coverage: every source file discovery found was excluded by policy ({} by {}); no ok.toml key governs that source, so review `ok --json status` `quality.skipped_paths`.",
+                group_thousands(count),
+                source.label()
+            ),
+        },
+        None => "Coverage: every source file discovery found was excluded by policy; the index predates source recording, so run `ok index .` to see which rule.".into(),
+    }
 }
 
 /// The advice for a coverage warning names the key that governs the dominant omission

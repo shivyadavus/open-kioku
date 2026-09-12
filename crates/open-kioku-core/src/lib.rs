@@ -3375,7 +3375,8 @@ pub enum QualityNoteKind {
 }
 
 /// One quality note: a kind for grouping and the human-readable message. Manifests
-/// written before 4.1 stored bare strings; those deserialize as `Unclassified`.
+/// written before kinds were recorded stored bare strings; those deserialize as
+/// `Unclassified`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
 pub struct QualityNote {
     pub kind: QualityNoteKind,

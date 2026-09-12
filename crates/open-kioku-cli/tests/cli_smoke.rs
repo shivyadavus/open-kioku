@@ -3428,6 +3428,58 @@ fn reviewer_benchmark_corpus_passes() {
 }
 
 #[test]
+fn doctor_reports_a_source_tree_excluded_by_policy_with_its_governing_setting() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
+    fs::write(repo.join(".gitignore"), "src/\n").unwrap();
+
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    let doctor = run({
+        let mut command = ok();
+        command.arg("--json").arg("doctor").arg(repo);
+        command
+    });
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    let check = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "coverage")
+        .expect("doctor has a coverage check");
+    assert_eq!(check["status"], "warn");
+    let message = check["message"].as_str().unwrap();
+    // ok.toml is the one recognised file left; the source tree is named as excluded,
+    // with the rule that excluded it, rather than reported as never discovered.
+    assert!(
+        message.starts_with("no programming-language files considered under the current policy"),
+        "{message}"
+    );
+    assert!(
+        message.contains("1 excluded by policy (1 ignored; 1 under src/; `.gitignore` governs the largest share)"),
+        "{message}"
+    );
+    let step = doctor["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step.as_str())
+        .find(|step| step.starts_with("Coverage:"))
+        .expect("an emptied ratio carries a next step");
+    assert!(step.contains("`.gitignore` governs that"), "{step}");
+}
+
+#[test]
 fn index_reports_coverage_in_summary_status_and_doctor() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
