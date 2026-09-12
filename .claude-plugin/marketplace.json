@@ -5,7 +5,7 @@
     "email": "shivyadavus@users.noreply.github.com"
   },
   "metadata": {
-    "description": "Local-first code intelligence for AI agents — code search, symbol resolution, impact analysis, dependency graphs, and context packs from a local Open Kioku index. No hosted index or embeddings API required.",
+    "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. A local, read-only MCP server with 16 tools: code and regex search, symbol definitions and references, dependency paths, impact analysis, context packs, plan_change and verify_change, from an index under the repository's .ok/ directory. No hosted index or embeddings API required.",
     "version": "4.0.0"
   },
   "plugins": [
@@ -15,7 +15,7 @@
         "source": "github",
         "repo": "shivyadavus/open-kioku"
       },
-      "description": "Local-first code intelligence for AI agents — BM25 + regex code search, symbol resolution, call-graph traversal, impact analysis, and token-efficient context packs from a local native binary. Index once, query locally. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
+      "description": "Your coding agent shows its evidence before it edits, and its diff is verified against the plan it declared. Local, read-only MCP server with 16 tools — BM25 and regex code search, symbol resolution, references and call relationships, impact analysis, context packs, plan_change and verify_change — from a native binary and an index under .ok/. Supports Rust, TypeScript, Python, Go, Java, and JavaScript.",
       "version": "4.0.0",
       "author": {
         "name": "Shiv Yadav",

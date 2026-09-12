@@ -77,6 +77,17 @@ ok verify --plan plan.json --git                               # the real diff a
 
 Underneath: exact definitions, references, and dependency paths from source (and optional SCIP) are authoritative. Lexical, semantic, history, test, and runtime signals can reorder retrieval; they cannot overwrite repository truth.
 
+## What Changed in 4.0.0
+
+Released 2026-09-11. Run `ok index` after upgrading: the index storage format changed, and a pre-4.0 index withholds relationship evidence and says so (`ok impact`, `ok plan`, `ok context`, and the MCP tools on them refuse with `run ok index` rather than answer from an empty graph). The full list, with the commit and method behind every number, is in [`CHANGELOG.md`](CHANGELOG.md).
+
+- **16 MCP tools, down from 58.** Each answers one question no other tool answers; a retired name answers with where its capability went. Six descriptions that said what their names suggested now say what the implementation does, and `structural_search` is gone because no structural matching existed. [`docs/mcp-tools.md`](docs/mcp-tools.md) carries the migration table.
+- **`regex_search` does regex.** It had dispatched to ranked lexical search; it now evaluates the pattern line by line over indexed text and reports files scanned and early stops. `ok search <pattern> --regex` is the CLI equivalent.
+- **The index reports what it did not index.** Per-language coverage with every omission attributed to a skip reason, in `ok index`, `ok doctor`, `ok status`, and `repo_status`. An ingest rule had silently dropped 25 Java source files from one repository.
+- **More of the right region.** Selected units covered 3–22% of the lines a real commit changed even when the file was right; the top three files now widen to the enclosing symbol and adjacent chunks. Share of changed lines shown within 8k tokens, 626 paired local cases, no case worse, about three times the tokens: Java 0.216 → 0.248, Go 0.207 → 0.299, TypeScript 0.155 → 0.335, Python 0.130 → 0.203 ([`docs/ranking.md`](docs/ranking.md), [`benchmarks/commit-derived/region-widening-ab.json`](benchmarks/commit-derived/region-widening-ab.json)).
+- **Task words reach the repository's identifiers.** `CollectionsUtils Tests` reaches `CollectionUtilsTests` with no model, network, or re-index. Neutral on commit-subject benchmarks by construction; on 259 perturbed queries R@5 0.656 → 0.699, MRR +0.036 (95% CI +0.015 to +0.062), an upper bound by design ([`docs/ranking.md`](docs/ranking.md)).
+- **Derived-file edges.** A generated file and its origin, or a test and the module it is named after, join impact analysis as labeled possibilities: a declared origin carries its proof, a naming convention is marked heuristic ([`docs/graph-model.md`](docs/graph-model.md)).
+
 ## What to Expect
 
 Retrieval is measured on the production path (`ok context`, the same builder behind `ok plan` and the MCP `build_context_pack` tool) on four real repositories, each indexed at a fixed base commit. Every case is a later commit: the query is its subject line, the answer is the source files it changed. Cases are split chronologically; both splits are gated nightly, and the table shows holdout.
@@ -103,7 +114,7 @@ Two more measured facts:
 
 ## Measured at Scale
 
-Performance claims are observations tied to an identifiable build, published with method and caveats. The current record validates the `3.1.0` release lineage at source commit `3959fdfb6ca27d0c279b635fca7fc1b7935d4889` on a large Java repository, on the same host and protocol as the previous public record.
+Performance claims are observations tied to an identifiable build, published with method and caveats. The most recent end-to-end scale record validates the `3.1.0` release lineage at source commit `3959fdfb6ca27d0c279b635fca7fc1b7935d4889` on a large Java repository, on the same host and protocol as the previous public record. 4.0.0 changed the index storage format and has not been re-run on this corpus; the table describes 3.1.0. 4.0.0's own measured changes are listed with their commits and methods in [`CHANGELOG.md`](CHANGELOG.md).
 
 | Measurement (v3.1.0 lineage, end to end) | Result |
 |---|---:|
@@ -129,7 +140,6 @@ These are local workstation timings, not universal guarantees.
 | **npm** (recommended) | `npm install -g open-kioku` — the wrapper pulls `@open-kioku/{darwin-arm64,linux-x64,linux-arm64,win32-x64}` (sources under [`packages/`](packages/)) |
 | crates.io | `cargo install open-kioku-cli` or `cargo binstall open-kioku-cli` |
 | GitHub releases | Binaries with `SHA256SUMS`, `SBOM.cargo-metadata.json`, `PROVENANCE.json`, and GitHub build-provenance attestations ([`docs/release-trust.md`](docs/release-trust.md)) |
-| Homebrew | Formula tracked at [`Formula/open-kioku.rb`](Formula/open-kioku.rb); no public tap is published yet |
 | Claude Code plugin | [`claude_plugin.json`](claude_plugin.json) and [`.claude-plugin/`](.claude-plugin/) |
 | Cursor / Codex plugins | [`.cursor-plugin/`](.cursor-plugin/) · [`.codex-plugin/`](.codex-plugin/) |
 | MCP directories | Glama ([`glama.json`](glama.json)) · Smithery ([`smithery.yaml`](smithery.yaml)) |
