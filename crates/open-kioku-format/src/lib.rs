@@ -79,13 +79,20 @@ fn push_retrieval_diagnostics(out: &mut String, diagnostics: &RetrievalDiagnosti
     push_string_list(out, 1, "attempted_sources", &attempted_sources);
     push_string_list(out, 1, "succeeded_sources", &succeeded_sources);
 
-    if diagnostics.selection.budget.max_tokens > 0 {
+    let budget = &diagnostics.selection.budget;
+    if budget.max_tokens > 0 && !budget.has_token_ceiling() {
+        // The file-limit budget carries a sentinel in `max_tokens`; naming the bound that
+        // actually applies beats printing the sentinel as if it were a budget.
+        push_kv(out, 1, "budget_tokens", "none");
+        push_kv(out, 1, "budget_file_limit", budget.max_primary_files);
         push_kv(
             out,
             1,
-            "budget_tokens",
-            diagnostics.selection.budget.max_tokens,
+            "selected_tokens_estimate",
+            diagnostics.selection.estimated_tokens_selected,
         );
+    } else if budget.max_tokens > 0 {
+        push_kv(out, 1, "budget_tokens", budget.max_tokens);
         push_kv(
             out,
             1,

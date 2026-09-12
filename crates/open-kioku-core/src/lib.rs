@@ -3283,6 +3283,13 @@ impl ContextBudget {
             .saturating_sub(self.reserve_for_validation)
     }
 
+    /// Whether `max_tokens` is a real ceiling. `from_file_limit` fills `max_tokens` and
+    /// `max_per_file` with a sentinel so that only the file limit binds; renderers ask this
+    /// rather than print a nineteen-digit sentinel as if it were a budget.
+    pub fn has_token_ceiling(&self) -> bool {
+        self.max_tokens < usize::MAX / 8 || self.max_per_file < usize::MAX / 8
+    }
+
     pub fn from_file_limit(limit: usize) -> Self {
         Self {
             max_tokens: usize::MAX / 4,
