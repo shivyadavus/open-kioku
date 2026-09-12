@@ -132,6 +132,37 @@ mod tests {
         );
     }
 
+    /// `ok --help` shipped with 24 of 38 commands blank and whole option lists undescribed.
+    /// The walk covers the entire command tree, so a new subcommand or flag cannot land
+    /// without saying what it does.
+    #[test]
+    fn every_command_and_option_carries_help_text() {
+        use clap::CommandFactory;
+
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.get_help().is_none() {
+                    missing.push(format!("{path} --{}", arg.get_id()));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                let name = format!("{path} {}", subcommand.get_name());
+                if subcommand.get_about().is_none() {
+                    missing.push(name.clone());
+                }
+                walk(subcommand, &name, missing);
+            }
+        }
+
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "ok", &mut missing);
+        assert!(
+            missing.is_empty(),
+            "commands or options without help text:\n{}",
+            missing.join("\n")
+        );
+    }
+
     #[test]
     fn status_markdown_bounds_quality_notes_without_hiding_the_total() {
         let notes = (0..105)
