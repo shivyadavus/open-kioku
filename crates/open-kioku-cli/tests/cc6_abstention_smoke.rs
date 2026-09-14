@@ -249,10 +249,10 @@ fn context_reports_unmatched_hyphenated_words_without_the_identifier_blocker() {
         .iter()
         .find(|item| item["scope"].as_str() == Some("anchor"))
         .expect("anchor negative evidence");
-    assert!(
-        anchor["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("re-index") && reason.contains("drive-by")),
+    // Named as words, never as identifiers the repository lacks.
+    assert_eq!(
+        anchor["reason"].as_str(),
+        Some("hyphenated task word(s) spelled by no selected context: re-index, drive-by"),
         "{anchor}"
     );
 }

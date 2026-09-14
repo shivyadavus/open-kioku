@@ -721,10 +721,14 @@ fn task_content_terms(task: &str) -> Vec<String> {
 /// surfaces agree on what the task named and therefore on what counts as missing.
 ///
 /// An all-lowercase token whose only separator is `-` is spelled the same whether it is a
-/// compound word (`re-index`, `best-effort`) or a lowercase kebab-case identifier
-/// (`get-or-load`), so its spelling cannot establish that the task named code. Such a token
-/// is a weak anchor, returned by [`weak_named_anchors`] and not here, unless the task quotes
-/// it in backticks. A capital, a digit, or an `_` in the token keeps it a named anchor.
+/// compound word (`re-index`, `best-effort`) or a lowercase kebab-case name (`get-or-load`,
+/// `serde-json`), so its spelling alone cannot establish that the task named code. Such a
+/// token is a weak anchor, returned by [`weak_named_anchors`] and not here, unless the task
+/// marks it as code: quoted in backticks, written as a flag (`--allow-network`), or joined to
+/// a path, module, scope, or assignment by `/`, `::`, `@`, `=`, or a `.` with a word on its
+/// other side (`crates/open-kioku-cor/src/lib.rs`, `drive-by.rs`). A capital, a digit, or an
+/// `_` in the token also keeps it named. A task with an odd number of backticks has no
+/// reliable quoted spans, and none of its tokens is weak.
 pub fn named_anchors(task: &str) -> Vec<String> {
     task_anchors(task)
         .into_iter()
@@ -733,8 +737,8 @@ pub fn named_anchors(task: &str) -> Vec<String> {
         .collect()
 }
 
-/// The weak anchors of `task`: unquoted all-lowercase tokens whose only separator is `-`.
-/// See [`named_anchors`].
+/// The weak anchors of `task`: all-lowercase tokens whose only separator is `-` and which the
+/// task does not mark as code. See [`named_anchors`].
 pub fn weak_named_anchors(task: &str) -> Vec<String> {
     task_anchors(task)
         .into_iter()
@@ -753,14 +757,20 @@ enum AnchorStrength {
 /// task is named even where it also appears unquoted.
 fn task_anchors(task: &str) -> Vec<(String, AnchorStrength)> {
     let mut anchors: Vec<(String, AnchorStrength)> = Vec::new();
-    let spans = task.split('`').collect::<Vec<_>>();
-    for (index, span) in spans.iter().enumerate() {
-        // Odd spans sit between a pair of backticks; an unclosed trailing backtick quotes
-        // nothing.
-        let quoted = index % 2 == 1 && index + 1 < spans.len();
-        for token in span.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
-        {
-            let token = token.trim_matches('-');
+    // A stray backtick shifts every later span between quoted and unquoted, which would demote
+    // a quoted name to a weak anchor; with an odd count no token is demoted.
+    let balanced_backticks = task.matches('`').count() % 2 == 0;
+    for (index, span) in task.split('`').enumerate() {
+        // Odd spans sit between a pair of backticks.
+        let quoted = index % 2 == 1;
+        for (start, raw) in identifier_runs(span) {
+            // Classified on the raw run and its neighbours: trimming first would turn the flag
+            // `--allow-network` and the path segment in `crates/open-kioku-cor/src` into the
+            // same bare word as `re-index`.
+            let marked_as_code = quoted
+                || raw.starts_with("--")
+                || touches_code_syntax(span, start, start + raw.len());
+            let token = raw.trim_matches('-');
             if token.len() < 3 || is_ticket_anchor(token) {
                 continue;
             }
@@ -779,7 +789,13 @@ fn task_anchors(task: &str) -> Vec<(String, AnchorStrength)> {
             {
                 continue;
             }
-            let strength = if has_hyphen && !has_underscore && !has_upper && !has_digit && !quoted {
+            let strength = if balanced_backticks
+                && !marked_as_code
+                && has_hyphen
+                && !has_underscore
+                && !has_upper
+                && !has_digit
+            {
                 AnchorStrength::Weak
             } else {
                 AnchorStrength::Named
@@ -794,6 +810,48 @@ fn task_anchors(task: &str) -> Vec<(String, AnchorStrength)> {
         }
     }
     anchors
+}
+
+/// Maximal runs of identifier characters (ASCII alphanumerics, `_`, `-`) in `text`, each with
+/// its byte offset.
+fn identifier_runs(text: &str) -> Vec<(usize, &str)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (offset, ch) in text.char_indices() {
+        let part = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-';
+        match (part, start) {
+            (true, None) => start = Some(offset),
+            (false, Some(begin)) => {
+                runs.push((begin, &text[begin..offset]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        runs.push((begin, &text[begin..]));
+    }
+    runs
+}
+
+/// Whether `text[start..end]` is joined to code syntax: a path or module separator (`/`,
+/// `::`), a scope or assignment (`@`, `=`), or a `.` with a word on its other side
+/// (`drive-by.rs`). A `.` followed by a space or the end of the task is sentence punctuation.
+fn touches_code_syntax(text: &str, start: usize, end: usize) -> bool {
+    let is_word = |ch: Option<char>| ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let joins = |adjacent: Option<char>, beyond: Option<char>| match adjacent {
+        Some('/' | '@' | '=') => true,
+        Some(':') => beyond == Some(':'),
+        Some('.') => is_word(beyond),
+        _ => false,
+    };
+    let mut before = text[..start].chars().rev();
+    let previous = before.next();
+    let before_previous = before.next();
+    let mut after = text[end..].chars();
+    let next = after.next();
+    let after_next = after.next();
+    joins(previous, before_previous) || joins(next, after_next)
 }
 
 /// The [`named_anchors`] and [`weak_named_anchors`] of `task` that none of the top five
@@ -995,7 +1053,7 @@ impl ConfidenceBreakdown {
                 "exact_references",
                 exact_reference,
                 0.20,
-                "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence",
+                "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence; a plan also counts proven cross-file dependents",
             ),
             confidence_component(
                 "validation_availability",
@@ -5467,7 +5525,7 @@ mod tests {
         );
         assert_eq!(named_anchors("rename get_or_load"), vec!["get_or_load"]);
 
-        // Lowercase kebab-case is spelled like a compound word; only quoting names it.
+        // Lowercase kebab-case is spelled like a compound word; quoting or code syntax names it.
         assert!(named_anchors("rename get-or-load").is_empty());
         assert_eq!(
             weak_named_anchors("rename get-or-load"),
@@ -5478,7 +5536,52 @@ mod tests {
         let quoted_once = "rename get-or-load to `get-or-load`";
         assert_eq!(named_anchors(quoted_once), vec!["get-or-load"]);
         assert!(weak_named_anchors(quoted_once).is_empty());
-        assert!(named_anchors("rename `get-or-load").is_empty());
+
+        // An odd number of backticks demotes nothing: a stray one would otherwise put a quoted
+        // name in an unquoted span.
+        let stray = "use the ` separator; rename `alpha-token-cache` for the alpha token";
+        assert_eq!(named_anchors(stray), vec!["alpha-token-cache"]);
+        assert!(weak_named_anchors(stray).is_empty());
+        assert_eq!(named_anchors("rename `get-or-load"), vec!["get-or-load"]);
+
+        // A flag, a path, a module, a scope, an assignment, or a `.` joining another word marks
+        // a token as code; sentence punctuation does not.
+        assert_eq!(
+            named_anchors("add the --allow-network flag to the alpha token"),
+            vec!["allow-network"]
+        );
+        assert_eq!(
+            named_anchors("fix the alpha token in crates/open-kioku-cor/src/lib.rs"),
+            vec!["open-kioku-cor"]
+        );
+        assert_eq!(
+            named_anchors("fix the alpha token in `crates/open-kioku-cor/src/lib.rs`"),
+            vec!["open-kioku-cor"]
+        );
+        assert_eq!(
+            named_anchors("rename the drive-by.rs module"),
+            vec!["drive-by"]
+        );
+        assert_eq!(
+            named_anchors("import @acme/left-pad and ops::drive-by"),
+            vec!["left-pad", "drive-by"]
+        );
+        assert_eq!(
+            named_anchors("default to mode=fail-closed"),
+            vec!["fail-closed"]
+        );
+        let sentence = "make retries best-effort instead of fail-closed.";
+        assert!(named_anchors(sentence).is_empty());
+        assert_eq!(
+            weak_named_anchors(sentence),
+            vec!["best-effort", "fail-closed"]
+        );
+        // A bare package name is spelled like a compound word and stays weak.
+        assert!(named_anchors("bump serde-json for the alpha token").is_empty());
+        assert_eq!(
+            weak_named_anchors("bump serde-json for the alpha token"),
+            vec!["serde-json"]
+        );
 
         // A capital, a digit, or an underscore keeps a hyphenated token a named anchor.
         assert_eq!(

@@ -1546,6 +1546,45 @@ struct NegativeEvidenceInputs<'a> {
     unmatched_anchors: &'a [String],
 }
 
+/// `unmatched` anchors split into (hyphenated task words, identifiers), each in task order.
+/// Plan publishes the same split, so the two surfaces word an anchor miss identically.
+fn split_unmatched_anchors<'a>(
+    unmatched: &'a [String],
+    weak_anchors: &[String],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    unmatched
+        .iter()
+        .map(String::as_str)
+        .partition(|anchor| weak_anchors.iter().any(|weak| weak == anchor))
+}
+
+/// A hyphenated word the index does not hold may be prose, so the reason never calls it an
+/// identifier.
+fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
+    let mut parts = Vec::new();
+    if !identifiers.is_empty() {
+        parts.push(format!(
+            "task identifier(s) spelled by no selected context: {}",
+            identifiers.join(", ")
+        ));
+    }
+    if !words.is_empty() {
+        parts.push(format!(
+            "hyphenated task word(s) spelled by no selected context: {}",
+            words.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+fn anchor_miss_probe(identifiers: &[&str]) -> &'static str {
+    if identifiers.is_empty() {
+        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+    } else {
+        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
+    }
+}
+
 fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<NegativeEvidence> {
     let NegativeEvidenceInputs {
         task,
@@ -1568,6 +1607,8 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
         });
     }
     if !unmatched_anchors.is_empty() {
+        let weak_anchors = open_kioku_core::weak_named_anchors(task);
+        let (words, identifiers) = split_unmatched_anchors(unmatched_anchors, &weak_anchors);
         items.push(NegativeEvidence {
             query: task.into(),
             scope: negative_evidence_scope::ANCHOR.into(),
@@ -1576,14 +1617,9 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
                 "primary_context.snippets".into(),
                 "primary_context.symbols".into(),
             ],
-            reason: format!(
-                "task identifier(s) spelled by no selected context: {}",
-                unmatched_anchors.join(", ")
-            ),
+            reason: anchor_miss_reason(&identifiers, &words),
             confidence: 0.85,
-            suggested_next_probe: Some(
-                "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into(),
-            ),
+            suggested_next_probe: Some(anchor_miss_probe(&identifiers).into()),
         });
     }
     if exact_reference_count == 0 {
@@ -6735,6 +6771,54 @@ mod tests {
         // An ambiguous anchor is retained as a corroborating possibility, not as proof.
         diagnostics.traces[0].authority = RetrievalAuthority::Corroborating;
         assert_eq!(exact_reference_count(&diagnostics, &primary, &[], &[]), 0);
+    }
+
+    #[test]
+    fn hyphenated_task_words_are_not_published_as_missing_identifiers() {
+        let primary = vec![lexical_hit(
+            "src/auth.rs",
+            "lexical match",
+            "lexical evidence",
+        )];
+        let anchor_item = |task: &str, unmatched: &[String]| {
+            negative_evidence_for_context(NegativeEvidenceInputs {
+                task,
+                primary_files: &primary,
+                supporting_files: &[],
+                tests: &[],
+                runtime_signals: &[],
+                exact_reference_count: 1,
+                unmatched_anchors: unmatched,
+            })
+            .into_iter()
+            .find(|item| item.scope == negative_evidence_scope::ANCHOR)
+            .expect("anchor negative evidence")
+        };
+
+        let mixed = anchor_item(
+            "fix FrobnicateWidgetManager after a drive-by edit",
+            &[
+                "FrobnicateWidgetManager".to_string(),
+                "drive-by".to_string(),
+            ],
+        );
+        assert_eq!(
+            mixed.reason,
+            "task identifier(s) spelled by no selected context: FrobnicateWidgetManager; hyphenated task word(s) spelled by no selected context: drive-by"
+        );
+
+        let words = anchor_item(
+            "re-index after a drive-by edit",
+            &["re-index".to_string(), "drive-by".to_string()],
+        );
+        assert_eq!(
+            words.reason,
+            "hyphenated task word(s) spelled by no selected context: re-index, drive-by"
+        );
+        assert!(words
+            .suggested_next_probe
+            .as_deref()
+            .is_some_and(|probe| !probe.contains("does not exist")));
     }
 
     #[test]
