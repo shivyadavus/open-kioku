@@ -95,6 +95,69 @@ rebased onto current main. CHANGELOG.md carries the full provenance. Each wideni
 evidence ref (`region:enclosing-symbol`, `region:ranked-unit`, `region:adjacent-unit`) on
 the unit.
 
+## Text relevance scale (advisory)
+
+On the search path (`ok search`, `ok eval`, `ok prove`, and the retrieval benchmark's `fusion`
+strategy), `text_relevance` is the raw boosted BM25 score. That score is unbounded. The other
+signals are bounded, except `boundary_fit`'s 18.0 tier and the `path_quality` penalty, which is
+a share of the raw score. A bounded signal can therefore reorder only candidates whose lexical
+scores are nearly tied. Context packs are unaffected, because they fuse candidate streams by
+rank.
+
+`ok retrieval-bench` measures two alternatives beside `fusion`. They are reported under
+`stream_ablations` and excluded from `benchmarks/retrieval-baseline.json` and the release
+thresholds:
+
+- `fusion_pool_max`: the candidate's lexical score, including Tantivy's query-variant boost, divided by the highest such score in the pool. Only
+  candidates that carry a lexical component and are not semantic-only set that maximum: the
+  Tantivy index's `bm25_relevance` or the in-memory fallback's `lexical_relevance`. The top
+  lexical hit reads 1.0. The divisor is a per-query constant, so with every other weight at
+  zero the order is the raw order, and the value depends neither on how many candidates were
+  fetched nor on corpus size.
+- `fusion_rank10`: `(k + 1) / (k + rank)` with k = 10. Rank counts the strictly higher lexical
+  scores in the pool, so equal scores share a rank.
+
+Both arms keep every weight at its default and the exact-identity tier unchanged. That includes
+`boundary_fit`'s unrescaled 18.0 tier. At the default weight it contributes 4.5, more than the
+whole scaled lexical range of at most 1.0, so a candidate that hits the tier outranks every
+candidate that does not, whatever its lexical score, and arm order is largely tier order. The
+arms therefore measure scaled text relevance beside today's tiers, not the ranker a default
+change would ship, which rescales the tiers in the same change. In both arms:
+
+- the `path_quality` penalty is a share of the scaled value;
+- only a candidate that carries a lexical component and is not semantic-only is scaled. Any
+  other candidate, such as a git co-change candidate or a semantic hit, carries no text
+  relevance, never sets the scale, and records why in a weight-0 `text_relevance_excluded`
+  component;
+- a pool with no positive lexical score is left unscaled, recorded in a weight-0
+  `text_relevance_unscaled` component even when the score is 0;
+- the producer's score parts (`bm25_relevance` or `lexical_relevance`, and Tantivy's
+  `query_variant_boost`) stay in the breakdown at weight 0. A weight-0
+  `text_relevance_pool_max` component carries the divisor as its raw value, or
+  `text_relevance_rank` the rank, with the scaled value as its normalized value, so the scale
+  survives JSON output.
+
+The scale is an internal ranking option, not an `ok.toml` key, and every shipped surface ranks
+with the raw score. Lexical baseline ranking is never scaled.
+
+First measurement, on the frozen 30-case corpus (39-file fixture, 25 positive cases, 10 of the
+30 in holdout). It ran on a local workstation (macOS 13, x86_64), comparing a debug build of this
+change on `4a88274` with a baseline binary built from `4a88274`. The frozen `lexical` and
+`fusion` blocks were bit-identical between the two builds.
+
+| Strategy | R@1 | R@5 | R@10 | MRR | F1@10 | No-gold FP | Dev MRR | Holdout R@5 | Holdout MRR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `fusion` | 0.3733 | 0.8600 | 1.0000 | 0.7800 | 0.3543 | 0.0 | 0.7719 | 0.7222 | 0.8056 |
+| `fusion_pool_max` | 0.3533 | 0.8933 | 1.0000 | 0.7733 | 0.3543 | 0.0 | 0.7544 | 0.7778 | 0.8333 |
+| `fusion_rank10` | 0.3533 | 0.8933 | 1.0000 | 0.7713 | 0.3543 | 0.0 | 0.7518 | 0.7778 | 0.8333 |
+
+Under both arms the same six positive cases change their best gold rank. Four improve by one
+or two ranks. Two worsen, one from rank 1 to 2 and one from rank 2 to 4 under both arms, which
+is the R@1 drop. One case moves MRR by about 0.02 here, so every difference is two or three
+cases wide. The fixture carries no persisted graph, runtime, memory or history components and
+no vendor paths, so it cannot show what scaling does for those signals. These numbers are not
+a basis for changing the default.
+
 ## Confidence breakdown
 
 The `confidence_breakdown` on a context pack or plan is separate from result ranking: it
