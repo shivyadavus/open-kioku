@@ -44,7 +44,7 @@
           "contribution": 0.0,
           "evidence_ids": [],
           "normalized_value": 0.0,
-          "rationale": "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence",
+          "rationale": "selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence; a plan also counts proven cross-file dependents",
           "raw_value": 0.0,
           "signal": "exact_references",
           "weight": 0.0
