@@ -928,6 +928,13 @@ fn negative_evidence_for_plan(
     unmatched_anchors: &[String],
 ) -> Vec<NegativeEvidence> {
     let mut items = context.negative_evidence.clone();
+    // A context pack does not count proven cross-file dependents, so its "no exact evidence"
+    // item contradicts a plan that found exact references of its own.
+    if exact_reference_count > 0 {
+        items.retain(|item| {
+            item.scope != open_kioku_core::negative_evidence_scope::EXACT_REFERENCES
+        });
+    }
     if history_signal_count(primary_context)
         + history_signal_count(&impact.direct_impacts)
         + history_signal_count(&impact.indirect_impacts)
@@ -1093,9 +1100,10 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
 /// symbol references among the impacts, SCIP-sourced evidence, and proven dependents in
 /// another file. Result prose is never consulted; a substring test for "scip" used to fire on
 /// a lexical impact hit whose query variant named the target file's `scip_setup_report`. A
-/// proven edge counts only when it is cross-file, authoritative, and unambiguous: a same-file
-/// edge, such as `USES_TYPE` between two of the target's own symbols, is the target referring
-/// to itself and says nothing the selection does not, and an ambiguous edge is not proof.
+/// proven edge counts only when it is cross-file, authoritative, unambiguous, and of a kind
+/// that references a symbol (see [`references_a_symbol`]): a same-file edge, such as
+/// `USES_TYPE` between two of the target's own symbols, is the target referring to itself and
+/// says nothing the selection does not, and an ambiguous edge is not proof.
 fn exact_reference_count(
     diagnostics: &open_kioku_core::RetrievalDiagnostics,
     primary_context: &[SearchResult],
@@ -1109,6 +1117,7 @@ fn exact_reference_count(
             .iter()
             .filter(|relationship| {
                 relationship.path.as_path() != target
+                    && references_a_symbol(&relationship.edge_type)
                     && relationship.authority
                         == open_kioku_core::RelationshipAuthority::Authoritative
                     && !relationship.ambiguous
@@ -1124,6 +1133,21 @@ fn exact_reference_count(
             .iter()
             .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Scip)
             .count()
+}
+
+/// Relationship kinds whose edge points at a symbol in the target file. An `IMPORTS` edge
+/// proves only that a dependent imports the target module, which a glob import
+/// (`use fx::*;`) establishes without referring to any symbol in it.
+fn references_a_symbol(edge_type: &open_kioku_core::GraphEdgeType) -> bool {
+    use open_kioku_core::GraphEdgeType;
+    matches!(
+        edge_type,
+        GraphEdgeType::References
+            | GraphEdgeType::UsesType
+            | GraphEdgeType::Calls
+            | GraphEdgeType::Implements
+            | GraphEdgeType::Extends
+    )
 }
 
 fn runtime_signal_count(results: &[SearchResult]) -> usize {
@@ -3664,6 +3688,81 @@ mod tests {
         ambiguous.ambiguous = true;
         impact.proven_impact.push(ambiguous);
         assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+
+        // Importing the target module refers to no symbol in it.
+        impact
+            .proven_impact
+            .push(proven("tests/auth_flow.rs", GraphEdgeType::Imports));
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+    }
+
+    #[test]
+    fn import_only_proven_dependents_are_not_exact_references() {
+        use open_kioku_core::{RelationshipAuthority, RelationshipImpact, RelationshipProofKind};
+
+        // A glob import (`use fx::*;`) proves an `IMPORTS` edge from `import_binding` alone.
+        let impact = ImpactReport {
+            proven_impact: vec![RelationshipImpact {
+                path: PathBuf::from("tests/alpha_token.rs"),
+                symbol: None,
+                source: "src/lib.rs".into(),
+                edge_type: GraphEdgeType::Imports,
+                authority: RelationshipAuthority::Authoritative,
+                proof_kinds: vec![RelationshipProofKind::ImportBinding],
+                ambiguous: false,
+                reason: "fixture".into(),
+            }],
+            possible_impact: Vec::new(),
+            target: "src/lib.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 0);
+    }
+
+    #[test]
+    fn plan_drops_the_context_exact_references_item_only_when_it_counts_exact_references() {
+        let task = "fix rounding in the invoice total";
+        let primary_context = vec![test_search_result("src/billing.rs")];
+        let (mut context, impact) = lexical_impact(
+            task,
+            primary_context.clone(),
+            test_search_result("src/checkout.rs"),
+        );
+        // What a context pack publishes when it found no exact evidence of its own.
+        context.negative_evidence.push(NegativeEvidence {
+            query: task.into(),
+            scope: open_kioku_core::negative_evidence_scope::EXACT_REFERENCES.into(),
+            inspected_sources: Vec::new(),
+            reason: "no explicit exact symbol reference or SCIP evidence was found".into(),
+            confidence: 0.85,
+            suggested_next_probe: None,
+        });
+        let exact_items = |exact_reference_count: usize| {
+            negative_evidence_for_plan(
+                task,
+                &context,
+                &primary_context,
+                &impact,
+                &[],
+                exact_reference_count,
+                &[],
+            )
+            .into_iter()
+            .filter(|item| item.scope == open_kioku_core::negative_evidence_scope::EXACT_REFERENCES)
+            .count()
+        };
+        assert_eq!(exact_items(1), 0);
+        assert_eq!(exact_items(0), 1);
     }
 
     #[test]
