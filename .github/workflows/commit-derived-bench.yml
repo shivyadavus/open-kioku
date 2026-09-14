@@ -6,18 +6,24 @@ name: commit-derived-bench
 # ranking change that only shows on ten thousand files. It is scheduled because indexing the
 # corpus and scoring ~400 queries takes about 45 minutes.
 #
-# Matrix entries are keyed java-a, go-a, ts-a, py-a (a Java service, a Go application, a TypeScript
-# standard library, a Python ML library); the keys name the baseline files. Each repository URL lives
-# in a repository secret named `BENCH_<CODE>_URL`, and each base commit in `BENCH_<CODE>_BASE`
-# (Settings > Secrets and variables > Actions) -- never in this file or in
-# `benchmarks/commit-derived/`. A full commit hash of a public repository is searchable and
-# therefore identifies it, so it is withheld for the same reason the URL is. The extension and
-# indexed subtrees stay checked in because they name nothing.
+# Matrix entries are keyed java-a, go-a, ts-a, py-a (Java, Go, TypeScript, Python); the keys name
+# the baseline files. These values live in repository secrets (Settings > Secrets and variables >
+# Actions), never in this file or in `benchmarks/commit-derived/`:
+# - each repository URL in `BENCH_<CODE>_URL`;
+# - each base commit in `BENCH_<CODE>_BASE`;
+# - for a corpus indexed as subtrees, the space-separated subtrees in `BENCH_<CODE>_PATHS`.
+# A full commit hash of a public repository is searchable and therefore identifies it, and so can a
+# set of top-level directory names, so both are withheld for the same reason the URL is. The
+# extension stays checked in because it names nothing.
 #
-# So corpus identity stays out of public logs and artifacts: the secrets reach only the steps that
-# use them, `scripts/mask-corpus-identity.sh` masks the forms of them a log could still show, case
-# derivation runs `--quiet`, manual runs cannot name a repository or corpus, and the uploaded
-# artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`), never cases.
+# How corpus identity stays out of public logs and artifacts:
+# - The secrets reach only the steps that use them. Before the clone,
+#   `scripts/mask-corpus-identity.sh` normalises them and masks every form a log could still show.
+# - Dispatch inputs reach scripts only through `env:` or the event file, validated. They never
+#   appear as expression text inside `run:`.
+# - The clone and its remote are removed once cases are derived, and case derivation runs `--quiet`.
+# - `ok index` writes its manifest to a file; the log gets one counts-only line.
+# - The uploaded artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`).
 
 on:
   schedule:
@@ -25,10 +31,10 @@ on:
   workflow_dispatch:
     inputs:
       path_prefixes:
-        description: Space-separated subtrees that are extracted and indexed
+        description: Space-separated subtrees to extract and index instead of each corpus's BENCH_<CODE>_PATHS secret (plain relative paths; masked in the log)
         default: ""
       after:
-        description: Commits after base to scan for cases
+        description: Commits after base to scan for cases (digits; blank = each corpus's default)
         default: ""
 
 env:
@@ -45,49 +51,56 @@ jobs:
           - name: java-a
             url_secret: BENCH_JAVA_A_URL
             base_secret: BENCH_JAVA_A_BASE
-            prefixes: "libs/ modules/ server/"
+            paths_secret: BENCH_JAVA_A_PATHS
             ext: .java
             after: "3800"
           - name: go-a
             url_secret: BENCH_GO_A_URL
             base_secret: BENCH_GO_A_BASE
-            prefixes: ""
+            paths_secret: ""
             ext: .go
             after: "1500"
           - name: ts-a
             url_secret: BENCH_TS_A_URL
             base_secret: BENCH_TS_A_BASE
-            prefixes: ""
+            paths_secret: ""
             ext: .ts
             after: "1500"
           - name: py-a
             url_secret: BENCH_PY_A_URL
             base_secret: BENCH_PY_A_BASE
-            prefixes: ""
+            paths_secret: ""
             ext: .py
             after: "1500"
     name: bench (${{ matrix.corpus.name }})
     env:
-      PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || matrix.corpus.prefixes }}
-      EXT: ${{ matrix.corpus.ext }}
-      AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
       CORPUS_NAME: ${{ matrix.corpus.name }}
+      EXT: ${{ matrix.corpus.ext }}
     steps:
       - uses: actions/checkout@v7
-      - name: Check the corpus secrets are set
+      - name: Check the corpus secrets and dispatch inputs
         env:
           REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
           BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
+          CORPUS_PATHS: ${{ secrets[matrix.corpus.paths_secret] }}
+          URL_SECRET: ${{ matrix.corpus.url_secret }}
+          BASE_SECRET: ${{ matrix.corpus.base_secret }}
+          PATHS_SECRET: ${{ matrix.corpus.paths_secret }}
+          IN_AFTER: ${{ github.event.inputs.after }}
         run: |
-          if [ -z "$REPO_URL" ]; then
-            echo "::error::no repository URL for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.url_secret }} repository secret"
+          missing=""
+          if [ -z "$REPO_URL" ]; then missing="$missing $URL_SECRET"; fi
+          if [ -z "$BASE_SHA" ]; then missing="$missing $BASE_SECRET"; fi
+          if [ -n "$PATHS_SECRET" ] && [ -z "$CORPUS_PATHS" ]; then missing="$missing $PATHS_SECRET"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::corpus $CORPUS_NAME is missing repository secrets:$missing"
             exit 1
           fi
-          if [ -z "$BASE_SHA" ]; then
-            echo "::error::no base commit for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.base_secret }} repository secret"
+          if [[ -n "$IN_AFTER" && ! "$IN_AFTER" =~ ^[0-9]+$ ]]; then
+            echo "::error::the after input must be digits"
             exit 1
           fi
-          echo "corpus ${{ matrix.corpus.name }} resolved (URL from ${{ matrix.corpus.url_secret }}, base from ${{ matrix.corpus.base_secret }})"
+          echo "corpus $CORPUS_NAME resolved from repository secrets"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -99,29 +112,39 @@ jobs:
         env:
           REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
           BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
+          CORPUS_PATHS: ${{ secrets[matrix.corpus.paths_secret] }}
+          AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
         run: |
-          # Masks first, before any command that could print the URL, its owner or name, or the base commit.
-          bash scripts/mask-corpus-identity.sh
+          set -o pipefail
+          # A dispatch override of the subtrees is read from the event file rather than `env:`, so it
+          # is validated and masked below before anything could print it.
+          override="$(python3 -c 'import json, os; print(((json.load(open(os.environ["GITHUB_EVENT_PATH"])).get("inputs") or {}).get("path_prefixes") or "").strip())')"
+          if [ -n "$override" ]; then CORPUS_PATHS="$override"; fi
+          # Normalises REPO_URL, BASE_SHA and CORPUS_PATHS in place and masks every form of them a
+          # log could show. Nothing before this line prints them.
+          . scripts/mask-corpus-identity.sh
+          if [[ ! "$AFTER" =~ ^[0-9]+$ ]]; then echo "::error::after must be digits"; exit 1; fi
+          if [[ ! "$EXT" =~ ^\.[a-z0-9]+$ ]]; then echo "::error::ext must be a dot and lowercase letters or digits"; exit 1; fi
 
+          # The clone holds the remote URL and the corpus history; it is removed however this step ends.
+          trap 'rm -rf source extract.err' EXIT
           # History only, blobs on demand.
           git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "$BASE_SHA" || true
 
-          # The indexed subtree at the base commit. Extraction stderr can name corpus paths, so a
+          # The indexed subtrees at the base commit. Extraction stderr can name corpus paths, so a
           # failure reports only that it failed.
           mkdir -p corpus
-          # shellcheck disable=SC2086
-          if ! git -C source archive "$BASE_SHA" $PATH_PREFIXES 2>extract.err | tar -x -C corpus 2>>extract.err; then
+          read -r -a paths <<< "$CORPUS_PATHS"
+          if ! git -C source archive "$BASE_SHA" "${paths[@]}" 2>extract.err | tar -x -C corpus 2>>extract.err; then
             echo "::error::extracting the base commit failed; its stderr is withheld"
             exit 1
           fi
-          echo "$BASE_SHA" > corpus/.base-sha
           echo "$(find corpus -type f | wc -l) files extracted"
 
-          args=""
-          for p in $PATH_PREFIXES; do args="$args --path-prefix $p"; done
-          # shellcheck disable=SC2086
-          python3 scripts/commit-derived-cases.py source --quiet --base "$BASE_SHA" --after "$AFTER" --ext "$EXT" $args --out cases.tsv
+          args=()
+          for p in "${paths[@]}"; do args+=(--path-prefix "$p"); done
+          python3 scripts/commit-derived-cases.py source --quiet --base "$BASE_SHA" --after "$AFTER" --ext "$EXT" "${args[@]}" --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines()
           cut = int(len(rows) * 0.7)
@@ -130,14 +153,35 @@ jobs:
           print(f"{len(rows)} cases: {cut} dev, {len(rows) - cut} holdout (chronological split)")
           PY
 
+          # Blobs were fetched from the remote on demand until here. Later steps need neither.
+          git -C source remote remove origin
+          rm -rf source extract.err
+
       - name: Index the corpus
         run: |
+          set -o pipefail
           mkdir -p artifacts
           ./target/release/ok init corpus
-          ./target/release/ok index corpus 2>&1 | tail -5
+          # Text output names excluded top-level directories, so the manifest goes to a file and the
+          # log gets one counts-only line; a failure prints only its exit status.
+          status=0
+          ./target/release/ok --json index corpus > "$RUNNER_TEMP/index.json" 2> "$RUNNER_TEMP/index.err" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::ok index exited with status $status; its output is withheld"
+            exit "$status"
+          fi
+          python3 - "$RUNNER_TEMP/index.json" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          coverage = (manifest.get("quality") or {}).get("coverage") or {}
+          count = lambda obj, key: int(obj.get(key) or 0)
+          print(f"indexed {count(manifest, 'file_count'):,} files, {count(manifest, 'symbol_count'):,} symbols, "
+                f"{count(manifest, 'chunk_count'):,} chunks; {count(coverage, 'indexed'):,} of "
+                f"{count(coverage, 'discovered'):,} discovered files indexed")
+          PY
           # Coverage is what the index did not hold; it travels with every score below.
           # Only the coverage object is kept: the full status carries skipped paths.
-          ./target/release/ok --repo corpus --json status \
+          ./target/release/ok --repo corpus --json status 2> "$RUNNER_TEMP/status.err" \
             | python3 -c 'import json, sys; json.dump(json.load(sys.stdin).get("coverage"), sys.stdout, indent=1)' \
             > artifacts/coverage.json
 

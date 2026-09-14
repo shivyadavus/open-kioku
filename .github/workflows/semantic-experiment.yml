@@ -6,32 +6,51 @@ name: semantic-experiment
 # Runs on Linux because the `ort` crate needs an ONNX Runtime the macOS-Intel prebuilts do not
 # provide; on Linux it downloads its own runtime.
 #
-# Runs on the Go application corpus, matrix key go-a (docs/retrieval-benchmark.md, "Commit-derived corpora"). The
-# repository URL and base commit come from the `BENCH_GO_A_URL` and `BENCH_GO_A_BASE` repository secrets, never
-# from this file or a dispatch input. So corpus identity stays out of public logs and artifacts, the derive step
-# masks the forms of them a log could still show (`scripts/mask-corpus-identity.sh`), case derivation runs
-# `--quiet`, and the uploaded artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`).
+# Runs on the Go corpus, matrix key go-a (docs/retrieval-benchmark.md, "Commit-derived corpora").
+# The repository URL and base commit come from the `BENCH_GO_A_URL` and `BENCH_GO_A_BASE`
+# repository secrets, never from this file or a dispatch input.
+#
+# How corpus identity stays out of public logs and artifacts:
+# - The derive step normalises and masks every form of the secrets a log could still show
+#   (`scripts/mask-corpus-identity.sh`), removes the clone once cases are derived, and runs case
+#   derivation `--quiet`.
+# - `ok index` writes its manifest to a file; the log gets one counts-only line.
+# - Dispatch inputs are validated and reach scripts only through `env:` or the event file, never as
+#   expression text inside `run:`.
+# - The uploaded artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`).
 
 on:
   workflow_dispatch:
     inputs:
       ext:
+        description: source extension to derive cases for (a dot and lowercase letters or digits)
         default: .go
       path_prefixes:
-        description: Space-separated subtrees to extract and index (blank = whole tree); also restricts gold
+        description: Space-separated subtrees to extract and index (blank = whole tree); also restricts gold (plain relative paths; masked in the log)
         default: ""
       after:
+        description: commits after base to scan for cases (digits)
         default: "1500"
       model:
-        description: local neural model name (gte-modernbert-base, jina-embeddings-v2-base-code, qwen3-embedding-0.6b)
+        description: local neural model name
+        type: choice
+        options:
+          - gte-modernbert-base
+          - jina-embeddings-v2-base-code
+          - qwen3-embedding-0.6b
         default: gte-modernbert-base
       dimensions:
+        description: embedding dimensions (digits)
         default: "768"
       split:
-        description: which split to score (dev or holdout)
+        description: which split to score
+        type: choice
+        options:
+          - holdout
+          - dev
         default: holdout
       batch_size:
-        description: embedding batch size written to the corpus ok.toml (the shipped default of 64 exceeds a 16 GB runner for ONNX models run in parallel batches)
+        description: embedding batch size written to the corpus ok.toml (digits; the shipped default of 64 exceeds a 16 GB runner for ONNX models run in parallel batches)
         default: "8"
 
 env:
@@ -43,6 +62,26 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
+      - name: Validate the dispatch inputs
+        env:
+          IN_EXT: ${{ github.event.inputs.ext }}
+          IN_AFTER: ${{ github.event.inputs.after }}
+          IN_MODEL: ${{ github.event.inputs.model }}
+          IN_DIMENSIONS: ${{ github.event.inputs.dimensions }}
+          IN_SPLIT: ${{ github.event.inputs.split }}
+          IN_BATCH_SIZE: ${{ github.event.inputs.batch_size }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$IN_EXT" =~ ^\.[a-z0-9]+$ ]] || fail "ext must be a dot and lowercase letters or digits"
+          [[ "$IN_AFTER" =~ ^[0-9]+$ ]] || fail "after must be digits"
+          [[ "$IN_DIMENSIONS" =~ ^[0-9]+$ ]] || fail "dimensions must be digits"
+          [[ "$IN_BATCH_SIZE" =~ ^[0-9]+$ ]] || fail "batch_size must be digits"
+          case "$IN_SPLIT" in dev|holdout) ;; *) fail "split must be dev or holdout" ;; esac
+          case "$IN_MODEL" in
+            gte-modernbert-base|jina-embeddings-v2-base-code|qwen3-embedding-0.6b) ;;
+            *) fail "model must be one of the three documented local models" ;;
+          esac
+          echo "dispatch inputs validated"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -54,50 +93,93 @@ jobs:
         env:
           REPO_URL: ${{ secrets.BENCH_GO_A_URL }}
           BASE_SHA: ${{ secrets.BENCH_GO_A_BASE }}
+          IN_EXT: ${{ github.event.inputs.ext }}
+          IN_AFTER: ${{ github.event.inputs.after }}
         run: |
+          set -o pipefail
           if [ -z "$REPO_URL" ] || [ -z "$BASE_SHA" ]; then
             echo "::error::no corpus for go-a: set the BENCH_GO_A_URL and BENCH_GO_A_BASE repository secrets"
             exit 1
           fi
-          # Masks first, before any command that could print the URL, its owner or name, or the base commit.
-          bash scripts/mask-corpus-identity.sh
+          # Subtrees are read from the event file rather than `env:`, so they are validated and
+          # masked below before anything could print them.
+          CORPUS_PATHS="$(python3 -c 'import json, os; print(((json.load(open(os.environ["GITHUB_EVENT_PATH"])).get("inputs") or {}).get("path_prefixes") or "").strip())')"
+          # Normalises REPO_URL, BASE_SHA and CORPUS_PATHS in place and masks every form of them a
+          # log could show. Nothing before this line prints them.
+          . scripts/mask-corpus-identity.sh
+          # The clone holds the remote URL and the corpus history; it is removed however this step ends.
+          trap 'rm -rf source extract.err' EXIT
           git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "$BASE_SHA" || true
-          PREFIXES="${{ github.event.inputs.path_prefixes }}"
           mkdir -p corpus
+          read -r -a paths <<< "$CORPUS_PATHS"
           # Extraction stderr can name corpus paths, so a failure reports only that it failed.
-          # shellcheck disable=SC2086
-          if ! git -C source archive "$BASE_SHA" $PREFIXES 2>extract.err | tar -x -C corpus 2>>extract.err; then
+          if ! git -C source archive "$BASE_SHA" "${paths[@]}" 2>extract.err | tar -x -C corpus 2>>extract.err; then
             echo "::error::extracting the base commit failed; its stderr is withheld"
             exit 1
           fi
-          args=""; for p in $PREFIXES; do args="$args --path-prefix $p"; done
-          # shellcheck disable=SC2086
+          args=()
+          for p in "${paths[@]}"; do args+=(--path-prefix "$p"); done
           python3 scripts/commit-derived-cases.py source --quiet --base "$BASE_SHA" \
-            --after "${{ github.event.inputs.after }}" --ext "${{ github.event.inputs.ext }}" $args --out cases.tsv
+            --after "$IN_AFTER" --ext "$IN_EXT" "${args[@]}" --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines(); cut = int(len(rows) * 0.7)
           open("cases-dev.tsv", "w").writelines(rows[:cut]); open("cases-holdout.tsv", "w").writelines(rows[cut:])
           print(f"{len(rows)} cases: {cut} dev, {len(rows) - cut} holdout")
           PY
+          # Blobs were fetched from the remote on demand until here. Later steps need neither.
+          git -C source remote remove origin
+          rm -rf source extract.err
+
+      - name: Index the corpus
+        run: |
+          set -o pipefail
           ./target/release/ok init corpus
-          ./target/release/ok index corpus 2>&1 | tail -2
+          # Text output names excluded top-level directories, so the manifest goes to a file and the
+          # log gets one counts-only line; a failure prints only its exit status.
+          status=0
+          ./target/release/ok --json index corpus > "$RUNNER_TEMP/index.json" 2> "$RUNNER_TEMP/index.err" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::ok index exited with status $status; its output is withheld"
+            exit "$status"
+          fi
+          python3 - "$RUNNER_TEMP/index.json" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          coverage = (manifest.get("quality") or {}).get("coverage") or {}
+          count = lambda obj, key: int(obj.get(key) or 0)
+          print(f"indexed {count(manifest, 'file_count'):,} files, {count(manifest, 'symbol_count'):,} symbols, "
+                f"{count(manifest, 'chunk_count'):,} chunks; {count(coverage, 'indexed'):,} of "
+                f"{count(coverage, 'discovered'):,} discovered files indexed")
+          PY
 
       - name: Control — semantic disabled
+        env:
+          IN_SPLIT: ${{ github.event.inputs.split }}
         run: |
           mkdir -p artifacts
           python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
-            --cases "cases-${{ github.event.inputs.split }}.tsv" --label control --workers 3 --out artifacts/control.json
+            --cases "cases-$IN_SPLIT.tsv" --label control --workers 3 --out artifacts/control.json
 
       - name: Enable the neural semantic provider and build its index
+        env:
+          IN_MODEL: ${{ github.event.inputs.model }}
+          IN_DIMENSIONS: ${{ github.event.inputs.dimensions }}
+          IN_BATCH_SIZE: ${{ github.event.inputs.batch_size }}
         run: |
           python3 - <<'PY'
-          import re
+          import os, re
+          model, dimensions, batch_size = os.environ["IN_MODEL"], os.environ["IN_DIMENSIONS"], os.environ["IN_BATCH_SIZE"]
+          if (model not in ("gte-modernbert-base", "jina-embeddings-v2-base-code", "qwen3-embedding-0.6b")
+                  or not re.fullmatch(r"[0-9]+", dimensions) or not re.fullmatch(r"[0-9]+", batch_size)):
+              raise SystemExit("model, dimensions, or batch_size failed validation")
           p = "corpus/ok.toml"; s = open(p).read()
+          semantic = (f'[semantic]\nenabled = true\nbackend = "auto"\nprovider = "fastembed"\n'
+                      f'model = "{model}"\ndimensions = {dimensions}')
           s = re.sub(r'\[semantic\]\nenabled = false\nbackend = "[^"]*"\nprovider = "[^"]*"\nmodel = "[^"]*"\ndimensions = \d+',
-                     '[semantic]\nenabled = true\nbackend = "auto"\nprovider = "fastembed"\nmodel = "${{ github.event.inputs.model }}"\ndimensions = ${{ github.event.inputs.dimensions }}', s)
+                     lambda _: semantic, s)
           s = s.replace("deny_network = true", "deny_network = false")
-          s = re.sub(r'(?m)^batch_size = \d+$', 'batch_size = ${{ github.event.inputs.batch_size }}', s)
+          s = re.sub(r'(?m)^batch_size = \d+$', lambda _: f"batch_size = {batch_size}", s)
           open(p, "w").write(s)
           PY
           grep -E '^(model|dimensions|batch_size) = ' corpus/ok.toml
@@ -116,9 +198,11 @@ jobs:
           "
 
       - name: Treatment — semantic enabled
+        env:
+          IN_SPLIT: ${{ github.event.inputs.split }}
         run: |
           python3 scripts/score-context-cases.py --ok ./target/release/ok --repo corpus \
-            --cases "cases-${{ github.event.inputs.split }}.tsv" --label treatment --workers 3 --out artifacts/treatment.json
+            --cases "cases-$IN_SPLIT.tsv" --label treatment --workers 3 --out artifacts/treatment.json
 
       - name: Compare
         run: python3 scripts/compare-commit-derived-report.py artifacts/treatment.json artifacts/control.json --slack 0.0 || true
