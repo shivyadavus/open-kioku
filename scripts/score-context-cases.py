@@ -387,18 +387,38 @@ def family_breakdown(scored, min_cases=MIN_FAMILY_CASES, seed=7):
     }
 
 
+# Printed with the per-family numbers; the same sentence as `FAMILY_CAVEAT` in
+# `scripts/compare-commit-derived-report.py`, pinned by the family tests.
+FAMILY_CAVEAT = (
+    "task families are the router's labels (retrieval_diagnostics.routing.task_family); a "
+    "per-family number measures the retrieval policy on the cases routed to it, not whether "
+    "routing chose the right family"
+)
+
+# The metrics printed per family: the ones the baseline comparison watches.
+FAMILY_PRINTED = ("R@5", "R@20", "MRR", "gold_recall@20")
+
+
 def family_lines(section):
-    """Printable per-family rows for a `by_task_family` section."""
+    """Printable per-family rows for a `by_task_family` section, each metric with its interval.
+
+    The scorer has no baseline, so it cannot say that a family is gated: only an insufficient
+    family is known never to be.
+    """
     lines = [
-        f"  -- per routed task family ({section['assignment']}); fewer than {section['min_cases']} "
-        f"cases is insufficient and never gated; {section['unassigned_cases']} unassigned --",
-        f"  {'family':20} {'cases':>5}  {'R@5':>6}  {'R@20':>6}  {'MRR':>6}  {'gold_recall@20':>14}",
+        f"  -- per routed task family ({section['assignment']}); {section['unassigned_cases']} cases unassigned --",
+        f"  note: {FAMILY_CAVEAT}",
+        f"  a family with fewer than {section['min_cases']} cases is insufficient and never gated; any other "
+        "family is gated only against a baseline that carries it (scripts/compare-commit-derived-report.py)",
     ]
     for family, entry in section["families"].items():
-        m = entry["metrics"]
-        note = "  insufficient" if entry["insufficient"] else ""
-        lines.append(f"  {family:20} {entry['cases']:>5}  {m['R@5']:.4f}  {m['R@20']:.4f}  "
-                     f"{m['MRR']:.4f}  {m['gold_recall@20']:>14.4f}{note}")
+        status = ("insufficient; never gated" if entry["insufficient"]
+                  else "gated only against a baseline that carries this family")
+        lines.append(f"  {family:20} {entry['cases']:>5} cases  [{status}]")
+        for k in FAMILY_PRINTED:
+            span = entry["ci"].get(k)
+            interval = "95% CI not computed" if span is None else f"95% CI [{span[0]:.4f}, {span[1]:.4f}]"
+            lines.append(f"    {k:16} {entry['metrics'][k]:.4f}   {interval}")
     return lines
 
 

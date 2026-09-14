@@ -12,9 +12,12 @@ Per routed task family (`by_task_family`), the same watched metrics follow the s
 the same exit status: a family's metric may not fall more than `slack` below that family's
 baseline, and such a regression exits 1 exactly as an aggregate one does. A family is gated
 only when the report and the baseline both carry it with at least the report's `min_cases`
-scored cases. Every other family, and every family when the baseline has no `by_task_family`
-section, is printed and not gated. Case counts are printed for both sides because the router
-assigns a family, not the case file, so a routing change moves cases between families.
+scored cases. Every family is printed with its gate status and 95% interval. Families are the
+router's labels: a per-family number measures the retrieval policy on the cases routed to it,
+not whether routing chose the right family. Case counts are printed for both sides, but equal
+counts do not mean equal membership: a routing change can swap cases between families at the
+same count, so per-family numbers are not comparable across builds whose routing changed.
+`summary_table` renders the same statuses for the nightly job summary.
 
 Gold yield at a token budget (`gold_file_yield@B`, `gold_line_yield@B`, median
 `tokens_to_first_gold`) is printed when the report carries it, informationally: it is not
@@ -34,6 +37,16 @@ INFORMATIONAL = (
     "gold_file_yield@4000", "gold_file_yield@8000", "gold_file_yield@16000",
     "gold_line_yield@4000", "gold_line_yield@8000", "gold_line_yield@16000",
 )
+
+# Printed wherever per-family numbers are. `scripts/score-context-cases.py` carries the same
+# sentence; `scripts/tests/test_commit_derived_families.py` pins the two together.
+FAMILY_CAVEAT = (
+    "task families are the router's labels (retrieval_diagnostics.routing.task_family); a "
+    "per-family number measures the retrieval policy on the cases routed to it, not whether "
+    "routing chose the right family"
+)
+
+SUMMARY_METRICS = ("R@5", "R@20", "MRR")
 
 
 def print_yield(report, baseline=None):
@@ -63,8 +76,36 @@ def family_section(report):
     return None
 
 
-def watched_values(entry):
-    return "  ".join(f"{k} {entry['metrics'][k]:.4f}" for k in WATCHED)
+def family_status(family, section, base_section):
+    """(gated, label) for one family of a report section against a baseline section or None.
+
+    Gated only when the report and the baseline both carry the family with at least the
+    report's `min_cases` cases. Every other status says why the family is not gated.
+    """
+    min_cases = section["min_cases"]
+    now = section["families"].get(family)
+    base = (base_section or {}).get("families", {}).get(family)
+    if now is None:
+        return False, "absent from the report; not gated"
+    short = [side for side, entry in (("report", now), ("baseline", base))
+             if entry is not None and entry["cases"] < min_cases]
+    if short:
+        return False, f"insufficient: fewer than {min_cases} cases on the {' and '.join(short)}; not gated"
+    if base_section is None:
+        return False, "informational: no family baseline frozen; not gated"
+    if base is None:
+        return False, "informational: absent from the baseline; not gated"
+    return True, "gated"
+
+
+def bounds(entry, k):
+    lo, hi = entry.get("ci", {}).get(k) or (None, None)
+    return None if lo is None else (lo, hi)
+
+
+def interval(entry, k):
+    span = bounds(entry, k)
+    return "95% CI not computed" if span is None else f"95% CI [{span[0]:.4f}, {span[1]:.4f}]"
 
 
 def compare_families(report, baseline, slack=SLACK):
@@ -73,42 +114,75 @@ def compare_families(report, baseline, slack=SLACK):
     if section is None:
         print("  per routed task family: the report has no by_task_family section; nothing compared")
         return []
-    min_cases = section["min_cases"]
-    families = section["families"]
-    print(f"  per routed task family ({section['assignment']}; gated only with {min_cases} or more "
-          f"cases on both sides; {section['unassigned_cases']} cases unassigned):")
     base_section = family_section(baseline)
-    if base_section is None:
-        for family, entry in families.items():
-            reason = f"insufficient, fewer than {min_cases} cases" if entry["cases"] < min_cases else "no family baseline"
-            print(f"  {family:20} {entry['cases']:>4} cases  {watched_values(entry)}  ({reason}; not gated)")
-        if baseline is not None:
-            print("  the baseline has no by_task_family section; per-family metrics are informational until one is frozen")
-        return []
-    base_families = base_section["families"]
+    print(f"  per routed task family ({section['assignment']}; {section['unassigned_cases']} cases unassigned):")
+    print(f"  note: {FAMILY_CAVEAT}")
+    if baseline is not None and base_section is None:
+        print("  the baseline has no by_task_family section; no family is gated until one is frozen")
+    families = section["families"]
+    base_families = (base_section or {}).get("families", {})
     failed = []
     for family in list(families) + [f for f in base_families if f not in families]:
+        gated, label = family_status(family, section, base_section)
         now, base = families.get(family), base_families.get(family)
         if now is None:
-            print(f"  {family:20} baseline {base['cases']} cases -> absent from the report (not gated)")
+            print(f"  {family:20} baseline {base['cases']} cases [{label}]")
             continue
-        if base is None:
-            print(f"  {family:20} {now['cases']:>4} cases  {watched_values(now)}  (absent from the baseline; not gated)")
-            continue
-        short = [side for side, entry in (("report", now), ("baseline", base)) if entry["cases"] < min_cases]
-        status = "gated" if not short else f"insufficient on the {' and '.join(short)}, fewer than {min_cases} cases; not gated"
-        print(f"  {family:20} cases {base['cases']} -> {now['cases']} ({status})")
+        counts = f"cases {base['cases']} -> {now['cases']}" if base else f"{now['cases']} cases"
+        print(f"  {family:20} {counts} [{label}]")
         for k in WATCHED:
-            b, n = base["metrics"][k], now["metrics"][k]
+            n = now["metrics"][k]
+            if base is None:
+                print(f"    {k:16} {n:.4f}   {interval(now, k)}")
+                continue
+            b = base["metrics"][k]
             marker = ""
             if n < b - slack:
-                if short:
-                    marker = "  <-- below slack (not gated)"
-                else:
+                if gated:
                     marker = "  <-- REGRESSION"
                     failed.append(f"{family}:{k}")
-            print(f"    {k:16} baseline {b:.4f} -> {n:.4f} ({n - b:+.4f}){marker}")
+                else:
+                    marker = "  <-- below slack (not gated)"
+            print(f"    {k:16} baseline {b:.4f} -> {n:.4f} ({n - b:+.4f})   {interval(now, k)}{marker}")
     return failed
+
+
+def summary_rows(split, report, baseline):
+    """Markdown rows for one split: each family's cases, metrics with intervals, and gate status."""
+    section = family_section(report)
+    if section is None:
+        return [f"| {split} | (no by_task_family section) | | | | | |"]
+    base_section = family_section(baseline)
+    families = section["families"]
+    base_families = (base_section or {}).get("families", {})
+    rows = []
+    for family in list(families) + [f for f in base_families if f not in families]:
+        _, label = family_status(family, section, base_section)
+        now, base = families.get(family), base_families.get(family)
+        if now is None:
+            rows.append(f"| {split} | {family} | {base['cases']} -> absent | | | | {label} |")
+            continue
+        cases = f"{base['cases']} -> {now['cases']}" if base else f"{now['cases']}"
+        cells = []
+        for k in SUMMARY_METRICS:
+            span = bounds(now, k)
+            ci = "[not computed]" if span is None else f"[{span[0]:.4f}, {span[1]:.4f}]"
+            cells.append(f"{now['metrics'][k]:.4f} {ci}")
+        rows.append(f"| {split} | {family} | {cases} | {' | '.join(cells)} | {label} |")
+    return rows
+
+
+def summary_table(splits):
+    """The job summary's per-family table; `splits` maps split name to (report, baseline or None)."""
+    lines = [
+        f"Per routed task family: {FAMILY_CAVEAT}. See docs/retrieval-benchmark.md, \"Per-task-family breakdown\".",
+        "",
+        "| split | routed task family | cases (baseline -> report) | R@5 [95% CI] | R@20 [95% CI] | MRR [95% CI] | gate |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for split, (report, baseline) in splits.items():
+        lines += summary_rows(split, report, baseline)
+    return lines
 
 
 def main():

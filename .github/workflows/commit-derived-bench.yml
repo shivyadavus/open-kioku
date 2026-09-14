@@ -166,18 +166,23 @@ jobs:
                   continue
               m = r["metrics"]
               print(f"| {split} | {r.get('coverage_line', 'not recorded')} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
-          print()
-          print("| split | routed task family | cases | R@5 | R@20 | MRR |")
-          print("| --- | --- | ---: | ---: | ---: | ---: |")
+          # Per-family rows take their gate status from the compare script, so the summary
+          # shows what the gate applied rather than inferring it from the case count.
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("compare", "scripts/compare-commit-derived-report.py")
+          compare = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(compare)
+          splits = {}
           for split in ("holdout", "dev"):
               try:
-                  section = json.load(open(f"artifacts/{split}.json")).get("by_task_family") or {}
+                  report = json.load(open(f"artifacts/{split}.json"))
               except OSError:
                   continue
-              for family, f in section.get("families", {}).items():
-                  m = f["metrics"]
-                  note = " (insufficient, not gated)" if f["insufficient"] else ""
-                  print(f"| {split} | {family}{note} | {f['cases']} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
+              path = f"benchmarks/commit-derived/{os.environ['CORPUS_NAME']}-{split}.json"
+              splits[split] = (report, json.load(open(path)) if os.path.exists(path) else None)
+          print()
+          for line in compare.summary_table(splits):
+              print(line)
           PY
 
       - name: Upload reports
