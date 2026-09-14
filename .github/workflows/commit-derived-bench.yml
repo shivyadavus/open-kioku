@@ -166,6 +166,23 @@ jobs:
                   continue
               m = r["metrics"]
               print(f"| {split} | {r.get('coverage_line', 'not recorded')} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
+          # Per-family rows take their gate status from the compare script, so the summary
+          # shows what the gate applied rather than inferring it from the case count.
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("compare", "scripts/compare-commit-derived-report.py")
+          compare = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(compare)
+          splits = {}
+          for split in ("holdout", "dev"):
+              try:
+                  report = json.load(open(f"artifacts/{split}.json"))
+              except OSError:
+                  continue
+              path = f"benchmarks/commit-derived/{os.environ['CORPUS_NAME']}-{split}.json"
+              splits[split] = (report, json.load(open(path)) if os.path.exists(path) else None)
+          print()
+          for line in compare.summary_table(splits):
+              print(line)
           PY
 
       - name: Upload reports
