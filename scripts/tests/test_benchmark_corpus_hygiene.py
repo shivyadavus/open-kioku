@@ -309,6 +309,23 @@ class WorkflowHygieneTests(unittest.TestCase):
             self.assertIn("git -C source remote remove origin", script, name)
             self.assertIn("commit-derived-cases.py source --quiet", script, name)
 
+    def test_the_build_prints_only_warnings_and_errors(self):
+        for name, scripts in self.scripts.items():
+            builds = [line for script in scripts for line in script.splitlines() if "cargo build" in line]
+            self.assertTrue(builds, f"{name}: no cargo build found")
+            for line in builds:
+                self.assertIn("--quiet", line.split(), f"{name}: {line.strip()}")
+
+    def test_git_prompts_are_off_and_network_stderr_stays_out_of_the_log(self):
+        for name, text in self.texts.items():
+            self.assertEqual(len(re.findall(r'(?m)^\s+GIT_TERMINAL_PROMPT: "0"$', text)), 1, name)
+            script = next(s for s in self.scripts[name] if "git clone" in s)
+            self.assertIn('GIT_TERMINAL_PROMPT: "0"', text.split(script, 1)[0].rsplit("- name:", 1)[1], name)
+            for command in ("git clone", "git -C source fetch"):
+                lines = [line for line in script.splitlines() if line.strip().startswith(command)]
+                self.assertEqual(len(lines), 1, (name, command))
+                self.assertRegex(lines[0], r'2>\s*"\$RUNNER_TEMP/[\w.-]+"', (name, command))
+
     def test_mapping_lines_keep_a_space_after_the_key(self):
         # A text-level guard for the YAML the parser-free tests above read: `ext:.go` is not a mapping.
         for name, text in self.texts.items():

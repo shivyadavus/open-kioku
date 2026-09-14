@@ -87,7 +87,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
       - name: Build ok
-        run: cargo build --release -p open-kioku-cli
+        # Only warnings and errors: the progress lines add nothing to the log.
+        run: cargo build --release --quiet -p open-kioku-cli
 
       - name: Derive the corpus at the base commit
         env:
@@ -95,6 +96,7 @@ jobs:
           BASE_SHA: ${{ secrets.BENCH_GO_A_BASE }}
           IN_EXT: ${{ github.event.inputs.ext }}
           IN_AFTER: ${{ github.event.inputs.after }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -o pipefail
           if [ -z "$REPO_URL" ] || [ -z "$BASE_SHA" ]; then
@@ -109,8 +111,15 @@ jobs:
           . scripts/mask-corpus-identity.sh
           # The clone holds the remote URL and the corpus history; it is removed however this step ends.
           trap 'rm -rf source extract.err' EXIT
-          git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
-          git -C source fetch --quiet origin "$BASE_SHA" || true
+          # Git's stderr goes to files outside the log, and a failure prints only its exit status.
+          status=0
+          git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source 2>"$RUNNER_TEMP/git-clone.err" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::git clone exited with status $status; its stderr is withheld"
+            exit "$status"
+          fi
+          git -C source fetch --quiet origin "$BASE_SHA" 2>"$RUNNER_TEMP/git-fetch.err" \
+            || echo "fetching the base commit exited with status $?; continuing with the cloned history"
           mkdir -p corpus
           read -r -a paths <<< "$CORPUS_PATHS"
           # Extraction stderr can name corpus paths, so a failure reports only that it failed.
