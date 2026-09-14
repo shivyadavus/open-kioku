@@ -6,6 +6,8 @@ const NO_MATCH_QUERY: &str = "zzqv_no_matching_repository_evidence_7f31b9";
 /// `alpha token` reaches the fixture's one function; the two identifiers exist nowhere.
 const UNKNOWN_IDENTIFIER_QUERY: &str =
     "fix the null check in alpha token FrobnicateWidgetManager::reticulate_splines";
+/// `alpha token` reaches the fixture's one function; the hyphenated words are prose.
+const HYPHENATED_PROSE_QUERY: &str = "re-index the alpha token after a drive-by edit";
 
 fn initialized_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("temporary repository");
@@ -194,5 +196,63 @@ fn context_names_unknown_task_identifiers_and_reports_low_confidence() {
     assert!(
         rendered.contains("FrobnicateWidgetManager") && rendered.contains("reticulate_splines"),
         "{rendered}"
+    );
+}
+
+#[test]
+fn context_reports_unmatched_hyphenated_words_without_the_identifier_blocker() {
+    let temp = initialized_fixture();
+    let repo = temp.path();
+
+    let output = cargo_bin_cmd!("ok")
+        .arg("--repo")
+        .arg(repo)
+        .args(["context", HYPHENATED_PROSE_QUERY, "--format", "json"])
+        .output()
+        .expect("run context command");
+    assert!(
+        output.status.success(),
+        "context command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pack: Value = serde_json::from_slice(&output.stdout).expect("context JSON");
+    assert!(
+        !pack["primary_files"]
+            .as_array()
+            .expect("primary_files array")
+            .is_empty(),
+        "the known term must still retrieve context"
+    );
+    let blockers = pack
+        .pointer("/confidence_breakdown/blockers")
+        .and_then(Value::as_array)
+        .expect("blockers array");
+    assert!(
+        blockers.iter().all(|blocker| !blocker
+            .as_str()
+            .is_some_and(|blocker| blocker.contains("task identifier(s) name nothing"))),
+        "hyphenated prose must not be reported as unknown identifiers: {blockers:?}"
+    );
+    let caveats = pack
+        .pointer("/confidence_breakdown/caveats")
+        .and_then(Value::as_array)
+        .expect("caveats array");
+    assert!(
+        caveats.iter().any(|caveat| caveat
+            .as_str()
+            .is_some_and(|caveat| caveat.contains("re-index") && caveat.contains("drive-by"))),
+        "the unmatched words must stay visible as a caveat: {caveats:?}"
+    );
+    let anchor = pack["negative_evidence"]
+        .as_array()
+        .expect("negative_evidence array")
+        .iter()
+        .find(|item| item["scope"].as_str() == Some("anchor"))
+        .expect("anchor negative evidence");
+    // Named as words, never as identifiers the repository lacks.
+    assert_eq!(
+        anchor["reason"].as_str(),
+        Some("hyphenated task word(s) spelled by no selected context: re-index, drive-by"),
+        "{anchor}"
     );
 }

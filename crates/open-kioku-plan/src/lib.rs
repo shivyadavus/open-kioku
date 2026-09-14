@@ -419,6 +419,7 @@ impl<'a> PlanEngine<'a> {
             &impact.risk_report,
             primary_context.is_empty(),
             &unmatched_anchors,
+            &open_kioku_core::weak_named_anchors(task),
         );
         // The context pack already carries its own impact evidence; the plan's impact report
         // re-derives the same `impact:<path>` and bounded-search records.
@@ -735,11 +736,51 @@ fn context_has_bounded_impact(context: &ContextPack) -> bool {
         .any(|evidence| evidence.id.0 == "context:bounded-search")
 }
 
+/// `unmatched` anchors split into (hyphenated task words, identifiers), each in task order.
+/// Context publishes the same split, so the two surfaces word an anchor miss identically.
+fn split_unmatched_anchors<'a>(
+    unmatched: &'a [String],
+    weak_anchors: &[String],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    unmatched
+        .iter()
+        .map(String::as_str)
+        .partition(|anchor| weak_anchors.iter().any(|weak| weak == anchor))
+}
+
+/// A hyphenated word the index does not hold may be prose, so the reason never calls it an
+/// identifier.
+fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
+    let mut parts = Vec::new();
+    if !identifiers.is_empty() {
+        parts.push(format!(
+            "task identifier(s) spelled by no selected context: {}",
+            identifiers.join(", ")
+        ));
+    }
+    if !words.is_empty() {
+        parts.push(format!(
+            "hyphenated task word(s) spelled by no selected context: {}",
+            words.join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+fn anchor_miss_probe(identifiers: &[&str]) -> &'static str {
+    if identifiers.is_empty() {
+        "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+    } else {
+        "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
+    }
+}
+
 fn merge_risk(
     context: &RiskReport,
     impact: &RiskReport,
     no_matches: bool,
     unmatched_anchors: &[String],
+    weak_anchors: &[String],
 ) -> RiskReport {
     if no_matches {
         return RiskReport {
@@ -756,10 +797,21 @@ fn merge_risk(
         }
     }
     if !unmatched_anchors.is_empty() {
-        reasons.push(format!(
-            "low confidence: top context did not match named task anchor(s): {}",
-            unmatched_anchors.join(", ")
-        ));
+        let (words, identifiers) = split_unmatched_anchors(unmatched_anchors, weak_anchors);
+        let mut parts = Vec::new();
+        if !identifiers.is_empty() {
+            parts.push(format!(
+                "top context did not match named task anchor(s): {}",
+                identifiers.join(", ")
+            ));
+        }
+        if !words.is_empty() {
+            parts.push(format!(
+                "top context did not spell hyphenated task word(s): {}",
+                words.join(", ")
+            ));
+        }
+        reasons.push(format!("low confidence: {}", parts.join("; ")));
     }
 
     let score = if unmatched_anchors.is_empty() {
@@ -862,6 +914,7 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
                 .count(),
         named_anchor_count: open_kioku_core::named_anchors(task).len(),
         unmatched_anchors: unmatched_anchors.to_vec(),
+        weak_anchors: open_kioku_core::weak_named_anchors(task),
     })
 }
 
@@ -875,6 +928,13 @@ fn negative_evidence_for_plan(
     unmatched_anchors: &[String],
 ) -> Vec<NegativeEvidence> {
     let mut items = context.negative_evidence.clone();
+    // A context pack does not count proven cross-file dependents, so its "no exact evidence"
+    // item contradicts a plan that found exact references of its own.
+    if exact_reference_count > 0 {
+        items.retain(|item| {
+            item.scope != open_kioku_core::negative_evidence_scope::EXACT_REFERENCES
+        });
+    }
     if history_signal_count(primary_context)
         + history_signal_count(&impact.direct_impacts)
         + history_signal_count(&impact.indirect_impacts)
@@ -989,6 +1049,8 @@ fn negative_evidence_for_plan(
         );
     }
     if !unmatched_anchors.is_empty() {
+        let weak_anchors = open_kioku_core::weak_named_anchors(task);
+        let (words, identifiers) = split_unmatched_anchors(unmatched_anchors, &weak_anchors);
         push_unique_negative_evidence(
             &mut items,
             NegativeEvidence {
@@ -999,14 +1061,9 @@ fn negative_evidence_for_plan(
                     "primary_context.snippets".into(),
                     "primary_context.symbols".into(),
                 ],
-                reason: format!(
-                    "task identifier(s) spelled by no selected context: {}",
-                    unmatched_anchors.join(", ")
-                ),
+                reason: anchor_miss_reason(&identifiers, &words),
                 confidence: 0.85,
-                suggested_next_probe: Some(
-                    "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`.".into(),
-                ),
+                suggested_next_probe: Some(anchor_miss_probe(&identifiers).into()),
             },
         );
     }
@@ -1040,19 +1097,32 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
 }
 
 /// Exact references a plan can point at: exact-authority selections in the pack, indexed
-/// symbol references among the impacts, and SCIP-sourced evidence. Result prose is never
-/// consulted; a substring test for "scip" used to fire on a lexical impact hit whose query
-/// variant named the target file's `scip_setup_report`. `impact.proven_impact` is
-/// deliberately not a source: a proven `Calls` edge is a graph fact about the target's
-/// dependents (often the target file itself), reported in the summary and priced by impact
-/// risk, and it says nothing about whether the selected context anchors the task.
+/// symbol references among the impacts, SCIP-sourced evidence, and proven dependents in
+/// another file. Result prose is never consulted; a substring test for "scip" used to fire on
+/// a lexical impact hit whose query variant named the target file's `scip_setup_report`. A
+/// proven edge counts only when it is cross-file, authoritative, unambiguous, and of a kind
+/// that references a symbol (see [`references_a_symbol`]): a same-file edge, such as
+/// `USES_TYPE` between two of the target's own symbols, is the target referring to itself and
+/// says nothing the selection does not, and an ambiguous edge is not proof.
 fn exact_reference_count(
     diagnostics: &open_kioku_core::RetrievalDiagnostics,
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     evidence: &[open_kioku_core::Evidence],
 ) -> usize {
+    let target = Path::new(&impact.target);
     open_kioku_context::exact_authority_selection_count(diagnostics, primary_context)
+        + impact
+            .proven_impact
+            .iter()
+            .filter(|relationship| {
+                relationship.path.as_path() != target
+                    && references_a_symbol(&relationship.edge_type)
+                    && relationship.authority
+                        == open_kioku_core::RelationshipAuthority::Authoritative
+                    && !relationship.ambiguous
+            })
+            .count()
         + impact
             .direct_impacts
             .iter()
@@ -1063,6 +1133,21 @@ fn exact_reference_count(
             .iter()
             .filter(|item| item.source_type == open_kioku_core::EvidenceSourceType::Scip)
             .count()
+}
+
+/// Relationship kinds whose edge points at a symbol in the target file. An `IMPORTS` edge
+/// proves only that a dependent imports the target module, which a glob import
+/// (`use fx::*;`) establishes without referring to any symbol in it.
+fn references_a_symbol(edge_type: &open_kioku_core::GraphEdgeType) -> bool {
+    use open_kioku_core::GraphEdgeType;
+    matches!(
+        edge_type,
+        GraphEdgeType::References
+            | GraphEdgeType::UsesType
+            | GraphEdgeType::Calls
+            | GraphEdgeType::Implements
+            | GraphEdgeType::Extends
+    )
 }
 
 fn runtime_signal_count(results: &[SearchResult]) -> usize {
@@ -3356,6 +3441,75 @@ mod tests {
     }
 
     #[test]
+    fn hyphenated_task_words_are_named_apart_from_identifiers_in_anchor_evidence_and_risk() {
+        let task = "fix FrobnicateWidgetManager after a drive-by edit";
+        let primary_context = vec![test_search_result("src/auth.rs")];
+        let (context, impact) = lexical_impact(
+            task,
+            primary_context.clone(),
+            test_search_result("src/session.rs"),
+        );
+        let anchor_item = |task: &str, unmatched: &[String]| {
+            negative_evidence_for_plan(task, &context, &primary_context, &impact, &[], 1, unmatched)
+                .into_iter()
+                .find(|item| item.scope == "anchor")
+                .expect("anchor negative evidence")
+        };
+
+        let unmatched = vec![
+            "FrobnicateWidgetManager".to_string(),
+            "drive-by".to_string(),
+        ];
+        let weak = open_kioku_core::weak_named_anchors(task);
+        assert_eq!(weak, vec!["drive-by"]);
+        assert_eq!(
+            anchor_item(task, &unmatched).reason,
+            "task identifier(s) spelled by no selected context: FrobnicateWidgetManager; hyphenated task word(s) spelled by no selected context: drive-by"
+        );
+        let risk = merge_risk(
+            &context.risk_report,
+            &impact.risk_report,
+            false,
+            &unmatched,
+            &weak,
+        );
+        assert!(
+            risk.reasons.iter().any(|reason| reason
+                == "low confidence: top context did not match named task anchor(s): FrobnicateWidgetManager; top context did not spell hyphenated task word(s): drive-by"),
+            "{:?}",
+            risk.reasons
+        );
+
+        // Words only: neither the evidence nor the risk reason calls them identifiers, and the
+        // risk floor is unchanged.
+        let task = "re-index after a drive-by edit";
+        let unmatched = open_kioku_core::weak_named_anchors(task);
+        let words = anchor_item(task, &unmatched);
+        assert_eq!(
+            words.reason,
+            "hyphenated task word(s) spelled by no selected context: re-index, drive-by"
+        );
+        assert!(words
+            .suggested_next_probe
+            .as_deref()
+            .is_some_and(|probe| !probe.contains("does not exist")));
+        let risk = merge_risk(
+            &context.risk_report,
+            &impact.risk_report,
+            false,
+            &unmatched,
+            &unmatched,
+        );
+        assert!(
+            risk.reasons.iter().any(|reason| reason
+                == "low confidence: top context did not spell hyphenated task word(s): re-index, drive-by"),
+            "{:?}",
+            risk.reasons
+        );
+        assert!(risk.score >= 0.45, "{risk:?}");
+    }
+
+    #[test]
     fn named_anchor_miss_raises_low_confidence_risk() {
         let store = test_store();
         let evidence = Evidence {
@@ -3495,6 +3649,123 @@ mod tests {
     }
 
     #[test]
+    fn only_cross_file_authoritative_unambiguous_proven_impact_counts_as_exact_reference() {
+        use open_kioku_core::{RelationshipAuthority, RelationshipImpact};
+
+        let proven = |path: &str, edge_type: GraphEdgeType| RelationshipImpact {
+            path: PathBuf::from(path),
+            symbol: None,
+            source: "auth::issue_token".into(),
+            edge_type,
+            authority: RelationshipAuthority::Authoritative,
+            proof_kinds: Vec::new(),
+            ambiguous: false,
+            reason: "fixture".into(),
+        };
+        let mut impact = ImpactReport {
+            proven_impact: vec![
+                proven("src/auth.rs", GraphEdgeType::UsesType),
+                proven("src/session.rs", GraphEdgeType::Calls),
+            ],
+            possible_impact: Vec::new(),
+            target: "src/auth.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+
+        // An ambiguous edge is not proof, even into another file.
+        let mut ambiguous = proven("src/billing.rs", GraphEdgeType::Calls);
+        ambiguous.ambiguous = true;
+        impact.proven_impact.push(ambiguous);
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+
+        // Importing the target module refers to no symbol in it.
+        impact
+            .proven_impact
+            .push(proven("tests/auth_flow.rs", GraphEdgeType::Imports));
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+    }
+
+    #[test]
+    fn import_only_proven_dependents_are_not_exact_references() {
+        use open_kioku_core::{RelationshipAuthority, RelationshipImpact, RelationshipProofKind};
+
+        // A glob import (`use fx::*;`) proves an `IMPORTS` edge from `import_binding` alone.
+        let impact = ImpactReport {
+            proven_impact: vec![RelationshipImpact {
+                path: PathBuf::from("tests/alpha_token.rs"),
+                symbol: None,
+                source: "src/lib.rs".into(),
+                edge_type: GraphEdgeType::Imports,
+                authority: RelationshipAuthority::Authoritative,
+                proof_kinds: vec![RelationshipProofKind::ImportBinding],
+                ambiguous: false,
+                reason: "fixture".into(),
+            }],
+            possible_impact: Vec::new(),
+            target: "src/lib.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 0);
+    }
+
+    #[test]
+    fn plan_drops_the_context_exact_references_item_only_when_it_counts_exact_references() {
+        let task = "fix rounding in the invoice total";
+        let primary_context = vec![test_search_result("src/billing.rs")];
+        let (mut context, impact) = lexical_impact(
+            task,
+            primary_context.clone(),
+            test_search_result("src/checkout.rs"),
+        );
+        // What a context pack publishes when it found no exact evidence of its own.
+        context.negative_evidence.push(NegativeEvidence {
+            query: task.into(),
+            scope: open_kioku_core::negative_evidence_scope::EXACT_REFERENCES.into(),
+            inspected_sources: Vec::new(),
+            reason: "no explicit exact symbol reference or SCIP evidence was found".into(),
+            confidence: 0.85,
+            suggested_next_probe: None,
+        });
+        let exact_items = |exact_reference_count: usize| {
+            negative_evidence_for_plan(
+                task,
+                &context,
+                &primary_context,
+                &impact,
+                &[],
+                exact_reference_count,
+                &[],
+            )
+            .into_iter()
+            .filter(|item| item.scope == open_kioku_core::negative_evidence_scope::EXACT_REFERENCES)
+            .count()
+        };
+        assert_eq!(exact_items(1), 0);
+        assert_eq!(exact_items(0), 1);
+    }
+
+    #[test]
     fn scip_in_an_impact_query_variant_does_not_grant_plan_exact_confidence() {
         // Impact queries are built from the target file's symbol names; a file defining
         // `scip_setup_report` stamps this line on every lexical dependent it finds.
@@ -3539,7 +3810,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_symbol_references_count_as_exact_but_proven_dependents_do_not() {
+    fn indexed_symbol_references_and_cross_file_proven_dependents_count_as_exact() {
         let mut reference_hit = test_search_result("src/publisher.rs");
         reference_hit.match_reason = "exact symbol reference via tree-sitter".into();
         let (_, mut impact) = lexical_impact("token", Vec::new(), reference_hit);
@@ -3559,7 +3830,7 @@ mod tests {
                 ambiguous: false,
                 reason: "calls edge into `issue_token` (exact call site)".into(),
             });
-        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 0);
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
     }
 
     #[test]
