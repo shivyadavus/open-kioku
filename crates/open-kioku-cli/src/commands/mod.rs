@@ -476,6 +476,33 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         lines.push("".to_string());
                     }
 
+                    if !schema.syntax.is_empty() {
+                        lines.push("## Query Syntax".to_string());
+                        for sentence in &schema.syntax {
+                            lines.push(format!("- {}", sentence));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    if !schema.examples.is_empty() {
+                        lines.push("## Query Examples".to_string());
+                        for example in &schema.examples {
+                            lines.push(format!("- `{}`: {}", example.query, example.description));
+                        }
+                        lines.push("".to_string());
+                    }
+
+                    if !schema.unsupported.is_empty() {
+                        lines.push("## Unsupported Query Forms".to_string());
+                        for form in &schema.unsupported {
+                            lines.push(format!(
+                                "- `{}` (`{}`): {}",
+                                form.form, form.example, form.alternative
+                            ));
+                        }
+                        lines.push("".to_string());
+                    }
+
                     if !schema.evidence_source_types.is_empty() {
                         lines.push("## Evidence Source Types".to_string());
                         for source_type in &schema.evidence_source_types {

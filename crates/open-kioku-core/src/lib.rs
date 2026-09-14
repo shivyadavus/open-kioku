@@ -3855,12 +3855,33 @@ pub struct EvidenceGraphSchema {
     pub evidence_source_types: Vec<String>,
     #[serde(default)]
     pub query_features: Vec<String>,
+    /// One sentence per clause of the graph query language, as the parser accepts it.
+    #[serde(default)]
+    pub syntax: Vec<String>,
+    #[serde(default)]
+    pub examples: Vec<GraphQueryExample>,
+    /// Forms the parser or executor rejects, each with the accepted way to ask instead.
+    #[serde(default)]
+    pub unsupported: Vec<UnsupportedGraphQueryForm>,
     #[serde(default)]
     pub optional_evidence: Vec<OptionalEvidenceSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caveats: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GraphQueryExample {
+    pub query: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnsupportedGraphQueryForm {
+    pub form: String,
+    pub example: String,
+    pub alternative: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
