@@ -434,6 +434,7 @@ mod tests {
                     Vec::new(),
                     "test fixture",
                 )],
+                exact_reference_provenance: None,
             }],
             primary_symbols: Vec::new(),
             supporting_files: Vec::new(),

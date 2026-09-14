@@ -849,6 +849,7 @@ mod tests {
                 evidence_refs: vec!["ctx:lib".into()],
                 confidence: 0.9,
                 score_breakdown: vec![],
+                exact_reference_provenance: None,
             }],
             relevant_symbols: vec![Symbol {
                 id: SymbolId::new("sym-handler"),

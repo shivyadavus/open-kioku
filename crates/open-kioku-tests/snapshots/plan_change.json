@@ -584,7 +584,7 @@
         "confidence": 0.0,
         "inspected_sources": [
           "retrieval_trace.authority",
-          "impact.match_reason",
+          "impact.exact_reference_provenance",
           "evidence.source_type"
         ],
         "query": "add a subtract function next to add",

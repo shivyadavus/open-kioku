@@ -1412,6 +1412,15 @@ pub enum EvidenceSourceType {
     Heuristic,
 }
 
+impl EvidenceSourceType {
+    /// Whether a symbol occurrence from this source is an exact reference: SCIP and LSP index
+    /// data and tree-sitter occurrences. Listed explicitly, so a variant added later is not
+    /// exact until someone decides it is.
+    pub fn is_exact_reference_source(&self) -> bool {
+        matches!(self, Self::Scip | Self::TreeSitter | Self::Lsp)
+    }
+}
+
 /// An immutable shared string used by evidence fields.
 ///
 /// Backed by `Arc<str>` rather than `String` for two reasons that only matter at
@@ -4450,9 +4459,27 @@ pub struct SearchResult {
     pub confidence: f32,
     #[serde(default)]
     pub score_breakdown: Vec<ScoreComponent>,
+    /// Source of the indexed symbol occurrence this result was produced from. Consumers read
+    /// exact-reference provenance here, never from `match_reason`: a deduplicated result takes
+    /// the prose of whichever duplicate scored higher, and a lexical hit on the same range
+    /// would erase it. Absent on results that are not symbol occurrences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_reference_provenance: Option<EvidenceSourceType>,
 }
 
 impl SearchResult {
+    /// The exact-reference source this result carries. A provenance that is not an exact
+    /// reference source does not make the result exact.
+    pub fn exact_reference_source(&self) -> Option<&EvidenceSourceType> {
+        self.exact_reference_provenance
+            .as_ref()
+            .filter(|source| source.is_exact_reference_source())
+    }
+
+    pub fn is_exact_reference(&self) -> bool {
+        self.exact_reference_source().is_some()
+    }
+
     pub fn derived_evidence_ids(&self) -> Vec<String> {
         if !self.evidence_refs.is_empty() {
             return self.evidence_refs.clone();
@@ -4796,6 +4823,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 

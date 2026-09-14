@@ -221,6 +221,7 @@ impl<'a> BuiltinCandidateContext<'a> {
                     evidence_refs: vec![evidence_ref],
                     confidence: 0.65,
                     score_breakdown: Vec::new(),
+                    exact_reference_provenance: None,
                 };
                 scored.push((
                     score,
@@ -872,6 +873,7 @@ fn indexed_document_stream(
                 evidence_refs: vec![evidence_ref],
                 confidence: 0.65,
                 score_breakdown: Vec::new(),
+                exact_reference_provenance: None,
             };
             Some((
                 score,
@@ -948,6 +950,7 @@ fn result_for_test(file: &File, test: &TestTarget, score: f32) -> SearchResult {
         evidence_refs: vec![format!("test:{}", test.id)],
         confidence: test.confidence.score(),
         score_breakdown: Vec::new(),
+        exact_reference_provenance: None,
     }
 }
 
@@ -996,6 +999,7 @@ fn result_for_file(
         evidence_refs,
         confidence,
         score_breakdown: Vec::new(),
+        exact_reference_provenance: None,
     }
 }
 
