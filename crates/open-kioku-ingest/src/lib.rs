@@ -2917,7 +2917,7 @@ fn is_programming_language(language: &Language) -> bool {
 
 /// Paths that hold key material or environment secrets are never read. A *programming-language*
 /// source file is only blocked by the strict list (key-material extensions and the `.env`,
-/// `.aws`, `.ssh` entries) because a class named `BasicCredentialsProviderIT` or a
+/// `.aws`, `.ssh` entries) because a class named `CredentialsProviderTest` or a
 /// module named `secrets.go` is code, not a secret; the loose rule silently dropped 25 Java
 /// files from one repository. Data, config, and prose files (`credentials.json`,
 /// `secrets.yaml`, `SECRETS.md`) keep the loose name rule, because chunk contents are not

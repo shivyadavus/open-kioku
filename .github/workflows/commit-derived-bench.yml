@@ -51,25 +51,21 @@ jobs:
           - name: java-a
             url_secret: BENCH_JAVA_A_URL
             base_secret: BENCH_JAVA_A_BASE
-            paths_secret: BENCH_JAVA_A_PATHS
             ext: .java
             after: "3800"
           - name: go-a
             url_secret: BENCH_GO_A_URL
             base_secret: BENCH_GO_A_BASE
-            paths_secret: ""
             ext: .go
             after: "1500"
           - name: ts-a
             url_secret: BENCH_TS_A_URL
             base_secret: BENCH_TS_A_BASE
-            paths_secret: ""
             ext: .ts
             after: "1500"
           - name: py-a
             url_secret: BENCH_PY_A_URL
             base_secret: BENCH_PY_A_BASE
-            paths_secret: ""
             ext: .py
             after: "1500"
     name: bench (${{ matrix.corpus.name }})
@@ -82,10 +78,11 @@ jobs:
         env:
           REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
           BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
-          CORPUS_PATHS: ${{ secrets[matrix.corpus.paths_secret] }}
+          # Only java-a is indexed as subtrees; no other corpus looks up a paths secret.
+          CORPUS_PATHS: ${{ matrix.corpus.name == 'java-a' && secrets.BENCH_JAVA_A_PATHS || '' }}
           URL_SECRET: ${{ matrix.corpus.url_secret }}
           BASE_SECRET: ${{ matrix.corpus.base_secret }}
-          PATHS_SECRET: ${{ matrix.corpus.paths_secret }}
+          PATHS_SECRET: ${{ matrix.corpus.name == 'java-a' && 'BENCH_JAVA_A_PATHS' || '' }}
           IN_AFTER: ${{ github.event.inputs.after }}
         run: |
           missing=""
@@ -112,7 +109,8 @@ jobs:
         env:
           REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
           BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
-          CORPUS_PATHS: ${{ secrets[matrix.corpus.paths_secret] }}
+          # Only java-a is indexed as subtrees; no other corpus looks up a paths secret.
+          CORPUS_PATHS: ${{ matrix.corpus.name == 'java-a' && secrets.BENCH_JAVA_A_PATHS || '' }}
           AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
         run: |
           set -o pipefail

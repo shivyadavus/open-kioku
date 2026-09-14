@@ -270,6 +270,22 @@ class WorkflowHygieneTests(unittest.TestCase):
             self.assertIn("git -C source remote remove origin", script, name)
             self.assertIn("commit-derived-cases.py source --quiet", script, name)
 
+    def test_mapping_lines_keep_a_space_after_the_key(self):
+        # A text-level guard for the YAML the parser-free tests above read: `ext:.go` is not a mapping.
+        for name, text in self.texts.items():
+            self.assertNotRegex(text, r"(?m)^\s+(?:- )?[A-Za-z_][\w-]*:[^\s:]", name)
+
+    def test_every_secret_lookup_names_a_non_empty_secret(self):
+        for name, text in self.texts.items():
+            self.assertNotRegex(text, r"secrets\[\s*(''|\"\")\s*\]", name)
+            self.assertNotIn("paths_secret", text, name)
+            for key in set(re.findall(r"secrets\[\s*matrix\.corpus\.(\w+)\s*\]", text)):
+                values = [v.strip("'\"") for v in re.findall(rf"(?m)^\s*{key}:\s*(.*?)\s*$", text)]
+                self.assertEqual(len(values), 4, f"{name}: {key} is not set on every matrix entry")
+                self.assertTrue(all(values), f"{name}: {key} is empty on a matrix entry")
+        bench = self.texts["commit-derived-bench.yml"]
+        self.assertEqual(bench.count("matrix.corpus.name == 'java-a' && secrets.BENCH_JAVA_A_PATHS || ''"), 2)
+
     def test_no_subtree_list_is_checked_in(self):
         self.assertNotRegex(self.texts["commit-derived-bench.yml"], r"(?m)^\s*prefixes:")
         for path in sorted((REPO / "benchmarks" / "commit-derived").glob("*-a-*.json")):
