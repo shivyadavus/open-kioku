@@ -20,6 +20,36 @@ fn cleanup_ok_dir(fixture: &str) {
     }
 }
 
+/// Outside test-path files, only a function, method, or test symbol may be persisted as a
+/// test target: a constant or struct beside an inline test module is not one.
+fn assert_test_targets_are_callables(fixture: &str) {
+    let conn = rusqlite::Connection::open(fixture_dir(fixture).join(".ok/index.sqlite")).unwrap();
+    let mut statement = conn
+        .prepare("SELECT t.json, s.json FROM tests t JOIN symbols s ON s.file_id = t.file_id")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap();
+    for row in rows {
+        let (target, symbol) = row.unwrap();
+        let target: serde_json::Value = serde_json::from_str(&target).unwrap();
+        let symbol: serde_json::Value = serde_json::from_str(&symbol).unwrap();
+        if target["name"] != symbol["name"] || target["range"] != symbol["range"] {
+            continue;
+        }
+        let kind = symbol["kind"].as_str().unwrap_or_default();
+        assert!(
+            ["function", "method", "test"]
+                .iter()
+                .any(|callable| kind.eq_ignore_ascii_case(callable)),
+            "{fixture}: `{}` of kind {kind} was persisted as a test target",
+            symbol["name"]
+        );
+    }
+}
+
 fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     cleanup_ok_dir(fixture);
 
@@ -43,6 +73,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
         .success();
 
     assert!(fixture_dir(fixture).join(".ok/index.sqlite").exists());
+    assert_test_targets_are_callables(fixture);
 
     // 3. Status
     let mut cmd = Command::cargo_bin("ok").unwrap();
@@ -261,6 +292,32 @@ fn test_mcp_plan_change_snapshot() {
         .get("result")
         .cloned()
         .expect("plan_change should return a JSON-RPC result");
+
+    // Every evidence record id is unique and no ref names more than one record. A primary
+    // result whose refs are one per evidence line resolves each ref to exactly one record;
+    // results merged from several chunks or streams carry refs that are not index-aligned
+    // with their lines, and their lines are published under derived ids instead.
+    let plan = &result["structuredContent"];
+    let record_ids = plan["evidence"]
+        .as_array()
+        .expect("plan evidence is an array")
+        .iter()
+        .map(|record| record["id"].as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    let unique_ids = record_ids.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique_ids.len(), record_ids.len(), "{record_ids:?}");
+    for context in plan["primary_context"].as_array().unwrap() {
+        let refs = context["evidence_refs"].as_array().unwrap();
+        let one_per_line = refs.len() == context["evidence"].as_array().unwrap().len();
+        for evidence_ref in refs {
+            let evidence_ref = evidence_ref.as_str().unwrap();
+            let records = record_ids.iter().filter(|id| *id == evidence_ref).count();
+            assert!(records <= 1, "{evidence_ref} names {records} records");
+            if one_per_line {
+                assert_eq!(records, 1, "{evidence_ref} should resolve to one record");
+            }
+        }
+    }
 
     // The text content block duplicates structuredContent as pretty-printed JSON;
     // keep only the envelope shape for it.

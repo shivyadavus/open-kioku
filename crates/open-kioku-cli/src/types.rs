@@ -240,6 +240,13 @@ enum Command {
   ok verify --plan plan.json --git
   ok verify --plan plan.json --since-plan HEAD~1 --check-api-surface
   ok verify --plan plan.json --diff change.patch --run-commands --write-attestation")]
+    // Without a change source there is nothing to hold to the plan; clap reports that as a
+    // usage error before the store is opened. The kernel keeps the same check for MCP and
+    // library callers.
+    #[command(group = clap::ArgGroup::new("change_source")
+        .required(true)
+        .multiple(true)
+        .args(["git", "diff", "changed", "since_plan"]))]
     Verify {
         /// Saved plan from `ok plan --format json`.
         #[arg(long, value_name = "PLAN_JSON")]

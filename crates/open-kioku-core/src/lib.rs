@@ -171,6 +171,17 @@ pub fn distinct_evidence_count(evidence: &[Evidence]) -> usize {
         .len()
 }
 
+/// `evidence` with repeated ids removed, keeping the first record for each id and the order
+/// the producers emitted them. Every point that merges evidence from several producers
+/// passes through this, so an `evidence_refs` id names one record rather than several.
+pub fn dedupe_evidence_by_id(evidence: impl IntoIterator<Item = Evidence>) -> Vec<Evidence> {
+    let mut seen = BTreeSet::new();
+    evidence
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect()
+}
+
 const DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS: i64 = 7;
 
 /// The evidence-quality caveat for a manifest without SCIP exact references. Named so a

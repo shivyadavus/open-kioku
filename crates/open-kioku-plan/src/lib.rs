@@ -420,12 +420,15 @@ impl<'a> PlanEngine<'a> {
             primary_context.is_empty(),
             &unmatched_anchors,
         );
-        let evidence = context
-            .evidence
-            .iter()
-            .chain(impact.evidence.iter())
-            .cloned()
-            .collect::<Vec<_>>();
+        // The context pack already carries its own impact evidence; the plan's impact report
+        // re-derives the same `impact:<path>` and bounded-search records.
+        let evidence = open_kioku_core::dedupe_evidence_by_id(
+            context
+                .evidence
+                .iter()
+                .chain(impact.evidence.iter())
+                .cloned(),
+        );
         let exact_reference_count = exact_reference_count(
             &context.retrieval_diagnostics,
             &primary_context,
@@ -3061,6 +3064,16 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.source_type == EvidenceSourceType::Runtime));
+        // The runtime signal's id names the runtime record only, never a lexical line that
+        // cites it.
+        let runtime_id = report.runtime_signals[0].id.clone();
+        let records = report
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.id.0 == runtime_id)
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].source_type, EvidenceSourceType::Runtime);
         assert!(report.primary_context.iter().any(|result| {
             result
                 .score_breakdown

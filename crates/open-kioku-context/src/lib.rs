@@ -73,8 +73,8 @@ impl ContextPackFormat {
                 }
 
                 out.push_str("## Supporting Impact\n\n");
-                for result in &pack.supporting_files {
-                    out.push_str(&format!("- {}\n", result.path.display()));
+                for path in supporting_paths(&pack.supporting_files) {
+                    out.push_str(&format!("- {}\n", path.display()));
                 }
 
                 out.push_str("\n## Runtime Signals\n\n");
@@ -122,8 +122,8 @@ impl ContextPackFormat {
                     out.push_str(&result.snippet);
                     out.push_str("\n[END FILE]\n");
                 }
-                for result in &pack.supporting_files {
-                    out.push_str(&format!("IMPACT: {}\n", result.path.display()));
+                for path in supporting_paths(&pack.supporting_files) {
+                    out.push_str(&format!("IMPACT: {}\n", path.display()));
                 }
                 for test in &pack.validation_plan.tests {
                     out.push_str(&format!("TEST: {}\n", test.name));
@@ -789,6 +789,14 @@ impl<'a> ContextPackBuilder<'a> {
             .collect::<Vec<_>>();
         let runtime_signals =
             runtime_signals_for_context(self.store, task, &primary_files, &supporting_files, 12)?;
+        // Records for the retrieval evidence lines are taken before runtime and history
+        // annotation append lines whose refs are not index-aligned with them; those producers
+        // publish their own records below.
+        let primary_evidence = primary_files
+            .iter()
+            .take(20)
+            .flat_map(primary_result_evidence)
+            .collect::<Vec<_>>();
         annotate_results_with_runtime(&mut primary_files, &runtime_signals);
         annotate_results_with_runtime(&mut supporting_files, &runtime_signals);
         annotate_results_with_git_history(self.store, self.history_store, &mut primary_files)?;
@@ -820,32 +828,25 @@ impl<'a> ContextPackBuilder<'a> {
             .collect::<Vec<_>>();
         let git_evidence = git_history_evidence_for_results(self.store, &primary_files)?;
 
-        let evidence = primary_files
+        // A result line that cites another producer's fact (a runtime signal or history
+        // fact) resolves to that producer's record, which carries the fact's own source type.
+        let producer_evidence = impact
+            .evidence
             .iter()
-            .take(20)
-            .flat_map(|result| {
-                result.evidence.iter().map(|msg| Evidence {
-                    id: EvidenceId::new(format!("context:{}", result.path.display())),
-                    source: "open-kioku-search".into(),
-                    source_type: EvidenceSourceType::Lexical,
-                    file_range: result
-                        .line_range
-                        .clone()
-                        .map(|lr| open_kioku_core::FileRange {
-                            path: result.path.as_path().into(),
-                            line_range: Some(lr),
-                        }),
-                    symbol_id: result.symbol.as_ref().map(|s| s.id.clone()),
-                    confidence: Confidence::Medium,
-                    message: msg.clone().into(),
-                    indexed_at: Utc::now(),
-                    ..Default::default()
-                })
-            })
-            .chain(impact.evidence.clone())
-            .chain(runtime_evidence.clone())
+            .cloned()
+            .chain(runtime_evidence.iter().cloned())
             .chain(git_evidence)
             .collect::<Vec<_>>();
+        let producer_ids = producer_evidence
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let evidence = open_kioku_core::dedupe_evidence_by_id(
+            primary_evidence
+                .into_iter()
+                .filter(|item| !producer_ids.contains(&item.id))
+                .chain(producer_evidence),
+        );
         let allowed_files = primary_files
             .iter()
             .take(8)
@@ -915,12 +916,17 @@ impl<'a> ContextPackBuilder<'a> {
             risk_report: impact.risk_report,
             recommended_change_boundary: ChangeBoundary {
                 allowed_files,
-                caution_files: impact
-                    .direct_impacts
-                    .iter()
-                    .take(8)
-                    .map(|result| result.path.clone())
-                    .collect(),
+                caution_files: {
+                    // One path can be a direct impact under several edge kinds.
+                    let mut seen = std::collections::BTreeSet::new();
+                    impact
+                        .direct_impacts
+                        .iter()
+                        .filter(|result| seen.insert(result.path.as_path()))
+                        .take(8)
+                        .map(|result| result.path.clone())
+                        .collect()
+                },
                 forbidden_files: Vec::new(),
                 evidence_refs: boundary_evidence_refs,
                 ..Default::default()
@@ -930,9 +936,9 @@ impl<'a> ContextPackBuilder<'a> {
                     .iter()
                     .filter_map(|test| test.command.clone())
                     .collect(),
+                evidence: validation_cited_evidence(&tests, &evidence),
                 tests,
                 requires_approval: true,
-                evidence: evidence.clone(),
             },
             evidence,
             negative_evidence,
@@ -1964,6 +1970,80 @@ fn runtime_signal_from_fact(fact: &AnalysisFact, file: &File) -> RuntimeSignal {
         occurred_at: None,
         confidence: fact.confidence,
     }
+}
+
+/// Distinct supporting paths in rank order. A file can support the task under several edge
+/// kinds, and the path-only renderings would otherwise print it once per kind.
+fn supporting_paths(results: &[SearchResult]) -> Vec<&std::path::Path> {
+    let mut seen = std::collections::BTreeSet::new();
+    results
+        .iter()
+        .map(|result| result.path.as_path())
+        .filter(|path| seen.insert(*path))
+        .collect()
+}
+
+/// One record per evidence line of a selected result, under the id the result's own
+/// `evidence_refs` cite for that line, so a ref resolves to exactly that fact. Refs are used by
+/// position only when there is one per line; otherwise every line takes its derived
+/// `search:<path>:<range>:<index>` id rather than risk naming a line after another fact.
+fn primary_result_evidence(result: &SearchResult) -> Vec<Evidence> {
+    let refs = result.derived_evidence_ids();
+    let ids = if refs.len() == result.evidence.len() {
+        refs
+    } else {
+        open_kioku_core::search_result_evidence_ids(
+            &result.path,
+            &result.line_range,
+            result.evidence.len(),
+        )
+    };
+    result
+        .evidence
+        .iter()
+        .zip(ids)
+        .map(|(message, id)| Evidence {
+            id: EvidenceId::new(id),
+            source: "open-kioku-search".into(),
+            source_type: EvidenceSourceType::Lexical,
+            file_range: result
+                .line_range
+                .clone()
+                .map(|line_range| open_kioku_core::FileRange {
+                    path: result.path.as_path().into(),
+                    line_range: Some(line_range),
+                }),
+            symbol_id: result.symbol.as_ref().map(|symbol| symbol.id.clone()),
+            confidence: Confidence::Medium,
+            message: message.clone().into(),
+            indexed_at: Utc::now(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// The pack evidence the validation plan's tests cite. The full list is published once, on
+/// the pack; the validation plan used to repeat all of it.
+fn validation_cited_evidence(
+    tests: &[open_kioku_core::TestTarget],
+    evidence: &[Evidence],
+) -> Vec<Evidence> {
+    let cited = tests
+        .iter()
+        .flat_map(|test| {
+            test.evidence_refs.iter().chain(
+                test.score_breakdown
+                    .iter()
+                    .flat_map(|component| component.evidence_ids.iter()),
+            )
+        })
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    evidence
+        .iter()
+        .filter(|item| cited.contains(item.id.0.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn runtime_signal_evidence(signal: &RuntimeSignal) -> Evidence {
@@ -3638,6 +3718,130 @@ fn bounded_impact(task: &str) -> open_kioku_core::ImpactReport {
 mod tests {
     use super::*;
     use open_kioku_core::{FileId, Language, LineRange, RepositoryId, SymbolId, SymbolKind};
+
+    #[test]
+    fn each_evidence_line_gets_the_id_its_result_cites_and_ids_are_unique_in_a_pack() {
+        let line_range = Some(LineRange { start: 4, end: 9 });
+        let result = SearchResult {
+            path: std::path::PathBuf::from("src/rates.rs"),
+            evidence_refs: Vec::new(),
+            line_range,
+            snippet: "fn rate() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "tantivy hybrid lexical match".into(),
+            evidence: vec![
+                "matched `rate`".into(),
+                "matched `rates`".into(),
+                "matched `Rate`".into(),
+            ],
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let impact = Evidence {
+            id: EvidenceId::new("impact:src/rates.rs"),
+            message: "impact report".into(),
+            ..Default::default()
+        };
+        // The same result twice and the impact record twice, as two producers would emit them.
+        let evidence = open_kioku_core::dedupe_evidence_by_id(
+            primary_result_evidence(&result)
+                .into_iter()
+                .chain(primary_result_evidence(&result))
+                .chain([impact.clone(), impact]),
+        );
+
+        let ids = evidence
+            .iter()
+            .map(|item| item.id.0.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "search:src/rates.rs:4-9:0",
+                "search:src/rates.rs:4-9:1",
+                "search:src/rates.rs:4-9:2",
+                "impact:src/rates.rs",
+            ]
+        );
+        for evidence_ref in result.derived_evidence_ids() {
+            let records = evidence
+                .iter()
+                .filter(|item| item.id.0 == evidence_ref)
+                .collect::<Vec<_>>();
+            assert_eq!(records.len(), 1, "{evidence_ref} resolves to one record");
+        }
+        assert_eq!(evidence[1].message.as_str(), "matched `rates`");
+    }
+
+    #[test]
+    fn refs_that_are_not_one_per_line_never_name_a_line_after_another_fact() {
+        let line_range = Some(LineRange { start: 2, end: 3 });
+        // A lexical line whose refs were empty, then annotated with one history line and two
+        // history refs: positional refs would give the lexical line a history id.
+        let result = SearchResult {
+            path: std::path::PathBuf::from("src/rates.rs"),
+            evidence_refs: vec![
+                "history-author:abc".into(),
+                "history-churn:src/rates.rs".into(),
+                "history-similar:1".into(),
+            ],
+            line_range,
+            snippet: "fn rate() {}".into(),
+            symbol: None,
+            score: 1.0,
+            match_reason: "tantivy hybrid lexical match".into(),
+            evidence: vec![
+                "matched `rate`".into(),
+                "history signal for `src/rates.rs`: churn".into(),
+            ],
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let ids = primary_result_evidence(&result)
+            .into_iter()
+            .map(|item| item.id.0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["search:src/rates.rs:2-3:0", "search:src/rates.rs:2-3:1"]
+        );
+    }
+
+    #[test]
+    fn validation_plan_evidence_is_only_what_its_tests_cite() {
+        let cited = Evidence {
+            id: EvidenceId::new("runtime:checkout"),
+            ..Default::default()
+        };
+        let uncited = Evidence {
+            id: EvidenceId::new("search:src/rates.rs:4-9:0"),
+            ..Default::default()
+        };
+        let test = open_kioku_core::TestTarget {
+            evidence_refs: vec!["runtime:checkout".into()],
+            ..test_target_fixture()
+        };
+        let selected = validation_cited_evidence(&[test], &[uncited, cited]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id.0, "runtime:checkout");
+    }
+
+    fn test_target_fixture() -> open_kioku_core::TestTarget {
+        open_kioku_core::TestTarget {
+            selection_tier: open_kioku_core::TestSelectionTier::default(),
+            tier_justification: Vec::new(),
+            id: "test-checkout".into(),
+            name: "checkout_flow".into(),
+            file_id: FileId::new("tests"),
+            range: None,
+            command: None,
+            confidence: Confidence::Medium,
+            reason: "fixture".into(),
+            evidence_refs: Vec::new(),
+            score_breakdown: Vec::new(),
+        }
+    }
     use std::path::Path;
 
     #[test]

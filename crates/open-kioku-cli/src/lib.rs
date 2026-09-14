@@ -113,9 +113,28 @@ pub fn try_print_version_json(args: &[String]) -> bool {
     requested
 }
 
+/// Whether `err` is, or wraps, an `OkError::InvalidInput`: the caller's arguments were wrong,
+/// which the binary reports with the usage exit code rather than the runtime-failure one.
+pub fn is_invalid_input_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<open_kioku_errors::OkError>()
+            .is_some_and(open_kioku_errors::OkError::is_invalid_input)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_input_is_detected_through_anyhow_context() {
+        let err = anyhow::Error::from(open_kioku_errors::OkError::InvalidInput("x".into()))
+            .context("verifying");
+        assert!(is_invalid_input_error(&err));
+        let other = anyhow::Error::from(open_kioku_errors::OkError::Config("x".into()));
+        assert!(!is_invalid_input_error(&other));
+    }
 
     #[test]
     fn resolve_repo_prefers_command_path_over_global_default() {

@@ -1162,14 +1162,14 @@ pub fn extract_tests(
         || path.ends_with(".test.ts")
         || path.ends_with("_test.py");
 
+    let lines = content.lines().collect::<Vec<_>>();
     symbols
         .iter()
         .filter(|symbol| {
             is_test_file
-                || symbol.name.starts_with("test")
-                || content
-                    .lines()
-                    .any(|line| line.contains("#[test]") || line.contains("@Test"))
+                || (is_test_symbol_kind(&symbol.kind)
+                    && (symbol.name.starts_with("test")
+                        || has_adjacent_test_annotation(&lines, symbol)))
         })
         .map(|symbol| TestTarget {
             selection_tier: open_kioku_core::TestSelectionTier::default(),
@@ -1206,6 +1206,54 @@ pub fn extract_tests(
             )],
         })
         .collect()
+}
+
+/// Lines above a symbol's first line that may carry its test annotation. Rust attributes
+/// and Java annotations sit on the preceding lines outside the symbol's own range.
+const TEST_ANNOTATION_LOOKBACK: usize = 3;
+
+/// Line prefixes, after indentation, that mark the next function as a test. Matched as
+/// prefixes, not substrings: `it(` inside `commit(` or `test(` inside `latest(` is not one.
+const TEST_ANNOTATIONS: &[&str] = &[
+    "#[test]",
+    "#[tokio::test",
+    "#[async_std::test",
+    "#[rstest",
+    "#[test_case",
+    "@Test",
+    "@ParameterizedTest",
+    "it(",
+    "test(",
+    "def test_",
+    "async def test_",
+];
+
+fn is_test_symbol_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
+    )
+}
+
+/// Whether a test annotation sits on the symbol's first line or within the few lines above
+/// it. Scanned per symbol, not per file: a `#[cfg(test)] mod tests` elsewhere in the file
+/// says nothing about the constant or struct three hundred lines earlier.
+fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
+    let Some(range) = &symbol.range else {
+        return false;
+    };
+    let start = (range.start as usize).saturating_sub(1);
+    let window_start = start.saturating_sub(TEST_ANNOTATION_LOOKBACK);
+    lines
+        .get(window_start..=start)
+        .into_iter()
+        .flatten()
+        .any(|line| {
+            let line = line.trim_start();
+            TEST_ANNOTATIONS
+                .iter()
+                .any(|annotation| line.starts_with(annotation))
+        })
 }
 
 fn qualified_name(file: &File, content: &str, name: &str) -> String {
@@ -1644,6 +1692,28 @@ endpoint = "https://orders.example.com/v1/orders"
         let tests = extract_tests(&file, src, &symbols, None);
         assert!(!tests.is_empty(), "should detect #[test] function");
         assert!(tests[0].command.as_deref() == Some("cargo test"));
+    }
+
+    #[test]
+    fn constants_and_structs_beside_an_inline_test_module_are_not_test_targets() {
+        let file = rust_file();
+        let src = "pub const LATTICE_ANCHOR_BOOST: f32 = 0.4;\n\npub struct ScoreComponent;\n\npub fn boost() -> f32 {\n    LATTICE_ANCHOR_BOOST\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn boost_is_positive() {\n        assert!(boost() > 0.0);\n    }\n}\n";
+        use crate::{HeuristicParser, Parser};
+        let parsed = HeuristicParser.parse_with_hint(&file, src, None);
+        let names = parsed
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["boost_is_positive"]);
+    }
+
+    #[test]
+    fn annotation_text_inside_another_call_does_not_mark_a_function() {
+        let file = rust_file();
+        let src = "fn flush(store: &Store) {\n    store.commit(latest());\n}\nfn helper() {}\n";
+        let symbols = extract_symbols(&file, src);
+        assert!(extract_tests(&file, src, &symbols, None).is_empty());
     }
 
     #[test]

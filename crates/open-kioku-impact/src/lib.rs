@@ -152,7 +152,7 @@ impl<'a> ImpactEngine<'a> {
                         .filter(|result| result.path != file.path),
                 );
             }
-            direct = dedupe_results(direct);
+            direct = group_direct_impacts(dedupe_results(direct));
             direct.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
@@ -633,7 +633,7 @@ fn git_cochange_impacts(
             snippet,
             symbol: None,
             score: 0.18 + (fact.confidence.score() * 0.05).min(0.05),
-            match_reason: "historical git co-change with target file".into(),
+            match_reason: GIT_COCHANGE_MATCH_REASON.into(),
             evidence,
             evidence_refs: vec![fact.id.clone()],
             confidence: fact.confidence.score(),
@@ -1158,6 +1158,145 @@ fn exact_reference_impacts(
 /// `match_reason` prefix of a result produced from an indexed symbol occurrence.
 const EXACT_REFERENCE_MATCH_REASON_PREFIX: &str = "exact symbol reference via ";
 
+/// Further chunks of one path whose evidence lines a grouped direct impact lists. The rest are
+/// named by line range on one summary line: a symbol referenced a hundred times in one file
+/// would otherwise put a hundred lines in one entry.
+const MAX_LISTED_GROUPED_CHUNKS: usize = 4;
+
+/// `match_reason` of a result produced from a local git co-change fact.
+const GIT_COCHANGE_MATCH_REASON: &str = "historical git co-change with target file";
+
+/// The edge a direct impact was reached through. Grouping is per path per kind: several
+/// chunks of one file found the same way are one impact, while an exact reference and a
+/// lexical hit on that file stay separate entries so neither hides the other's authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DirectImpactKind {
+    ExactReference,
+    CoChange,
+    Runtime,
+    ServiceBoundary,
+    Lexical,
+}
+
+fn direct_impact_kind(result: &SearchResult) -> DirectImpactKind {
+    let has_signal = |signal: &str| {
+        result
+            .score_breakdown
+            .iter()
+            .any(|component| component.signal == signal)
+    };
+    if is_exact_reference_result(result) {
+        DirectImpactKind::ExactReference
+    } else if result.match_reason == GIT_COCHANGE_MATCH_REASON {
+        DirectImpactKind::CoChange
+    } else if has_signal("runtime_corroboration") {
+        DirectImpactKind::Runtime
+    } else if has_signal("service_boundary") {
+        DirectImpactKind::ServiceBoundary
+    } else {
+        DirectImpactKind::Lexical
+    }
+}
+
+/// One entry per (path, edge kind). The best-scoring chunk is the representative; every other
+/// chunk's evidence lines are kept under their own ids, prefixed with the chunk's line range
+/// and symbol, so the ranges stay visible as evidence while the list bounds files, not chunks.
+fn group_direct_impacts(results: Vec<SearchResult>) -> Vec<SearchResult> {
+    let mut groups = BTreeMap::<(std::path::PathBuf, DirectImpactKind), Vec<SearchResult>>::new();
+    for result in results {
+        groups
+            .entry((result.path.clone(), direct_impact_kind(&result)))
+            .or_default()
+            .push(result);
+    }
+    groups
+        .into_values()
+        .filter_map(merge_direct_group)
+        .collect()
+}
+
+fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
+    let line_start = |result: &SearchResult| result.line_range.as_ref().map(|range| range.start);
+    chunks.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| line_start(a).cmp(&line_start(b)))
+    });
+    let mut chunks = chunks.into_iter();
+    let mut representative = chunks.next()?;
+    let mut others = chunks.collect::<Vec<_>>();
+    if others.is_empty() {
+        return Some(representative);
+    }
+    others.sort_by_key(|result| line_start(result));
+    let mut evidence_refs = aligned_evidence_refs(&representative);
+    let mut evidence = std::mem::take(&mut representative.evidence);
+    let mut unlisted = Vec::new();
+    for (index, other) in others.into_iter().enumerate() {
+        representative.confidence = representative.confidence.max(other.confidence);
+        if index >= MAX_LISTED_GROUPED_CHUNKS {
+            unlisted.push(chunk_location(&other));
+            continue;
+        }
+        let location = chunk_location(&other);
+        for (message, id) in other.evidence.iter().zip(aligned_evidence_refs(&other)) {
+            if evidence_refs.contains(&id) {
+                continue;
+            }
+            evidence.push(format!("{location}: {message}"));
+            evidence_refs.push(id);
+        }
+    }
+    if !unlisted.is_empty() {
+        let summary_id = search_result_evidence_ids(
+            &representative.path,
+            &representative.line_range,
+            evidence.len() + 1,
+        )
+        .pop()
+        .unwrap_or_default();
+        evidence.push(format!(
+            "{} more matching ranges on this path, evidence not listed: {}",
+            unlisted.len(),
+            unlisted.join("; ")
+        ));
+        evidence_refs.push(summary_id);
+    }
+    representative.evidence = evidence;
+    representative.evidence_refs = evidence_refs;
+    Some(representative)
+}
+
+/// One id per evidence line, index-aligned: the result's own refs where it has them, the
+/// derived `search:` id for any line past them.
+fn aligned_evidence_refs(result: &SearchResult) -> Vec<String> {
+    let refs = result.derived_evidence_ids();
+    if refs.len() == result.evidence.len() {
+        return refs;
+    }
+    let derived =
+        search_result_evidence_ids(&result.path, &result.line_range, result.evidence.len());
+    derived
+        .into_iter()
+        .enumerate()
+        .take(result.evidence.len())
+        .map(|(index, fallback)| refs.get(index).cloned().unwrap_or(fallback))
+        .collect()
+}
+
+fn chunk_location(result: &SearchResult) -> String {
+    let lines = result
+        .line_range
+        .as_ref()
+        .map(|range| format!("lines {}-{}", range.start, range.end))
+        .unwrap_or_else(|| "file".into());
+    match &result.symbol {
+        Some(symbol) => format!("{lines} in `{}`", symbol.qualified_name),
+        None => lines,
+    }
+}
+
 /// Whether `result` is an indexed symbol reference rather than a lexical or heuristic hit.
 /// Consumers count exact references by this predicate instead of scanning result prose, so
 /// a lexical hit whose query words include "exact" or "scip" cannot pass as one.
@@ -1457,6 +1596,95 @@ mod tests {
             report.indirect_impacts[0].path.display().to_string(),
             "src/main.rs"
         );
+    }
+
+    fn chunk_hit(path: &str, start: u32, score: f32, message: &str) -> SearchResult {
+        let line_range = Some(LineRange {
+            start,
+            end: start + 2,
+        });
+        SearchResult {
+            path: PathBuf::from(path),
+            evidence_refs: search_result_evidence_ids(Path::new(path), &line_range, 1),
+            line_range,
+            snippet: message.into(),
+            symbol: None,
+            score,
+            match_reason: "tantivy hybrid lexical match".into(),
+            evidence: vec![message.into()],
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn chunk_hits_on_one_path_group_into_one_direct_impact_per_edge_kind() {
+        let mut exact = chunk_hit("src/publisher.rs", 40, 2.0, "exact reference");
+        exact.match_reason = format!("{EXACT_REFERENCE_MATCH_REASON_PREFIX}SCIP");
+        let grouped = group_direct_impacts(vec![
+            chunk_hit("src/publisher.rs", 20, 0.4, "matched `rate` at 20"),
+            chunk_hit("src/publisher.rs", 1, 0.9, "matched `rate` at 1"),
+            chunk_hit("src/publisher.rs", 10, 0.6, "matched `rate` at 10"),
+            exact,
+        ]);
+
+        assert_eq!(
+            grouped.len(),
+            2,
+            "one lexical and one exact-reference entry"
+        );
+        let lexical = grouped
+            .iter()
+            .find(|result| !is_exact_reference_result(result))
+            .unwrap();
+        assert_eq!(lexical.line_range, Some(LineRange { start: 1, end: 3 }));
+        assert_eq!(
+            lexical.evidence,
+            vec![
+                "matched `rate` at 1".to_string(),
+                "lines 10-12: matched `rate` at 10".to_string(),
+                "lines 20-22: matched `rate` at 20".to_string(),
+            ]
+        );
+        assert_eq!(
+            lexical.evidence_refs,
+            vec![
+                "search:src/publisher.rs:1-3:0".to_string(),
+                "search:src/publisher.rs:10-12:0".to_string(),
+                "search:src/publisher.rs:20-22:0".to_string(),
+            ]
+        );
+        assert!(grouped.iter().any(is_exact_reference_result));
+    }
+
+    #[test]
+    fn a_grouped_impact_lists_a_bounded_number_of_chunks_and_names_the_rest_by_range() {
+        let chunks = (0..7u32)
+            .map(|index| {
+                chunk_hit(
+                    "src/publisher.rs",
+                    1 + index * 10,
+                    1.0 - index as f32 * 0.1,
+                    &format!("matched `rate` at {}", 1 + index * 10),
+                )
+            })
+            .collect::<Vec<_>>();
+        let grouped = group_direct_impacts(chunks);
+
+        assert_eq!(grouped.len(), 1);
+        let entry = &grouped[0];
+        // The representative, four listed chunks, and one line naming the other two ranges.
+        assert_eq!(entry.evidence.len(), 1 + MAX_LISTED_GROUPED_CHUNKS + 1);
+        assert_eq!(entry.evidence.len(), entry.evidence_refs.len());
+        assert_eq!(
+            entry.evidence.last().unwrap(),
+            "2 more matching ranges on this path, evidence not listed: lines 51-53; lines 61-63"
+        );
+        let unique = entry
+            .evidence_refs
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), entry.evidence_refs.len());
     }
 
     #[test]
