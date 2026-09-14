@@ -89,7 +89,7 @@ def clean_query(subject):
     return " ".join(subject.split()).strip(" .:-")
 
 
-def annotate(repo, cases_path, out_path):
+def annotate(repo, cases_path, out_path, quiet=False):
     """Add (or refresh) the modified-line-range column on an existing cases TSV."""
     written = 0
     with open(cases_path) as src, open(out_path, "w") as out:
@@ -102,7 +102,10 @@ def annotate(repo, cases_path, out_path):
             ranges = format_ranges(changed_ranges(repo, sha, paths))
             out.write(f"{sha}\t{date}\t{query}\t{gold}\t{ranges}\n")
             written += 1
-    print(f"{written} cases annotated with modified line ranges -> {out_path}", file=sys.stderr)
+    if quiet:
+        print(f"{written} cases annotated with modified line ranges", file=sys.stderr)
+    else:
+        print(f"{written} cases annotated with modified line ranges -> {out_path}", file=sys.stderr)
     return 0
 
 
@@ -121,7 +124,7 @@ def main():
     )
     ap.add_argument(
         "--keep-repeated-subjects", action="store_true",
-        help="keep every commit whose subject repeats an earlier one up to numbers (default: keep the first only; on one Go corpus a 'release: bump module versions for the X cut' subject was a third of the holdout and every instance had the same gold file, so one pattern decided the corpus)",
+        help="keep every commit whose subject repeats an earlier one up to numbers (default: keep the first only; a subject repeated for every release, such as 'chore: sync plugin versions for the 5.3.0 train', can become a third of a holdout with the same gold file every time, so one pattern decides the corpus)",
     )
     ap.add_argument(
         "--path-prefix", action="append", default=None,
@@ -131,12 +134,32 @@ def main():
         "--annotate", metavar="CASES_TSV",
         help="re-derive the modified-line-range column for an existing cases file instead of deriving cases; every other selection flag is ignored",
     )
+    ap.add_argument(
+        "--quiet", action="store_true",
+        help="print counts only: no commit, subject, or path on success, and on failure only the git exit status or the exception type (for public CI logs)",
+    )
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
-    if args.annotate:
-        return annotate(args.repo, args.annotate, args.out)
-    if not args.base:
+    if not args.annotate and not args.base:
         ap.error("--base is required unless --annotate is given")
+    if not args.quiet:
+        return run(args)
+    try:
+        return run(args)
+    except subprocess.CalledProcessError as err:
+        print(f"git exited with status {err.returncode}; command and output withheld (--quiet)", file=sys.stderr)
+    except Exception as err:  # noqa: BLE001 - the message can name a commit, a subject, or a path
+        print(f"failed with {type(err).__name__}; message withheld (--quiet)", file=sys.stderr)
+    return 1
+
+
+def run(args):
+    if args.annotate:
+        return annotate(args.repo, args.annotate, args.out, args.quiet)
+    return derive(args)
+
+
+def derive(args):
     exts = tuple(args.ext or [".java"])
     prefixes = tuple(args.path_prefix or [""])
 
@@ -176,7 +199,11 @@ def main():
             ranges = format_ranges(changed_ranges(args.repo, sha, paths))
             out.write(f"{sha}\t{date}\t{query}\t{'|'.join(paths)}\t{ranges}\n")
             kept += 1
-    print(f"{kept} cases written to {args.out} (base {args.base[:12]}, {args.after} commits scanned, {dropped_repeats} repeated subjects dropped)", file=sys.stderr)
+    if args.quiet:
+        print(f"{kept} cases written ({args.after} commits scanned, {dropped_repeats} repeated subjects dropped)", file=sys.stderr)
+    else:
+        print(f"{kept} cases written to {args.out} (base {args.base[:12]}, {args.after} commits scanned, {dropped_repeats} repeated subjects dropped)", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
