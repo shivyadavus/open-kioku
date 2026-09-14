@@ -205,8 +205,15 @@ where
         }
         // Reopen after idling so another process's `ok index` becomes visible, and keep
         // looking while unindexed so an index built after startup is served without a
-        // restart; the unindexed probe is one `stat`.
-        if probe.store.is_none() || store_idle_expired(last_request) {
+        // restart; the unindexed probe is one `stat`. A full `ok index` removes the manifest
+        // when it stages its rows and publishes it last, so a store whose manifest has gone
+        // is probed again too (one indexed lookup) rather than answering `indexed: false`, or
+        // from a graph and search index being rewritten, through the handle it cached.
+        let withdrawn = probe
+            .store
+            .as_ref()
+            .is_some_and(|store| !store.has_manifest().unwrap_or(false));
+        if probe.store.is_none() || withdrawn || store_idle_expired(last_request) {
             probe.refresh(&repo);
         }
         last_request = Instant::now();
@@ -3509,9 +3516,12 @@ mod tests {
             assert_eq!(response["error"]["message"], expected, "{response}");
         }
 
-        // Released without a publish (a killed writer removes nothing, but a finished
-        // failed run does): unindexed again, in the unindexed words.
+        // Released however the writer ended, and a file a killed writer left behind holds
+        // nothing: unindexed again, in the unindexed words.
         drop(lock);
+        let lock_path = open_kioku_storage::generations::index_lock_path(&repo);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, b"").unwrap();
         let responses = responses_for(
             &repo,
             concat!(
@@ -3527,6 +3537,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status["indexed"], false, "{status}");
+    }
+
+    /// A session that already serves an index notices a full `ok index` starting — the
+    /// staged write removes the manifest while the writer holds the lock — and answers
+    /// `indexing in progress` instead of `indexed: false` from its cached store; once the
+    /// lock is released with no manifest published, it answers unindexed.
+    #[tokio::test]
+    async fn ready_session_probes_again_when_the_manifest_is_withdrawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let db = repo.join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&fixture_manifest())
+            .unwrap();
+        let expected = format!(
+            "index error: {}",
+            open_kioku_storage::generations::indexing_in_progress_message(&repo)
+        );
+
+        let (mut client_input, server_input) = tokio::io::duplex(1 << 16);
+        let (server_output, client_output) = tokio::io::duplex(1 << 20);
+        let session = serve(
+            repo.clone(),
+            OkConfig::default(),
+            BufReader::new(server_input),
+            server_output,
+        );
+        let driver = async move {
+            let mut responses = BufReader::new(client_output).lines();
+            let repo_status = concat!(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n"
+            );
+
+            client_input
+                .write_all(
+                    concat!(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_files","arguments":{}}}"#,
+                        "\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let first: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert!(
+                first.get("error").is_none(),
+                "served from the index: {first}"
+            );
+
+            let lock = open_kioku_storage::generations::IndexWriteLock::acquire(
+                &repo,
+                Duration::from_millis(10),
+            )
+            .unwrap();
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute("DELETE FROM manifests", [])
+                .unwrap();
+            client_input
+                .write_all(repo_status.as_bytes())
+                .await
+                .unwrap();
+            let second: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(second["error"]["code"], -32000, "{second}");
+            assert_eq!(second["error"]["message"], expected, "{second}");
+
+            drop(lock);
+            client_input
+                .write_all(repo_status.as_bytes())
+                .await
+                .unwrap();
+            let third: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(
+                third["result"]["structuredContent"]["indexed"], false,
+                "{third}"
+            );
+            // End of input ends the session.
+            drop(client_input);
+        };
+        let (served, ()) = tokio::join!(session, driver);
+        served.expect("the session ends cleanly at end of input");
     }
 
     /// An index written by a newer Open Kioku is refused with the upgrade-or-reindex

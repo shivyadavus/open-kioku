@@ -3999,22 +3999,90 @@ fn mcp_repo_status_error(repo: &std::path::Path) -> String {
     response["error"]["message"].as_str().unwrap().to_string()
 }
 
-/// While `.ok/index.lock` is held and no manifest is published, every read surface says the
-/// index is being built. "Not indexed" would send the user (or an agent) to start a second
-/// `ok index` against the one that is running.
+/// Holds the index writer lock from a separate process for
+/// `index_lock_reports_in_progress_only_while_a_live_process_holds_it`, which re-runs this test
+/// binary with `OK_TEST_HOLD_INDEX_LOCK` naming the repository and then kills it. Without the
+/// variable there is nothing to hold and it returns at once. It also returns when its stdin
+/// closes, so a parent that fails before the kill does not leave it running.
 #[test]
-fn index_lock_without_a_manifest_reports_indexing_in_progress_on_every_surface() {
+fn hold_index_lock_for_a_parent_test() {
+    let Some(repo) = std::env::var_os("OK_TEST_HOLD_INDEX_LOCK") else {
+        return;
+    };
+    let _lock = open_kioku_storage::generations::IndexWriteLock::acquire(
+        std::path::Path::new(&repo),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the parent test leaves the lock free");
+    let mut sink = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+}
+
+/// `.ok/index.lock` means "indexing in progress" only while a live process holds it. A file
+/// with no holder — what Ctrl-C, an OOM kill, or a crash during `ok index` leaves — is ignored
+/// by every read surface and taken over by the next `ok index`, instead of wedging reads until
+/// a person deletes it.
+#[test]
+fn index_lock_reports_in_progress_only_while_a_live_process_holds_it() {
+    use open_kioku_storage::generations::{
+        index_lock_path, index_write_in_progress, indexing_in_progress_message,
+    };
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().canonicalize().unwrap();
     let repo = repo.as_path();
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
-    let lock_path = open_kioku_storage::generations::index_lock_path(repo);
+    let lock_path = index_lock_path(repo);
+    let expected = indexing_in_progress_message(repo);
+    assert!(expected.starts_with("indexing in progress"), "{expected}");
+    let json_status = |repo: &std::path::Path| -> serde_json::Value {
+        let status = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").arg("status");
+            command
+        });
+        serde_json::from_str(&status).unwrap()
+    };
+
+    // A lock file nobody holds: the repository is simply unindexed.
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     fs::write(&lock_path, b"").unwrap();
-    let expected = open_kioku_storage::generations::indexing_in_progress_message(repo);
-    assert!(expected.starts_with("indexing in progress"), "{expected}");
+    assert_eq!(json_status(repo)["indexed"], false);
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["search", "Worker"]);
+        command
+    });
+    assert!(stderr.contains("repository is not indexed"), "{stderr}");
+    assert_eq!(
+        mcp_repo_status(repo)["result"]["structuredContent"]["indexed"],
+        false
+    );
 
+    // A live process holds it: every surface says the index is being built.
+    let mut holder = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "hold_index_lock_for_a_parent_test",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env("OK_TEST_HOLD_INDEX_LOCK", repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the lock holder should spawn");
+    let waiting_since = std::time::Instant::now();
+    while !index_write_in_progress(repo) {
+        if let Some(status) = holder.try_wait().unwrap() {
+            panic!("the lock holder exited before taking the lock: {status}");
+        }
+        assert!(
+            waiting_since.elapsed() < std::time::Duration::from_secs(60),
+            "the lock holder never took the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     for args in [
         vec!["status"],
         vec!["--json", "status"],
@@ -4032,7 +4100,6 @@ fn index_lock_without_a_manifest_reports_indexing_in_progress_on_every_surface()
             "{args:?} must not call an index being built unindexed: {stderr}"
         );
     }
-
     let (doctor, _stderr) = run_failure({
         let mut command = ok();
         command.arg("doctor").arg(repo);
@@ -4046,18 +4113,30 @@ fn index_lock_without_a_manifest_reports_indexing_in_progress_on_every_surface()
         doctor.contains("Wait for the running `ok index`"),
         "{doctor}"
     );
-
     assert!(mcp_repo_status_error(repo).contains(&expected));
 
-    // The lock alone never created an index: released, the repository is unindexed again.
-    fs::remove_file(&lock_path).unwrap();
-    let status = run({
+    // Killed, as Ctrl-C or the OOM killer would: no destructor runs, so the file stays, and
+    // the kernel has released the lock anyway.
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert!(lock_path.exists(), "a killed writer leaves its lock file");
+    assert!(!index_write_in_progress(repo));
+    assert_eq!(json_status(repo)["indexed"], false);
+    assert_eq!(
+        mcp_repo_status(repo)["result"]["structuredContent"]["indexed"],
+        false
+    );
+    let started = std::time::Instant::now();
+    run({
         let mut command = ok();
-        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command.arg("index").arg(repo);
         command
     });
-    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
-    assert_eq!(status["indexed"], false, "{status}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "`ok index` must take over an unheld lock file, not wait out the 30 s writer timeout"
+    );
+    assert_eq!(json_status(repo)["indexed"], true);
 }
 
 /// The manifest is written after the graph and the search index, so a run that fails between
@@ -4086,7 +4165,7 @@ fn index_run_that_fails_after_the_rows_publishes_no_manifest() {
     });
     assert!(stderr.contains("Not a directory"), "{stderr}");
     assert!(
-        !open_kioku_storage::generations::index_lock_path(&repo).exists(),
+        !open_kioku_storage::generations::index_write_in_progress(&repo),
         "a failed run releases the writer lock"
     );
 

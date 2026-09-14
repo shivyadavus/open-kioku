@@ -181,9 +181,10 @@ impl SqliteStore {
     /// The repository's active index for reading, or `None` when the repository has never
     /// been indexed: no database, or a database without a manifest, which is what a 4.0.0
     /// read surface left behind. `Err` is reserved for an index that cannot be served: one
-    /// that exists and cannot be opened, one written by a newer Open Kioku, or one a writer
-    /// is building right now (`.ok/index.lock` is held and no manifest is published), so a
-    /// caller can tell "not indexed" from each of those and say the right thing.
+    /// that exists and cannot be opened, one written by a newer Open Kioku, or one a live
+    /// writer is building right now (it holds the `.ok/index.lock` advisory lock and no
+    /// manifest is published), so a caller can tell "not indexed" from each of those and say
+    /// the right thing.
     pub fn open_repo_index(repo: &Path) -> Result<Option<Self>> {
         let path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
         if !path.is_file() {
@@ -278,10 +279,12 @@ impl SqliteStore {
     /// match a clean rebuild rather than approximate it. Unchanged edges keep their stored
     /// evidence, including its `indexed_at`.
     ///
-    /// The previous manifest stays in place while the update runs, so readers keep serving the
-    /// previous index rather than seeing an unindexed repository; the caller publishes the new
-    /// manifest once the search index is rebuilt. `update.graph_nodes` and
-    /// `update.graph_edges` are inserted before the reconciliation and are normally empty here.
+    /// The previous manifest stays published: readers are not told the repository is
+    /// unindexed, and they read this update's rows and graph, under the previous manifest, as
+    /// soon as the transaction commits. The caller publishes the new manifest once the search
+    /// index is rebuilt, or withdraws the previous one (`withdraw_manifest`) if a later step
+    /// fails. `update.graph_nodes` and `update.graph_edges` are inserted before the
+    /// reconciliation and are normally empty here.
     pub fn stage_files_index_with_graph(
         &self,
         update: PartialIndexUpdate<'_>,
@@ -316,6 +319,36 @@ impl SqliteStore {
             .map_err(storage_err)?;
         insert_document_sections(&tx, document_sections)?;
         tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(())
+    }
+
+    /// Whether a manifest is published, without deserializing it. A long-lived reader (the
+    /// MCP server) checks this before each request: a full `ok index` removes the manifest
+    /// when it stages its rows, and a store opened before that must not keep answering from
+    /// rows whose graph and search index are being rewritten.
+    pub fn has_manifest(&self) -> Result<bool> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        conn.query_row("SELECT 1 FROM manifests WHERE id = 1", [], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(storage_err)
+    }
+
+    /// Remove the published manifest, leaving every other row in place. For a writer whose
+    /// committed rows no longer match the previous manifest and which failed before it could
+    /// publish its own: the repository then reads as unindexed rather than as the previous
+    /// index over this run's rows.
+    pub fn withdraw_manifest(&self) -> Result<()> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        conn.execute("DELETE FROM manifests", [])
+            .map_err(storage_err)?;
         self.invalidate_semantics_verdict();
         Ok(())
     }
@@ -5910,7 +5943,7 @@ mod tests {
     #[test]
     fn open_repo_index_reports_an_index_being_built_while_the_lock_is_held() {
         use open_kioku_storage::generations::{
-            index_lock_path, indexing_in_progress_message, IndexWriteLock,
+            index_lock_path, index_write_in_progress, indexing_in_progress_message, IndexWriteLock,
         };
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
@@ -5931,7 +5964,7 @@ mod tests {
         let error = IndexWriteLock::acquire(repo, Duration::from_millis(10))
             .expect_err("the lock is exclusive")
             .to_string();
-        assert!(error.contains("locked by another writer"), "{error}");
+        assert!(error.contains("locked by a running"), "{error}");
 
         // Lock held, rows staged, manifest withheld: still being built.
         let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
@@ -5958,10 +5991,18 @@ mod tests {
 
         // Published: served, lock or no lock.
         store.put_manifest(&manifest).unwrap();
+        assert!(store.has_manifest().unwrap());
         assert!(SqliteStore::open_repo_index(repo).unwrap().is_some());
         drop(lock);
-        assert!(!index_lock_path(repo).exists());
+        assert!(!index_write_in_progress(repo));
         assert!(SqliteStore::open_repo_index(repo).unwrap().is_some());
+
+        // Withdrawn with no live writer, whatever file a dead one left: unindexed, not
+        // being built.
+        store.withdraw_manifest().unwrap();
+        assert!(!store.has_manifest().unwrap());
+        std::fs::write(index_lock_path(repo), b"").unwrap();
+        assert!(SqliteStore::open_repo_index(repo).unwrap().is_none());
     }
 
     #[test]

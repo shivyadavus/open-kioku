@@ -70,15 +70,43 @@ changed files' rows and the complete graph of the new snapshot, in one transacti
 
 ### Publication order
 
-The manifest is the publication marker: `ok index` and `ok watch` write the rows, the git
-history, the graph and the Tantivy index, and put the manifest last. A concurrent reader
-therefore never opens a manifest whose graph or search index is still being written, and a
-run that fails after the rows leaves the repository reading as unindexed rather than as an
-index whose components disagree. While the writer holds `.ok/index.lock` and no manifest is
-published, every read surface — `ok status`, `ok doctor`, every read command, and the MCP
-server, whose session survives the failed probe — reports the index as being built rather
-than as missing. The incremental path keeps the previous manifest in place until its own
-components are written, so readers keep serving the previous index meanwhile.
+The manifest is the publication marker, written as the last step of an index run.
+
+- **Full runs** (`ok index`, and `ok watch` when it cannot update incrementally) stage the
+  rows in one transaction that also removes the manifest, write the git history and the
+  graph in transactions of their own, rebuild the Tantivy index, and then put the manifest.
+  A reader never opens a manifest over rows or a graph from a different run, and a run that
+  fails partway leaves no manifest, so the repository reads as unindexed until a run
+  completes. From the row transaction until the manifest is put, reads are refused with
+  `indexing in progress` rather than served: the previous index's rows are already gone.
+  Building the next index in a staging generation and publishing it with the atomic
+  `active` pointer (`crates/open-kioku-storage/src/generations.rs`) is what would keep the
+  previous index readable during a rebuild; it is not done yet.
+- **Incremental `ok watch` runs** replace the changed files' rows and reconcile the graph in
+  one transaction while the previous manifest stays published, so readers see the new rows
+  and graph as soon as it commits, under the previous manifest's counts and timestamps. The
+  Tantivy index is then rebuilt in place: its directory is removed and recreated. For that
+  stage `ok search` and `search_code` with `mode=code` find either no index, and fall back to
+  lexical search over the SQLite chunks, or an index that is empty until the rebuild commits;
+  `mode=graph` reports the graph search index missing. The new manifest is put last. If any
+  step after the transaction fails, the previous manifest is withdrawn and the error is
+  returned, so the repository reads as unindexed instead of serving this run's rows under
+  the previous manifest with no search index; the next `ok watch` event finds no manifest and
+  rebuilds in full.
+
+SQLite components are therefore consistent per transaction; the search index is not
+versioned with them.
+
+`.ok/index.lock` is an OS advisory lock (`flock` on unix, `LockFileEx` on Windows) that every
+writer holds for its whole run, and the kernel releases it however the writer exits, Ctrl-C
+and OOM kills included. On unix the writer removes the file as it finishes, while still
+holding the lock; on Windows the file stays. A lock file nobody holds is ignored by readers
+and taken over by the next writer at once. While a live writer holds the lock and no
+manifest is published, every read surface — `ok status`, `ok doctor`, every read command,
+and the MCP server — reports `indexing in progress` rather than `repository is not indexed`.
+The MCP session survives the failed probe, and a session that already holds a store checks
+for the manifest before each request and probes again when it is gone, so it gives the same
+answer.
 
 Object-level deduplication of evidence was measured and rejected. Evidence objects are 1.0x
 distinct per edge — their `id` is a content hash and `indexed_at` is stamped per run — so a

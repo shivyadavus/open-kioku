@@ -128,32 +128,42 @@ pub fn index_lock_path(repo: &Path) -> PathBuf {
     repo.join(".ok").join(INDEX_LOCK_FILE)
 }
 
-/// Whether an index writer holds the repository's lock right now.
+/// Whether a live index writer holds the repository's lock right now.
 ///
-/// Readers consult it only when no manifest is published: the manifest is the last thing a
-/// run writes, so "no manifest, lock held" is an index being built, and every read surface
-/// says so with [`indexing_in_progress_message`] rather than reporting the repository as
-/// unindexed or answering from rows the run has not finished. A lock left behind by a killed
-/// writer keeps that answer until it is removed; the message says when removing it is safe.
+/// The lock is an OS advisory lock on `.ok/index.lock` (`flock` on unix, `LockFileEx` on
+/// Windows), not the file's existence: the kernel releases it however the writer exits,
+/// Ctrl-C and OOM kills included, so a file left behind by a writer that died is ignored here
+/// and taken over by the next writer. Readers consult it only when no manifest is published:
+/// the manifest is the last thing a run writes, so "no manifest, lock held" is an index being
+/// built, and every read surface says so with [`indexing_in_progress_message`] rather than
+/// reporting the repository as unindexed. A lock file this process cannot open or lock reads
+/// as no writer, which is the answer readers gave before the lock was consulted at all.
+///
+/// Opens the file read-only and never creates it, so a read surface leaves nothing on disk.
 pub fn index_write_in_progress(repo: &Path) -> bool {
-    index_lock_path(repo).exists()
+    let Ok(file) = std::fs::File::open(index_lock_path(repo)) else {
+        return false;
+    };
+    // `Ok(false)` is "would block": another open of the file holds the exclusive lock. The
+    // shared lock taken on `Ok(true)` is released when `file` drops. Called as a trait
+    // function because newer toolchains give `File` inherent methods of the same name.
+    matches!(fs4::fs_std::FileExt::try_lock_shared(&file), Ok(false))
 }
 
 pub fn indexing_in_progress_message(repo: &Path) -> String {
     format!(
-        "indexing in progress: {} is held by `ok index` or `ok watch`, and the index is not \
-         published until that run completes; retry when it finishes (remove the lock file only \
-         if no Open Kioku process is running, then run `ok index {}`)",
-        index_lock_path(repo).display(),
-        repo.display()
+        "indexing in progress: an `ok index` or `ok watch` run holds {} and has not published \
+         the index yet; retry when it finishes",
+        index_lock_path(repo).display()
     )
 }
 
-/// Exclusive writer lock for a repository's index, released on drop.
+/// Exclusive writer lock for a repository's index, released when dropped or when the
+/// holding process exits.
 ///
 /// Held by `ok index` and by every `ok watch` write for the whole run, so two writers never
 /// interleave their component writes and readers can tell an index being built from one that
-/// does not exist.
+/// does not exist ([`index_write_in_progress`]).
 #[derive(Debug)]
 pub struct IndexWriteLock {
     path: PathBuf,
@@ -161,36 +171,43 @@ pub struct IndexWriteLock {
 }
 
 impl IndexWriteLock {
-    /// How long a writer waits for another writer before giving up.
+    /// How long a writer waits for another live writer before giving up.
     pub const DEFAULT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+    /// Take the lock, waiting up to `wait` while another live writer holds it. A lock file
+    /// nobody holds, such as one left by a killed writer, is taken over at once.
     pub fn acquire(repo: &Path, wait: std::time::Duration) -> Result<Self> {
         let path = index_lock_path(repo);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let started_waiting = std::time::Instant::now();
-        let file = loop {
-            match std::fs::OpenOptions::new()
+        loop {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
                 .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => break file,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if started_waiting.elapsed() > wait {
-                        return Err(OkError::Index(format!(
-                            "index is locked by another writer or a stale lock at {}; remove it \
-                             only if no ok index process is running",
-                            path.display()
-                        )));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-                Err(err) => return Err(err.into()),
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            let locked = fs4::fs_std::FileExt::try_lock_exclusive(&file).map_err(|err| {
+                OkError::Index(format!("could not lock {}: {err}", path.display()))
+            })?;
+            // A finishing writer removes the file while it still holds the lock (unix), so a
+            // lock taken on a file that is no longer at `path` guards nothing; try again on
+            // whatever is there now.
+            if locked && lock_file_is_current(&file, &path) {
+                return Ok(Self { path, _file: file });
             }
-        };
-        Ok(Self { path, _file: file })
+            drop(file);
+            if started_waiting.elapsed() > wait {
+                return Err(OkError::Index(format!(
+                    "index is locked by a running `ok index` or `ok watch` ({}); retry when it \
+                     finishes",
+                    path.display()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -200,8 +217,28 @@ impl IndexWriteLock {
 
 impl Drop for IndexWriteLock {
     fn drop(&mut self) {
+        // Removed while the lock is still held, so the path never names a file another writer
+        // has locked; `acquire` checks identity after locking for the remaining race. Windows
+        // keeps the file: std cannot identify an open file there, and an unheld file is taken
+        // over by the next writer either way. Closing the file releases the lock.
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+#[cfg(unix)]
+fn lock_file_is_current(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(held), Ok(current)) => held.dev() == current.dev() && held.ino() == current.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_file_is_current(_file: &std::fs::File, _path: &Path) -> bool {
+    // Nothing removes the lock file on this platform, so the file at `path` is the one locked.
+    true
 }
 
 /// The status object `ok --json status` and MCP `repo_status` return for a repository that
@@ -514,6 +551,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolve_index_location(repo).generation_id(), None);
+    }
+
+    #[test]
+    fn a_lock_file_nobody_holds_is_ignored_by_readers_and_taken_over_by_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        assert!(!index_write_in_progress(repo));
+        assert!(
+            !repo.join(".ok").exists(),
+            "asking whether a writer runs must not create .ok"
+        );
+
+        // What a writer killed mid-run leaves behind: the file, and no holder.
+        std::fs::create_dir_all(repo.join(".ok")).unwrap();
+        std::fs::write(index_lock_path(repo), b"").unwrap();
+        assert!(!index_write_in_progress(repo));
+
+        let started = std::time::Instant::now();
+        let lock = IndexWriteLock::acquire(repo, std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "an unheld lock file must be taken over, not waited out"
+        );
+        assert_eq!(lock.path(), index_lock_path(repo));
+        assert!(index_write_in_progress(repo));
+
+        let error = IndexWriteLock::acquire(repo, std::time::Duration::from_millis(10))
+            .expect_err("the lock is exclusive")
+            .to_string();
+        assert!(error.contains("locked by a running"), "{error}");
+
+        drop(lock);
+        assert!(!index_write_in_progress(repo));
+        let again = IndexWriteLock::acquire(repo, std::time::Duration::from_millis(10));
+        assert!(again.is_ok(), "a released lock is free: {again:?}");
     }
 
     #[test]
