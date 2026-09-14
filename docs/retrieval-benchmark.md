@@ -165,7 +165,9 @@ indexed), a Go application (~800 files), a TypeScript standard library (~900 fil
 a Python ML library (~4k files) — and fails when a watched metric falls more
 than 0.03 below its baseline. The repositories are not named here; the baseline files are keyed by
 language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.json`, and so on), and
-the workflow reads each repository URL from a repository variable. The baselines were frozen from a hosted-runner matrix run on
+the workflow reads each repository URL and base commit from repository secrets (`BENCH_<CODE>_URL`, `BENCH_<CODE>_BASE`),
+masks them in the log, and uploads aggregate results only, never the cases or per-case rows, so corpus identity stays out
+of public logs and artifacts. The baselines were frozen from a hosted-runner matrix run on
 2026-09-08, after generated files began to be indexed and ranked below hand-written source and a
 commit scope's directory entry file became a candidate (each file records its run and commit under
 `provenance`); earlier freezes are in each file's git history:

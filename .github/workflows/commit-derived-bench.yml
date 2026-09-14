@@ -8,31 +8,27 @@ name: commit-derived-bench
 #
 # Matrix entries are keyed java-a, go-a, ts-a, py-a (a Java service, a Go application, a TypeScript
 # standard library, a Python ML library); the keys name the baseline files. Each repository URL lives
-# in a repository variable named `BENCH_<CODE>_URL`, and each base commit in `BENCH_<CODE>_BASE`
+# in a repository secret named `BENCH_<CODE>_URL`, and each base commit in `BENCH_<CODE>_BASE`
 # (Settings > Secrets and variables > Actions) -- never in this file or in
 # `benchmarks/commit-derived/`. A full commit hash of a public repository is searchable and
 # therefore identifies it, so it is withheld for the same reason the URL is. The extension and
 # indexed subtrees stay checked in because they name nothing.
+#
+# So corpus identity stays out of public logs and artifacts: the secrets reach only the steps that
+# use them, `scripts/mask-corpus-identity.sh` masks the forms of them a log could still show, case
+# derivation runs `--quiet`, manual runs cannot name a repository or corpus, and the uploaded
+# artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`), never cases.
 
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
-      repo_url:
-        description: Override the repository for every matrix entry (leave blank to read each corpus's BENCH_<CODE>_URL variable)
-        default: ""
-      base_sha:
-        description: Base commit; the repository is indexed here
-        default: ""
       path_prefixes:
         description: Space-separated subtrees that are extracted and indexed
         default: ""
       after:
         description: Commits after base to scan for cases
-        default: ""
-      corpus_name:
-        description: Corpus code whose baseline under benchmarks/commit-derived/ is compared against (java-a, go-a, ts-a, py-a)
         default: ""
 
 env:
@@ -47,50 +43,51 @@ jobs:
       matrix:
         corpus:
           - name: java-a
-            url_var: BENCH_JAVA_A_URL
-            base_var: BENCH_JAVA_A_BASE
+            url_secret: BENCH_JAVA_A_URL
+            base_secret: BENCH_JAVA_A_BASE
             prefixes: "libs/ modules/ server/"
             ext: .java
             after: "3800"
           - name: go-a
-            url_var: BENCH_GO_A_URL
-            base_var: BENCH_GO_A_BASE
+            url_secret: BENCH_GO_A_URL
+            base_secret: BENCH_GO_A_BASE
             prefixes: ""
             ext: .go
             after: "1500"
           - name: ts-a
-            url_var: BENCH_TS_A_URL
-            base_var: BENCH_TS_A_BASE
+            url_secret: BENCH_TS_A_URL
+            base_secret: BENCH_TS_A_BASE
             prefixes: ""
             ext: .ts
             after: "1500"
           - name: py-a
-            url_var: BENCH_PY_A_URL
-            base_var: BENCH_PY_A_BASE
+            url_secret: BENCH_PY_A_URL
+            base_secret: BENCH_PY_A_BASE
             prefixes: ""
             ext: .py
             after: "1500"
     name: bench (${{ matrix.corpus.name }})
     env:
-      REPO_URL: ${{ github.event.inputs.repo_url || vars[matrix.corpus.url_var] }}
-      BASE_SHA: ${{ github.event.inputs.base_sha || vars[matrix.corpus.base_var] }}
       PATH_PREFIXES: ${{ github.event.inputs.path_prefixes || matrix.corpus.prefixes }}
       EXT: ${{ matrix.corpus.ext }}
       AFTER: ${{ github.event.inputs.after || matrix.corpus.after }}
-      CORPUS_NAME: ${{ github.event.inputs.corpus_name || matrix.corpus.name }}
+      CORPUS_NAME: ${{ matrix.corpus.name }}
     steps:
       - uses: actions/checkout@v7
-      - name: Resolve the corpus repository
+      - name: Check the corpus secrets are set
+        env:
+          REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
+          BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
         run: |
           if [ -z "$REPO_URL" ]; then
-            echo "::error::no repository URL for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.url_var }} repository variable or pass repo_url"
+            echo "::error::no repository URL for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.url_secret }} repository secret"
             exit 1
           fi
           if [ -z "$BASE_SHA" ]; then
-            echo "::error::no base commit for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.base_var }} repository variable or pass base_sha"
+            echo "::error::no base commit for corpus ${{ matrix.corpus.name }}: set the ${{ matrix.corpus.base_secret }} repository secret"
             exit 1
           fi
-          echo "corpus ${{ matrix.corpus.name }} resolved (URL from ${{ matrix.corpus.url_var }}, base from ${{ matrix.corpus.base_var }})"
+          echo "corpus ${{ matrix.corpus.name }} resolved (URL from ${{ matrix.corpus.url_secret }}, base from ${{ matrix.corpus.base_secret }})"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
@@ -98,25 +95,33 @@ jobs:
       - name: Build ok
         run: cargo build --release -p open-kioku-cli
 
-      - name: Clone source repository (history only, blobs on demand)
+      - name: Derive the corpus and its cases at the base commit
+        env:
+          REPO_URL: ${{ secrets[matrix.corpus.url_secret] }}
+          BASE_SHA: ${{ secrets[matrix.corpus.base_secret] }}
         run: |
+          # Masks first, before any command that could print the URL, its owner or name, or the base commit.
+          bash scripts/mask-corpus-identity.sh
+
+          # History only, blobs on demand.
           git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "$BASE_SHA" || true
 
-      - name: Extract the indexed subtree at the base commit
-        run: |
+          # The indexed subtree at the base commit. Extraction stderr can name corpus paths, so a
+          # failure reports only that it failed.
           mkdir -p corpus
           # shellcheck disable=SC2086
-          git -C source archive "$BASE_SHA" $PATH_PREFIXES | tar -x -C corpus
+          if ! git -C source archive "$BASE_SHA" $PATH_PREFIXES 2>extract.err | tar -x -C corpus 2>>extract.err; then
+            echo "::error::extracting the base commit failed; its stderr is withheld"
+            exit 1
+          fi
           echo "$BASE_SHA" > corpus/.base-sha
-          find corpus -type f | wc -l
+          echo "$(find corpus -type f | wc -l) files extracted"
 
-      - name: Derive cases
-        run: |
           args=""
           for p in $PATH_PREFIXES; do args="$args --path-prefix $p"; done
           # shellcheck disable=SC2086
-          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" --after "$AFTER" --ext "$EXT" $args --out cases.tsv
+          python3 scripts/commit-derived-cases.py source --quiet --base "$BASE_SHA" --after "$AFTER" --ext "$EXT" $args --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines()
           cut = int(len(rows) * 0.7)
@@ -185,12 +190,22 @@ jobs:
               print(line)
           PY
 
-      - name: Upload reports
+      # After the comparison and the summary, which read the per-case rows; nothing is uploaded
+      # unless every report was reduced.
+      - name: Reduce the reports to aggregates
+        id: aggregate
         if: always()
+        run: |
+          python3 scripts/reduce-benchmark-report.py artifacts/holdout.json artifacts/dev.json \
+            --coverage artifacts/coverage.json
+
+      - name: Upload reports
+        if: always() && steps.aggregate.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: commit-derived-${{ env.CORPUS_NAME }}
+          name: commit-derived-${{ matrix.corpus.name }}
           path: |
-            artifacts/
-            cases.tsv
+            artifacts/holdout.json
+            artifacts/dev.json
+            artifacts/coverage.json
           if-no-files-found: error

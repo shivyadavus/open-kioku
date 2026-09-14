@@ -6,18 +6,15 @@ name: semantic-experiment
 # Runs on Linux because the `ort` crate needs an ONNX Runtime the macOS-Intel prebuilts do not
 # provide; on Linux it downloads its own runtime.
 #
-# Defaults to the Go application corpus, matrix key go-a (docs/retrieval-benchmark.md, "Commit-derived corpora"). The
-# repository URL comes from the `BENCH_GO_A_URL` repository variable, never from this file.
+# Runs on the Go application corpus, matrix key go-a (docs/retrieval-benchmark.md, "Commit-derived corpora"). The
+# repository URL and base commit come from the `BENCH_GO_A_URL` and `BENCH_GO_A_BASE` repository secrets, never
+# from this file or a dispatch input. So corpus identity stays out of public logs and artifacts, the derive step
+# masks the forms of them a log could still show (`scripts/mask-corpus-identity.sh`), case derivation runs
+# `--quiet`, and the uploaded artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`).
 
 on:
   workflow_dispatch:
     inputs:
-      repo_url:
-        description: Repository to derive the corpus from (blank = the BENCH_GO_A_URL repository variable, the go-a corpus)
-        default: ""
-      base_sha:
-        description: Base commit (blank = the BENCH_GO_A_BASE repository variable, the go-a corpus)
-        default: ""
       ext:
         default: .go
       path_prefixes:
@@ -55,21 +52,28 @@ jobs:
 
       - name: Derive the corpus at the base commit
         env:
-          REPO_URL: ${{ github.event.inputs.repo_url || vars.BENCH_GO_A_URL }}
-          BASE_SHA: ${{ github.event.inputs.base_sha || vars.BENCH_GO_A_BASE }}
+          REPO_URL: ${{ secrets.BENCH_GO_A_URL }}
+          BASE_SHA: ${{ secrets.BENCH_GO_A_BASE }}
         run: |
-          if [ -z "$REPO_URL" ]; then
-            echo "::error::no repository URL: set the BENCH_GO_A_URL repository variable or pass repo_url"
+          if [ -z "$REPO_URL" ] || [ -z "$BASE_SHA" ]; then
+            echo "::error::no corpus for go-a: set the BENCH_GO_A_URL and BENCH_GO_A_BASE repository secrets"
             exit 1
           fi
+          # Masks first, before any command that could print the URL, its owner or name, or the base commit.
+          bash scripts/mask-corpus-identity.sh
           git clone --quiet --filter=blob:none --no-checkout "$REPO_URL" source
           git -C source fetch --quiet origin "$BASE_SHA" || true
           PREFIXES="${{ github.event.inputs.path_prefixes }}"
+          mkdir -p corpus
+          # Extraction stderr can name corpus paths, so a failure reports only that it failed.
           # shellcheck disable=SC2086
-          mkdir -p corpus && git -C source archive "$BASE_SHA" $PREFIXES | tar -x -C corpus
+          if ! git -C source archive "$BASE_SHA" $PREFIXES 2>extract.err | tar -x -C corpus 2>>extract.err; then
+            echo "::error::extracting the base commit failed; its stderr is withheld"
+            exit 1
+          fi
           args=""; for p in $PREFIXES; do args="$args --path-prefix $p"; done
           # shellcheck disable=SC2086
-          python3 scripts/commit-derived-cases.py source --base "$BASE_SHA" \
+          python3 scripts/commit-derived-cases.py source --quiet --base "$BASE_SHA" \
             --after "${{ github.event.inputs.after }}" --ext "${{ github.event.inputs.ext }}" $args --out cases.tsv
           python3 - <<'PY'
           rows = open("cases.tsv").readlines(); cut = int(len(rows) * 0.7)
@@ -119,10 +123,19 @@ jobs:
       - name: Compare
         run: python3 scripts/compare-commit-derived-report.py artifacts/treatment.json artifacts/control.json --slack 0.0 || true
 
-      - name: Upload reports
+      # After the comparison, which reads the per-case rows; nothing is uploaded unless every
+      # report was reduced.
+      - name: Reduce the reports to aggregates
+        id: aggregate
         if: always()
+        run: python3 scripts/reduce-benchmark-report.py artifacts/control.json artifacts/treatment.json
+
+      - name: Upload reports
+        if: always() && steps.aggregate.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: semantic-experiment-${{ github.event.inputs.model }}
-          path: artifacts/
+          path: |
+            artifacts/control.json
+            artifacts/treatment.json
           if-no-files-found: error
