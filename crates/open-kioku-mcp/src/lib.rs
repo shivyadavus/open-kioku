@@ -899,9 +899,7 @@ async fn dispatch(
                 .map(str::to_string);
             if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
                 for change in changed_ranges_since(repo, since)? {
-                    if let Some(path) = change.new_path.or(change.old_path) {
-                        changed_files.push(path);
-                    }
+                    changed_files.extend(change.changed_paths());
                 }
                 if unified_diff.is_none() {
                     unified_diff = git_diff_since(repo, since)?;
@@ -2125,6 +2123,8 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
 fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
     // `since` is caller input on a read-only server. Without the terminator a value such as
     // `--output=<path>` is an option to git, which exits 0 and writes the diff there.
+    // Rename detection is requested rather than left to `diff.renames`, so the report pairs
+    // both sides of a rename whatever the local git config says.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -2132,6 +2132,7 @@ fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--find-renames",
             "--relative",
             "--end-of-options",
         ])
@@ -2228,9 +2229,7 @@ fn verify_change_contract_tool(
         .map(str::to_string);
     if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
         for change in changed_ranges_since(repo, since)? {
-            if let Some(path) = change.new_path.or(change.old_path) {
-                changed_files.push(path);
-            }
+            changed_files.extend(change.changed_paths());
         }
         if unified_diff.is_none() {
             unified_diff = git_diff_since(repo, since)?;
@@ -3202,6 +3201,77 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("invalid input: verify requires at least one changed file"));
+    }
+
+    #[tokio::test]
+    async fn verify_change_checks_both_sides_of_a_renamed_file() {
+        let fixture = McpSnapshotFixture::new();
+        let plan = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"plan","method":"tools/call","params":{"name":"plan_change","arguments":{"task":"publish invoice","format":"json"}}}"#,
+        )
+        .await
+        .expect("plan_change should answer");
+        let mut plan =
+            plan.result.expect("plan_change should succeed")["structuredContent"].clone();
+        let boundary = &mut plan["recommended_change_boundary"];
+        boundary["allowed_files"] = json!(["src/billing.rs", "src/invoices.rs"]);
+        boundary["caution_files"] = json!([]);
+        boundary["caution_rules"] = json!([]);
+        boundary["forbidden_files"] = json!([]);
+        boundary["forbidden_rules"] =
+            json!([{"pattern": "src/secrets/**", "reason": "secrets stay in place"}]);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "verify",
+            "method": "tools/call",
+            "params": {"name": "verify_change", "arguments": {
+                "plan": plan,
+                "diff": "diff --git a/src/secrets/billing_keys.rs b/src/invoices.rs\nsimilarity index 100%\nrename from src/secrets/billing_keys.rs\nrename to src/invoices.rs\n",
+            }},
+        })
+        .to_string();
+
+        let response = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            &request,
+        )
+        .await
+        .expect("verify_change should answer");
+
+        let report =
+            response.result.expect("verify_change should succeed")["structuredContent"].clone();
+        assert_eq!(report["verdict"], "fail", "{report}");
+        assert_eq!(
+            report["previous_paths"],
+            json!([{
+                "path": "src/invoices.rs",
+                "previous_path": "src/secrets/billing_keys.rs",
+                "kind": "rename"
+            }])
+        );
+        let violation = report["boundary_violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| {
+                finding["kind"] == "forbidden_boundary"
+                    && finding["path"] == "src/secrets/billing_keys.rs"
+            })
+            .unwrap_or_else(|| {
+                panic!("the previous path is not held to the forbidden rule: {report}")
+            });
+        assert!(
+            violation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("renamed to `src/invoices.rs`"),
+            "{violation}"
+        );
     }
 
     #[tokio::test]

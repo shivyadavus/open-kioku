@@ -1062,9 +1062,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let mut changed = changed;
             let unified_diff = if let Some(since) = since_plan.as_deref() {
                 for change in changed_ranges_since(&repo, since)? {
-                    if let Some(path) = change.new_path.or(change.old_path) {
-                        changed.push(path);
-                    }
+                    changed.extend(change.changed_paths());
                 }
                 verify_diff_since(&repo, diff.as_deref(), since)?
             } else {

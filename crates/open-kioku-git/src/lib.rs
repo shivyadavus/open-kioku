@@ -73,6 +73,22 @@ impl DiffFile {
             .filter_map(|hunk| hunk.new_range.clone())
             .collect()
     }
+
+    /// Paths whose content this change adds, modifies or removes: both sides of a rename,
+    /// the removed path of a deletion, and only the destination of a copy.
+    pub fn changed_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(2);
+        if let Some(new_path) = &self.new_path {
+            paths.push(new_path.clone());
+        }
+        if let Some(old_path) = &self.old_path {
+            let removed = self.new_path.is_none() || self.status == GitChangeKind::Renamed;
+            if removed && self.new_path.as_ref() != Some(old_path) {
+                paths.push(old_path.clone());
+            }
+        }
+        paths
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +282,12 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, revision: Option<&str>) -> Resu
         .arg(root)
         .args(["-c", "core.quotePath=true"])
         .arg("diff")
-        .args(["--unified=0", "--no-ext-diff", "--no-textconv"])
+        .args([
+            "--unified=0",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+        ])
         .args(revision_args(revision))
         .output()
         .map_err(|err| OkError::Repository(format!("git diff failed: {err}")))?;
@@ -584,7 +605,7 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
             pending.rename_score = None;
             return;
         }
-        let status = pending.status.unwrap_or_else(|| {
+        let status = pending.status.take().unwrap_or_else(|| {
             if pending.old_path.is_none() {
                 GitChangeKind::Added
             } else if pending.new_path.is_none() {
@@ -621,6 +642,12 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
         } else if let Some(value) = line.strip_prefix("rename to ") {
             pending.new_path = Some(parse_patch_path(value, None)?);
             pending.status = Some(GitChangeKind::Renamed);
+        } else if let Some(value) = line.strip_prefix("copy from ") {
+            pending.old_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Copied);
+        } else if let Some(value) = line.strip_prefix("copy to ") {
+            pending.new_path = Some(parse_patch_path(value, None)?);
+            pending.status = Some(GitChangeKind::Copied);
         } else if let Some(value) = line.strip_prefix("--- ") {
             if value != "/dev/null" {
                 pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
@@ -1063,6 +1090,53 @@ mod tests {
         assert_eq!(
             files[3].new_path.as_deref(),
             Some(Path::new("src/after.rs"))
+        );
+    }
+
+    #[test]
+    fn changed_paths_name_both_sides_of_a_rename_and_only_the_destination_of_a_copy() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/src/old.rs b/src/new.rs\n\
+             similarity index 100%\n\
+             rename from src/old.rs\n\
+             rename to src/new.rs\n\
+             diff --git a/src/template.rs b/src/copy.rs\n\
+             similarity index 100%\n\
+             copy from src/template.rs\n\
+             copy to src/copy.rs\n\
+             diff --git a/src/gone.rs b/src/gone.rs\n\
+             deleted file mode 100644\n\
+             --- a/src/gone.rs\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n\
+             -gone();\n\
+             diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1 +1 @@\n\
+             -old();\n\
+             +new();\n",
+        )
+        .unwrap();
+
+        let changed = files
+            .iter()
+            .map(|file| (file.status, file.changed_paths()))
+            .collect::<Vec<_>>();
+        let paths = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changed,
+            vec![
+                (GitChangeKind::Renamed, paths(&["src/new.rs", "src/old.rs"])),
+                (GitChangeKind::Copied, paths(&["src/copy.rs"])),
+                (GitChangeKind::Deleted, paths(&["src/gone.rs"])),
+                (GitChangeKind::Modified, paths(&["src/lib.rs"])),
+            ]
         );
     }
 
