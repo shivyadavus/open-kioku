@@ -7,6 +7,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Per-task-family metrics on the commit-derived benchmarks (`docs/retrieval-benchmark.md`, "Per-task-family breakdown"). `scripts/score-context-cases.py` adds a `by_task_family` section that reports every aggregate metric, its bootstrap interval, and case coverage for each routed family (`retrieval_diagnostics.routing.task_family`, named by `TaskFamily`), and each row records its `task_family`; existing report keys are unchanged. A family with fewer than 34 scored cases is marked `insufficient` and never gated. `scripts/compare-commit-derived-report.py` gates each sufficient family on R@5, R@20, MRR, and `gold_recall@20` with the aggregate's 0.03 slack and exit status once a baseline carries the section. No frozen baseline carries it yet, so per-family numbers are informational until the next re-freeze. The scorer output, the compare output, and the nightly job summary print each family with its 95% intervals under a note that families are the router's labels, and the summary's gate column comes from the compare script. The scripts' unit tests (`scripts/tests/test_context_yield.py`, `scripts/tests/test_commit_derived_families.py`) run in the Benchmarks workflow (#388).
+
 ### Fixed
 
 - `ok watch` replaces exactly the changed file's graph edges on an incremental re-index and reconciles the rest of the stored graph with the new snapshot by identity, so a renamed symbol loses its old callers, edges from unchanged files into nodes the change removed go with them, and the graph string dictionary does not grow across repeated runs. The per-file delete used to key on the producing pass name, which never matched a path, so no edge was ever removed (#413).
