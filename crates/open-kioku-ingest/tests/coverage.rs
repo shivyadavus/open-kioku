@@ -170,8 +170,9 @@ fn hidden_directories_are_policy_exclusions_outside_the_coverage_ratio() {
 }
 
 /// `.gitignore` exclusions are counted per language, and a worktree under a hidden
-/// directory that `.gitignore` also lists counts as hidden: ingest checks the hidden
-/// rule first, so the doctor's git-ignore warning cannot fire on agent worktrees.
+/// directory that `.gitignore` also lists counts as hidden: under the default
+/// `[security] allow_hidden_files = false` ingest checks the hidden rule first, so the
+/// doctor's git-ignore warning does not fire on agent worktrees.
 #[test]
 fn git_ignored_source_is_counted_per_language_and_hidden_worktrees_stay_hidden() {
     let dir = tempfile::tempdir().unwrap();
@@ -228,6 +229,81 @@ fn git_ignored_source_is_counted_per_language_and_hidden_worktrees_stay_hidden()
     assert!(coverage
         .languages_mostly_excluded_by(SkipSource::GitIgnore)
         .is_empty());
+}
+
+/// `[index] exclude` is checked before git ignore rules, so listing git-ignored paths
+/// there records them as `config_exclude`: the way to mark an intended exclusion so the
+/// doctor's git-ignore warning stops.
+#[test]
+fn index_exclude_marks_git_ignored_source_as_an_intended_exclusion() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".gitignore", "scratch/\n");
+    write(root, "app.py", "def run():\n    pass\n");
+    for index in 0..25 {
+        write(
+            root,
+            &format!("scratch/m{index}.py"),
+            "def m():\n    pass\n",
+        );
+    }
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    assert_eq!(
+        coverage.policy_excluded_by_language["python"][&SkipSource::GitIgnore],
+        25
+    );
+    assert_eq!(
+        coverage.languages_mostly_excluded_by(SkipSource::GitIgnore),
+        vec![("python", 25, 1)]
+    );
+
+    config.index.exclude.push("scratch/**".into());
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    let sources = &coverage.policy_excluded_by_language["python"];
+    assert_eq!(sources[&SkipSource::ConfigExclude], 25);
+    assert!(!sources.contains_key(&SkipSource::GitIgnore));
+    assert!(coverage
+        .languages_mostly_excluded_by(SkipSource::GitIgnore)
+        .is_empty());
+}
+
+/// The hidden rule applies only under the default `[security] allow_hidden_files = false`.
+/// With it on, a git-ignored worktree under `.claude/` is attributed to git ignore rules
+/// and does qualify for the doctor's warning.
+#[test]
+fn git_ignored_worktree_counts_as_git_ignored_when_hidden_files_are_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, ".gitignore", ".claude/\n");
+    write(root, "app/main.rs", "fn main() {}\n");
+    write(root, "app/lib.rs", "pub fn live() {}\n");
+    for index in 0..30 {
+        write(
+            root,
+            &format!(".claude/worktrees/agent/src/w{index}.rs"),
+            "pub fn w() {}\n",
+        );
+    }
+
+    let mut config = OkConfig::default();
+    config.scip.enabled = false;
+    config.history.enabled = false;
+    config.security.allow_hidden_files = true;
+    let snapshot = Indexer::default().index_repo(root, &config).unwrap();
+    let coverage = snapshot.manifest.quality.coverage.as_ref().unwrap();
+    let sources = &coverage.policy_excluded_by_language["rust"];
+    assert_eq!(sources[&SkipSource::GitIgnore], 30);
+    assert!(!sources.contains_key(&SkipSource::HiddenPolicy));
+    assert_eq!(
+        coverage.languages_mostly_excluded_by(SkipSource::GitIgnore),
+        vec![("rust", 30, 2)]
+    );
 }
 
 fn write(root: &Path, path: &str, content: &str) {

@@ -243,8 +243,8 @@ mod tests {
         coverage
     }
 
-    /// `.gitignore` is written for git: when it sets aside most of a language, 100% of
-    /// what remains says nothing about the files an agent will not find.
+    /// Git ignore rules are written for git: when they set aside most of a language, 100%
+    /// of what remains says nothing about the files an agent will not find.
     #[test]
     fn doctor_coverage_warns_when_gitignore_excludes_most_of_a_language() {
         use open_kioku_core::{SkipReason, SkipSource};
@@ -267,14 +267,48 @@ mod tests {
         );
         let step = step.expect("a mostly git-ignored language carries a next step");
         assert!(
-            step.contains("`.gitignore` governs the largest share of rust source"),
+            step.contains("git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`) govern the largest share of rust source"),
+            "{step}"
+        );
+        assert!(
+            step.contains("list the paths under `[index] exclude` if the exclusion is intended"),
             "{step}"
         );
     }
 
-    /// Ingest checks `hidden` before `.gitignore`, so a git-ignored agent worktree under
-    /// `.claude/` is a hidden-policy exclusion: this tool's own setting, reported in the
-    /// detail and never a verdict. Every other rule this tool owns stays silent too.
+    /// Listing the git-ignored paths under `[index] exclude`, which ingest checks before
+    /// git ignore rules, records them as `config_exclude`: the exclusion is marked
+    /// intended, and the check passes with that setting named.
+    #[test]
+    fn doctor_coverage_passes_when_the_git_ignored_paths_are_under_index_exclude() {
+        use open_kioku_core::{SkipReason, SkipSource};
+
+        let coverage = rust_coverage_beside_policy_exclusions(
+            640,
+            SkipReason::Ignored,
+            SkipSource::ConfigExclude,
+            "src",
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Pass),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .ends_with("640 under src/; `[index] exclude` governs the largest share)"),
+            "{}",
+            check.message
+        );
+        assert!(step.is_none());
+    }
+
+    /// With the default `[security] allow_hidden_files = false`, ingest checks `hidden`
+    /// before git ignore rules, so a git-ignored agent worktree under `.claude/` is a
+    /// hidden-policy exclusion: this tool's own setting, reported in the detail and never
+    /// a verdict. Every other rule this tool owns stays silent too.
     #[test]
     fn doctor_coverage_passes_when_a_hidden_worktree_holds_most_of_a_language() {
         use open_kioku_core::{SkipReason, SkipSource};

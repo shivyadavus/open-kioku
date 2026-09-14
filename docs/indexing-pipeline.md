@@ -89,14 +89,22 @@ column for policy exclusions, and the ratio over the considered files), then an
 with the top three judged skip reasons, when the programming-language ratio falls under
 98%, when a programming language with at least 50 considered files falls under 98%,
 when a programming language is missing 20 or more considered files regardless of
-percentage, or when any walk error occurred. It also warns when `.gitignore` excludes at
+percentage, or when any walk error occurred. It also warns when git ignore rules exclude at
 least 20 files of a programming language and more files than that language has
-considered (`mostly git-ignored: rust (640 ignored, 12 considered)`), naming `.gitignore`
-in the next step: `.gitignore` is written for git, so it can remove most of a language's
-source behind a 100% ratio. `hidden`, `vendor`, `fast_mode`, `denied`, `[index] exclude`
-and `.okignore` exclusions never warn; they are this tool's own settings. The hidden rule
-is checked before `.gitignore`, so a git-ignored worktree under `.claude/` counts as
-`hidden` and does not trigger it. Pruned directories and walk errors are appended to the summary
+considered (`mostly git-ignored: rust (640 ignored, 12 considered)`). In a git work tree
+those rules are everything `git check-ignore` applies (`.gitignore` at any depth,
+`.git/info/exclude`, and `core.excludesFile`), so the verdict can differ between machines;
+outside one, only `.gitignore` files. They are written for git, so they can remove most of
+a language's source behind a 100% ratio. The next step names them: remove the rule if the
+files are source an agent should see, or list the paths under `[index] exclude` if the
+exclusion is intended. `[index] exclude` is checked before the git ignore rules, so those
+files are recorded as `config_exclude` and the warning stops; `.okignore` is checked after
+them and does not silence it. `hidden`, `vendor`, `fast_mode`, `denied`, `[index] exclude`
+and `.okignore` exclusions never warn; they are this tool's own settings. With the default
+`[security] allow_hidden_files = false`, the hidden rule is checked before the git ignore
+rules, so a git-ignored worktree under `.claude/` counts as `hidden` and does not trigger
+the warning; with `allow_hidden_files = true` the same worktree counts as git-ignored and
+can. Pruned directories and walk errors are appended to the summary
 line whenever nonzero; pruned directories alone do not force a warning, since `target/`
 and `node_modules/` are pruned on nearly every repository. A repository with no
 recognised programming source reports `no programming-language files discovered` rather
