@@ -424,11 +424,11 @@ impl<'a> ContractVerifier<'a> {
         input: VerifyChangeInput,
     ) -> Result<ContractVerificationReport> {
         contract.validate().map_err(|err| {
-            OkError::InvalidInput(format!("contract verification input is invalid: {err}"))
+            OkError::Config(format!("contract verification input is invalid: {err}"))
         })?;
         if input.traceability_strict {
             validate_traceability(contract).map_err(|err| {
-                OkError::InvalidInput(format!(
+                OkError::Config(format!(
                     "contract verification input is missing traceability: {err}"
                 ))
             })?;
@@ -2265,16 +2265,18 @@ pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
 /// still describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChangedRegion {
-    new: LineRange,
+    new: Option<LineRange>,
     old: Option<LineRange>,
 }
 
+/// The pre-edit and post-edit line ranges of one diff hunk, in that order; a side that holds
+/// no lines is `None`.
+pub type HunkRanges = (Option<LineRange>, Option<LineRange>);
+
 /// Hunk ranges per path from the `@@ -a,b +c,d @@` headers of a unified diff, in file order.
 /// A pure deletion (`+c,0`) is reported at line `c`, the line after which text was removed.
-pub fn changed_hunks_from_unified_diff(
-    diff: &str,
-) -> BTreeMap<PathBuf, Vec<(LineRange, LineRange)>> {
-    let mut hunks = BTreeMap::<PathBuf, Vec<(LineRange, LineRange)>>::new();
+pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<HunkRanges>> {
+    let mut hunks = BTreeMap::<PathBuf, Vec<HunkRanges>>::new();
     let mut current: Option<PathBuf> = None;
     let mut pending_old: Option<String> = None;
     for line in diff.lines() {
@@ -2301,30 +2303,38 @@ pub fn changed_hunks_from_unified_diff(
             else {
                 continue;
             };
-            hunks.entry(path.clone()).or_default().push((old, new));
+            if old.is_some() || new.is_some() {
+                hunks.entry(path.clone()).or_default().push((old, new));
+            }
         }
     }
     hunks
 }
 
 /// `-a,b +c,d` (a `,count` of 1 may be omitted) into `(old, new)` line ranges.
-fn parse_hunk_header(header: &str) -> Option<(LineRange, LineRange)> {
+fn parse_hunk_header(header: &str) -> Option<HunkRanges> {
     let mut parts = header.split_whitespace();
     let old = parts.next()?.strip_prefix('-')?;
     let new = parts.next()?.strip_prefix('+')?;
     Some((hunk_side_range(old)?, hunk_side_range(new)?))
 }
 
-fn hunk_side_range(side: &str) -> Option<LineRange> {
+/// One side of a hunk header. `None` when the side does not parse; `Some(None)` when it holds
+/// no lines (`+42,0` for a pure deletion, `-41,0` for a pure insertion), whose start is only an
+/// anchor and must not be read as a changed line of the neighbouring symbol.
+fn hunk_side_range(side: &str) -> Option<Option<LineRange>> {
     let (start, count) = match side.split_once(',') {
         Some((start, count)) => (start.parse::<u32>().ok()?, count.parse::<u32>().ok()?),
         None => (side.parse::<u32>().ok()?, 1),
     };
+    if count == 0 {
+        return Some(None);
+    }
     let start = start.max(1);
-    Some(LineRange {
+    Some(Some(LineRange {
         start,
-        end: start + count.saturating_sub(1),
-    })
+        end: start.saturating_add(count - 1),
+    }))
 }
 
 fn changed_files_from_input(input: &VerifyChangeInput) -> Vec<PathBuf> {
@@ -2351,7 +2361,7 @@ fn changed_regions_from_input(input: &VerifyChangeInput) -> BTreeMap<PathBuf, Ve
             .entry(PathBuf::from(normalize_path(path)))
             .or_default()
             .extend(ranges.iter().map(|range| ChangedRegion {
-                new: range.clone(),
+                new: Some(range.clone()),
                 old: None,
             }));
     }
@@ -2360,10 +2370,11 @@ fn changed_regions_from_input(input: &VerifyChangeInput) -> BTreeMap<PathBuf, Ve
             regions
                 .entry(PathBuf::from(normalize_path(&path)))
                 .or_default()
-                .extend(hunks.into_iter().map(|(old, new)| ChangedRegion {
-                    new,
-                    old: Some(old),
-                }));
+                .extend(
+                    hunks
+                        .into_iter()
+                        .map(|(old, new)| ChangedRegion { new, old }),
+                );
         }
     }
     regions
@@ -2827,7 +2838,16 @@ fn changed_symbols(
 }
 
 fn region_label(path: &Path, region: &ChangedRegion) -> String {
-    format!("{}:{}-{}", path.display(), region.new.start, region.new.end)
+    match (&region.new, &region.old) {
+        (Some(new), _) => format!("{}:{}-{}", path.display(), new.start, new.end),
+        (None, Some(old)) => format!(
+            "{}:{}-{} (removed; pre-edit lines)",
+            path.display(),
+            old.start,
+            old.end
+        ),
+        (None, None) => path.display().to_string(),
+    }
 }
 
 fn ranges_overlap(left: &LineRange, right: &LineRange) -> bool {
@@ -2838,7 +2858,10 @@ fn symbol_overlaps_region(symbol: &Symbol, region: &ChangedRegion) -> bool {
     let Some(range) = &symbol.range else {
         return false;
     };
-    ranges_overlap(range, &region.new)
+    region
+        .new
+        .as_ref()
+        .is_some_and(|new| ranges_overlap(range, new))
         || region
             .old
             .as_ref()
@@ -3471,13 +3494,10 @@ mod tests {
             hunks.get(Path::new("src/handler.rs")).unwrap(),
             &vec![
                 (
-                    LineRange { start: 6, end: 6 },
-                    LineRange { start: 6, end: 6 }
+                    Some(LineRange { start: 6, end: 6 }),
+                    Some(LineRange { start: 6, end: 6 })
                 ),
-                (
-                    LineRange { start: 41, end: 41 },
-                    LineRange { start: 42, end: 44 }
-                ),
+                (None, Some(LineRange { start: 42, end: 44 })),
             ]
         );
     }
@@ -3564,6 +3584,146 @@ mod tests {
         );
         // The warning states how precisely the change was attributed; it does not move the verdict.
         assert_eq!(report.verdict, with_diff_verdict);
+    }
+
+    #[test]
+    fn a_hunk_count_past_the_last_line_number_saturates() {
+        assert_eq!(
+            hunk_side_range("10,4294967295"),
+            Some(Some(LineRange {
+                start: 10,
+                end: u32::MAX
+            }))
+        );
+        assert_eq!(hunk_side_range("10,0"), Some(None));
+        assert_eq!(hunk_side_range("ten,1"), None);
+    }
+
+    #[test]
+    fn pure_insertion_after_a_symbol_is_not_attributed_to_it() {
+        let store = store_with_handler_symbols();
+        // `-40,0`: the module ends exactly at the anchor line; nothing of it changed.
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -40,0 +41,5 @@\n+fn appended() {}\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            report.changed_symbols.is_empty(),
+            "{:?}",
+            report.changed_symbols
+        );
+        assert_eq!(
+            report.changed_regions_without_symbol,
+            vec!["src/handler.rs:41-45".to_string()]
+        );
+    }
+
+    #[test]
+    fn pure_deletion_is_attributed_by_its_removed_lines_only() {
+        let store = store_with_handler_symbols();
+        // `-13,1 +12,0`: the removed line sat between `checkout` (5-12) and `refund` (14-20),
+        // inside the module; `checkout` ends at the new-side anchor and did not change.
+        let inside = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -13,1 +12,0 @@\n-// gap\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(inside.changed_symbols, vec!["handler::handler".to_string()]);
+
+        let past_every_symbol = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -41,2 +40,0 @@\n-// a\n-// b\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(past_every_symbol.changed_symbols.is_empty());
+        assert_eq!(
+            past_every_symbol.changed_regions_without_symbol,
+            vec!["src/handler.rs:41-42 (removed; pre-edit lines)".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_low_ranked_lexical_impact_is_outside_the_boundary() {
+        let store = RuntimeStore::new().without_runtime();
+        let hit = |path: &str, score: f32, match_reason: &str| SearchResult {
+            path: PathBuf::from(path),
+            line_range: Some(LineRange { start: 1, end: 3 }),
+            snippet: "fn handler() {}".into(),
+            symbol: None,
+            score,
+            match_reason: match_reason.into(),
+            evidence: vec![format!("{match_reason} in {path}")],
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut supporting_files = (0..10)
+            .map(|rank| {
+                hit(
+                    &format!("src/lexical_{rank}.rs"),
+                    1.0 - rank as f32 * 0.05,
+                    "tantivy hybrid lexical match",
+                )
+            })
+            .collect::<Vec<_>>();
+        supporting_files.push(hit("src/caller.rs", 0.1, "exact symbol reference via SCIP"));
+        // Bounded-search evidence makes the plan reuse these supporting files as its impact.
+        let context = open_kioku_core::ContextPack {
+            task: "change handler".into(),
+            primary_files: vec![hit("src/handler.rs", 2.0, "tantivy hybrid lexical match")],
+            supporting_files,
+            evidence: vec![open_kioku_core::Evidence {
+                id: open_kioku_core::EvidenceId::new("context:bounded-search"),
+                message: "bounded context".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let plan = open_kioku_plan::PlanEngine::new(&store)
+            .plan_from_context("change handler", 5, context)
+            .unwrap();
+        let verify = |path: &str| {
+            ChangeVerifier::new(&store)
+                .verify(
+                    Path::new("."),
+                    &plan,
+                    VerifyChangeInput {
+                        changed_files: vec![PathBuf::from(path)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+
+        let low_ranked = verify("src/lexical_9.rs");
+        assert_eq!(low_ranked.verdict, VerificationVerdict::Fail);
+        assert!(low_ranked
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "out_of_boundary"));
+        for admitted in ["src/lexical_0.rs", "src/caller.rs"] {
+            assert!(
+                !verify(admitted)
+                    .boundary_violations
+                    .iter()
+                    .any(|finding| finding.kind == "out_of_boundary"),
+                "{admitted} should be a caution file"
+            );
+        }
     }
 
     #[test]

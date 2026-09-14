@@ -3172,7 +3172,7 @@ mod tests {
         let fixture = McpSnapshotFixture::new();
         let plan = handle_line(
             &fixture.repo,
-            Some(&fixture.store),
+            ServedIndex::Ready(&fixture.store),
             &fixture.config,
             r#"{"jsonrpc":"2.0","id":"plan","method":"tools/call","params":{"name":"plan_change","arguments":{"task":"publish invoice","format":"json"}}}"#,
         )
@@ -3189,7 +3189,7 @@ mod tests {
 
         let response = handle_line(
             &fixture.repo,
-            Some(&fixture.store),
+            ServedIndex::Ready(&fixture.store),
             &fixture.config,
             &request,
         )

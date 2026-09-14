@@ -48,6 +48,31 @@ fn assert_test_targets_are_callables(fixture: &str) {
             symbol["name"]
         );
     }
+    // `rust-tests-fixture` holds a constant, a struct and a helper beside an inline test module
+    // with a `#[test]` and an `#[rstest]` case stack. It is its own repository so the plan
+    // snapshot over `rust-fixture` keeps one obvious file for its task.
+    if fixture == "rust-tests-fixture" {
+        let mut names_statement = conn.prepare("SELECT json FROM tests").unwrap();
+        let names = names_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.unwrap()).unwrap()["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for expected in ["clamp_keeps_small_counts", "clamp_bounds_each_case"] {
+            assert!(
+                names.contains(expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+        for unexpected in ["CACHE_LIMIT", "CacheEntry", "clamp_hits", "tests"] {
+            assert!(!names.contains(unexpected), "{unexpected} in {names:?}");
+        }
+    }
 }
 
 fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
@@ -115,6 +140,11 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
 #[test]
 fn test_rust_fixture_lifecycle() {
     run_lifecycle_test("rust-fixture", "add", "src/main.rs");
+}
+
+#[test]
+fn test_rust_tests_fixture_lifecycle() {
+    run_lifecycle_test("rust-tests-fixture", "clamp_hits", "src/lib.rs");
 }
 
 #[test]
@@ -293,28 +323,49 @@ fn test_mcp_plan_change_snapshot() {
         .cloned()
         .expect("plan_change should return a JSON-RPC result");
 
-    // Every evidence record id is unique and no ref names more than one record. A primary
-    // result whose refs are one per evidence line resolves each ref to exactly one record;
-    // results merged from several chunks or streams carry refs that are not index-aligned
-    // with their lines, and their lines are published under derived ids instead.
+    // Every evidence record id is unique. Each evidence line of a primary result resolves to
+    // exactly one record under its derived id; any other ref the result cites resolves to at
+    // most one record, and never to a retrieval record of another file.
     let plan = &result["structuredContent"];
-    let record_ids = plan["evidence"]
+    let records = plan["evidence"]
         .as_array()
-        .expect("plan evidence is an array")
+        .expect("plan evidence is an array");
+    let record_ids = records
         .iter()
         .map(|record| record["id"].as_str().expect("evidence id").to_string())
         .collect::<Vec<_>>();
     let unique_ids = record_ids.iter().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(unique_ids.len(), record_ids.len(), "{record_ids:?}");
     for context in plan["primary_context"].as_array().unwrap() {
-        let refs = context["evidence_refs"].as_array().unwrap();
-        let one_per_line = refs.len() == context["evidence"].as_array().unwrap().len();
-        for evidence_ref in refs {
+        let path = context["path"].as_str().unwrap();
+        let range = match (
+            context["line_range"]["start"].as_u64(),
+            context["line_range"]["end"].as_u64(),
+        ) {
+            (Some(start), Some(end)) => format!("{start}-{end}"),
+            _ => "unknown".to_string(),
+        };
+        for index in 0..context["evidence"].as_array().unwrap().len() {
+            let derived = format!("search:{path}:{range}:{index}");
+            assert_eq!(
+                record_ids.iter().filter(|id| **id == derived).count(),
+                1,
+                "{derived} should resolve to one record"
+            );
+        }
+        for evidence_ref in context["evidence_refs"].as_array().unwrap() {
             let evidence_ref = evidence_ref.as_str().unwrap();
-            let records = record_ids.iter().filter(|id| *id == evidence_ref).count();
-            assert!(records <= 1, "{evidence_ref} names {records} records");
-            if one_per_line {
-                assert_eq!(records, 1, "{evidence_ref} should resolve to one record");
+            let matching = records
+                .iter()
+                .filter(|record| record["id"] == evidence_ref)
+                .collect::<Vec<_>>();
+            assert!(matching.len() <= 1, "{evidence_ref} names several records");
+            if let (Some(record), true) = (matching.first(), evidence_ref.starts_with("search:")) {
+                assert_eq!(
+                    record["file_range"]["path"].as_str(),
+                    Some(path),
+                    "{evidence_ref} resolved to another file's record"
+                );
             }
         }
     }

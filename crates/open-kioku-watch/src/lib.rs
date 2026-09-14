@@ -119,8 +119,10 @@ pub fn reindex_repo_after_changes<'a>(
         let compatibility =
             analysis_semantics_compatibility(previous_manifest.as_ref(), &snapshot.manifest);
         if !compatibility.status.allows_partial_index_update() {
+            // Watch refuses rather than rebuilding on its own: an incompatible index keeps its
+            // manifest until a full `ok index` replaces it, so the next step names this root.
             return Err(OkError::Index(format!(
-                "analysis semantics {}: {}; stored={}, current={}; {}",
+                "analysis semantics {}: {}; stored={}, current={}; run `ok index {}` to rebuild the index with current analysis semantics",
                 format!("{:?}", compatibility.status).to_ascii_lowercase(),
                 compatibility.reasons.join("; "),
                 compatibility
@@ -128,7 +130,7 @@ pub fn reindex_repo_after_changes<'a>(
                     .as_deref()
                     .unwrap_or("missing"),
                 compatibility.current_fingerprint,
-                compatibility.recommended_action
+                root.display()
             )));
         }
     }
@@ -508,6 +510,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("analysis semantics"));
+        assert!(
+            err.to_string()
+                .contains(&format!("run `ok index {}`", repo.display())),
+            "{err}"
+        );
 
         let persisted = store.manifest().unwrap().unwrap();
         assert_eq!(

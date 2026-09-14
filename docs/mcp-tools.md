@@ -87,10 +87,9 @@ tools, then use Open Kioku to verify the result.
 Open Kioku preserves string and numeric JSON-RPC request IDs in responses,
 returns parse errors for malformed JSON, and returns an invalid-request error
 when `method` is missing. Tool execution failures return structured JSON-RPC
-errors instead of crashing the stdio server: `-32602` (invalid params) when the
-failure is the caller's arguments, such as `verify_change` given no changed file
-or a diff that names none; `-32001` when the dispatch timed out; `-32000` for
-every other tool failure. Each tool dispatch is bounded by a
+errors instead of crashing the stdio server. `verify_change` given no changed
+file, or a diff that names none, returns `-32602` (invalid params); a dispatch
+that times out returns `-32001`; other tool failures return `-32000`. Each tool dispatch is bounded by a
 server-side timeout, and idle stdio sessions reopen the local SQLite store after
 an inactivity window.
 

@@ -126,8 +126,18 @@ impl<'a> ImpactEngine<'a> {
             }
         };
 
+        // Exact references are counted per indexed occurrence before direct impacts are grouped
+        // by path: twelve call sites in one file are twelve references in one impacted file.
+        let mut exact_reference_count = 0;
+        let mut exact_reference_files = 0;
         let direct = if let Some(file) = &file {
             let mut direct = exact_reference_impacts(self.store, file, &target_symbols)?;
+            exact_reference_count = direct.len();
+            exact_reference_files = direct
+                .iter()
+                .map(|result| result.path.as_path())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
             direct.extend(git_cochange_impacts(self.store, file, &git_facts)?);
             direct.extend(runtime_impacts(
                 self.store,
@@ -193,13 +203,9 @@ impl<'a> ImpactEngine<'a> {
         indirect.dedup_by(|a, b| a.path == b.path);
         indirect.truncate(15);
         let mut reasons = Vec::new();
-        let exact_reference_count = direct
-            .iter()
-            .filter(|result| is_exact_reference_result(result))
-            .count();
         if exact_reference_count > 0 {
             reasons.push(format!(
-                "{exact_reference_count} exact indexed symbol reference(s) found"
+                "{exact_reference_count} exact indexed symbol reference(s) found in {exact_reference_files} file(s)"
             ));
         }
         if direct.len() > 10 {
@@ -1306,6 +1312,13 @@ pub fn is_exact_reference_result(result: &SearchResult) -> bool {
         .starts_with(EXACT_REFERENCE_MATCH_REASON_PREFIX)
 }
 
+/// Whether a direct impact was reached only through lexical search, not through an exact
+/// reference, a co-change, a runtime fact or a service-boundary fact. Consumers bound how many
+/// of these widen an edit boundary; the structural kinds are admitted without that bound.
+pub fn is_lexical_impact_result(result: &SearchResult) -> bool {
+    direct_impact_kind(result) == DirectImpactKind::Lexical
+}
+
 fn occurrence_result(
     store: &dyn MetadataStore,
     files_by_id: &HashMap<FileId, File>,
@@ -1764,6 +1777,25 @@ mod tests {
                 confidence: Confidence::Exact,
                 provenance: EvidenceSourceType::Scip,
             },
+            // Two more call sites in the same caller file: three references, one impacted file.
+            SymbolOccurrence {
+                symbol_id: symbol.id.clone(),
+                file_id: caller.id.clone(),
+                range: Some(LineRange { start: 11, end: 11 }),
+                source_range: None,
+                is_definition: false,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::Scip,
+            },
+            SymbolOccurrence {
+                symbol_id: symbol.id.clone(),
+                file_id: caller.id.clone(),
+                range: Some(LineRange { start: 12, end: 12 }),
+                source_range: None,
+                is_definition: false,
+                confidence: Confidence::Exact,
+                provenance: EvidenceSourceType::Scip,
+            },
         ];
         let manifest = IndexManifest {
             analysis_semantics: Some(open_kioku_core::AnalysisSemanticsState::current()),
@@ -1810,11 +1842,24 @@ mod tests {
             .iter()
             .any(|result| result.path == Path::new("src/publisher.rs")
                 && result.match_reason.contains("exact symbol reference")));
-        assert!(report
-            .risk_report
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("exact indexed symbol reference")));
+        assert_eq!(
+            report
+                .direct_impacts
+                .iter()
+                .filter(|result| is_exact_reference_result(result))
+                .count(),
+            1,
+            "three call sites in one file group into one exact-reference entry"
+        );
+        assert!(
+            report
+                .risk_report
+                .reasons
+                .iter()
+                .any(|reason| reason == "3 exact indexed symbol reference(s) found in 1 file(s)"),
+            "{:?}",
+            report.risk_report.reasons
+        );
     }
 
     #[test]
