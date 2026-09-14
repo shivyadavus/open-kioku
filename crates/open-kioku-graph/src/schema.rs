@@ -5,8 +5,9 @@ use open_kioku_core::{
 };
 
 /// Node types in schema order. The schema advertises these and the query parser resolves and lists
-/// types from them, so the two cannot disagree. A new `GraphNodeType` variant fails to compile
-/// in `node_type_name`; add it here as well.
+/// types from them, so the two cannot disagree. The compiler does not tie this list to
+/// `GraphNodeType` (only `node_type_name`'s match is exhaustive); `type_lists_hold_every_variant`
+/// fails when a variant is missing.
 pub(crate) const NODE_TYPES: [GraphNodeType; 23] = [
     GraphNodeType::File,
     GraphNodeType::Directory,
@@ -342,8 +343,9 @@ fn query_features() -> Vec<String> {
     .collect()
 }
 
-// Every sentence here describes `query.rs` as it behaves; the parser tests run `examples` and
-// reject every `unsupported` entry, so a grammar change that makes this stale fails there.
+// Every sentence here must describe `query.rs` as it behaves. The parser tests run every example
+// against builder-shaped labels and reject every `unsupported` entry, but no test reads these
+// sentences: change them together with the grammar.
 fn query_syntax() -> Vec<String> {
     vec![
         "A query is MATCH <path> [WHERE <filter> [AND <filter>]...] RETURN <variable>[, <variable>]..., optionally followed by LIMIT <n> and OFFSET <n> in either order; keywords are case-insensitive.".into(),
@@ -353,6 +355,7 @@ fn query_syntax() -> Vec<String> {
         format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, the source node must name its type, and only forward edges are followed."),
         "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].".into(),
         "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a node variable bound in MATCH, with a single- or double-quoted value.".into(),
+        "A File node's label is its repository-relative path (src/config.rs); a symbol node's label is its qualified name, the path without its extension and the symbol name joined by :: (src::config::parse_config), with Java and Go symbols under their package. label, file_path and qualified_name filters compare against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
         "Filter fields are label, id, file_path, qualified_name, source, source_type and confidence; file_path and qualified_name compare against the node label, and graph nodes carry no source, source_type or confidence field, so filters on those match no rows.".into(),
         "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.".into(),
         "RETURN lists node variables bound in MATCH, each at most once; read labels and properties from the returned node objects.".into(),
@@ -371,16 +374,16 @@ fn query_examples() -> Vec<GraphQueryExample> {
             "Functions defined in files under src/; file_path compares against the File node label, which is its path.",
         ),
         (
-            "MATCH (caller:Function)-[:CALLS]->(callee:Function) WHERE callee.label = 'parse_config' RETURN caller",
-            "Direct callers of functions named parse_config.",
+            "MATCH (caller:Function)-[:CALLS]->(callee:Function) WHERE callee.label = 'src::config::parse_config' RETURN caller",
+            "Direct callers of parse_config in src/config.rs, named by its full qualified label.",
         ),
         (
-            "MATCH (s:Function)<-[:DEFINES]-(f:File) WHERE s.label =~ '^handle_' RETURN s, f",
-            "The DEFINES edge read in reverse, filtered by a label regex.",
+            "MATCH (s:Function)<-[:DEFINES]-(f:File) WHERE s.label =~ '::handle_[^:]*$' RETURN s, f",
+            "The DEFINES edge read in reverse: functions whose own name starts with handle_, and the files that define them.",
         ),
         (
-            "MATCH (a:Function)-[:CALLS *1..3]->(b:Function) WHERE a.label = 'main' RETURN b LIMIT 20",
-            "Functions reachable from main within one to three CALLS hops.",
+            "MATCH (a:Function)-[:CALLS *1..3]->(b:Function) WHERE a.label =~ '::run$' RETURN b LIMIT 20",
+            "Functions reachable within one to three CALLS hops from functions named run. A multi-hop query walks forward from every Function node before its filters apply, so on a large index it can reach the query timeout; a one-hop query with label = is anchored by the index and much cheaper.",
         ),
         (
             "MATCH (f:File)-[:IMPORTS]->(g:File) WHERE g.file_path = 'src/config.rs' RETURN f",
@@ -665,6 +668,73 @@ mod tests {
                 "unsupported forms must list {form}"
             );
         }
+    }
+
+    fn enum_values(schema: &serde_json::Value, values: &mut std::collections::BTreeSet<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    match (key.as_str(), child) {
+                        ("enum", serde_json::Value::Array(items)) => values.extend(
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string)),
+                        ),
+                        _ => enum_values(child, values),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    enum_values(item, values);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // A variant left out of NODE_TYPES or EDGE_TYPES compiles, and the parser would then reject
+    // it; the enums' JSON schemas are the independent source of every serialized variant. A
+    // documented variant appears under `oneOf`, so the walk collects every `enum` array.
+    #[test]
+    fn type_lists_hold_every_variant() {
+        let mut node_variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(GraphNodeType)).unwrap(),
+            &mut node_variants,
+        );
+        let listed_nodes = NODE_TYPES
+            .iter()
+            .map(node_type_query_spelling)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_nodes.len(),
+            NODE_TYPES.len(),
+            "NODE_TYPES repeats a type"
+        );
+        assert_eq!(
+            listed_nodes, node_variants,
+            "NODE_TYPES must hold every GraphNodeType variant"
+        );
+
+        let mut edge_variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(GraphEdgeType)).unwrap(),
+            &mut edge_variants,
+        );
+        let listed_edges = EDGE_TYPES
+            .iter()
+            .map(edge_type_query_spelling)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_edges.len(),
+            EDGE_TYPES.len(),
+            "EDGE_TYPES repeats a type"
+        );
+        assert_eq!(
+            listed_edges, edge_variants,
+            "EDGE_TYPES must hold every GraphEdgeType variant"
+        );
     }
 
     #[test]

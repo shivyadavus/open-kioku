@@ -953,6 +953,12 @@ fn missing_edge_pattern() -> GraphQueryError {
     )
 }
 
+fn return_expression_error() -> GraphQueryError {
+    GraphQueryError::ParseError(
+        "RETURN accepts only variables bound in MATCH; functions, DISTINCT and AS aliases are not supported".into(),
+    )
+}
+
 fn unknown_node_type(name: &str) -> GraphQueryError {
     let accepted = NODE_TYPES
         .iter()
@@ -1256,35 +1262,45 @@ impl Parser {
     fn parse_return(&mut self) -> QueryResult<ReturnClause> {
         self.expect(Token::Return)?;
         let mut variables = Vec::new();
-        match self.consume() {
-            Some(Token::Identifier(s)) => variables.push(s.clone()),
+        let variable = match self.consume() {
+            Some(Token::Identifier(s)) => s.clone(),
             _ => {
                 return Err(GraphQueryError::ParseError(
                     "Expected identifier in RETURN".into(),
                 ))
             }
-        }
-        self.reject_return_property_access()?;
+        };
+        self.reject_return_expression(&variable)?;
+        variables.push(variable);
         while let Some(Token::Comma) = self.peek() {
             self.consume();
-            match self.consume() {
-                Some(Token::Identifier(s)) => variables.push(s.clone()),
+            let variable = match self.consume() {
+                Some(Token::Identifier(s)) => s.clone(),
                 _ => {
                     return Err(GraphQueryError::ParseError(
                         "Expected identifier after comma".into(),
                     ))
                 }
-            }
-            self.reject_return_property_access()?;
+            };
+            self.reject_return_expression(&variable)?;
+            variables.push(variable);
         }
         Ok(ReturnClause { variables })
     }
 
-    fn reject_return_property_access(&self) -> QueryResult<()> {
+    /// RETURN takes bare variables. Property access, functions, DISTINCT and AS aliases are named
+    /// here, so the error says what RETURN accepts instead of reporting trailing input.
+    fn reject_return_expression(&self, variable: &str) -> QueryResult<()> {
         match self.peek() {
             Some(Token::Dot) => Err(GraphQueryError::ParseError(
                 "RETURN accepts variables only; filter properties in WHERE".into(),
             )),
+            Some(Token::LParen) => Err(return_expression_error()),
+            Some(Token::Identifier(next))
+                if variable.eq_ignore_ascii_case("DISTINCT") || next.eq_ignore_ascii_case("AS") =>
+            {
+                Err(return_expression_error())
+            }
             _ => Ok(()),
         }
     }
@@ -1803,36 +1819,60 @@ mod tests {
         assert!(res.has_more);
     }
 
+    /// Labels are shaped as the graph builder writes them: a File node carries its
+    /// repository-relative path and a symbol node its qualified name, computed here by the same
+    /// `identity::qualified_name` the parser uses, so the examples are tested against real labels.
     fn example_store() -> MockGraphStore {
         let mut store = MockGraphStore {
             nodes: std::collections::HashMap::new(),
             edges: Vec::new(),
         };
+        let symbol_label = |path: &str, name: &str| {
+            open_kioku_core::identity::qualified_name(
+                std::path::Path::new(path),
+                &open_kioku_core::Language::Rust,
+                None,
+                name,
+            )
+            .expect("a relative Rust path has a qualified name")
+        };
         for (id, label, node_type) in [
-            ("file:main", "src/main.rs", GraphNodeType::File),
-            ("file:config", "src/config.rs", GraphNodeType::File),
-            ("fn:main", "main", GraphNodeType::Function),
-            ("fn:parse_config", "parse_config", GraphNodeType::Function),
+            ("file:app", "src/app.rs".to_string(), GraphNodeType::File),
+            (
+                "file:config",
+                "src/config.rs".to_string(),
+                GraphNodeType::File,
+            ),
+            (
+                "fn:run",
+                symbol_label("src/app.rs", "run"),
+                GraphNodeType::Function,
+            ),
             (
                 "fn:handle_request",
-                "handle_request",
+                symbol_label("src/app.rs", "handle_request"),
+                GraphNodeType::Function,
+            ),
+            (
+                "fn:parse_config",
+                symbol_label("src/config.rs", "parse_config"),
                 GraphNodeType::Function,
             ),
         ] {
             store
                 .nodes
-                .insert(id.into(), test_node(id, label, node_type));
+                .insert(id.into(), test_node(id, &label, node_type));
         }
+        assert_eq!(
+            store.nodes["fn:parse_config"].label,
+            "src::config::parse_config"
+        );
+
         for (id, from, to, edge_type) in [
-            (
-                "defines-main",
-                "file:main",
-                "fn:main",
-                GraphEdgeType::Defines,
-            ),
+            ("defines-run", "file:app", "fn:run", GraphEdgeType::Defines),
             (
                 "defines-handle",
-                "file:main",
+                "file:app",
                 "fn:handle_request",
                 GraphEdgeType::Defines,
             ),
@@ -1844,7 +1884,7 @@ mod tests {
             ),
             (
                 "calls-parse",
-                "fn:main",
+                "fn:run",
                 "fn:parse_config",
                 GraphEdgeType::Calls,
             ),
@@ -1856,7 +1896,7 @@ mod tests {
             ),
             (
                 "imports-config",
-                "file:main",
+                "file:app",
                 "file:config",
                 GraphEdgeType::Imports,
             ),
@@ -1864,6 +1904,22 @@ mod tests {
             store.edges.push(test_edge(id, from, to, edge_type));
         }
         store
+    }
+
+    #[test]
+    fn functions_distinct_and_aliases_in_return_say_return_accepts_only_variables() {
+        for query in [
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN count(s)",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN DISTINCT s",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s AS symbol",
+        ] {
+            assert_eq!(
+                parse_graph_query(query).unwrap_err().to_string(),
+                "Parse error: RETURN accepts only variables bound in MATCH; functions, DISTINCT \
+                 and AS aliases are not supported",
+                "{query}"
+            );
+        }
     }
 
     #[test]

@@ -479,7 +479,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     if !schema.syntax.is_empty() {
                         lines.push("## Query Syntax".to_string());
                         for sentence in &schema.syntax {
-                            lines.push(format!("- {}", sentence));
+                            lines.push(format!("- {}", escape_markdown(sentence)));
                         }
                         lines.push("".to_string());
                     }
@@ -487,7 +487,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     if !schema.examples.is_empty() {
                         lines.push("## Query Examples".to_string());
                         for example in &schema.examples {
-                            lines.push(format!("- `{}`: {}", example.query, example.description));
+                            lines.push(format!(
+                                "- `{}`: {}",
+                                example.query,
+                                escape_markdown(&example.description)
+                            ));
                         }
                         lines.push("".to_string());
                     }
@@ -497,7 +501,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         for form in &schema.unsupported {
                             lines.push(format!(
                                 "- `{}` (`{}`): {}",
-                                form.form, form.example, form.alternative
+                                form.form,
+                                form.example,
+                                escape_markdown(&form.alternative)
                             ));
                         }
                         lines.push("".to_string());
@@ -1740,4 +1746,17 @@ pub async fn run_cli() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Schema prose quotes the query grammar, whose `<path>`, `[...]` and `*` a Markdown renderer
+/// would otherwise read as HTML tags, links and emphasis and drop from the output.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(character, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
