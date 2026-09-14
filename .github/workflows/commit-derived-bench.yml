@@ -6,9 +6,10 @@ name: commit-derived-bench
 # ranking change that only shows on ten thousand files. It is scheduled because indexing the
 # corpus and scoring ~400 queries takes about 45 minutes.
 #
-# Matrix entries are keyed java-a, go-a, ts-a, py-a (Java, Go, TypeScript, Python); the keys name
-# the baseline files. These values live in repository secrets (Settings > Secrets and variables >
-# Actions), never in this file or in `benchmarks/commit-derived/`:
+# Corpora are keyed java-a, go-a, ts-a, py-a (Java, Go, TypeScript, Python); the keys name the
+# baseline files. The schedule runs all four; a manual run can pick one with the `corpus` input.
+# These values live in repository secrets (Settings > Secrets and variables > Actions), never in
+# this file or in `benchmarks/commit-derived/`:
 # - each repository URL in `BENCH_<CODE>_URL`;
 # - each base commit in `BENCH_<CODE>_BASE`;
 # - for a corpus indexed as subtrees, the space-separated subtrees in `BENCH_<CODE>_PATHS`.
@@ -22,7 +23,8 @@ name: commit-derived-bench
 # - Dispatch inputs reach scripts only through `env:` or the event file, validated. They never
 #   appear as expression text inside `run:`.
 # - The clone and its remote are removed once cases are derived, and case derivation runs `--quiet`.
-# - `ok index` writes its manifest to a file; the log gets one counts-only line.
+# - `ok index` and `ok status` write to files. `scripts/extract-ok-json.py` reads them past any log
+#   lines, and the log gets one counts-only line.
 # - The uploaded artifact carries aggregate results only (`scripts/reduce-benchmark-report.py`).
 
 on:
@@ -30,6 +32,16 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
+      corpus:
+        description: Corpus to run (all runs every corpus, as the schedule does)
+        type: choice
+        options:
+          - all
+          - java-a
+          - go-a
+          - ts-a
+          - py-a
+        default: all
       path_prefixes:
         description: Space-separated subtrees to extract and index instead of each corpus's BENCH_<CODE>_PATHS secret (plain relative paths; masked in the log)
         default: ""
@@ -41,33 +53,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  corpora:
+    name: select corpora
+    runs-on: ubuntu-latest
+    outputs:
+      corpora: ${{ steps.select.outputs.corpora }}
+    steps:
+      - name: Select the corpora to run
+        id: select
+        env:
+          IN_CORPUS: ${{ github.event.inputs.corpus }}
+          # Secret names, extensions, and commit windows only; the values live in repository secrets.
+          CORPORA: >-
+            [
+            {"name": "java-a", "url_secret": "BENCH_JAVA_A_URL", "base_secret": "BENCH_JAVA_A_BASE", "ext": ".java", "after": "3800"},
+            {"name": "go-a", "url_secret": "BENCH_GO_A_URL", "base_secret": "BENCH_GO_A_BASE", "ext": ".go", "after": "1500"},
+            {"name": "ts-a", "url_secret": "BENCH_TS_A_URL", "base_secret": "BENCH_TS_A_BASE", "ext": ".ts", "after": "1500"},
+            {"name": "py-a", "url_secret": "BENCH_PY_A_URL", "base_secret": "BENCH_PY_A_BASE", "ext": ".py", "after": "1500"}
+            ]
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          corpora = json.loads(os.environ["CORPORA"])
+          wanted = os.environ.get("IN_CORPUS") or "all"
+          if wanted != "all" and wanted not in [corpus["name"] for corpus in corpora]:
+              print("::error::the corpus input must be all or one of the four corpus codes")
+              sys.exit(1)
+          selected = [corpus for corpus in corpora if wanted in ("all", corpus["name"])]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"corpora={json.dumps(selected)}\n")
+          print(f"{len(selected)} corpora selected: {', '.join(corpus['name'] for corpus in selected)}")
+          PY
+
   bench:
+    needs: corpora
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        corpus:
-          - name: java-a
-            url_secret: BENCH_JAVA_A_URL
-            base_secret: BENCH_JAVA_A_BASE
-            ext: .java
-            after: "3800"
-          - name: go-a
-            url_secret: BENCH_GO_A_URL
-            base_secret: BENCH_GO_A_BASE
-            ext: .go
-            after: "1500"
-          - name: ts-a
-            url_secret: BENCH_TS_A_URL
-            base_secret: BENCH_TS_A_BASE
-            ext: .ts
-            after: "1500"
-          - name: py-a
-            url_secret: BENCH_PY_A_URL
-            base_secret: BENCH_PY_A_BASE
-            ext: .py
-            after: "1500"
+        corpus: ${{ fromJSON(needs.corpora.outputs.corpora) }}
     name: bench (${{ matrix.corpus.name }})
     env:
       CORPUS_NAME: ${{ matrix.corpus.name }}
@@ -168,20 +193,22 @@ jobs:
             echo "::error::ok index exited with status $status; its output is withheld"
             exit "$status"
           fi
-          python3 - "$RUNNER_TEMP/index.json" <<'PY'
-          import json, sys
-          manifest = json.load(open(sys.argv[1]))
-          coverage = (manifest.get("quality") or {}).get("coverage") or {}
-          count = lambda obj, key: int(obj.get(key) or 0)
-          print(f"indexed {count(manifest, 'file_count'):,} files, {count(manifest, 'symbol_count'):,} symbols, "
-                f"{count(manifest, 'chunk_count'):,} chunks; {count(coverage, 'indexed'):,} of "
-                f"{count(coverage, 'discovered'):,} discovered files indexed")
-          PY
+          python3 scripts/extract-ok-json.py index-counts "$RUNNER_TEMP/index.json" || {
+            echo "::error::ok index exited with status $status but wrote no readable manifest; its output is withheld"
+            exit 1
+          }
           # Coverage is what the index did not hold; it travels with every score below.
           # Only the coverage object is kept: the full status carries skipped paths.
-          ./target/release/ok --repo corpus --json status 2> "$RUNNER_TEMP/status.err" \
-            | python3 -c 'import json, sys; json.dump(json.load(sys.stdin).get("coverage"), sys.stdout, indent=1)' \
-            > artifacts/coverage.json
+          status=0
+          ./target/release/ok --repo corpus --json status > "$RUNNER_TEMP/status.json" 2> "$RUNNER_TEMP/status.err" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::ok status exited with status $status; its output is withheld"
+            exit "$status"
+          fi
+          python3 scripts/extract-ok-json.py coverage "$RUNNER_TEMP/status.json" > artifacts/coverage.json || {
+            echo "::error::ok status exited with status $status but wrote no readable document; its output is withheld"
+            exit 1
+          }
 
       - name: Score the production context path
         run: |

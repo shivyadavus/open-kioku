@@ -143,15 +143,10 @@ jobs:
             echo "::error::ok index exited with status $status; its output is withheld"
             exit "$status"
           fi
-          python3 - "$RUNNER_TEMP/index.json" <<'PY'
-          import json, sys
-          manifest = json.load(open(sys.argv[1]))
-          coverage = (manifest.get("quality") or {}).get("coverage") or {}
-          count = lambda obj, key: int(obj.get(key) or 0)
-          print(f"indexed {count(manifest, 'file_count'):,} files, {count(manifest, 'symbol_count'):,} symbols, "
-                f"{count(manifest, 'chunk_count'):,} chunks; {count(coverage, 'indexed'):,} of "
-                f"{count(coverage, 'discovered'):,} discovered files indexed")
-          PY
+          python3 scripts/extract-ok-json.py index-counts "$RUNNER_TEMP/index.json" || {
+            echo "::error::ok index exited with status $status but wrote no readable manifest; its output is withheld"
+            exit 1
+          }
 
       - name: Control — semantic disabled
         env:

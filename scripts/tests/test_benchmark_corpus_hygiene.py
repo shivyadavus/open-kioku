@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -207,6 +208,44 @@ class ReduceBenchmarkReportTests(unittest.TestCase):
         self.assertEqual(reduce_report.main([str(bad)]), 1)
 
 
+class ExtractOkJsonTests(unittest.TestCase):
+    def run_extract(self, mode, content):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "out.json"
+            path.write_text(content)
+            return subprocess.run([sys.executable, str(SCRIPTS / "extract-ok-json.py"), mode, str(path)],
+                                  capture_output=True, text=True)
+
+    MANIFEST = {"file_count": 12, "symbol_count": 34, "chunk_count": 56,
+                "repository": {"root": "/work/placeholder-root"},
+                "quality": {"coverage": {"discovered": 14, "indexed": 12,
+                                         "policy_excluded_dirs": {"placeholder-dir": 2}}}}
+
+    def test_counts_are_read_past_log_lines_and_nothing_else_is_printed(self):
+        content = ("2026-01-01T00:00:00Z  WARN some_dependency: a warning\n"
+                   + json.dumps(self.MANIFEST, indent=2) + "\n"
+                   + "2026-01-01T00:00:01Z  WARN some_dependency: {not json}\n")
+        result = self.run_extract("index-counts", content)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(),
+                         "indexed 12 files, 34 symbols, 56 chunks; 12 of 14 discovered files indexed")
+        for withheld in ("placeholder-dir", "placeholder-root", "WARN"):
+            self.assertNotIn(withheld, result.stdout + result.stderr)
+
+    def test_coverage_is_the_status_documents_coverage_object(self):
+        status = {"coverage": {"discovered": 3, "indexed": 2}, "quality": {"skipped_paths": ["x/y.java"]}}
+        result = self.run_extract("coverage", "WARN a warning\n" + json.dumps(status, indent=2) + "\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), status["coverage"])
+
+    def test_unreadable_output_fails_with_a_fixed_message(self):
+        result = self.run_extract("index-counts", "Error: something about placeholder-path/file.java\n{\"file_count\": ")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("placeholder-path", result.stderr)
+        self.assertIn("withheld", result.stderr)
+
+
 def run_scripts(text):
     """The text of every `run:` value in a workflow, block scalars included."""
     lines = text.splitlines()
@@ -275,19 +314,59 @@ class WorkflowHygieneTests(unittest.TestCase):
         for name, text in self.texts.items():
             self.assertNotRegex(text, r"(?m)^\s+(?:- )?[A-Za-z_][\w-]*:[^\s:]", name)
 
+    def corpora(self):
+        """The corpus list the setup job's `CORPORA` env block declares."""
+        lines = self.texts["commit-derived-bench.yml"].splitlines()
+        start = next(i for i, line in enumerate(lines) if line.strip() == "CORPORA: >-")
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        body = []
+        for line in lines[start + 1:]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        return json.loads(" ".join(body))
+
     def test_every_secret_lookup_names_a_non_empty_secret(self):
+        corpora = self.corpora()
+        self.assertEqual([corpus["name"] for corpus in corpora], ["java-a", "go-a", "ts-a", "py-a"])
         for name, text in self.texts.items():
             self.assertNotRegex(text, r"secrets\[\s*(''|\"\")\s*\]", name)
             self.assertNotIn("paths_secret", text, name)
             for key in set(re.findall(r"secrets\[\s*matrix\.corpus\.(\w+)\s*\]", text)):
-                values = [v.strip("'\"") for v in re.findall(rf"(?m)^\s*{key}:\s*(.*?)\s*$", text)]
-                self.assertEqual(len(values), 4, f"{name}: {key} is not set on every matrix entry")
-                self.assertTrue(all(values), f"{name}: {key} is empty on a matrix entry")
+                self.assertTrue(all(isinstance(c.get(key), str) and c[key] for c in corpora),
+                                f"{name}: {key} is missing or empty on a corpus")
         bench = self.texts["commit-derived-bench.yml"]
         self.assertEqual(bench.count("matrix.corpus.name == 'java-a' && secrets.BENCH_JAVA_A_PATHS || ''"), 2)
+        self.assertIn("corpus: ${{ fromJSON(needs.corpora.outputs.corpora) }}", bench)
+
+    def test_corpus_input_selects_one_or_all_and_rejects_anything_else(self):
+        script = next(s for s in self.scripts["commit-derived-bench.yml"] if 'os.environ["CORPORA"]' in s)
+        code_lines = []
+        for line in script.split("<<'PY'\n", 1)[1].splitlines():
+            if line.strip() == "PY":
+                break
+            code_lines.append(line)
+        code = textwrap.dedent("\n".join(code_lines))
+        corpora = json.dumps(self.corpora())
+        with tempfile.TemporaryDirectory() as tmp:
+            for wanted, expected in (("all", ["java-a", "go-a", "ts-a", "py-a"]), ("", ["java-a", "go-a", "ts-a", "py-a"]),
+                                     ("go-a", ["go-a"]), ("nope", None)):
+                output = Path(tmp) / f"output-{wanted or 'blank'}"
+                output.write_text("")
+                result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                        env={**os.environ, "CORPORA": corpora, "IN_CORPUS": wanted, "GITHUB_OUTPUT": str(output)})
+                if expected is None:
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertEqual(output.read_text(), "")
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                line = output.read_text().strip()
+                self.assertTrue(line.startswith("corpora="), line)
+                self.assertEqual([c["name"] for c in json.loads(line[len("corpora="):])], expected)
 
     def test_no_subtree_list_is_checked_in(self):
         self.assertNotRegex(self.texts["commit-derived-bench.yml"], r"(?m)^\s*prefixes:")
+        self.assertTrue(all("prefixes" not in corpus for corpus in self.corpora()))
         for path in sorted((REPO / "benchmarks" / "commit-derived").glob("*-a-*.json")):
             provenance = json.loads(path.read_text())["provenance"]
             self.assertNotIn("path_prefixes", provenance, path.name)

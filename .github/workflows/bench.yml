@@ -29,7 +29,7 @@ jobs:
       run: mkdir -p artifacts/benchmarks
 
     - name: Test benchmark scripts
-      run: python3 -m unittest scripts.tests.test_evaluate_fusion_calibration scripts.tests.test_context_yield scripts.tests.test_commit_derived_families
+      run: python3 -m unittest scripts.tests.test_evaluate_fusion_calibration scripts.tests.test_context_yield scripts.tests.test_commit_derived_families scripts.tests.test_benchmark_corpus_hygiene
 
     - name: Run Criterion Benchmarks
       shell: bash

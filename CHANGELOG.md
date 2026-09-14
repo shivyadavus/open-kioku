@@ -27,8 +27,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The corpus benchmark workflows, `commit-derived-bench.yml` and `semantic-experiment.yml`, now keep corpus identity out of public logs and artifacts:
   - **Secrets.** Each corpus's repository URL, base commit, and indexed subtree list is read from the `BENCH_<CODE>_URL`, `BENCH_<CODE>_BASE`, and (for a corpus indexed as subtrees) `BENCH_<CODE>_PATHS` repository secrets. The subtree list is no longer checked in: it leaves the workflow matrix, and `provenance.path_prefixes` in the baselines becomes `provenance.path_prefix_count`.
   - **Masking.** `scripts/mask-corpus-identity.sh` normalises these values and masks every form of them a log can still show.
-  - **Clone and index output.** The clone and its remote are removed once cases are derived. `ok index` writes its manifest to a file, and the log gets one counts-only line.
-  - **Manual runs.** They no longer accept a repository URL, base commit, or corpus name. The remaining inputs are validated, and none reach a `run:` script as expression text.
+  - **Clone and index output.** The clone and its remote are removed once cases are derived. `ok index` and `ok status` write to files, `scripts/extract-ok-json.py` reads the document past any log lines, and the log gets one counts-only line.
+  - **Manual runs.** They no longer accept a repository URL or base commit. A `corpus` choice (`all` by default, which is what the schedule runs) limits a trial run to one corpus. Every input is validated, and none reach a `run:` script as expression text.
   - **Case derivation.** `scripts/commit-derived-cases.py --quiet` prints counts only and withholds failure details.
   - **Artifacts.** Uploads carry aggregate results only. `scripts/reduce-benchmark-report.py` keeps allowlisted fields of allowlisted shapes after the baseline comparison, and `cases.tsv` is not uploaded. The documented baseline freeze reads `cases_scored` from the reduced reports.
 
