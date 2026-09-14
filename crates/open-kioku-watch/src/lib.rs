@@ -308,7 +308,8 @@ pub fn reindex_repo_after_changes<'a>(
         return Err(match store.withdraw_manifest() {
             Ok(()) => OkError::Index(format!(
                 "{err}; the index manifest was withdrawn, so reads report the repository as \
-                 unindexed until a re-index completes"
+                 unindexed; the next change re-indexes in full, or run `ok index {}` now",
+                root.display()
             )),
             Err(withdraw_err) => OkError::Index(format!(
                 "{err}; withdrawing the previous index manifest also failed ({withdraw_err}), so \
@@ -766,17 +767,33 @@ mod tests {
             "{:?}",
             calls_into(&store, "renamed_target")
         );
-        // The unchanged file still says `target()`, which now resolves to the renamed symbol
-        // or to nothing; either way its edge into the old symbol is gone.
-        let moved = unchanged_file_calls(&store);
+        // The unchanged file still says `target()`. No symbol has that name any more, so its
+        // edge into the old symbol must be gone. The symbol registry's fuzzy fallback may match
+        // the call to `renamed_target`; that is a heuristic, so the edge is not required here,
+        // and if it exists it must carry the fallback's low confidence and source rather than
+        // read as a resolved call.
+        let after_rename = call_edges_from(&store, "unrelated");
         assert!(
-            !moved.contains("src::lib::target"),
-            "src/other.rs kept its edge into the renamed symbol: {moved:?}"
+            after_rename
+                .iter()
+                .all(|(label, _)| label != "src::lib::target"),
+            "src/other.rs kept its edge into the renamed symbol: {after_rename:?}"
         );
-        assert!(
-            moved.contains("src::lib::renamed_target"),
-            "src/other.rs's call should follow the rename: {moved:?}"
-        );
+        for (_, edge) in after_rename
+            .iter()
+            .filter(|(label, _)| label == "src::lib::renamed_target")
+        {
+            assert_eq!(
+                edge.evidence.confidence,
+                open_kioku_core::Confidence::Low,
+                "{edge:?}"
+            );
+            assert_eq!(
+                edge.evidence.source.as_str(),
+                "open-kioku-symbol-registry/fuzzy-fallback",
+                "{edge:?}"
+            );
+        }
         let stale_edges = store
             .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
             .unwrap()
@@ -847,31 +864,44 @@ mod tests {
         assert_incremental_graph_matches_a_clean_rebuild(repo, "after the touch-and-revert cycles");
     }
 
-    /// Labels of the nodes that `name`'s symbol calls, from the persisted CALLS edges. A
-    /// resolved symbol node and the symbol registry's analysis node both carry the callee's
-    /// qualified name as their label, so either form of the edge is counted.
-    fn call_targets_from(store: &SqliteStore, name: &str) -> BTreeSet<String> {
+    /// The persisted CALLS edges from `name`'s symbol, each with the label of the node it
+    /// reaches. A resolved symbol node and the symbol registry's analysis node both carry the
+    /// callee's qualified name as their label, so either form of the edge is found.
+    fn call_edges_from(
+        store: &SqliteStore,
+        name: &str,
+    ) -> Vec<(String, open_kioku_core::GraphEdge)> {
         let Some(symbol) = store
             .symbols_named(name, 10)
             .unwrap()
             .into_iter()
             .find(|symbol| symbol.name == name)
         else {
-            return BTreeSet::new();
+            return Vec::new();
         };
         let node = format!("symbol:{}", symbol.id.0);
         let (nodes, edges) = store.neighbors(&node, 100).unwrap();
         edges
-            .iter()
+            .into_iter()
             .filter(|edge| {
                 edge.edge_type == open_kioku_core::GraphEdgeType::Calls && edge.from.0 == node
             })
             .filter_map(|edge| {
-                nodes
+                let label = nodes
                     .iter()
-                    .find(|candidate| candidate.id == edge.to)
-                    .map(|candidate| candidate.label.clone())
+                    .find(|candidate| candidate.id == edge.to)?
+                    .label
+                    .clone();
+                Some((label, edge))
             })
+            .collect()
+    }
+
+    /// The labels [`call_edges_from`] reaches.
+    fn call_targets_from(store: &SqliteStore, name: &str) -> BTreeSet<String> {
+        call_edges_from(store, name)
+            .into_iter()
+            .map(|(label, _)| label)
             .collect()
     }
 
@@ -939,6 +969,13 @@ mod tests {
             .expect_err("the search stage fails")
             .to_string();
         assert!(error.contains("manifest was withdrawn"), "{error}");
+        assert!(
+            error.ends_with(&format!(
+                "the next change re-indexes in full, or run `ok index {}` now",
+                repo.display()
+            )),
+            "the error must end with the next step: {error}"
+        );
         assert!(
             SqliteStore::open_repo_index(repo).unwrap().is_none(),
             "the repository reads as unindexed, not as the previous index"

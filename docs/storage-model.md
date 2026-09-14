@@ -79,6 +79,8 @@ The manifest is the publication marker, written as the last step of an index run
   fails partway leaves no manifest, so the repository reads as unindexed until a run
   completes. From the row transaction until the manifest is put, reads are refused with
   `indexing in progress` rather than served: the previous index's rows are already gone.
+  A request already dispatched when a full run begins can read rows from both states; the
+  next request is refused until the manifest is published.
   Building the next index in a staging generation and publishing it with the atomic
   `active` pointer (`crates/open-kioku-storage/src/generations.rs`) is what would keep the
   previous index readable during a rebuild; it is not done yet.
@@ -101,7 +103,10 @@ versioned with them.
 writer holds for its whole run, and the kernel releases it however the writer exits, Ctrl-C
 and OOM kills included. On unix the writer removes the file as it finishes, while still
 holding the lock; on Windows the file stays. A lock file nobody holds is ignored by readers
-and taken over by the next writer at once. While a live writer holds the lock and no
+and taken over by the next writer at once. On a filesystem where advisory locks do not
+work, `ok index` and `ok watch` fail with `could not lock` and readers treat the lock as
+absent; on a network mount without lock support, the lock is local to each machine and does
+not exclude a writer on another. While a live writer holds the lock and no
 manifest is published, every read surface — `ok status`, `ok doctor`, every read command,
 and the MCP server — reports `indexing in progress` rather than `repository is not indexed`.
 The MCP session survives the failed probe, and a session that already holds a store checks
