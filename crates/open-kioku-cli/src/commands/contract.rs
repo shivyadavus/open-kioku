@@ -93,9 +93,7 @@ fn handle_contract_command(
             }
             let unified_diff = if let Some(since) = since_plan.as_deref() {
                 for change in changed_ranges_since(repo, since)? {
-                    if let Some(path) = change.new_path.or(change.old_path) {
-                        changed.push(path);
-                    }
+                    changed.extend(change.changed_paths());
                 }
                 verify_diff_since(repo, diff.as_deref(), since)?
             } else {
@@ -622,10 +620,19 @@ fn verify_diff_input(
         diffs.push(fs::read_to_string(path)?);
     }
     if include_git_diff {
+        // Rename detection is requested rather than left to `diff.renames`, so the report pairs
+        // both sides of a rename whatever the local git config says.
         let output = ProcessCommand::new("git")
             .arg("-C")
             .arg(repo)
-            .args(["diff", "--unified=0", "--no-ext-diff", "--relative", "HEAD"])
+            .args([
+                "diff",
+                "--unified=0",
+                "--no-ext-diff",
+                "--find-renames",
+                "--relative",
+                "HEAD",
+            ])
             .output()?;
         if !output.status.success() {
             anyhow::bail!(
@@ -660,6 +667,7 @@ fn verify_diff_since(
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--find-renames",
             "--relative",
             "--end-of-options",
         ])
@@ -740,11 +748,31 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
     }
 }
 
+fn previous_path_lines(previous_paths: &[open_kioku_patch::PreviousPath]) -> Vec<String> {
+    previous_paths
+        .iter()
+        .map(|previous| {
+            let relation = match previous.kind {
+                open_kioku_patch::PreviousPathKind::Rename => "renamed from",
+                open_kioku_patch::PreviousPathKind::Copy => "copied from",
+            };
+            format!(
+                "{} {relation} {}",
+                previous.path.display(),
+                previous.previous_path.display()
+            )
+        })
+        .collect()
+}
+
 fn print_verify_report(report: &ChangeVerificationReport) {
     println!("Verification: {:?}", report.verdict);
     println!("Changed files: {}", report.changed_files.len());
     for path in &report.changed_files {
         println!("  - {}", path.display());
+    }
+    for line in previous_path_lines(&report.previous_paths) {
+        println!("  - {line}");
     }
     if !report.changed_symbols.is_empty() {
         println!("Changed symbols:");
