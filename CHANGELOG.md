@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- `ok watch` replaces exactly the changed file's graph edges on an incremental re-index and reconciles the rest of the stored graph with the new snapshot by identity, so a renamed symbol loses its old callers, edges from unchanged files into nodes the change removed go with them, and the graph string dictionary does not grow across repeated runs. The per-file delete used to key on the producing pass name, which never matched a path, so no edge was ever removed (#413).
+- `ok index` and `ok watch` write the index manifest after the graph and the search index, on the full and the incremental path, so a concurrent reader never opens a manifest whose components are still being written and a run that fails after the rows publishes nothing. While `.ok/index.lock` is held and no manifest is published, `ok status`, `ok doctor`, every read command, and the MCP server report `indexing in progress` instead of `repository is not indexed`.
+- The MCP server keeps serving when its index probe fails (a writer holds the database, the file is unreadable, the manifest is newer than the binary): the request that hit the failure gets a `-32000` error carrying the reason, the handshake and `tools/list` still answer, and the failure is logged once per distinct message. The session used to end without a response.
+- `IndexManifest.schema_version` is 3. A manifest with a newer version than the binary supports is refused by every read surface and by `ok snapshot import` with `index was written by a newer Open Kioku (...): upgrade Open Kioku or run `ok index` to rebuild it`, instead of a serde error or `repository is not indexed`; older manifests still read.
+
 ### Changed
 
 - `repo_status` and `ok --json status` return `quality.quality_notes` as `{total, by_kind, sample}` and `quality.skipped_paths` as `{total, by_reason, sample}`, each `sample` at most 20 entries drawn round-robin across kinds or reasons, instead of the full lists; `detail: "full"` (MCP) and `ok status --full` (JSON, Markdown, and text) return every entry, and the manifest still stores them all. Each quality note is now `{kind, message}` with the kind assigned by its producer (`discovery`, `scip`, `exact_references`, `index_mode`, `import_resolver_caveat`, `import_resolver_cap`, `symbol_registry_caveat`, `symbol_registry_unresolved`, `relationship_resolution`); notes stored by an earlier index deserialize as `unclassified`. Measured on this 380-file repository after a full index: `ok --json status` went from 1,771,248 bytes (9,767 notes, 3,286 skipped paths) to 24,392 bytes with the summaries (`--full`: 2,577,421 bytes, the typed notes being larger than the bare strings).

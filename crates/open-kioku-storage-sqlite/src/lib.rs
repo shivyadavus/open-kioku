@@ -16,7 +16,7 @@ use open_kioku_storage::{
     PartialIndexUpdate,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -180,18 +180,31 @@ impl SqliteStore {
 
     /// The repository's active index for reading, or `None` when the repository has never
     /// been indexed: no database, or a database without a manifest, which is what a 4.0.0
-    /// read surface left behind. `Err` is reserved for an index that exists and cannot be
-    /// opened, so a caller can tell "not indexed" from "broken" and say the right thing.
+    /// read surface left behind. `Err` is reserved for an index that cannot be served: one
+    /// that exists and cannot be opened, one written by a newer Open Kioku, or one a writer
+    /// is building right now (`.ok/index.lock` is held and no manifest is published), so a
+    /// caller can tell "not indexed" from each of those and say the right thing.
     pub fn open_repo_index(repo: &Path) -> Result<Option<Self>> {
         let path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
         if !path.is_file() {
-            return Ok(None);
+            return Self::unindexed(repo);
         }
         let store = Self::open_existing(path)?;
         if store.manifest()?.is_none() {
-            return Ok(None);
+            return Self::unindexed(repo);
         }
         Ok(Some(store))
+    }
+
+    /// No manifest is "not indexed" unless a writer holds the lock: the manifest is the last
+    /// thing an index run writes, so its absence under the lock is an index being built.
+    fn unindexed(repo: &Path) -> Result<Option<Self>> {
+        if open_kioku_storage::generations::index_write_in_progress(repo) {
+            return Err(OkError::Index(
+                open_kioku_storage::generations::indexing_in_progress_message(repo),
+            ));
+        }
+        Ok(None)
     }
 
     fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
@@ -224,6 +237,87 @@ impl SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         graph_rebuild_required(&conn)
+    }
+
+    /// `replace_index_with_documents` with the manifest withheld: every row is replaced and
+    /// the previous manifest row is removed, so the index stays unpublished until
+    /// `put_manifest`. Indexing writes the graph and the search index after the rows;
+    /// publishing the manifest with the rows let a concurrent reader open a manifest whose
+    /// graph was still the previous index's, or empty. While unpublished, readers report the
+    /// index as being built when the writer holds `.ok/index.lock` and as unindexed otherwise.
+    ///
+    /// `data.manifest` is not written; the caller publishes it once the graph and search
+    /// components are in place.
+    pub fn stage_index_with_documents(
+        &self,
+        data: IndexData<'_>,
+        document_sections: &[DocumentSection],
+    ) -> Result<()> {
+        self.replace_index_with_documents_and_manifest(
+            data,
+            document_sections,
+            ManifestWrite::Withhold,
+        )
+    }
+
+    /// The incremental writer's whole update in one transaction, with the manifest withheld
+    /// as in [`stage_index_with_documents`](Self::stage_index_with_documents): the changed
+    /// files' rows replace their predecessors, and the stored graph is reconciled with
+    /// `nodes` and `edges`, the complete graph of the new snapshot.
+    ///
+    /// A file's edges are the ones anchored at a node the file owns (its file node and its
+    /// symbols' nodes, in either direction) and the ones whose evidence range lies in the
+    /// file; every one of them is removed and rebuilt from the new graph, so a renamed symbol
+    /// loses its old callers and a moved call site gets its new range. Edges that end at a
+    /// node derived from the file's content but start in an unchanged file (a resolved call
+    /// to the renamed symbol, a name reference from a config file) are not anchored at a node
+    /// the file owns, so they are reconciled by identity instead: every stored node and edge
+    /// absent from the new graph is removed, and every node and edge of the new graph absent
+    /// from the store is added. That pass reads every stored edge id once, which is
+    /// proportional to the graph rather than to the change, and is what makes the stored graph
+    /// match a clean rebuild rather than approximate it. Unchanged edges keep their stored
+    /// evidence, including its `indexed_at`.
+    ///
+    /// The previous manifest stays in place while the update runs, so readers keep serving the
+    /// previous index rather than seeing an unindexed repository; the caller publishes the new
+    /// manifest once the search index is rebuilt. `update.graph_nodes` and
+    /// `update.graph_edges` are inserted before the reconciliation and are normally empty here.
+    pub fn stage_files_index_with_graph(
+        &self,
+        update: PartialIndexUpdate<'_>,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> Result<GraphReconciliation> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        let report =
+            replace_files_rows(&tx, &update, ManifestWrite::Withhold, Some((nodes, edges)))?;
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(report)
+    }
+
+    fn replace_index_with_documents_and_manifest(
+        &self,
+        data: IndexData<'_>,
+        document_sections: &[DocumentSection],
+        manifest: ManifestWrite,
+    ) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        replace_index_rows(&tx, data, manifest)?;
+        tx.execute("DELETE FROM document_sections", [])
+            .map_err(storage_err)?;
+        insert_document_sections(&tx, document_sections)?;
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(())
     }
 
     /// SQLite's `PRAGMA data_version`: changes when another connection commits. Our own
@@ -539,8 +633,7 @@ impl MetadataStore for SqliteStore {
             })
             .optional()
             .map_err(storage_err)?;
-        raw.map(|json| serde_json::from_str(&json).map_err(Into::into))
-            .transpose()
+        raw.as_deref().map(decode_index_manifest).transpose()
     }
 
     fn replace_index(&self, data: IndexData<'_>) -> Result<()> {
@@ -549,7 +642,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let tx = conn.transaction().map_err(storage_err)?;
-        replace_index_rows(&tx, data)?;
+        replace_index_rows(&tx, data, ManifestWrite::Publish)?;
         tx.execute("DELETE FROM document_sections", [])
             .map_err(storage_err)?;
         tx.commit().map_err(storage_err)?;
@@ -562,17 +655,11 @@ impl MetadataStore for SqliteStore {
         data: IndexData<'_>,
         document_sections: &[DocumentSection],
     ) -> Result<()> {
-        let mut conn = self
-            .connection
-            .lock()
-            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        let tx = conn.transaction().map_err(storage_err)?;
-        replace_index_rows(&tx, data)?;
-        tx.execute("DELETE FROM document_sections", [])
-            .map_err(storage_err)?;
-        insert_document_sections(&tx, document_sections)?;
-        tx.commit().map_err(storage_err)?;
-        Ok(())
+        self.replace_index_with_documents_and_manifest(
+            data,
+            document_sections,
+            ManifestWrite::Publish,
+        )
     }
 
     fn replace_files_index(&self, update: PartialIndexUpdate<'_>) -> Result<()> {
@@ -581,194 +668,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let tx = conn.transaction().map_err(storage_err)?;
-        let affected_file_ids = update
-            .changed_files
-            .iter()
-            .map(|file| file.id.clone())
-            .chain(update.deleted_file_ids.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        let mut affected_file_paths = update
-            .changed_files
-            .iter()
-            .map(|file| file.path.to_string_lossy().to_string())
-            .collect::<BTreeSet<_>>();
-        for file_id in &affected_file_ids {
-            let path: Option<String> = tx
-                .query_row(
-                    "SELECT path FROM files WHERE id = ?1",
-                    params![&file_id.0],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage_err)?;
-            if let Some(path) = path {
-                affected_file_paths.insert(path);
-            }
-        }
-
-        let mut affected_symbol_ids = update
-            .symbols
-            .iter()
-            .map(|symbol| symbol.id.clone())
-            .collect::<BTreeSet<_>>();
-        for file_id in &affected_file_ids {
-            let mut stmt = tx
-                .prepare("SELECT id FROM symbols WHERE file_id = ?1")
-                .map_err(storage_err)?;
-            let rows = stmt
-                .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
-                .map_err(storage_err)?;
-            for row in rows {
-                affected_symbol_ids.insert(SymbolId::new(row.map_err(storage_err)?));
-            }
-        }
-
-        let mut affected_node_ids = update
-            .graph_nodes
-            .iter()
-            .map(|node| node.id.0.clone())
-            .collect::<BTreeSet<_>>();
-        for file_id in &affected_file_ids {
-            let mut stmt = tx
-                .prepare("SELECT id FROM graph_nodes WHERE file_id = ?1")
-                .map_err(storage_err)?;
-            let rows = stmt
-                .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
-                .map_err(storage_err)?;
-            for row in rows {
-                affected_node_ids.insert(row.map_err(storage_err)?);
-            }
-        }
-        for symbol_id in &affected_symbol_ids {
-            let mut stmt = tx
-                .prepare("SELECT id FROM graph_nodes WHERE symbol_id = ?1")
-                .map_err(storage_err)?;
-            let rows = stmt
-                .query_map(params![&symbol_id.0], |row| row.get::<_, String>(0))
-                .map_err(storage_err)?;
-            for row in rows {
-                affected_node_ids.insert(row.map_err(storage_err)?);
-            }
-        }
-
-        tx.execute(
-            "INSERT INTO manifests(id, json) VALUES(1, ?1)
-             ON CONFLICT(id) DO UPDATE SET json = excluded.json",
-            params![serde_json::to_string(update.manifest)?],
-        )
-        .map_err(storage_err)?;
-
-        for node_id in &affected_node_ids {
-            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, node_id)? {
-                tx.execute(
-                    "DELETE FROM graph_edges WHERE from_sid = ?1 OR to_sid = ?1",
-                    params![sid],
-                )
-                .map_err(storage_err)?;
-            }
-        }
-        for path in &affected_file_paths {
-            // Unchanged semantics: `source_sid` holds `evidence.source` (the producing pass),
-            // which is what the pre-compaction `source_file` column held too.
-            if let Some(sid) = compact::lookup_sid(&tx, compact::GRAPH_STRINGS, path)? {
-                tx.execute(
-                    "DELETE FROM graph_edges WHERE source_sid = ?1",
-                    params![sid],
-                )
-                .map_err(storage_err)?;
-            }
-        }
-        for node_id in &affected_node_ids {
-            tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
-                .map_err(storage_err)?;
-        }
-        for file_id in &affected_file_ids {
-            tx.execute(
-                "DELETE FROM graph_nodes WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-        }
-        for symbol_id in &affected_symbol_ids {
-            tx.execute(
-                "DELETE FROM graph_nodes WHERE symbol_id = ?1",
-                params![&symbol_id.0],
-            )
-            .map_err(storage_err)?;
-        }
-
-        for symbol_id in &affected_symbol_ids {
-            tx.execute(
-                "DELETE FROM occurrences WHERE symbol_id = ?1",
-                params![&symbol_id.0],
-            )
-            .map_err(storage_err)?;
-        }
-        for file_id in &affected_file_ids {
-            tx.execute(
-                "DELETE FROM occurrences WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM analysis_facts WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM imports WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-            tx.execute("DELETE FROM tests WHERE file_id = ?1", params![&file_id.0])
-                .map_err(storage_err)?;
-            tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![&file_id.0])
-                .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM symbols WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-            tx.execute("DELETE FROM files WHERE id = ?1", params![&file_id.0])
-                .map_err(storage_err)?;
-            tx.execute("DELETE FROM scopes WHERE file_id = ?1", params![&file_id.0])
-                .map_err(storage_err)?;
-            tx.execute(
-                "DELETE FROM bindings WHERE file_id = ?1",
-                params![&file_id.0],
-            )
-            .map_err(storage_err)?;
-            if let Some(sid) = compact::lookup_sid(&tx, compact::CALL_SITE_STRINGS, &file_id.0)? {
-                tx.execute("DELETE FROM call_sites WHERE file_sid = ?1", params![sid])
-                    .map_err(storage_err)?;
-            }
-        }
-
-        let mut call_site_strings =
-            compact::StringWriter::incremental(&tx, compact::CALL_SITE_STRINGS)?;
-        insert_index_rows(
-            &tx,
-            &mut call_site_strings,
-            IndexRows {
-                files: update.changed_files,
-                symbols: update.symbols,
-                chunks: update.chunks,
-                tests: update.tests,
-                imports: update.imports,
-                occurrences: update.occurrences,
-                analysis_facts: update.analysis_facts,
-                scopes: update.scopes,
-                bindings: update.bindings,
-                call_sites: update.call_sites,
-            },
-        )?;
-        let mut graph_strings = compact::StringWriter::incremental(&tx, compact::GRAPH_STRINGS)?;
-        insert_graph_rows(
-            &tx,
-            &mut graph_strings,
-            update.graph_nodes,
-            update.graph_edges,
-        )?;
+        replace_files_rows(&tx, &update, ManifestWrite::Publish, None)?;
         tx.commit().map_err(storage_err)?;
         self.invalidate_semantics_verdict();
         Ok(())
@@ -2483,7 +2383,58 @@ struct IndexRows<'a> {
     call_sites: &'a [open_kioku_core::CallSite],
 }
 
-fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
+/// Whether a row replacement also writes the manifest that publishes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestWrite {
+    Publish,
+    Withhold,
+}
+
+/// What reconciling the stored graph with a snapshot's graph changed; see
+/// [`SqliteStore::stage_files_index_with_graph`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GraphReconciliation {
+    pub nodes_removed: usize,
+    pub nodes_added: usize,
+    pub edges_removed: usize,
+    pub edges_added: usize,
+    /// Dictionary entries no surviving edge referenced.
+    pub strings_removed: usize,
+}
+
+/// The message every read surface prints for an index whose manifest was written by a newer
+/// Open Kioku than this one. It is the same shape as the graph-rebuild message: what the
+/// index is, and the two ways out.
+pub fn newer_index_message(found: u32) -> String {
+    format!(
+        "index was written by a newer Open Kioku (manifest schema {found}; this version reads \
+         up to {}): upgrade Open Kioku or run `ok index` to rebuild it with this version",
+        open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION
+    )
+}
+
+/// Deserialize a stored manifest. A manifest from a newer Open Kioku is refused with
+/// [`newer_index_message`] rather than left to fail on whichever field it added: the version
+/// is checked before the body is read, so the message names the situation instead of a serde
+/// error, and a manifest with an older version reads through serde defaults as before.
+pub fn decode_index_manifest(json: &str) -> Result<IndexManifest> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        #[serde(default)]
+        schema_version: u32,
+    }
+    let header: Header = serde_json::from_str(json)?;
+    if header.schema_version > open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION {
+        return Err(OkError::Index(newer_index_message(header.schema_version)));
+    }
+    Ok(serde_json::from_str(json)?)
+}
+
+fn replace_index_rows(
+    tx: &Transaction<'_>,
+    data: IndexData<'_>,
+    manifest: ManifestWrite,
+) -> Result<()> {
     tx.execute("DELETE FROM call_sites", [])
         .map_err(storage_err)?;
     // The dictionary is owned by `call_sites`, so it is emptied with the rows that reference
@@ -2504,11 +2455,13 @@ fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
     tx.execute("DELETE FROM files", []).map_err(storage_err)?;
     tx.execute("DELETE FROM manifests", [])
         .map_err(storage_err)?;
-    tx.execute(
-        "INSERT INTO manifests(id, json) VALUES(1, ?1)",
-        params![serde_json::to_string(data.manifest)?],
-    )
-    .map_err(storage_err)?;
+    if manifest == ManifestWrite::Publish {
+        tx.execute(
+            "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+            params![serde_json::to_string(data.manifest)?],
+        )
+        .map_err(storage_err)?;
+    }
     let mut call_site_strings = compact::StringWriter::bulk(compact::CALL_SITE_STRINGS);
     insert_index_rows(
         tx,
@@ -2526,6 +2479,377 @@ fn replace_index_rows(tx: &Transaction<'_>, data: IndexData<'_>) -> Result<()> {
             call_sites: data.call_sites,
         },
     )
+}
+
+/// Everything `replace_files_index` does inside its transaction. With `full_graph`, the
+/// stored graph is also reconciled with it; see `SqliteStore::stage_files_index_with_graph`.
+fn replace_files_rows(
+    tx: &Transaction<'_>,
+    update: &PartialIndexUpdate<'_>,
+    manifest: ManifestWrite,
+    full_graph: Option<(&[GraphNode], &[GraphEdge])>,
+) -> Result<GraphReconciliation> {
+    let affected_file_ids = update
+        .changed_files
+        .iter()
+        .map(|file| file.id.clone())
+        .chain(update.deleted_file_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut affected_file_paths = update
+        .changed_files
+        .iter()
+        .map(|file| file.path.to_string_lossy().to_string())
+        .collect::<BTreeSet<_>>();
+    for file_id in &affected_file_ids {
+        let path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM files WHERE id = ?1",
+                params![&file_id.0],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_err)?;
+        if let Some(path) = path {
+            affected_file_paths.insert(path);
+        }
+    }
+
+    let mut affected_symbol_ids = update
+        .symbols
+        .iter()
+        .map(|symbol| symbol.id.clone())
+        .collect::<BTreeSet<_>>();
+    for file_id in &affected_file_ids {
+        let mut stmt = tx
+            .prepare("SELECT id FROM symbols WHERE file_id = ?1")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        for row in rows {
+            affected_symbol_ids.insert(SymbolId::new(row.map_err(storage_err)?));
+        }
+    }
+
+    let mut affected_node_ids = update
+        .graph_nodes
+        .iter()
+        .map(|node| node.id.0.clone())
+        .collect::<BTreeSet<_>>();
+    for file_id in &affected_file_ids {
+        let mut stmt = tx
+            .prepare("SELECT id FROM graph_nodes WHERE file_id = ?1")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        for row in rows {
+            affected_node_ids.insert(row.map_err(storage_err)?);
+        }
+    }
+    for symbol_id in &affected_symbol_ids {
+        let mut stmt = tx
+            .prepare("SELECT id FROM graph_nodes WHERE symbol_id = ?1")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![&symbol_id.0], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        for row in rows {
+            affected_node_ids.insert(row.map_err(storage_err)?);
+        }
+    }
+
+    if manifest == ManifestWrite::Publish {
+        tx.execute(
+            "INSERT INTO manifests(id, json) VALUES(1, ?1)
+             ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+            params![serde_json::to_string(update.manifest)?],
+        )
+        .map_err(storage_err)?;
+    }
+
+    let mut report = GraphReconciliation::default();
+    // Dictionary entries the removed edges referenced; whichever of them no surviving edge
+    // references is dropped at the end, so an incremental run cannot leave strings behind.
+    let mut orphan_candidates = HashSet::<i64>::new();
+
+    // A file's edges, part one: those anchored at a node it owns, in either direction.
+    for node_id in &affected_node_ids {
+        if let Some(sid) = compact::lookup_sid(tx, compact::GRAPH_STRINGS, node_id)? {
+            report.edges_removed += delete_edges_at_node(tx, sid, &mut orphan_candidates)?;
+        }
+    }
+
+    // Part two, in one pass over the stored edges: those whose evidence range lies in an
+    // affected file, whatever their endpoints. With a full graph the same pass finds the
+    // stored edges the new graph no longer has, and records which of the new graph's edges
+    // are already stored so only the missing ones are inserted below.
+    let changed_path_sids = affected_file_paths
+        .iter()
+        .filter_map(|path| compact::lookup_sid(tx, compact::GRAPH_STRINGS, path).transpose())
+        .collect::<Result<HashSet<i64>>>()?;
+    let new_edges = full_graph
+        .map(|(_, edges)| {
+            edges
+                .iter()
+                .enumerate()
+                .map(|(index, edge)| (edge.id.0.as_str(), index))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut edge_stored = vec![false; new_edges.len()];
+    let mut removed_edge_ids = Vec::new();
+    if !changed_path_sids.is_empty() || full_graph.is_some() {
+        let mut stmt = tx
+            .prepare(&format!("SELECT id, {EDGE_SID_COLUMNS} FROM graph_edges"))
+            .map_err(storage_err)?;
+        let mut rows = stmt.query([]).map_err(storage_err)?;
+        while let Some(row) = rows.next().map_err(storage_err)? {
+            let id: String = row.get(0).map_err(storage_err)?;
+            let sids = edge_sids(row, 1)?;
+            let refreshed =
+                sids[EDGE_SID_EV_PATH].is_some_and(|sid| changed_path_sids.contains(&sid));
+            let retained = full_graph.is_none() || new_edges.contains_key(id.as_str());
+            if refreshed || !retained {
+                orphan_candidates.extend(sids.iter().flatten());
+                removed_edge_ids.push(id);
+            } else if let Some(&index) = new_edges.get(id.as_str()) {
+                edge_stored[index] = true;
+            }
+        }
+    }
+    for id in &removed_edge_ids {
+        tx.execute("DELETE FROM graph_edges WHERE id = ?1", params![id])
+            .map_err(storage_err)?;
+    }
+    report.edges_removed += removed_edge_ids.len();
+
+    for node_id in &affected_node_ids {
+        report.nodes_removed += tx
+            .execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])
+            .map_err(storage_err)?;
+    }
+    for file_id in &affected_file_ids {
+        report.nodes_removed += tx
+            .execute(
+                "DELETE FROM graph_nodes WHERE file_id = ?1",
+                params![&file_id.0],
+            )
+            .map_err(storage_err)?;
+    }
+    for symbol_id in &affected_symbol_ids {
+        report.nodes_removed += tx
+            .execute(
+                "DELETE FROM graph_nodes WHERE symbol_id = ?1",
+                params![&symbol_id.0],
+            )
+            .map_err(storage_err)?;
+    }
+    // Nodes the new graph no longer has. Their edges are gone already: an edge of the new
+    // graph cannot end at a node the new graph does not hold, so every edge at such a node
+    // failed the identity check above.
+    let new_nodes = full_graph
+        .map(|(nodes, _)| {
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| (node.id.0.as_str(), index))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut node_stored = vec![false; new_nodes.len()];
+    if full_graph.is_some() {
+        let mut removed_node_ids = Vec::new();
+        let mut stmt = tx
+            .prepare("SELECT id FROM graph_nodes")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage_err)?;
+        for row in rows {
+            let id = row.map_err(storage_err)?;
+            match new_nodes.get(id.as_str()) {
+                Some(&index) => node_stored[index] = true,
+                None => removed_node_ids.push(id),
+            }
+        }
+        drop(stmt);
+        for id in &removed_node_ids {
+            tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])
+                .map_err(storage_err)?;
+        }
+        report.nodes_removed += removed_node_ids.len();
+    }
+
+    for symbol_id in &affected_symbol_ids {
+        tx.execute(
+            "DELETE FROM occurrences WHERE symbol_id = ?1",
+            params![&symbol_id.0],
+        )
+        .map_err(storage_err)?;
+    }
+    for file_id in &affected_file_ids {
+        tx.execute(
+            "DELETE FROM occurrences WHERE file_id = ?1",
+            params![&file_id.0],
+        )
+        .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM analysis_facts WHERE file_id = ?1",
+            params![&file_id.0],
+        )
+        .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM imports WHERE file_id = ?1",
+            params![&file_id.0],
+        )
+        .map_err(storage_err)?;
+        tx.execute("DELETE FROM tests WHERE file_id = ?1", params![&file_id.0])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![&file_id.0])
+            .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM symbols WHERE file_id = ?1",
+            params![&file_id.0],
+        )
+        .map_err(storage_err)?;
+        tx.execute("DELETE FROM files WHERE id = ?1", params![&file_id.0])
+            .map_err(storage_err)?;
+        tx.execute("DELETE FROM scopes WHERE file_id = ?1", params![&file_id.0])
+            .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM bindings WHERE file_id = ?1",
+            params![&file_id.0],
+        )
+        .map_err(storage_err)?;
+        if let Some(sid) = compact::lookup_sid(tx, compact::CALL_SITE_STRINGS, &file_id.0)? {
+            tx.execute("DELETE FROM call_sites WHERE file_sid = ?1", params![sid])
+                .map_err(storage_err)?;
+        }
+    }
+
+    let mut call_site_strings = compact::StringWriter::incremental(tx, compact::CALL_SITE_STRINGS)?;
+    insert_index_rows(
+        tx,
+        &mut call_site_strings,
+        IndexRows {
+            files: update.changed_files,
+            symbols: update.symbols,
+            chunks: update.chunks,
+            tests: update.tests,
+            imports: update.imports,
+            occurrences: update.occurrences,
+            analysis_facts: update.analysis_facts,
+            scopes: update.scopes,
+            bindings: update.bindings,
+            call_sites: update.call_sites,
+        },
+    )?;
+    let mut graph_strings = compact::StringWriter::incremental(tx, compact::GRAPH_STRINGS)?;
+    insert_graph_rows(
+        tx,
+        &mut graph_strings,
+        update.graph_nodes,
+        update.graph_edges,
+    )?;
+    report.nodes_added += update.graph_nodes.len();
+    report.edges_added += update.graph_edges.len();
+    if let Some((nodes, edges)) = full_graph {
+        for node in update.graph_nodes {
+            if let Some(&index) = new_nodes.get(node.id.0.as_str()) {
+                node_stored[index] = true;
+            }
+        }
+        for edge in update.graph_edges {
+            if let Some(&index) = new_edges.get(edge.id.0.as_str()) {
+                edge_stored[index] = true;
+            }
+        }
+        let missing_nodes = nodes
+            .iter()
+            .zip(&node_stored)
+            .filter_map(|(node, stored)| (!stored).then_some(node))
+            .collect::<Vec<_>>();
+        let missing_edges = edges
+            .iter()
+            .zip(&edge_stored)
+            .filter_map(|(edge, stored)| (!stored).then_some(edge))
+            .collect::<Vec<_>>();
+        report.nodes_added += missing_nodes.len();
+        report.edges_added += missing_edges.len();
+        insert_graph_rows(tx, &mut graph_strings, missing_nodes, missing_edges)?;
+    }
+    report.strings_removed = remove_orphan_graph_strings(tx, orphan_candidates)?;
+    Ok(report)
+}
+
+/// The dictionary-backed columns of `graph_edges`, in the order [`edge_sids`] reads them.
+const EDGE_SID_COLUMNS: &str = "from_sid, to_sid, source_sid, ev_path_sid, ev_symbol_sid, \
+                                ev_message_sid, ev_indexed_at_sid, extra_sid";
+const EDGE_SID_COUNT: usize = 8;
+const EDGE_SID_EV_PATH: usize = 3;
+
+fn edge_sids(row: &rusqlite::Row<'_>, first: usize) -> Result<[Option<i64>; EDGE_SID_COUNT]> {
+    let mut sids = [None; EDGE_SID_COUNT];
+    for (offset, sid) in sids.iter_mut().enumerate() {
+        *sid = row.get(first + offset).map_err(storage_err)?;
+    }
+    Ok(sids)
+}
+
+/// Remove every edge at `node_sid`, remembering the dictionary entries the removed rows
+/// referenced. Returns the number of edges removed.
+fn delete_edges_at_node(
+    tx: &Transaction<'_>,
+    node_sid: i64,
+    orphan_candidates: &mut HashSet<i64>,
+) -> Result<usize> {
+    let mut stmt = tx
+        .prepare_cached(&format!(
+            "SELECT {EDGE_SID_COLUMNS} FROM graph_edges WHERE from_sid = ?1 OR to_sid = ?1"
+        ))
+        .map_err(storage_err)?;
+    let mut rows = stmt.query(params![node_sid]).map_err(storage_err)?;
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        orphan_candidates.extend(edge_sids(row, 0)?.iter().flatten());
+    }
+    drop(rows);
+    drop(stmt);
+    tx.execute(
+        "DELETE FROM graph_edges WHERE from_sid = ?1 OR to_sid = ?1",
+        params![node_sid],
+    )
+    .map_err(storage_err)
+}
+
+/// Drop the `candidates` no edge references any more. One pass over the surviving rows
+/// decides; it stops as soon as every candidate has been seen in use.
+fn remove_orphan_graph_strings(
+    tx: &Transaction<'_>,
+    mut candidates: HashSet<i64>,
+) -> Result<usize> {
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let mut stmt = tx
+        .prepare(&format!("SELECT {EDGE_SID_COLUMNS} FROM graph_edges"))
+        .map_err(storage_err)?;
+    let mut rows = stmt.query([]).map_err(storage_err)?;
+    while let Some(row) = rows.next().map_err(storage_err)? {
+        for sid in edge_sids(row, 0)?.iter().flatten() {
+            candidates.remove(sid);
+        }
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+    }
+    drop(rows);
+    drop(stmt);
+    for sid in &candidates {
+        tx.execute("DELETE FROM graph_strings WHERE sid = ?1", params![sid])
+            .map_err(storage_err)?;
+    }
+    Ok(candidates.len())
 }
 
 fn insert_document_sections(tx: &Transaction<'_>, sections: &[DocumentSection]) -> Result<()> {
@@ -2752,17 +3076,17 @@ const GRAPH_INDEXES: &[(&str, &str)] = &[
     ),
 ];
 
-fn insert_graph_rows(
+fn insert_graph_rows<'a>(
     tx: &Transaction<'_>,
     strings: &mut compact::StringWriter,
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
+    nodes: impl IntoIterator<Item = &'a GraphNode>,
+    edges: impl IntoIterator<Item = &'a GraphEdge>,
 ) -> Result<()> {
     // Insert in primary-key order so the id B-tree fills mostly append-only instead of taking
     // millions of random-page inserts (ids are content hashes, i.e. uniformly random).
-    let mut nodes = nodes.iter().collect::<Vec<_>>();
+    let mut nodes = nodes.into_iter().collect::<Vec<_>>();
     nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-    let mut edges = edges.iter().collect::<Vec<_>>();
+    let mut edges = edges.into_iter().collect::<Vec<_>>();
     edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     {
         let mut stmt = tx.prepare_cached("INSERT INTO graph_nodes(id, label, node_type, file_id, symbol_id, evidence_available, freshness, json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)").map_err(storage_err)?;
@@ -4206,7 +4530,8 @@ fn source_type_name(source_type: &EvidenceSourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact, schema_meta_flag, set_schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
+        compact, decode_index_manifest, newer_index_message, schema_meta_flag,
+        set_schema_meta_flag, SqliteStore, GRAPH_REBUILD_REQUIRED_FLAG,
         SQLITE_GRAPH_SCHEMA_VERSION, SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION,
     };
     use chrono::{TimeZone, Utc};
@@ -4223,6 +4548,7 @@ mod tests {
         GraphStore, HistoryStore, IndexData, MetadataStore, PartialIndexUpdate,
     };
     use rusqlite::{params, Connection};
+    use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
 
@@ -5205,8 +5531,12 @@ mod tests {
             label: "external b".into(),
             ..Default::default()
         };
+        // Anchored at nodes no file owns; its evidence range is what ties it to the file.
         let mut source_evidence = evidence();
-        source_evidence.source = "src/main.rs".into();
+        source_evidence.file_range = Some(FileRange {
+            path: std::path::Path::new("src/main.rs").into(),
+            line_range: Some(LineRange::single(3)),
+        });
         let source_edge = GraphEdge {
             id: EdgeId::new("edge:source-file"),
             from: node3.id.clone(),
@@ -5285,6 +5615,353 @@ mod tests {
         assert_eq!(edge_count, 0);
         assert!(store.node_by_id("symbol:s1").unwrap().is_none());
         assert!(store.node_by_id("symbol:s2b").unwrap().is_some());
+    }
+
+    /// Nodes no file owns (analysis targets) and an edge into one from an unchanged file, on
+    /// top of the two-file index `partial_replace_updates_changed_files_and_cleans_deleted_graph_edges` builds.
+    fn reconciliation_fixture() -> (SqliteStore, IndexManifest, File, File, Symbol, Symbol) {
+        let store = make_store();
+        let manifest = make_manifest();
+        let file1 = make_file("f1", "src/main.rs");
+        let file2 = make_file("f2", "src/lib.rs");
+        let sym1 = make_symbol("s1", "main_fn", "f1");
+        let sym2 = make_symbol("s2", "lib_fn", "f2");
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &[file1.clone(), file2.clone()],
+                symbols: &[sym1.clone(), sym2.clone()],
+                chunks: &[],
+                tests: &[],
+                imports: &[],
+                occurrences: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        (store, manifest, file1, file2, sym1, sym2)
+    }
+
+    fn symbol_node(symbol: &Symbol) -> GraphNode {
+        GraphNode {
+            id: NodeId::new(format!("symbol:{}", symbol.id.0)),
+            node_type: GraphNodeType::Function,
+            label: symbol.name.clone(),
+            file_id: Some(symbol.file_id.clone()),
+            symbol_id: Some(symbol.id.clone()),
+            ..Default::default()
+        }
+    }
+
+    fn analysis_node(label: &str) -> GraphNode {
+        GraphNode {
+            id: NodeId::new(format!("analysis:Function:{label}")),
+            node_type: GraphNodeType::Function,
+            label: label.into(),
+            ..Default::default()
+        }
+    }
+
+    fn calls(id: &str, from: &GraphNode, to: &GraphNode, path: &str, message: &str) -> GraphEdge {
+        let mut evidence = evidence();
+        evidence.file_range = Some(FileRange {
+            path: std::path::Path::new(path).into(),
+            line_range: Some(LineRange::single(1)),
+        });
+        evidence.message = message.into();
+        GraphEdge {
+            id: EdgeId::new(id),
+            from: from.id.clone(),
+            to: to.id.clone(),
+            edge_type: GraphEdgeType::Calls,
+            evidence,
+            ..Default::default()
+        }
+    }
+
+    fn graph_counts(store: &SqliteStore) -> (i64, i64, i64) {
+        let conn = store.connection.lock().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        (
+            count("SELECT COUNT(*) FROM graph_nodes"),
+            count("SELECT COUNT(*) FROM graph_edges"),
+            count("SELECT COUNT(*) FROM graph_strings"),
+        )
+    }
+
+    /// #413: re-indexing `src/lib.rs` with `lib_fn` renamed must remove the call from the
+    /// unchanged `src/main.rs` into the node that only ever existed because of `lib_fn`, add
+    /// the call into the renamed symbol's node, and leave no dictionary entry behind. The
+    /// result is compared with a clean `replace_graph` of the same graph, dictionary included.
+    #[test]
+    fn partial_replace_with_graph_matches_a_clean_rebuild_and_leaks_no_strings() {
+        let (store, manifest, _file1, file2, sym1, sym2) = reconciliation_fixture();
+        let node1 = symbol_node(&sym1);
+        let node2 = symbol_node(&sym2);
+        let target_old = analysis_node("module::lib_fn");
+        let old_edges = vec![
+            calls(
+                "edge:main-calls-lib",
+                &node1,
+                &node2,
+                "src/main.rs",
+                "main_fn calls lib_fn",
+            ),
+            calls(
+                "edge:main-calls-name",
+                &node1,
+                &target_old,
+                "src/main.rs",
+                "resolved lib_fn",
+            ),
+        ];
+        store
+            .replace_graph(
+                &[node1.clone(), node2.clone(), target_old.clone()],
+                &old_edges,
+            )
+            .unwrap();
+
+        let mut renamed_file = file2.clone();
+        renamed_file.content_hash = "renamed".into();
+        let renamed = make_symbol("s2b", "lib_fn_new", "f2");
+        let node2_new = symbol_node(&renamed);
+        let target_new = analysis_node("module::lib_fn_new");
+        let new_nodes = vec![node1.clone(), node2_new.clone(), target_new.clone()];
+        let new_edges = vec![
+            calls(
+                "edge:main-calls-lib-new",
+                &node1,
+                &node2_new,
+                "src/main.rs",
+                "main_fn calls lib_fn_new",
+            ),
+            calls(
+                "edge:main-calls-name-new",
+                &node1,
+                &target_new,
+                "src/main.rs",
+                "resolved lib_fn_new",
+            ),
+        ];
+        let report = store
+            .stage_files_index_with_graph(
+                PartialIndexUpdate {
+                    manifest: &manifest,
+                    changed_files: std::slice::from_ref(&renamed_file),
+                    deleted_file_ids: &[],
+                    symbols: std::slice::from_ref(&renamed),
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                    graph_nodes: &[],
+                    graph_edges: &[],
+                },
+                &new_nodes,
+                &new_edges,
+            )
+            .unwrap();
+        assert_eq!(report.edges_removed, 2, "{report:?}");
+        assert_eq!(report.edges_added, 2, "{report:?}");
+        assert_eq!(report.nodes_removed, 2, "{report:?}");
+        assert_eq!(report.nodes_added, 2, "{report:?}");
+        assert!(report.strings_removed > 0, "{report:?}");
+
+        assert!(store.node_by_id(&node2.id.0).unwrap().is_none());
+        assert!(store.node_by_id(&target_old.id.0).unwrap().is_none());
+        let (_, edges) = store.neighbors(&node1.id.0, 10).unwrap();
+        let mut targets = edges
+            .iter()
+            .map(|edge| edge.to.0.clone())
+            .collect::<Vec<_>>();
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![target_new.id.0.clone(), node2_new.id.0.clone()]
+        );
+        let incremental = graph_counts(&store);
+
+        let clean = make_store();
+        clean.replace_graph(&new_nodes, &new_edges).unwrap();
+        assert_eq!(incremental, graph_counts(&clean));
+    }
+
+    /// The previous manifest stays published through an incremental update; the caller
+    /// publishes the new one after the search index is rebuilt.
+    #[test]
+    fn staged_partial_replace_keeps_the_previous_manifest() {
+        let (store, manifest, _file1, file2, _sym1, sym2) = reconciliation_fixture();
+        let mut next = manifest.clone();
+        next.file_count = 99;
+        let node2 = symbol_node(&sym2);
+        store
+            .stage_files_index_with_graph(
+                PartialIndexUpdate {
+                    manifest: &next,
+                    changed_files: std::slice::from_ref(&file2),
+                    deleted_file_ids: &[],
+                    symbols: std::slice::from_ref(&sym2),
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                    graph_nodes: &[],
+                    graph_edges: &[],
+                },
+                std::slice::from_ref(&node2),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.manifest().unwrap().unwrap().file_count,
+            manifest.file_count
+        );
+        store.put_manifest(&next).unwrap();
+        assert_eq!(store.manifest().unwrap().unwrap().file_count, 99);
+    }
+
+    /// A full staged write unpublishes the index until `put_manifest`: the rows are there,
+    /// the manifest is not.
+    #[test]
+    fn staged_full_replace_withholds_the_manifest_until_published() {
+        let store = make_store();
+        let manifest = make_manifest();
+        store.put_manifest(&manifest).unwrap();
+        let file = make_file("f1", "src/lib.rs");
+        store
+            .stage_index_with_documents(
+                IndexData {
+                    manifest: &manifest,
+                    files: std::slice::from_ref(&file),
+                    symbols: &[],
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                },
+                &[],
+            )
+            .unwrap();
+        assert!(store.manifest().unwrap().is_none());
+        assert!(store
+            .get_file_by_path(std::path::Path::new("src/lib.rs"))
+            .unwrap()
+            .is_some());
+        store.put_manifest(&manifest).unwrap();
+        assert!(store.manifest().unwrap().is_some());
+    }
+
+    #[test]
+    fn manifest_from_a_newer_open_kioku_is_refused_with_the_upgrade_message() {
+        let store = make_store();
+        let mut json = serde_json::to_value(make_manifest()).unwrap();
+        json["schema_version"] = json!(open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1);
+        // A field this version does not know, as a newer writer would add.
+        json["from_the_future"] = json!(true);
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+                params![json.to_string()],
+            )
+            .unwrap();
+        let error = store.manifest().unwrap_err().to_string();
+        assert!(error.contains("written by a newer Open Kioku"), "{error}");
+        assert!(
+            error.contains("upgrade Open Kioku or run `ok index`"),
+            "{error}"
+        );
+        assert_eq!(
+            error,
+            format!(
+                "index error: {}",
+                newer_index_message(open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1)
+            )
+        );
+
+        // Older manifests still read, through serde defaults, as before.
+        let mut older = serde_json::to_value(make_manifest()).unwrap();
+        older["schema_version"] = json!(1);
+        assert_eq!(
+            decode_index_manifest(&older.to_string())
+                .unwrap()
+                .schema_version,
+            1
+        );
+    }
+
+    #[test]
+    fn open_repo_index_reports_an_index_being_built_while_the_lock_is_held() {
+        use open_kioku_storage::generations::{
+            index_lock_path, indexing_in_progress_message, IndexWriteLock,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        assert!(SqliteStore::open_repo_index(repo).unwrap().is_none());
+
+        // Lock held, no database yet: being built, not unindexed.
+        let lock = IndexWriteLock::acquire(repo, Duration::from_millis(10)).unwrap();
+        assert_eq!(lock.path(), index_lock_path(repo));
+        let error = SqliteStore::open_repo_index(repo)
+            .err()
+            .expect("an index being built is not served")
+            .to_string();
+        assert_eq!(
+            error,
+            format!("index error: {}", indexing_in_progress_message(repo))
+        );
+        // A second writer waits, then gives up with the lock's path.
+        let error = IndexWriteLock::acquire(repo, Duration::from_millis(10))
+            .expect_err("the lock is exclusive")
+            .to_string();
+        assert!(error.contains("locked by another writer"), "{error}");
+
+        // Lock held, rows staged, manifest withheld: still being built.
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let manifest = make_manifest();
+        store
+            .stage_index_with_documents(
+                IndexData {
+                    manifest: &manifest,
+                    files: &[],
+                    symbols: &[],
+                    chunks: &[],
+                    tests: &[],
+                    imports: &[],
+                    occurrences: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                },
+                &[],
+            )
+            .unwrap();
+        assert!(SqliteStore::open_repo_index(repo).is_err());
+
+        // Published: served, lock or no lock.
+        store.put_manifest(&manifest).unwrap();
+        assert!(SqliteStore::open_repo_index(repo).unwrap().is_some());
+        drop(lock);
+        assert!(!index_lock_path(repo).exists());
+        assert!(SqliteStore::open_repo_index(repo).unwrap().is_some());
     }
 
     #[test]

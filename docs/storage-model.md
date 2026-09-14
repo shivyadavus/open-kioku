@@ -45,9 +45,40 @@ over full strings.
 
 Each dictionary is owned by the table that references it and is emptied with it —
 `replace_graph` clears `graph_strings`, `replace_index` clears `call_site_strings` — so a
-re-index cannot accumulate entries nothing points at. The incremental writers add to a
-dictionary rather than clearing it, which can leave unreferenced entries between full
-re-indexes; the next full index run removes them.
+re-index cannot accumulate entries nothing points at. The incremental writer adds to
+`graph_strings` rather than clearing it, and removes whichever entries the edges it deleted
+referenced once no surviving edge references them, so repeated incremental runs do not grow
+the dictionary either.
+
+### Incremental graph updates
+
+`ok watch` re-indexes through `SqliteStore::stage_files_index_with_graph`, which takes the
+changed files' rows and the complete graph of the new snapshot, in one transaction:
+
+1. A file's edges are removed: every edge anchored at a node the file owns (its file node and
+   its symbols' nodes, in either direction) and every edge whose evidence range lies in the
+   file. The pre-4.0 writer keyed this delete on `evidence.source`, the producing pass name,
+   which never equals a path, so it deleted nothing (#413).
+2. The stored graph is reconciled with the new graph by identity: every stored node and edge
+   the new graph does not hold is removed, and every node and edge of the new graph the store
+   does not hold is added. This is what handles edges whose target moved — a resolved call
+   from an unchanged file into a symbol the changed file renamed ends at a node no file owns,
+   so step 1 cannot see it; the new graph no longer holds it, so step 2 removes it. The pass
+   reads every stored edge id once; it is proportional to the graph, not to the change, and
+   is what makes the incremental graph equal a clean rebuild rather than approximate it.
+3. Unchanged edges keep their stored evidence, including `indexed_at`.
+
+### Publication order
+
+The manifest is the publication marker: `ok index` and `ok watch` write the rows, the git
+history, the graph and the Tantivy index, and put the manifest last. A concurrent reader
+therefore never opens a manifest whose graph or search index is still being written, and a
+run that fails after the rows leaves the repository reading as unindexed rather than as an
+index whose components disagree. While the writer holds `.ok/index.lock` and no manifest is
+published, every read surface — `ok status`, `ok doctor`, every read command, and the MCP
+server, whose session survives the failed probe — reports the index as being built rather
+than as missing. The incremental path keeps the previous manifest in place until its own
+components are written, so readers keep serving the previous index meanwhile.
 
 Object-level deduplication of evidence was measured and rejected. Evidence objects are 1.0x
 distinct per edge — their `id` is a content hash and `indexed_at` is stamped per run — so a
@@ -422,10 +453,14 @@ them:
 watch never fabricates a graph — but it means watching a repository alone never recovers it.
 Run `ok index` once.
 
-`IndexManifest.schema_version` is bumped to 2 in the same release. A stored manifest whose
-version differs from the current one is not partially indexable, so the incremental path
-(`ok watch`) falls back to a full index rather than updating rows the current reader cannot
-interpret; `ok index` is already a full rebuild.
+`IndexManifest.schema_version` is bumped to 2 in the same release, and to 3 for the typed
+quality notes. A stored manifest whose version differs from the current one is not partially
+indexable, so the incremental path (`ok watch`) falls back to a full index rather than
+updating rows the current reader cannot interpret; `ok index` is already a full rebuild. A
+stored manifest whose version is *newer* than the reader's is refused before its body is
+deserialized, on every surface and on `ok snapshot import`, with one message: the index was
+written by a newer Open Kioku; upgrade Open Kioku or run `ok index` to rebuild it. Older
+manifests still read through serde defaults.
 
 `ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
 version and names the fix, instead of importing a store whose graph would be discarded on

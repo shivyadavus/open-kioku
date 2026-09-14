@@ -3138,6 +3138,7 @@ dependencies = [
  "open-kioku-semantic",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
+ "rusqlite",
  "tempfile",
  "toml",
 ]

@@ -44,6 +44,7 @@ use open_kioku_search_tantivy::{
     default_index_dir, rebuild_disk_index_with_graph, TantivySearchIndex,
 };
 use open_kioku_semantic::SemanticIndexManager;
+use open_kioku_storage::generations::IndexWriteLock;
 use open_kioku_storage::{
     GraphStore, HistoryStore, IndexData, MetadataStore, OkStore, SearchIndex,
 };

@@ -5,6 +5,7 @@ use open_kioku_graph::InMemoryGraph;
 use open_kioku_ingest::Indexer;
 use open_kioku_search_tantivy::{default_index_dir, rebuild_disk_index};
 use open_kioku_semantic::SemanticIndexManager;
+use open_kioku_storage::generations::IndexWriteLock;
 use open_kioku_storage::{
     analysis_semantics_compatibility, changed_document_paths, classify_file_changes,
     partial_index_supported, GraphStore, HistoryStore, IndexChangeKind, IndexData, MetadataStore,
@@ -105,6 +106,7 @@ pub fn reindex_repo_after_changes<'a>(
 ) -> Result<WatchIndexStatus> {
     let root = root.as_ref();
     let started = Instant::now();
+    let _lock = IndexWriteLock::acquire(root, IndexWriteLock::DEFAULT_WAIT)?;
     let config = OkConfig::load_from_repo(root)?;
     let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
     let store = SqliteStore::open(
@@ -216,55 +218,39 @@ pub fn reindex_repo_after_changes<'a>(
                 .filter(|fact| changed_ids.contains(&fact.file_id))
                 .cloned()
                 .collect::<Vec<_>>();
+            // The whole graph of the new snapshot, not the changed files' share of it: the
+            // store replaces the changed files' edges and reconciles the rest by identity, so
+            // an edge from an unchanged file to a symbol this change renamed goes too.
             let graph = graph_from_snapshot(&snapshot);
-            let affected_nodes = graph
-                .nodes
-                .values()
-                .filter(|node| {
-                    node.file_id
-                        .as_ref()
-                        .is_some_and(|file_id| changed_ids.contains(file_id))
-                        || node
-                            .symbol_id
-                            .as_ref()
-                            .is_some_and(|symbol_id| affected_symbol_ids.contains(symbol_id))
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let affected_node_ids = affected_nodes
-                .iter()
-                .map(|node| node.id.clone())
-                .collect::<BTreeSet<_>>();
-            let affected_edges = graph
-                .edges
-                .iter()
-                .filter(|edge| {
-                    affected_node_ids.contains(&edge.from) || affected_node_ids.contains(&edge.to)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            match store.replace_files_index(PartialIndexUpdate {
-                manifest: &snapshot.manifest,
-                changed_files: &changed_files,
-                deleted_file_ids: &deleted_ids,
-                symbols: &affected_symbols,
-                chunks: &changed_chunks,
-                tests: &changed_tests,
-                imports: &changed_imports,
-                occurrences: &changed_occurrences,
-                analysis_facts: &changed_facts,
-                graph_nodes: &affected_nodes,
-                graph_edges: &affected_edges,
-                scopes: &[],
-                bindings: &[],
-                call_sites: &[],
-            }) {
-                Ok(()) => partial = true,
-                Err(_) => persist_full_snapshot(&store, &snapshot)?,
+            let nodes = graph.nodes.into_values().collect::<Vec<_>>();
+            match store.stage_files_index_with_graph(
+                PartialIndexUpdate {
+                    manifest: &snapshot.manifest,
+                    changed_files: &changed_files,
+                    deleted_file_ids: &deleted_ids,
+                    symbols: &affected_symbols,
+                    chunks: &changed_chunks,
+                    tests: &changed_tests,
+                    imports: &changed_imports,
+                    occurrences: &changed_occurrences,
+                    analysis_facts: &changed_facts,
+                    graph_nodes: &[],
+                    graph_edges: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                },
+                &nodes,
+                &graph.edges,
+            ) {
+                Ok(_) => partial = true,
+                Err(err) => {
+                    eprintln!("watch partial update failed, rebuilding the index: {err}");
+                    persist_full_snapshot(&store, &snapshot)?;
+                }
             }
         } else {
             partial = true;
-            store.put_manifest(&snapshot.manifest)?;
         }
     } else {
         persist_full_snapshot(&store, &snapshot)?;
@@ -298,6 +284,8 @@ pub fn reindex_repo_after_changes<'a>(
             &snapshot.symbols,
         )?;
     }
+    // Published last: every component the manifest describes is in place by now.
+    store.put_manifest(&snapshot.manifest)?;
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -314,6 +302,7 @@ pub fn reindex_repo_after_changes<'a>(
 fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let root = root.as_ref();
     let started = Instant::now();
+    let _lock = IndexWriteLock::acquire(root, IndexWriteLock::DEFAULT_WAIT)?;
     let config = OkConfig::load_from_repo(root)?;
     let (snapshot, history) = Indexer::default().index_repo_with_history(root, &config)?;
     let store = SqliteStore::open(
@@ -332,6 +321,8 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
         &snapshot.files,
         &snapshot.symbols,
     )?;
+    // Published last: every component the manifest describes is in place by now.
+    store.put_manifest(&snapshot.manifest)?;
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -371,11 +362,13 @@ fn maintain_semantic_index(root: &Path, store: &SqliteStore, config: &OkConfig) 
     }
 }
 
+/// Rows and documents without the manifest; the caller publishes it once the graph and the
+/// search index are written.
 fn persist_full_snapshot(
     store: &SqliteStore,
     snapshot: &open_kioku_ingest::IndexSnapshot,
 ) -> Result<()> {
-    store.replace_index_with_documents(
+    store.stage_index_with_documents(
         IndexData {
             manifest: &snapshot.manifest,
             files: &snapshot.files,
@@ -659,6 +652,181 @@ mod tests {
             incremental_projection, clean_projection,
             "incremental and clean CALLS truth/proof projection diverged"
         );
+    }
+
+    /// #413: a partial re-index must replace exactly the changed file's edges. Old callers of
+    /// a renamed symbol used to stay in the graph because the per-file delete keyed on the
+    /// producing pass name instead of the file.
+    #[test]
+    fn incremental_reindex_drops_edges_the_changed_file_no_longer_supports() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn target() {}\npub fn caller() { target(); }\n",
+        )
+        .unwrap();
+        fs::write(repo.join("src/other.rs"), "pub fn unrelated() {}\n").unwrap();
+        OkConfig::write_default(repo.join("ok.toml")).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "watch@example.com"]);
+        git(repo, &["config", "user.name", "Watch Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "initial source"]);
+        reindex_repo(repo).unwrap();
+
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let calls_into = |store: &SqliteStore, name: &str| -> Vec<String> {
+            let symbols = store.symbols_named(name, 10).unwrap();
+            let Some(symbol) = symbols.iter().find(|symbol| symbol.name == name) else {
+                return Vec::new();
+            };
+            let node = format!("symbol:{}", symbol.id.0);
+            let (nodes, edges) = store.neighbors(&node, 100).unwrap();
+            edges
+                .iter()
+                .filter(|edge| {
+                    edge.edge_type == open_kioku_core::GraphEdgeType::Calls && edge.to.0 == node
+                })
+                .map(|edge| {
+                    nodes
+                        .iter()
+                        .find(|candidate| candidate.id == edge.from)
+                        .map(|candidate| candidate.label.clone())
+                        .unwrap_or_else(|| edge.from.0.clone())
+                })
+                .collect()
+        };
+        assert_eq!(
+            calls_into(&store, "target"),
+            vec!["src::lib::caller".to_string()]
+        );
+        let (edges_before, _) = graph_table_counts(&store);
+
+        fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn renamed_target() {}\npub fn caller() { renamed_target(); }\n",
+        )
+        .unwrap();
+        let status = reindex_repo_after_changes(repo, [repo.join("src/lib.rs").as_path()]).unwrap();
+        assert!(status.partial, "{status:?}");
+
+        assert!(
+            calls_into(&store, "target").is_empty(),
+            "the renamed symbol must not keep its old callers"
+        );
+        assert_eq!(
+            calls_into(&store, "renamed_target"),
+            vec!["src::lib::caller".to_string()]
+        );
+        let stale_edges = store
+            .edges_by_type(open_kioku_core::GraphEdgeType::Calls, usize::MAX, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| store.node_by_id(&edge.to.0).unwrap().is_none())
+            .count();
+        assert_eq!(
+            stale_edges, 0,
+            "no CALLS edge may point at a node that no longer exists"
+        );
+
+        // Repeated incremental runs over a tree that ends up unchanged must not grow the
+        // edge table or the string dictionary. The first cycle may add a few entries (edges
+        // re-derived from unchanged files legitimately carry the run that re-derived them);
+        // every later cycle must leave both counts where they are.
+        let touch_and_revert = || {
+            fs::write(
+                repo.join("src/lib.rs"),
+                "pub fn target() {}\npub fn caller() { target(); }\n// touched\n",
+            )
+            .unwrap();
+            let status =
+                reindex_repo_after_changes(repo, [repo.join("src/lib.rs").as_path()]).unwrap();
+            assert!(status.partial, "{status:?}");
+            fs::write(
+                repo.join("src/lib.rs"),
+                "pub fn target() {}\npub fn caller() { target(); }\n",
+            )
+            .unwrap();
+            let status =
+                reindex_repo_after_changes(repo, [repo.join("src/lib.rs").as_path()]).unwrap();
+            assert!(status.partial, "{status:?}");
+        };
+        touch_and_revert();
+        let (edges_after_first, strings_after_first) = graph_table_counts(&store);
+        assert_eq!(
+            edges_after_first, edges_before,
+            "edge rows grew across incremental runs"
+        );
+        for _ in 0..3 {
+            touch_and_revert();
+        }
+        let (edges_after, strings_after) = graph_table_counts(&store);
+        assert_eq!(
+            edges_after, edges_before,
+            "edge rows grew across incremental runs"
+        );
+        assert_eq!(
+            strings_after, strings_after_first,
+            "graph_strings grew across incremental runs"
+        );
+        assert_eq!(
+            calls_into(&store, "target"),
+            vec!["src::lib::caller".to_string()]
+        );
+
+        // What the incremental path holds is what a clean rebuild holds, node for node and
+        // edge for edge, not only along the CALLS edges the earlier test projects.
+        let stored_graph = |store: &SqliteStore| {
+            let conn = rusqlite::Connection::open_with_flags(
+                store.path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut nodes = conn
+                .prepare("SELECT id FROM graph_nodes ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            nodes.dedup();
+            let mut edges = conn
+                .prepare("SELECT id FROM graph_edges ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            edges.dedup();
+            (nodes, edges)
+        };
+        let incremental = stored_graph(&store);
+        drop(store);
+        fs::remove_dir_all(repo.join(".ok")).unwrap();
+        reindex_repo(repo).unwrap();
+        let clean = stored_graph(&SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap());
+        assert_eq!(
+            incremental, clean,
+            "incremental graph diverged from a clean rebuild"
+        );
+    }
+
+    fn graph_table_counts(store: &SqliteStore) -> (i64, i64) {
+        let conn = rusqlite::Connection::open_with_flags(
+            store.path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let edges = conn
+            .query_row("SELECT COUNT(*) FROM graph_edges", [], |row| row.get(0))
+            .unwrap();
+        let strings = conn
+            .query_row("SELECT COUNT(*) FROM graph_strings", [], |row| row.get(0))
+            .unwrap();
+        (edges, strings)
     }
 
     fn git(root: &Path, args: &[&str]) {

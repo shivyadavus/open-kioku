@@ -120,6 +120,90 @@ pub fn not_indexed_message(repo: &Path) -> String {
     )
 }
 
+/// The file an index writer holds for the duration of a run. Always directly under `.ok/`,
+/// whichever layout the components use, so one path answers "is a writer running" for both.
+pub const INDEX_LOCK_FILE: &str = "index.lock";
+
+pub fn index_lock_path(repo: &Path) -> PathBuf {
+    repo.join(".ok").join(INDEX_LOCK_FILE)
+}
+
+/// Whether an index writer holds the repository's lock right now.
+///
+/// Readers consult it only when no manifest is published: the manifest is the last thing a
+/// run writes, so "no manifest, lock held" is an index being built, and every read surface
+/// says so with [`indexing_in_progress_message`] rather than reporting the repository as
+/// unindexed or answering from rows the run has not finished. A lock left behind by a killed
+/// writer keeps that answer until it is removed; the message says when removing it is safe.
+pub fn index_write_in_progress(repo: &Path) -> bool {
+    index_lock_path(repo).exists()
+}
+
+pub fn indexing_in_progress_message(repo: &Path) -> String {
+    format!(
+        "indexing in progress: {} is held by `ok index` or `ok watch`, and the index is not \
+         published until that run completes; retry when it finishes (remove the lock file only \
+         if no Open Kioku process is running, then run `ok index {}`)",
+        index_lock_path(repo).display(),
+        repo.display()
+    )
+}
+
+/// Exclusive writer lock for a repository's index, released on drop.
+///
+/// Held by `ok index` and by every `ok watch` write for the whole run, so two writers never
+/// interleave their component writes and readers can tell an index being built from one that
+/// does not exist.
+#[derive(Debug)]
+pub struct IndexWriteLock {
+    path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl IndexWriteLock {
+    /// How long a writer waits for another writer before giving up.
+    pub const DEFAULT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    pub fn acquire(repo: &Path, wait: std::time::Duration) -> Result<Self> {
+        let path = index_lock_path(repo);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let started_waiting = std::time::Instant::now();
+        let file = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => break file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if started_waiting.elapsed() > wait {
+                        return Err(OkError::Index(format!(
+                            "index is locked by another writer or a stale lock at {}; remove it \
+                             only if no ok index process is running",
+                            path.display()
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
+        Ok(Self { path, _file: file })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IndexWriteLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// The status object `ok --json status` and MCP `repo_status` return for a repository that
 /// has never been indexed, in place of the manifest an indexed repository returns. `indexed`
 /// is the field an agent should branch on; `next_step` is the command that changes it.
