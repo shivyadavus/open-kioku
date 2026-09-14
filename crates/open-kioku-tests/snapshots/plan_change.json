@@ -109,7 +109,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:0",
         "indexed_at": "<TIMESTAMP>",
         "message": "BM25 lexical match from local Tantivy index",
         "source": "open-kioku-search",
@@ -125,7 +125,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:1",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
         "source": "open-kioku-search",
@@ -141,7 +141,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:2",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `function` matched local index",
         "source": "open-kioku-search",
@@ -157,7 +157,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:3",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `function` matched indexed search",
         "source": "open-kioku-search",
@@ -173,7 +173,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:4",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `subtract OR function` matched local index",
         "source": "open-kioku-search",
@@ -189,7 +189,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:5",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `subtract function` matched indexed search",
         "source": "open-kioku-search",
@@ -205,7 +205,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:6",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `function OR next` matched local index",
         "source": "open-kioku-search",
@@ -221,7 +221,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:7",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `function next` matched indexed search",
         "source": "open-kioku-search",
@@ -237,7 +237,7 @@
           },
           "path": "src/main.rs"
         },
-        "id": "context:src/main.rs",
+        "id": "search:src/main.rs:1-7:8",
         "indexed_at": "<TIMESTAMP>",
         "message": "region extended to adjacent chunk (lines 1-4)",
         "source": "open-kioku-search",
@@ -253,7 +253,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:0",
         "indexed_at": "<TIMESTAMP>",
         "message": "BM25 lexical match from local Tantivy index",
         "source": "open-kioku-search",
@@ -269,7 +269,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:1",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `add OR subtract OR function OR next OR to OR add` matched local index",
         "source": "open-kioku-search",
@@ -285,7 +285,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:2",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `function` matched local index",
         "source": "open-kioku-search",
@@ -301,7 +301,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:3",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `function` matched indexed search",
         "source": "open-kioku-search",
@@ -317,7 +317,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:4",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `subtract OR function` matched local index",
         "source": "open-kioku-search",
@@ -333,7 +333,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:5",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `subtract function` matched indexed search",
         "source": "open-kioku-search",
@@ -349,7 +349,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:6",
         "indexed_at": "<TIMESTAMP>",
         "message": "query variant `function OR next` matched local index",
         "source": "open-kioku-search",
@@ -365,7 +365,7 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:7",
         "indexed_at": "<TIMESTAMP>",
         "message": "expanded task query `function next` matched indexed search",
         "source": "open-kioku-search",
@@ -381,56 +381,11 @@
           },
           "path": "src/routes.rs"
         },
-        "id": "context:src/routes.rs",
+        "id": "search:src/routes.rs:2-6:8",
         "indexed_at": "<TIMESTAMP>",
         "message": "region extended to adjacent chunk (lines 4-6)",
         "source": "open-kioku-search",
         "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": null,
-          "path": "src/main.rs"
-        },
-        "id": "impact:src/main.rs",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "impact report derived from indexed symbols and lexical references",
-        "source": "open-kioku-impact",
-        "source_type": "lexical",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 7,
-            "start": 5
-          },
-          "path": "src/main.rs"
-        },
-        "id": "f82ebf4d558f63f88efc0949304981df6d92a031e5298ffb821e51055ed515b2",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
-        "source": "open-kioku-relationships:complexity",
-        "source_type": "static_analysis",
-        "symbol_id": "<ID>"
-      },
-      {
-        "confidence": "medium",
-        "file_range": {
-          "line_range": {
-            "end": 3,
-            "start": 1
-          },
-          "path": "src/main.rs"
-        },
-        "id": "e1274f3589446986a25653a0d814cad8774c278e7ec7231d0b08ec9fdfbcfe61",
-        "indexed_at": "<TIMESTAMP>",
-        "message": "complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=0; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity",
-        "source": "open-kioku-relationships:complexity",
-        "source_type": "static_analysis",
         "symbol_id": "<ID>"
       },
       {

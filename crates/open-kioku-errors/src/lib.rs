@@ -22,6 +22,10 @@ pub enum OkError {
     PolicyDenied(String),
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+    /// The caller's own arguments are wrong: a CLI usage error (exit code 2) or a JSON-RPC
+    /// invalid-params error (-32602), never a configuration or repository problem.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -36,5 +40,10 @@ impl OkError {
             }
             _ => self.to_string(),
         }
+    }
+
+    /// Whether the failure is the caller's input rather than the tool's state.
+    pub fn is_invalid_input(&self) -> bool {
+        matches!(self, Self::InvalidInput(_))
     }
 }

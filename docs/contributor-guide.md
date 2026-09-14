@@ -61,6 +61,7 @@ Current fixture categories:
 | Fixture | Purpose |
 | --- | --- |
 | `rust-fixture` | Rust indexing, symbol lookup, search, bench lifecycle |
+| `rust-tests-fixture` | Rust test-target extraction: a constant, struct and helper beside an inline test module with `#[test]` and `#[rstest]` case stacks |
 | `typescript-fixture` | TypeScript parsing and search lifecycle |
 | `python-fixture` | Python parsing and search lifecycle |
 | `go-fixture` | Go parsing and search lifecycle |

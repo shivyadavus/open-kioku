@@ -420,12 +420,15 @@ impl<'a> PlanEngine<'a> {
             primary_context.is_empty(),
             &unmatched_anchors,
         );
-        let evidence = context
-            .evidence
-            .iter()
-            .chain(impact.evidence.iter())
-            .cloned()
-            .collect::<Vec<_>>();
+        // The context pack already carries its own impact evidence; the plan's impact report
+        // re-derives the same `impact:<path>` and bounded-search records.
+        let evidence = open_kioku_core::dedupe_evidence_by_id(
+            context
+                .evidence
+                .iter()
+                .chain(impact.evidence.iter())
+                .cloned(),
+        );
         let exact_reference_count = exact_reference_count(
             &context.retrieval_diagnostics,
             &primary_context,
@@ -1169,6 +1172,10 @@ fn is_docs_or_test_path(path: &str) -> bool {
         || open_kioku_core::is_test_path(path)
 }
 
+/// Distinct lexical impact paths, direct then indirect, a plan admits as caution files,
+/// matching the eight caution files a context pack names.
+const MAX_LEXICAL_CAUTION_FILES: usize = 8;
+
 fn change_boundary(
     primary_context: &[SearchResult],
     relevant_symbols: &[Symbol],
@@ -1183,15 +1190,30 @@ fn change_boundary(
         allowed.insert(path.clone());
     }
 
+    // Verify exempts caution files from the out-of-boundary check, so every caution path
+    // loosens the loop. Structural impacts are all admitted; lexical ones share one budget of
+    // top paths, direct impacts first, because grouping lets the impact report list 25 distinct
+    // lexical files and indirect impacts are weaker two-hop lexical hits. An edit to a lexical
+    // impact past the budget still needs expansion evidence.
     let mut caution = BTreeSet::new();
+    let mut lexical_paths = BTreeSet::new();
     for result in impact
         .direct_impacts
         .iter()
         .chain(impact.indirect_impacts.iter())
     {
-        if !allowed.contains(&result.path) {
-            caution.insert(result.path.clone());
+        if allowed.contains(&result.path) {
+            continue;
         }
+        if open_kioku_impact::is_lexical_impact_result(result) {
+            if lexical_paths.len() >= MAX_LEXICAL_CAUTION_FILES
+                && !lexical_paths.contains(&result.path)
+            {
+                continue;
+            }
+            lexical_paths.insert(result.path.clone());
+        }
+        caution.insert(result.path.clone());
     }
     for path in &context_boundary.caution_files {
         if !allowed.contains(path) {
@@ -3061,6 +3083,16 @@ mod tests {
             .evidence
             .iter()
             .any(|evidence| evidence.source_type == EvidenceSourceType::Runtime));
+        // The runtime signal's id names the runtime record only, never a lexical line that
+        // cites it.
+        let runtime_id = report.runtime_signals[0].id.clone();
+        let records = report
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.id.0 == runtime_id)
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].source_type, EvidenceSourceType::Runtime);
         assert!(report.primary_context.iter().any(|result| {
             result
                 .score_breakdown
@@ -3109,6 +3141,79 @@ mod tests {
         assert!(rendered.contains("Run:"));
         let markdown = PreflightFormat::Markdown.render(&preflight).unwrap();
         assert!(markdown.contains("# Preflight: token"));
+    }
+
+    #[test]
+    fn caution_admits_structural_impacts_and_only_the_top_lexical_paths() {
+        let primary = test_search_result("src/auth.rs");
+        let mut direct_impacts = (0..12)
+            .map(|rank| test_search_result(&format!("src/lexical_{rank}.rs")))
+            .collect::<Vec<_>>();
+        let mut exact = test_search_result("src/caller.rs");
+        exact.match_reason = "exact symbol reference via SCIP".into();
+        direct_impacts.push(exact);
+        let impact_with = |direct_impacts: Vec<SearchResult>, indirect: &[&str]| ImpactReport {
+            proven_impact: Vec::new(),
+            possible_impact: Vec::new(),
+            target: "src/auth.rs".into(),
+            direct_impacts,
+            indirect_impacts: indirect
+                .iter()
+                .map(|path| test_search_result(path))
+                .collect(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let impact = impact_with(direct_impacts, &["src/indirect_0.rs"]);
+
+        let boundary = change_boundary(
+            std::slice::from_ref(&primary),
+            &[],
+            &impact,
+            &ChangeBoundary::default(),
+        );
+
+        assert_eq!(boundary.caution_files.len(), MAX_LEXICAL_CAUTION_FILES + 1);
+        assert!(!boundary
+            .caution_files
+            .contains(&PathBuf::from("src/indirect_0.rs")));
+        assert!(boundary
+            .caution_files
+            .contains(&PathBuf::from("src/caller.rs")));
+        assert!(boundary
+            .caution_files
+            .contains(&PathBuf::from("src/lexical_7.rs")));
+        assert!(!boundary
+            .caution_files
+            .contains(&PathBuf::from("src/lexical_8.rs")));
+
+        // Three direct lexical paths leave five of the eight for indirect lexical impacts.
+        let direct_impacts = (0..3)
+            .map(|rank| test_search_result(&format!("src/lexical_{rank}.rs")))
+            .collect::<Vec<_>>();
+        let indirect = (0..7)
+            .map(|rank| format!("src/indirect_{rank}.rs"))
+            .collect::<Vec<_>>();
+        let indirect = indirect.iter().map(String::as_str).collect::<Vec<_>>();
+        let boundary = change_boundary(
+            &[primary],
+            &[],
+            &impact_with(direct_impacts, &indirect),
+            &ChangeBoundary::default(),
+        );
+        assert_eq!(boundary.caution_files.len(), MAX_LEXICAL_CAUTION_FILES);
+        assert!(boundary
+            .caution_files
+            .contains(&PathBuf::from("src/indirect_4.rs")));
+        assert!(!boundary
+            .caution_files
+            .contains(&PathBuf::from("src/indirect_5.rs")));
     }
 
     #[test]

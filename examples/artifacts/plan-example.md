@@ -1,11 +1,11 @@
 # Plan: token
 
-Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation candidate(s), 0 history signal(s), 0 repo memory fact(s); risk is medium.
+Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation candidate(s), 0 history signal(s), 0 repo memory fact(s); risk is medium.
 
 ## Risk
 
 - Level: `medium`
-- Score: `0.36`
+- Score: `0.26`
 - 3 complexity/hot-path risk signal(s) touch this file
 - Evidence quality caveat: exact symbol/reference evidence is unavailable
 - Evidence quality caveat: runtime evidence is unavailable
@@ -14,7 +14,7 @@ Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation cand
 
 ### Score Signals
 
-- `plan_risk_score` contribution `0.360`: plan risk is `medium` from merged context and impact risk
+- `plan_risk_score` contribution `0.260`: plan risk is `medium` from merged context and impact risk
 
 ## Confidence
 
@@ -67,36 +67,32 @@ Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation cand
 
 ### Section References
 
-- `boundary`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+- `boundary`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 - `history`: `none`
-- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
+- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
 - `negative_evidence`: `negative:exact_references:token-no-explicit-exact-symbol-reference-or-scip, negative:history:token-no-churn-ownership-similar-change-reviewer-or, negative:runtime:token-no-runtime-trace-incident-or-error-artifact`
-- `primary_context`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
-- `validation`: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, 9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, ae205155363199d68c9b593ef5680df439ba9213c0536a84d77f326fd6fdbcfd, aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+- `primary_context`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+- `validation`: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 ### Evidence Items
 
-- `context:src/auth.rs` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
-- `context:src/auth.rs` `open-kioku-search` (Lexical): query variant `token` matched local index
-- `context:src/auth.rs` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 12-16)
-- `context:src/auth.rs` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 3-6)
-- `context:src/auth.rs` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 17-23)
-- `context:src/lib.rs` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
-- `context:src/lib.rs` `open-kioku-search` (Lexical): query variant `token` matched local index
-- `context:src/lib.rs` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 3-6)
-- `context:src/lib.rs` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 1-2)
-- `context:ok.toml` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
-- `context:ok.toml` `open-kioku-search` (Lexical): query variant `token` matched local index
-- `context:ok.toml` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 1-80)
-- `context:tests/auth_flow.rs` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
-- `context:tests/auth_flow.rs` `open-kioku-search` (Lexical): query variant `token` matched local index
-- `context:README.md` `open-kioku-search` (Lexical): document section `Open Kioku Demo: expired sessions` matched task vocabulary
-- `context:README.md` `open-kioku-search` (Lexical): document heading path: Open Kioku Demo: expired sessions
-- `context:README.md` `open-kioku-search` (Lexical): document content hash: 7768b68a12afc15f06ae744a8777f5f5de0a0f7c4de39c1a9e9e3a0ddd8cdedf
-- `impact:src/auth.rs` `open-kioku-impact` (Lexical): impact report derived from indexed symbols and lexical references
-- `797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c` `open-kioku-relationships:complexity` (StaticAnalysis): complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=1; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity
-- `abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2` `open-kioku-relationships:complexity` (StaticAnalysis): complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=1; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity
-- `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71` `open-kioku-relationships:complexity` (StaticAnalysis): complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=1; max_access_depth=1; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity
+- `search:src/auth.rs:3-23:0` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
+- `search:src/auth.rs:3-23:1` `open-kioku-search` (Lexical): query variant `token` matched local index
+- `search:src/auth.rs:3-23:2` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 12-16)
+- `search:src/auth.rs:3-23:3` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 3-6)
+- `search:src/auth.rs:3-23:4` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 17-23)
+- `search:src/lib.rs:1-12:0` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
+- `search:src/lib.rs:1-12:1` `open-kioku-search` (Lexical): query variant `token` matched local index
+- `search:src/lib.rs:1-12:2` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 3-6)
+- `search:src/lib.rs:1-12:3` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 1-2)
+- `search:ok.toml:1-147:0` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
+- `search:ok.toml:1-147:1` `open-kioku-search` (Lexical): query variant `token` matched local index
+- `search:ok.toml:1-147:2` `open-kioku-search` (Lexical): region extended to adjacent chunk (lines 1-80)
+- `search:tests/auth_flow.rs:4-7:0` `open-kioku-search` (Lexical): BM25 lexical match from local Tantivy index
+- `search:tests/auth_flow.rs:4-7:1` `open-kioku-search` (Lexical): query variant `token` matched local index
+- `search:README.md:1-3:0` `open-kioku-search` (Lexical): document section `Open Kioku Demo: expired sessions` matched task vocabulary
+- `search:README.md:1-3:1` `open-kioku-search` (Lexical): document heading path: Open Kioku Demo: expired sessions
+- `search:README.md:1-3:2` `open-kioku-search` (Lexical): document content hash: 7768b68a12afc15f06ae744a8777f5f5de0a0f7c4de39c1a9e9e3a0ddd8cdedf
 - `impact:src/auth.rs` `open-kioku-impact` (Lexical): impact report derived from indexed symbols and lexical references
 - `797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c` `open-kioku-relationships:complexity` (StaticAnalysis): complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=2; max_access_depth=1; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity
 - `abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2` `open-kioku-relationships:complexity` (StaticAnalysis): complexity_risk=low; cyclomatic=1; cognitive=1; loop_count=0; max_loop_depth=0; transitive_loop_depth=0; recursive=false; linear_scan_in_loop=false; allocation_in_loop=false; recursion_in_loop=false; unguarded_recursion=false; parameter_count=0; max_access_depth=1; blocking_network_db_call_count=0; caveat=risk signal, not proof of complexity
@@ -106,7 +102,7 @@ Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation cand
 
 - `src/auth.rs`:3-23: pub fn issue_token(context: &RequestContext, ttl_seconds: u64) -> String { format!("token:{}:{}", context.user_id, ttl_seconds) } pub fn validate_token(token: &str) -> bool { token.starts_with("token:") } #[cfg(test)] mod tests { use super::*; use crate::RequestContext; #[test] fn issues_token_with_user_id() { let context = RequestContext { user_id: "demo-user".into(), }; assert!(issue_token(&context, 60).contains("demo-user")); } }
   - score: `0.136`; signals: `bm25_relevance` +3.173, `query_variant_boost` +1.000, `retrieval_rrf:lexical` +0.091
-  - evidence: `search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10, region:adjacent-unit:12-16, region:adjacent-unit:3-6, region:adjacent-unit:17-23`
+  - evidence: `search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10, region:adjacent-unit:12-16, region:adjacent-unit:3-6, region:adjacent-unit:17-23`
 - `src/lib.rs`:1-12: pub mod auth; pub struct RequestContext { pub user_id: String, } pub fn handle_login(user_id: &str) -> String { let context = RequestContext { user_id: user_id.to_string(), }; auth::issue_token(&context, 3600) }
   - score: `0.077`; signals: `bm25_relevance` +0.988, `retrieval_rrf:lexical` +0.077, `score_reconciliation` -0.988
   - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, region:adjacent-unit:3-6, region:adjacent-unit:1-2`
@@ -130,16 +126,10 @@ Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation cand
 
 - `src/lib.rs`:7-12: pub fn handle_login(user_id: &str) -> String {
   - score: `7.886`; signals: `bm25_relevance` +7.836, `query_variant_boost` +0.050
-  - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1`
+  - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1`
 - `tests/auth_flow.rs`:4-7: assert!(auth::validate_token(&token));
   - score: `5.362`; signals: `bm25_relevance` +5.312, `query_variant_boost` +0.050
   - evidence: `search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
-- `src/lib.rs`:3-6: pub struct RequestContext {
-  - score: `4.634`; signals: `bm25_relevance` +4.584, `query_variant_boost` +0.050
-  - evidence: `search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1`
-- `src/lib.rs`:1-2: pub mod auth;
-  - score: `2.525`; signals: `bm25_relevance` +1.525, `query_variant_boost` +1.000
-  - evidence: `search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1`
 - `ok.toml`:81-147: [ranking]
   - score: `0.702`; signals: `bm25_relevance` +0.652, `query_variant_boost` +0.050
   - evidence: `search:ok.toml:81-147:0, search:ok.toml:81-147:1`
@@ -150,11 +140,8 @@ Found 5 primary context item(s), 5 direct impact candidate(s), 5 validation cand
 
 ## Validation Candidates
 
-- `issue_token` via `cargo test`; signals: `test_selection_score` +0.600, `indexed_test_confidence` +0.600, `command_availability` +0.050; evidence: `9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1`
+- `login_returns_valid_token` via `cargo test`; signals: `test_selection_score` +0.850, `indexed_test_confidence` +0.850, `command_availability` +0.050; evidence: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76`
 - `issues_token_with_user_id` via `cargo test`; signals: `test_selection_score` +0.600, `indexed_test_confidence` +0.600, `command_availability` +0.050; evidence: `cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
-- `login_returns_valid_token` via `cargo test`; signals: `test_selection_score` +0.600, `indexed_test_confidence` +0.600, `command_availability` +0.050; evidence: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76`
-- `tests` via `cargo test`; signals: `test_selection_score` +0.600, `indexed_test_confidence` +0.600, `command_availability` +0.050; evidence: `ae205155363199d68c9b593ef5680df439ba9213c0536a84d77f326fd6fdbcfd`
-- `validate_token` via `cargo test`; signals: `test_selection_score` +0.600, `indexed_test_confidence` +0.600, `command_availability` +0.050; evidence: `aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58`
 
 ## Repo Memory
 
@@ -171,7 +158,7 @@ Allowed files:
   - evidence: `region:adjacent-unit:1-80, search:ok.toml:81-147:0, search:ok.toml:81-147:1`
 - `src/auth.rs`
   - reason: primary context matched the requested edit intent
-  - evidence: `region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+  - evidence: `region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
   - symbols: `src::auth::validate_token`
 - `src/lib.rs`
   - reason: primary context matched the requested edit intent
@@ -225,14 +212,14 @@ Forbidden patterns:
 
 Boundary expansion:
 - Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.
-  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 Signal hooks:
 - architecture: `ok architecture summary, ok architecture violations, ok architecture policy check`
 - ownership: `CODEOWNERS, git_history`
 - co-change: `similar_change_overlap, historical_prs`
 
-Boundary evidence: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:9f8fd72a3efef98669b10543eb7c7fa7a75584a4c3d16a705c7616ea05306fd1, test:aeb43ec5523f20785b5dde21a67defb7d9c9416205bcf3a941778e0b2c88cb58, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+Boundary evidence: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 ## Recommended Next Steps
 

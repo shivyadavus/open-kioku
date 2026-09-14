@@ -161,14 +161,90 @@ pub fn negative_evidence_signal_count(items: &[NegativeEvidence]) -> usize {
     items.iter().filter(|item| item.lowers_confidence()).count()
 }
 
-/// Distinct evidence records in a pack or plan. `evidence` carries one entry per evidence
-/// line of each result, so its length grows with matched query variants, not with evidence.
+/// Distinct evidence facts in a pack or plan. Records count once per id, except that the
+/// per-line retrieval records of one result, `search:<path>:<range>:<index>`, count once for
+/// their path and range: each line restates the same match under another query variant, so
+/// counting them would grow density with query variants, not with evidence.
 pub fn distinct_evidence_count(evidence: &[Evidence]) -> usize {
     evidence
         .iter()
-        .map(|item| &item.id)
+        .map(|item| evidence_fact_key(item.id.0.as_str()))
         .collect::<BTreeSet<_>>()
         .len()
+}
+
+fn evidence_fact_key(id: &str) -> &str {
+    if !id.starts_with("search:") {
+        return id;
+    }
+    match id.rsplit_once(':') {
+        Some((fact, index)) if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) => {
+            fact
+        }
+        _ => id,
+    }
+}
+
+#[cfg(test)]
+mod evidence_count_tests {
+    use super::*;
+
+    fn record(id: &str) -> Evidence {
+        Evidence {
+            id: EvidenceId::new(id),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restated_retrieval_lines_of_one_result_count_as_one_fact() {
+        // One primary file whose BM25, query-variant and region lines are all the same match.
+        let evidence = vec![
+            record("search:src/auth.rs:1-4:0"),
+            record("search:src/auth.rs:1-4:1"),
+            record("search:src/auth.rs:1-4:2"),
+        ];
+        let evidence_count = distinct_evidence_count(&evidence);
+        assert_eq!(evidence_count, 1);
+
+        let breakdown = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            primary_file_count: 1,
+            evidence_count,
+            task_relevance: 1.0,
+            ..Default::default()
+        });
+        assert!(
+            breakdown
+                .caveats
+                .iter()
+                .any(|caveat| caveat == "evidence density is thin"),
+            "{:?}",
+            breakdown.caveats
+        );
+    }
+
+    #[test]
+    fn distinct_ranges_files_and_producers_stay_separate_facts() {
+        let evidence = vec![
+            record("search:src/auth.rs:1-4:0"),
+            record("search:src/auth.rs:9-12:0"),
+            record("search:src/lib.rs:1-4:0"),
+            record("impact:src/auth.rs"),
+            record("history-churn:src/auth.rs"),
+        ];
+        assert_eq!(distinct_evidence_count(&evidence), 5);
+    }
+}
+
+/// `evidence` with repeated ids removed, keeping the first record for each id and the order
+/// the producers emitted them. Every point that merges evidence from several producers
+/// passes through this, so an `evidence_refs` id names one record rather than several.
+pub fn dedupe_evidence_by_id(evidence: impl IntoIterator<Item = Evidence>) -> Vec<Evidence> {
+    let mut seen = BTreeSet::new();
+    evidence
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect()
 }
 
 const DEFAULT_EVIDENCE_FRESHNESS_MAX_AGE_DAYS: i64 = 7;

@@ -15,5 +15,13 @@ async fn main() -> anyhow::Result<()> {
     let result = open_kioku_cli::run_cli().await;
     #[cfg(feature = "mem-profile")]
     open_kioku_cli::mem_profile::report();
+    if let Err(err) = &result {
+        // Caller-input errors exit like clap usage errors (2), distinct from the runtime
+        // failures anyhow reports with 1, so scripts can tell a bad invocation from a bad repo.
+        if open_kioku_cli::is_invalid_input_error(err) {
+            eprintln!("Error: {err:#}");
+            std::process::exit(2);
+        }
+    }
     result
 }

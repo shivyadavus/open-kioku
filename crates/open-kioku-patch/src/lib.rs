@@ -12,8 +12,8 @@ use open_kioku_contract::{
 use open_kioku_core::{
     AnalysisFact, BoundaryExpansionRequirement, BoundaryForbiddenRule, ChangeBoundary, Confidence,
     ConfidenceBreakdown, EvidenceQuality, EvidenceSourceType, FileId, GraphEdge, GraphEdgeType,
-    GraphNode, ImpactReport, PatchId, PatchPlan, PlanReport, RiskReport, SearchResult, SymbolKind,
-    TestTarget,
+    GraphNode, ImpactReport, LineRange, PatchId, PatchPlan, PlanReport, RiskReport, SearchResult,
+    Symbol, SymbolKind, TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_impact::ImpactEngine;
@@ -86,6 +86,11 @@ pub struct VerifyChangeInput {
     pub changed_files: Vec<PathBuf>,
     #[serde(default)]
     pub unified_diff: Option<String>,
+    /// Post-edit line ranges per changed path. The `@@` hunk headers of `unified_diff` are
+    /// added to these; a caller without a diff may supply them directly. A path with no
+    /// ranges is verified at file granularity and the report says so.
+    #[serde(default)]
+    pub changed_ranges: BTreeMap<PathBuf, Vec<LineRange>>,
     #[serde(default)]
     pub evidence_refs: Vec<String>,
     #[serde(default)]
@@ -111,6 +116,11 @@ pub struct ChangeVerificationReport {
     pub verdict: VerificationVerdict,
     pub changed_files: Vec<PathBuf>,
     pub changed_symbols: Vec<String>,
+    /// Hunks (`<path>:<start>-<end>`, post-edit lines) that no indexed symbol range covers:
+    /// file-level code, comments, or files the index does not hold. Reported rather than
+    /// dropped so a change outside every symbol stays visible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_regions_without_symbol: Vec<String>,
     #[serde(default)]
     pub traceability: Vec<VerificationTrace>,
     pub boundary_violations: Vec<VerificationFinding>,
@@ -268,10 +278,11 @@ impl<'a> ChangeVerifier<'a> {
     ) -> Result<ChangeVerificationReport> {
         let changed_files = changed_files_from_input(&input);
         if changed_files.is_empty() {
-            return Err(OkError::Config(
+            return Err(OkError::InvalidInput(
                 "verify requires at least one changed file or a non-empty unified diff".into(),
             ));
         }
+        let changed_regions = changed_regions_from_input(&input);
 
         let mut boundary_violations =
             boundary_violations(plan, &changed_files, &input.evidence_refs);
@@ -283,7 +294,11 @@ impl<'a> ChangeVerifier<'a> {
             &evidence_quality,
             input.traceability_strict,
         ));
-        let changed_symbols = changed_symbols(self.store, &changed_files)?;
+        let ChangedSymbols {
+            symbols: changed_symbols,
+            regions_without_symbol: changed_regions_without_symbol,
+            granularity_warnings,
+        } = changed_symbols(self.store, &changed_files, &changed_regions)?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
         let missing_tests = missing_tests(plan, &recommended_tests);
         let changed_impact = changed_impact(self.store, self.search_index, plan, &changed_files)?;
@@ -322,9 +337,16 @@ impl<'a> ChangeVerifier<'a> {
         warnings.extend(runtime_warnings(self.store, &changed_files)?);
         let traceability = verification_traceability(plan, &input);
 
+        // A granularity warning describes how precisely the report could attribute the
+        // change, not the change itself, so it is reported without moving the verdict.
+        let verdict_warnings = warnings
+            .iter()
+            .any(|warning| warning.kind != SYMBOL_GRANULARITY_WARNING);
+        warnings.extend(granularity_warnings);
+
         let verdict = if !boundary_violations.is_empty() || !command_failures.is_empty() {
             VerificationVerdict::Fail
-        } else if !warnings.is_empty() || !missing_tests.is_empty() || !changed_impact.is_empty() {
+        } else if verdict_warnings || !missing_tests.is_empty() || !changed_impact.is_empty() {
             VerificationVerdict::Warn
         } else {
             VerificationVerdict::Pass
@@ -337,6 +359,7 @@ impl<'a> ChangeVerifier<'a> {
             verdict,
             changed_files,
             changed_symbols,
+            changed_regions_without_symbol,
             traceability,
             boundary_violations: all_boundary_violations,
             warnings,
@@ -2237,12 +2260,90 @@ pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
     paths.into_iter().collect()
 }
 
+/// One `@@` hunk of a unified diff. `new` is the post-edit range; `old` is the pre-edit
+/// range when the hunk came from a diff, which is what an index built before the edit
+/// still describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangedRegion {
+    new: Option<LineRange>,
+    old: Option<LineRange>,
+}
+
+/// The pre-edit and post-edit line ranges of one diff hunk, in that order; a side that holds
+/// no lines is `None`.
+pub type HunkRanges = (Option<LineRange>, Option<LineRange>);
+
+/// Hunk ranges per path from the `@@ -a,b +c,d @@` headers of a unified diff, in file order.
+/// A pure deletion (`+c,0`) is reported at line `c`, the line after which text was removed.
+pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<HunkRanges>> {
+    let mut hunks = BTreeMap::<PathBuf, Vec<HunkRanges>>::new();
+    let mut current: Option<PathBuf> = None;
+    let mut pending_old: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let parts = rest.split_whitespace().collect::<Vec<_>>();
+            current = parts
+                .get(1)
+                .and_then(|part| part.strip_prefix("b/"))
+                .map(PathBuf::from);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            pending_old = diff_path(path);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
+                current = Some(PathBuf::from(path));
+            }
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("@@ ") {
+            let (Some(path), Some((old, new))) = (current.as_ref(), parse_hunk_header(header))
+            else {
+                continue;
+            };
+            if old.is_some() || new.is_some() {
+                hunks.entry(path.clone()).or_default().push((old, new));
+            }
+        }
+    }
+    hunks
+}
+
+/// `-a,b +c,d` (a `,count` of 1 may be omitted) into `(old, new)` line ranges.
+fn parse_hunk_header(header: &str) -> Option<HunkRanges> {
+    let mut parts = header.split_whitespace();
+    let old = parts.next()?.strip_prefix('-')?;
+    let new = parts.next()?.strip_prefix('+')?;
+    Some((hunk_side_range(old)?, hunk_side_range(new)?))
+}
+
+/// One side of a hunk header. `None` when the side does not parse; `Some(None)` when it holds
+/// no lines (`+42,0` for a pure deletion, `-41,0` for a pure insertion), whose start is only an
+/// anchor and must not be read as a changed line of the neighbouring symbol.
+fn hunk_side_range(side: &str) -> Option<Option<LineRange>> {
+    let (start, count) = match side.split_once(',') {
+        Some((start, count)) => (start.parse::<u32>().ok()?, count.parse::<u32>().ok()?),
+        None => (side.parse::<u32>().ok()?, 1),
+    };
+    if count == 0 {
+        return Some(None);
+    }
+    let start = start.max(1);
+    Some(Some(LineRange {
+        start,
+        end: start.saturating_add(count - 1),
+    }))
+}
+
 fn changed_files_from_input(input: &VerifyChangeInput) -> Vec<PathBuf> {
     let mut paths = input
         .changed_files
         .iter()
         .map(|path| normalize_path(path))
         .collect::<BTreeSet<_>>();
+    paths.extend(input.changed_ranges.keys().map(|path| normalize_path(path)));
     if let Some(diff) = &input.unified_diff {
         paths.extend(
             changed_files_from_unified_diff(diff)
@@ -2251,6 +2352,32 @@ fn changed_files_from_input(input: &VerifyChangeInput) -> Vec<PathBuf> {
         );
     }
     paths.into_iter().map(PathBuf::from).collect()
+}
+
+fn changed_regions_from_input(input: &VerifyChangeInput) -> BTreeMap<PathBuf, Vec<ChangedRegion>> {
+    let mut regions = BTreeMap::<PathBuf, Vec<ChangedRegion>>::new();
+    for (path, ranges) in &input.changed_ranges {
+        regions
+            .entry(PathBuf::from(normalize_path(path)))
+            .or_default()
+            .extend(ranges.iter().map(|range| ChangedRegion {
+                new: Some(range.clone()),
+                old: None,
+            }));
+    }
+    if let Some(diff) = &input.unified_diff {
+        for (path, hunks) in changed_hunks_from_unified_diff(diff) {
+            regions
+                .entry(PathBuf::from(normalize_path(&path)))
+                .or_default()
+                .extend(
+                    hunks
+                        .into_iter()
+                        .map(|(old, new)| ChangedRegion { new, old }),
+                );
+        }
+    }
+    regions
 }
 
 fn diff_path(raw: &str) -> Option<String> {
@@ -2632,16 +2759,123 @@ fn push_evidence_ref(refs: &mut BTreeSet<String>, value: &str) {
     }
 }
 
-fn changed_symbols(store: &dyn MetadataStore, changed_files: &[PathBuf]) -> Result<Vec<String>> {
+/// Warning kind for a path whose changed symbols could only be attributed at file level.
+pub const SYMBOL_GRANULARITY_WARNING: &str = "symbol_granularity";
+
+struct ChangedSymbols {
+    symbols: Vec<String>,
+    regions_without_symbol: Vec<String>,
+    granularity_warnings: Vec<VerificationFinding>,
+}
+
+/// Symbols whose indexed ranges overlap a changed region, innermost per region so a module
+/// or class symbol cannot stand in for the whole file. A path with no regions falls back to
+/// every symbol in the file and says so; a region no symbol covers is reported, not dropped.
+fn changed_symbols(
+    store: &dyn MetadataStore,
+    changed_files: &[PathBuf],
+    changed_regions: &BTreeMap<PathBuf, Vec<ChangedRegion>>,
+) -> Result<ChangedSymbols> {
     let mut symbols = BTreeSet::new();
+    let mut regions_without_symbol = Vec::new();
+    let mut granularity_warnings = Vec::new();
     for path in changed_files {
-        if let Some(file) = store.get_file_by_path(path)? {
-            for symbol in store.symbols_for_file(&file.id)? {
-                symbols.insert(symbol.qualified_name);
+        let regions = changed_regions
+            .get(path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let file_symbols = match store.get_file_by_path(path)? {
+            Some(file) => store.symbols_for_file(&file.id)?,
+            None => Vec::new(),
+        };
+        let ranged = file_symbols.iter().any(|symbol| symbol.range.is_some());
+        if regions.is_empty() || !ranged {
+            if !file_symbols.is_empty() {
+                let reason = if regions.is_empty() {
+                    "no diff was supplied for this path, so changed_symbols lists every symbol in the file"
+                } else {
+                    "indexed symbols for this path carry no line ranges, so changed_symbols lists every symbol in the file"
+                };
+                granularity_warnings.push(VerificationFinding {
+                    path: Some(path.clone()),
+                    kind: SYMBOL_GRANULARITY_WARNING.into(),
+                    reason: reason.into(),
+                    evidence_refs: Vec::new(),
+                });
             }
+            if file_symbols.is_empty() {
+                regions_without_symbol
+                    .extend(regions.iter().map(|region| region_label(path, region)));
+            }
+            symbols.extend(file_symbols.into_iter().map(|symbol| symbol.qualified_name));
+            continue;
+        }
+        for region in regions {
+            let overlapping = file_symbols
+                .iter()
+                .filter(|symbol| symbol_overlaps_region(symbol, region))
+                .collect::<Vec<_>>();
+            let innermost = overlapping
+                .iter()
+                .filter(|symbol| {
+                    !overlapping
+                        .iter()
+                        .any(|other| other.id != symbol.id && symbol_contains(symbol, other))
+                })
+                .map(|symbol| symbol.qualified_name.clone())
+                .collect::<Vec<_>>();
+            if innermost.is_empty() {
+                regions_without_symbol.push(region_label(path, region));
+            }
+            symbols.extend(innermost);
         }
     }
-    Ok(symbols.into_iter().collect())
+    Ok(ChangedSymbols {
+        symbols: symbols.into_iter().collect(),
+        regions_without_symbol,
+        granularity_warnings,
+    })
+}
+
+fn region_label(path: &Path, region: &ChangedRegion) -> String {
+    match (&region.new, &region.old) {
+        (Some(new), _) => format!("{}:{}-{}", path.display(), new.start, new.end),
+        (None, Some(old)) => format!(
+            "{}:{}-{} (removed; pre-edit lines)",
+            path.display(),
+            old.start,
+            old.end
+        ),
+        (None, None) => path.display().to_string(),
+    }
+}
+
+fn ranges_overlap(left: &LineRange, right: &LineRange) -> bool {
+    left.start <= right.end && right.start <= left.end
+}
+
+fn symbol_overlaps_region(symbol: &Symbol, region: &ChangedRegion) -> bool {
+    let Some(range) = &symbol.range else {
+        return false;
+    };
+    region
+        .new
+        .as_ref()
+        .is_some_and(|new| ranges_overlap(range, new))
+        || region
+            .old
+            .as_ref()
+            .is_some_and(|old| ranges_overlap(range, old))
+}
+
+/// Whether `outer` strictly encloses `inner`, so that `inner` is the more precise attribution.
+fn symbol_contains(outer: &Symbol, inner: &Symbol) -> bool {
+    match (&outer.range, &inner.range) {
+        (Some(outer), Some(inner)) => {
+            outer.start <= inner.start && inner.end <= outer.end && outer != inner
+        }
+        _ => false,
+    }
 }
 
 fn recommended_tests(store: &dyn OkStore, changed_files: &[PathBuf]) -> Result<Vec<TestTarget>> {
@@ -3215,6 +3449,297 @@ mod tests {
         assert_eq!(warnings[0].kind, "runtime_validation_required");
         assert!(warnings[0].reason.contains("run targeted validation"));
         assert_eq!(warnings[0].evidence_refs, vec!["runtime-aggregate"]);
+    }
+
+    fn handler_symbol(name: &str, kind: SymbolKind, start: u32, end: u32) -> Symbol {
+        Symbol {
+            id: SymbolId::new(format!("symbol-{name}")),
+            name: name.into(),
+            qualified_name: format!("handler::{name}"),
+            kind,
+            file_id: FileId::new("handler"),
+            range: Some(LineRange { start, end }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        }
+    }
+
+    fn store_with_handler_symbols() -> RuntimeStore {
+        let mut store = RuntimeStore::new().without_runtime();
+        store.symbols = vec![
+            handler_symbol("handler", SymbolKind::Module, 1, 40),
+            handler_symbol("checkout", SymbolKind::Function, 5, 12),
+            handler_symbol("refund", SymbolKind::Function, 14, 20),
+        ];
+        store
+    }
+
+    fn verify_handler(store: &RuntimeStore, input: VerifyChangeInput) -> ChangeVerificationReport {
+        ChangeVerifier::new(store)
+            .verify(Path::new("."), &plan_with_boundary_evidence(), input)
+            .unwrap()
+    }
+
+    #[test]
+    fn parses_hunk_headers_with_and_without_counts() {
+        let diff = "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -6 +6 @@ fn checkout() {\n-old\n+new\n@@ -41,0 +42,3 @@\n+// a\n";
+        let hunks = changed_hunks_from_unified_diff(diff);
+        assert_eq!(
+            hunks.get(Path::new("src/handler.rs")).unwrap(),
+            &vec![
+                (
+                    Some(LineRange { start: 6, end: 6 }),
+                    Some(LineRange { start: 6, end: 6 })
+                ),
+                (None, Some(LineRange { start: 42, end: 44 })),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_hunk_diff_reports_only_the_innermost_overlapping_symbol() {
+        let store = store_with_handler_symbols();
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -6 +6 @@\n-    old();\n+    new();\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            report.changed_symbols,
+            vec!["handler::checkout".to_string()]
+        );
+        assert!(report.changed_regions_without_symbol.is_empty());
+        assert!(!report
+            .warnings
+            .iter()
+            .any(|warning| warning.kind == SYMBOL_GRANULARITY_WARNING));
+    }
+
+    #[test]
+    fn hunk_outside_every_symbol_is_reported_as_a_region_not_dropped() {
+        let store = store_with_handler_symbols();
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -41,0 +42 @@\n+// trailing comment\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            report.changed_symbols.is_empty(),
+            "{:?}",
+            report.changed_symbols
+        );
+        assert_eq!(
+            report.changed_regions_without_symbol,
+            vec!["src/handler.rs:42-42".to_string()]
+        );
+    }
+
+    #[test]
+    fn changed_files_without_a_diff_fall_back_to_file_granularity_with_a_warning() {
+        let store = store_with_handler_symbols();
+        let with_diff_verdict = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -6 +6 @@\n-a\n+b\n".into(),
+                ),
+                ..Default::default()
+            },
+        )
+        .verdict;
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                changed_files: vec![PathBuf::from("src/handler.rs")],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(report.changed_symbols.len(), 3);
+        let granularity = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.kind == SYMBOL_GRANULARITY_WARNING)
+            .collect::<Vec<_>>();
+        assert_eq!(granularity.len(), 1);
+        assert_eq!(
+            granularity[0].path.as_deref(),
+            Some(Path::new("src/handler.rs"))
+        );
+        // The warning states how precisely the change was attributed; it does not move the verdict.
+        assert_eq!(report.verdict, with_diff_verdict);
+    }
+
+    #[test]
+    fn a_hunk_count_past_the_last_line_number_saturates() {
+        assert_eq!(
+            hunk_side_range("10,4294967295"),
+            Some(Some(LineRange {
+                start: 10,
+                end: u32::MAX
+            }))
+        );
+        assert_eq!(hunk_side_range("10,0"), Some(None));
+        assert_eq!(hunk_side_range("ten,1"), None);
+    }
+
+    #[test]
+    fn pure_insertion_after_a_symbol_is_not_attributed_to_it() {
+        let store = store_with_handler_symbols();
+        // `-40,0`: the module ends exactly at the anchor line; nothing of it changed.
+        let report = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -40,0 +41,5 @@\n+fn appended() {}\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            report.changed_symbols.is_empty(),
+            "{:?}",
+            report.changed_symbols
+        );
+        assert_eq!(
+            report.changed_regions_without_symbol,
+            vec!["src/handler.rs:41-45".to_string()]
+        );
+    }
+
+    #[test]
+    fn pure_deletion_is_attributed_by_its_removed_lines_only() {
+        let store = store_with_handler_symbols();
+        // `-13,1 +12,0`: the removed line sat between `checkout` (5-12) and `refund` (14-20),
+        // inside the module; `checkout` ends at the new-side anchor and did not change.
+        let inside = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -13,1 +12,0 @@\n-// gap\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(inside.changed_symbols, vec!["handler::handler".to_string()]);
+
+        let past_every_symbol = verify_handler(
+            &store,
+            VerifyChangeInput {
+                unified_diff: Some(
+                    "diff --git a/src/handler.rs b/src/handler.rs\n--- a/src/handler.rs\n+++ b/src/handler.rs\n@@ -41,2 +40,0 @@\n-// a\n-// b\n".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(past_every_symbol.changed_symbols.is_empty());
+        assert_eq!(
+            past_every_symbol.changed_regions_without_symbol,
+            vec!["src/handler.rs:41-42 (removed; pre-edit lines)".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_low_ranked_lexical_impact_is_outside_the_boundary() {
+        let store = RuntimeStore::new().without_runtime();
+        let hit = |path: &str, score: f32, match_reason: &str| SearchResult {
+            path: PathBuf::from(path),
+            line_range: Some(LineRange { start: 1, end: 3 }),
+            snippet: "fn handler() {}".into(),
+            symbol: None,
+            score,
+            match_reason: match_reason.into(),
+            evidence: vec![format!("{match_reason} in {path}")],
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+        };
+        let mut supporting_files = (0..10)
+            .map(|rank| {
+                hit(
+                    &format!("src/lexical_{rank}.rs"),
+                    1.0 - rank as f32 * 0.05,
+                    "tantivy hybrid lexical match",
+                )
+            })
+            .collect::<Vec<_>>();
+        supporting_files.push(hit("src/caller.rs", 0.1, "exact symbol reference via SCIP"));
+        // Bounded-search evidence makes the plan reuse these supporting files as its impact.
+        let context = open_kioku_core::ContextPack {
+            task: "change handler".into(),
+            primary_files: vec![hit("src/handler.rs", 2.0, "tantivy hybrid lexical match")],
+            supporting_files,
+            evidence: vec![open_kioku_core::Evidence {
+                id: open_kioku_core::EvidenceId::new("context:bounded-search"),
+                message: "bounded context".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let plan = open_kioku_plan::PlanEngine::new(&store)
+            .plan_from_context("change handler", 5, context)
+            .unwrap();
+        let verify = |path: &str| {
+            ChangeVerifier::new(&store)
+                .verify(
+                    Path::new("."),
+                    &plan,
+                    VerifyChangeInput {
+                        changed_files: vec![PathBuf::from(path)],
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+
+        let low_ranked = verify("src/lexical_9.rs");
+        assert_eq!(low_ranked.verdict, VerificationVerdict::Fail);
+        assert!(low_ranked
+            .boundary_violations
+            .iter()
+            .any(|finding| finding.kind == "out_of_boundary"));
+        for admitted in ["src/lexical_0.rs", "src/caller.rs"] {
+            assert!(
+                !verify(admitted)
+                    .boundary_violations
+                    .iter()
+                    .any(|finding| finding.kind == "out_of_boundary"),
+                "{admitted} should be a caution file"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_without_any_changed_file_is_invalid_input() {
+        let store = RuntimeStore::new().without_runtime();
+        let err = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan_with_boundary_evidence(),
+                VerifyChangeInput::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, OkError::InvalidInput(_)), "{err:?}");
+        assert!(err
+            .to_string()
+            .starts_with("invalid input: verify requires at least one changed file"));
     }
 
     #[test]

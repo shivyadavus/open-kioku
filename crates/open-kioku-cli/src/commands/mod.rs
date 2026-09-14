@@ -1069,6 +1069,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                         check_dependency_delta,
                         architecture_policy,
                         suppress_plan_validation_pending: false,
+                        changed_ranges: Default::default(),
                     },
                 )?;
             let governed_adrs =
