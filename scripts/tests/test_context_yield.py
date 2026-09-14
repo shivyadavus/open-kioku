@@ -82,25 +82,25 @@ class RangeColumn(unittest.TestCase):
 
     def test_hunk_headers_give_base_side_ranges(self):
         diff = "\n".join([
-            "diff --git a/fmt/duration.ts b/fmt/duration.ts",
-            "--- a/fmt/duration.ts",
-            "+++ b/fmt/duration.ts",
-            "@@ -26,8 +26,12 @@ function addZero(num: number, digits: number) {",
-            "-interface DurationObject {",
+            "diff --git a/text/span_format.ts b/text/span_format.ts",
+            "--- a/text/span_format.ts",
+            "+++ b/text/span_format.ts",
+            "@@ -26,8 +26,12 @@ function padLeft(value: number, width: number) {",
+            "-interface SpanParts {",
             "@@ -52 +60 @@ const x = 1;",
             "-const y = 2;",
             "@@ -70,0 +80,3 @@ const z = 3;",
             "+inserted",
-            "diff --git a/expect/mod.ts b/expect/mod.ts",
-            "--- a/expect/mod.ts",
-            "+++ b/expect/mod.ts",
+            "diff --git a/check/index.ts b/check/index.ts",
+            "--- a/check/index.ts",
+            "+++ b/check/index.ts",
             "@@ -0,0 +1,2 @@",
             "+top",
         ])
         ranges = derive.parse_hunk_ranges(diff)
-        self.assertEqual(ranges["fmt/duration.ts"], [(26, 33), (52, 52), (70, 70)])
-        self.assertEqual(ranges["expect/mod.ts"], [(1, 1)])
-        self.assertEqual(derive.format_ranges([ranges["fmt/duration.ts"], ranges["expect/mod.ts"]]),
+        self.assertEqual(ranges["text/span_format.ts"], [(26, 33), (52, 52), (70, 70)])
+        self.assertEqual(ranges["check/index.ts"], [(1, 1)])
+        self.assertEqual(derive.format_ranges([ranges["text/span_format.ts"], ranges["check/index.ts"]]),
                          "26-33,52-52,70-70|1-1")
 
 

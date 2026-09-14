@@ -620,8 +620,8 @@ impl<'a> BuiltinCandidateContext<'a> {
         // ~5 s per query. Symbol and path anchors are what co-change history can actually
         // speak to.
         // Loose prose similarity is noise, but a *near-identical* past subject is not: the
-        // 24th "release: bump module versions for the 2.14.0 cut" touches the file the other 23
-        // touched, and "feat(async): stabilize RetryGate" edits the same barrel every stabilize
+        // 24th "chore: sync plugin versions for the 5.3.0 train" touches the file the other 23
+        // touched, and "feat(queue): stabilize PoolLease" edits the same barrel every stabilize
         // commit did. Twins are matched on the subject after numbers and PR references are
         // stripped, with a high Jaccard bar, and vote for the files most of them touched.
         let twin_votes = self.subject_twin_votes(request, history_store);
@@ -799,7 +799,7 @@ const SUBJECT_TWIN_MIN_FILE_SHARE: f32 = 0.5;
 const SUBJECT_TWIN_SCAN: usize = 40;
 
 /// Subject vocabulary with version numbers, PR references, and punctuation removed, so
-/// "release: bump module versions for the 2.14.0 cut" and "... the 2.17.1 cut" are the same subject.
+/// "chore: sync plugin versions for the 5.3.0 train" and "... the 5.6.1 train" are the same subject.
 fn subject_tokens(subject: &str) -> Vec<String> {
     let mut tokens: Vec<String> = subject
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -1551,13 +1551,13 @@ mod indexed_document_stream_tests {
 
     #[test]
     fn subject_twins_ignore_numbers_and_pr_references() {
-        let a = subject_tokens("release: bump module versions for the 2.14.0 cut");
-        let b = subject_tokens("release: bump module versions for the 2.17.1 cut (#12345)");
+        let a = subject_tokens("chore: sync plugin versions for the 5.3.0 train");
+        let b = subject_tokens("chore: sync plugin versions for the 5.6.1 train (#4821)");
         assert!(subject_similarity(&a, &b) >= SUBJECT_TWIN_MIN_SIMILARITY);
-        let c = subject_tokens("release: prepare the module tree for 2.18.0-DEV");
+        let c = subject_tokens("chore: prepare the plugin tree for 5.7.0-DEV");
         assert!(subject_similarity(&a, &c) < SUBJECT_TWIN_MIN_SIMILARITY);
-        let d = subject_tokens("feat(async): stabilize LazyCell");
-        let e = subject_tokens("feat(async): stabilize RetryGate");
+        let d = subject_tokens("feat(queue): stabilize SpanBuffer");
+        let e = subject_tokens("feat(queue): stabilize PoolLease");
         assert!(subject_similarity(&d, &e) < SUBJECT_TWIN_MIN_SIMILARITY);
         assert!(subject_tokens("0.1.2").is_empty());
     }

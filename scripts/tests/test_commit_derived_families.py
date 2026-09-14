@@ -32,6 +32,7 @@ def load(name):
 
 score = load("score-context-cases")
 compare = load("compare-commit-derived-report")
+reduce_report = load("reduce-benchmark-report")
 
 # Top-level report keys and per-row keys written before the per-family section existed.
 LEGACY_REPORT_KEYS = {"label", "metrics", "ci", "median_secs", "yield_budgets", "coverage",
@@ -473,9 +474,13 @@ class ReportSchemaBackwardCompatibility(unittest.TestCase):
             download = Path(tmp) / "download"
             for path, baseline in baseline_files():
                 shutil.copy(path, target / path.name)
-                out = download / path.name.rsplit("-", 1)[0] / "artifacts" / f"{baseline['split']}.json"
+                # The artifact as the workflow uploads it: reduced to aggregates, at the artifact root.
+                out = download / path.name.rsplit("-", 1)[0] / f"{baseline['split']}.json"
                 out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(json.dumps(dict(self.report, label=baseline["split"])))
+                notes = []
+                uploaded = reduce_report.reduce_report(json.loads(json.dumps(dict(self.report, label=baseline["split"]))), notes)
+                self.assertNotIn("rows", uploaded)
+                out.write_text(json.dumps(uploaded))
             bad = subprocess.run([sys.executable, "-", str(download), "12345", "main"], input=snippet,
                                  cwd=repo, capture_output=True, text=True)
             self.assertNotEqual(bad.returncode, 0)

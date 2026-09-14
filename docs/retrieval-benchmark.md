@@ -140,7 +140,7 @@ repository's own history, after the Agent Retrieval Bench methodology:
    set is the source files it modified that already existed at `B`. Commits whose subject
    names a path are dropped (kept, the path is the answer; stripped, the subject no longer
    describes the change), and a subject that repeats an earlier one up to numbers keeps only
-   its first instance: on a Go application (~800 files), "release: bump module versions for the X cut" was a third of its
+   its first instance: on the Go corpus (~800 files), one repeated release-bump subject was a third of its
    holdout with the same gold file every time, so one pattern decided the corpus.
    The change lives in the future, never in the index, so a query cannot retrieve its
    own diff. Each gold file also records the line ranges the commit modified (a fifth
@@ -149,8 +149,8 @@ repository's own history, after the Agent Retrieval Bench methodology:
 3. Split chronologically — older cases are the development set, newer ones the holdout.
 
 ```sh
-scripts/commit-derived-cases.py ~/src/java-service --base <base-commit> --after 3800 \
-    --path-prefix libs/ --path-prefix modules/ --path-prefix server/ --out cases.tsv
+scripts/commit-derived-cases.py <repository> --base <base-commit> --after 3800 \
+    --path-prefix <subtree>/ --path-prefix <subtree>/ --out cases.tsv
 scripts/score-context-cases.py --ok target/release/ok --repo ./corpus-at-base \
     --cases cases-holdout.tsv --label holdout --out holdout.json
 scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/java-a-holdout.json
@@ -160,12 +160,14 @@ scripts/compare-commit-derived-report.py holdout.json benchmarks/commit-derived/
 `build_context_pack` tool use, and ranks files in the order the pack presents them. It
 reports Recall@k and MRR with 95% bootstrap intervals. Frozen baselines live under
 `benchmarks/commit-derived/`; `.github/workflows/commit-derived-bench.yml` re-derives four
-corpora from four large public repositories nightly as a matrix — a 10k-file Java service (`libs/ modules/ server/`
-indexed), a Go application (~800 files), a TypeScript standard library (~900 files), and
-a Python ML library (~4k files) — and fails when a watched metric falls more
+corpora from four large public repositories nightly as a matrix — Java (10k files, indexed as subtrees),
+Go (~800 files), TypeScript (~900 files), and Python (~4k files) — and fails when a watched metric falls more
 than 0.03 below its baseline. The repositories are not named here; the baseline files are keyed by
-language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.json`, and so on), and
-the workflow reads each repository URL from a repository variable. The baselines were frozen from a hosted-runner matrix run on
+language (the Java baseline is `java-a-holdout.json`, the Go one `go-a-holdout.json`, and so on).
+The workflow reads each repository URL, base commit, and indexed subtree list from repository secrets
+(`BENCH_<CODE>_URL`, `BENCH_<CODE>_BASE`, and `BENCH_<CODE>_PATHS` for a corpus indexed as subtrees) and
+masks them in the log. It keeps `ok index` output out of the log and uploads aggregate results only, never
+the cases or per-case rows, so corpus identity stays out of public logs and artifacts. The baselines were frozen from a hosted-runner matrix run on
 2026-09-08, after generated files began to be indexed and ranked below hand-written source and a
 commit scope's directory entry file became a candidate (each file records its run and commit under
 `provenance`); earlier freezes are in each file's git history:
@@ -181,7 +183,7 @@ commit scope's directory entry file became a candidate (each file records its ru
 | Python (~4k files) | dev | 462 | 0.600 | 0.725 | 0.490 |
 | Python (~4k files) | holdout | 199 | 0.663 | 0.759 | 0.545 |
 
-The Go application was the hardest of the four while a third of its holdout was one repeated release-bump
+The Go corpus was the hardest of the four while a third of its holdout was one repeated release-bump
 commit; with one case per repeated subject it sits between the others. 21% of its gold files
 are `_test.go` benchmarks for tasks that never say "test", and its commit subjects are terse. Read the per-corpus numbers, not
 an average; a change that helps Java and hurts Go is a regression on Go. The frozen baselines are what an accuracy change is judged
@@ -290,11 +292,11 @@ is `informational` and only the aggregate gates.
 baseline's aggregate and per-family numbers must come from the same run, so the section is
 frozen together with a re-freeze of the aggregate. Run the matrix on the build being frozen
 (`gh workflow run commit-derived-bench.yml --ref main`), wait for all four entries to finish,
-and run the following from the repository root. The reports are downloaded to a temporary
-directory outside the repository: a report's `rows` hold every case's commit hash, commit
-subject (`query`), and top-ranked paths, and `cases.tsv` in the same artifact holds commit
-hashes and subjects. Any of them identifies the repository, so none of them may be copied into
-the repository.
+and run the following from the repository root. Each artifact holds its reports at its root,
+already reduced to aggregates by `scripts/reduce-benchmark-report.py`: per-case `rows` are
+replaced by `cases_scored` and `cases_errored`, and `cases.tsv` is not uploaded. The reports
+are still downloaded to a temporary directory outside the repository, and only the allow-list
+below is copied in.
 
 ```sh
 RUN=<run-id>
@@ -324,12 +326,12 @@ def r4(value):
 
 for code in ("java-a", "go-a", "ts-a", "py-a"):
     for split in ("holdout", "dev"):
-        report = json.loads((Path(download) / code / "artifacts" / f"{split}.json").read_text())
+        report = json.loads((Path(download) / code / f"{split}.json").read_text())
         path = Path("benchmarks/commit-derived") / f"{code}-{split}.json"
         baseline = json.loads(path.read_text())
-        # An explicit allow-list. Never baseline.update(report): rows carry case data.
+        # An explicit allow-list. Never baseline.update(report).
         baseline.update({
-            "cases": sum(1 for r in report["rows"] if "err" not in r),
+            "cases": report["cases_scored"],
             "label": report["label"],
             "median_secs": report["median_secs"],
             "metrics": r4(report["metrics"]),
