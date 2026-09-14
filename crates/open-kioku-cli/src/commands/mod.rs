@@ -232,7 +232,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(
-                            &open_kioku_storage::generations::not_indexed_status(&repo)
+                            &SqliteStore::repo_not_indexed_status(&repo)?
                         )?
                     );
                     return Ok(());
@@ -607,12 +607,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
             semantic,
             hybrid,
         } => {
-            // A blank query answered `[]`, which read as "nothing matches"; the MCP
-            // `search_code` tool refuses it with the same words.
-            anyhow::ensure!(
-                !query.trim().is_empty(),
-                "`ok search` requires a non-empty query"
-            );
+            // A blank query answered `[]`, which read as "nothing matches"; MCP `search_code`
+            // refuses it through the same check, with the same message.
+            open_kioku_storage::require_search_query(&query)?;
             let store = open_store(&repo)?;
             // Exact matching answers in its own shape: the corpus caveat has to
             // survive `--json`, where stdout is the whole answer and an empty
@@ -911,8 +908,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Command::Path { from, to } => {
             let store = open_store(&repo)?;
-            let from = resolve_graph_node(&store, &from)?;
-            let to = resolve_graph_node(&store, &to)?;
+            // The resolver MCP `dependency_path` calls, so both surfaces mean the same nodes.
+            let from = open_kioku_graph::resolve_graph_node(&store, &from)?;
+            let to = open_kioku_graph::resolve_graph_node(&store, &to)?;
             let path = store.shortest_path(&from, &to, 12)?;
             output(cli.json, &path, || {
                 if path.is_empty() {
@@ -963,10 +961,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 .map(|store| store.retrieve(&ContextHandleId::new(&handle)))
                 .transpose()?
                 .flatten()
-                .with_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    open_kioku_errors::OkError::InvalidInput(format!(
                         "no context handle `{handle}` is stored for this repository; handles come from `ok context --compressed`"
-                    )
+                    ))
                 })?;
             output(cli.json, &retrieved, || {
                 println!("{}", retrieved.original);

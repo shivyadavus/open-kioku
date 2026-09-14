@@ -12,6 +12,7 @@ use open_kioku_core::{
 };
 use open_kioku_errors::{OkError, Result};
 use open_kioku_storage::{
+    generations::{IndexRefusalState, NotIndexedStatus},
     GraphCounts, GraphSchemaCounts, GraphStore, HistoryStore, IndexData, MetadataStore,
     PartialIndexUpdate,
 };
@@ -186,26 +187,90 @@ impl SqliteStore {
     /// manifest is published), so a caller can tell "not indexed" from each of those and say
     /// the right thing.
     pub fn open_repo_index(repo: &Path) -> Result<Option<Self>> {
+        Self::probe_repo_index(repo).map_err(|refusal| refusal.error)
+    }
+
+    /// [`open_repo_index`](Self::open_repo_index) with the refusal classified: the same store,
+    /// `None`, or error, plus the [`IndexRefusalState`] a client branches on. The state is
+    /// decided from the index itself (the lock, the database's `user_version`, the manifest's
+    /// `schema_version`), never from the error text.
+    pub fn probe_repo_index(repo: &Path) -> std::result::Result<Option<Self>, IndexOpenRefusal> {
         let path = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
         if !path.is_file() {
             return Self::unindexed(repo);
         }
-        let store = Self::open_existing(path)?;
-        if store.manifest()?.is_none() {
-            return Self::unindexed(repo);
+        let store = match Self::open_existing(&path) {
+            Ok(store) => store,
+            Err(error) => {
+                let state = if sqlite_schema_is_newer(&path) {
+                    IndexRefusalState::IndexNewerThanBinary
+                } else {
+                    IndexRefusalState::IndexUnavailable
+                };
+                return Err(IndexOpenRefusal { state, error });
+            }
+        };
+        match store.manifest() {
+            Ok(Some(_)) => Ok(Some(store)),
+            Ok(None) => Self::unindexed(repo),
+            Err(error) => {
+                let state = if store.stored_manifest_is_newer() {
+                    IndexRefusalState::IndexNewerThanBinary
+                } else {
+                    IndexRefusalState::IndexUnavailable
+                };
+                Err(IndexOpenRefusal { state, error })
+            }
         }
-        Ok(Some(store))
     }
 
     /// No manifest is "not indexed" unless a writer holds the lock: the manifest is the last
     /// thing an index run writes, so its absence under the lock is an index being built.
-    fn unindexed(repo: &Path) -> Result<Option<Self>> {
+    fn unindexed(repo: &Path) -> std::result::Result<Option<Self>, IndexOpenRefusal> {
         if open_kioku_storage::generations::index_write_in_progress(repo) {
-            return Err(OkError::Index(
-                open_kioku_storage::generations::indexing_in_progress_message(repo),
-            ));
+            return Err(IndexOpenRefusal {
+                state: IndexRefusalState::IndexingInProgress,
+                error: OkError::Index(
+                    open_kioku_storage::generations::indexing_in_progress_message(repo),
+                ),
+            });
         }
         Ok(None)
+    }
+
+    /// Whether the stored manifest row declares a schema newer than this binary reads. Only
+    /// consulted to classify a manifest read that already failed, so an unreadable row is
+    /// `false` and the failure is reported as an unavailable index with its own error.
+    fn stored_manifest_is_newer(&self) -> bool {
+        let Ok(conn) = self.connection.lock() else {
+            return false;
+        };
+        conn.query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|json| manifest_schema_version(&json).ok())
+        .is_some_and(|version| version > open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION)
+    }
+
+    /// The not-indexed status `repo_status` and `ok --json status` return, with the withdrawal
+    /// reason when the repository's database has rows whose manifest was withdrawn. Creates
+    /// nothing: without a database it is the plain not-indexed status.
+    pub fn repo_not_indexed_status(repo: &Path) -> Result<NotIndexedStatus> {
+        let status = open_kioku_storage::generations::not_indexed_status(repo);
+        if !status.index_path.is_file() {
+            return Ok(status);
+        }
+        let reason = Self::open_existing(&status.index_path)?.manifest_withdrawal()?;
+        Ok(NotIndexedStatus { reason, ..status })
+    }
+
+    /// [`repo_not_indexed_status`](Self::repo_not_indexed_status) for a store already open.
+    pub fn not_indexed_status(&self, repo: &Path) -> Result<NotIndexedStatus> {
+        Ok(NotIndexedStatus {
+            reason: self.manifest_withdrawal()?,
+            ..open_kioku_storage::generations::not_indexed_status(repo)
+        })
     }
 
     fn open_with_flags(path: PathBuf, flags: rusqlite::OpenFlags) -> Result<Self> {
@@ -342,15 +407,46 @@ impl SqliteStore {
     /// committed rows no longer match the previous manifest and which failed before it could
     /// publish its own: the repository then reads as unindexed rather than as the previous
     /// index over this run's rows.
-    pub fn withdraw_manifest(&self) -> Result<()> {
+    ///
+    /// `reason` is recorded in the same transaction and reported as the not-indexed status's
+    /// `reason` while no manifest is published, so the withdrawn index is not described as one
+    /// nobody built. Publishing a manifest, by any binary, removes it (a trigger on
+    /// `manifests`), and so does replacing the rows.
+    pub fn withdraw_manifest(&self, reason: &str) -> Result<()> {
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
+        let tx = conn.transaction().map_err(storage_err)?;
+        tx.execute("DELETE FROM manifests", [])
+            .map_err(storage_err)?;
+        tx.execute(
+            "INSERT INTO manifest_withdrawals(id, reason, withdrawn_at) VALUES(1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET reason = excluded.reason, withdrawn_at = excluded.withdrawn_at",
+            params![reason, Utc::now().to_rfc3339()],
+        )
+        .map_err(storage_err)?;
+        tx.commit().map_err(storage_err)?;
+        self.invalidate_semantics_verdict();
+        Ok(())
+    }
+
+    /// The reason recorded by the last [`withdraw_manifest`](Self::withdraw_manifest), and only
+    /// while the index is withdrawn: `None` whenever a manifest is published, whatever row is
+    /// left in the table.
+    pub fn manifest_withdrawal(&self) -> Result<Option<String>> {
         let conn = self
             .connection
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
-        conn.execute("DELETE FROM manifests", [])
-            .map_err(storage_err)?;
-        self.invalidate_semantics_verdict();
-        Ok(())
+        conn.query_row(
+            "SELECT reason FROM manifest_withdrawals
+             WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM manifests)",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_err)
     }
 
     /// SQLite's `PRAGMA data_version`: changes when another connection commits. Our own
@@ -442,6 +538,17 @@ impl MetadataStore for SqliteStore {
               id INTEGER PRIMARY KEY CHECK (id = 1),
               json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS manifest_withdrawals (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              reason TEXT NOT NULL,
+              withdrawn_at TEXT NOT NULL
+            );
+            -- Publishing a manifest ends a withdrawal whichever binary publishes it, including
+            -- one that does not know this table, so a reason can never outlive its index.
+            CREATE TRIGGER IF NOT EXISTS manifest_insert_ends_withdrawal
+              AFTER INSERT ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
+            CREATE TRIGGER IF NOT EXISTS manifest_update_ends_withdrawal
+              AFTER UPDATE ON manifests BEGIN DELETE FROM manifest_withdrawals; END;
             CREATE TABLE IF NOT EXISTS files (
               id TEXT PRIMARY KEY,
               path TEXT NOT NULL UNIQUE,
@@ -646,6 +753,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let json = serde_json::to_string(manifest)?;
+        // The manifest triggers end any outstanding withdrawal in the same statement.
         conn.execute(
             "INSERT INTO manifests(id, json) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET json = excluded.json",
             params![json],
@@ -2451,16 +2559,42 @@ pub fn newer_index_message(found: u32) -> String {
 /// is checked before the body is read, so the message names the situation instead of a serde
 /// error, and a manifest with an older version reads through serde defaults as before.
 pub fn decode_index_manifest(json: &str) -> Result<IndexManifest> {
+    let schema_version = manifest_schema_version(json)?;
+    if schema_version > open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION {
+        return Err(OkError::Index(newer_index_message(schema_version)));
+    }
+    Ok(serde_json::from_str(json)?)
+}
+
+/// A stored manifest's `schema_version`, read without the body.
+fn manifest_schema_version(json: &str) -> Result<u32> {
     #[derive(serde::Deserialize)]
     struct Header {
         #[serde(default)]
         schema_version: u32,
     }
-    let header: Header = serde_json::from_str(json)?;
-    if header.schema_version > open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION {
-        return Err(OkError::Index(newer_index_message(header.schema_version)));
-    }
-    Ok(serde_json::from_str(json)?)
+    Ok(serde_json::from_str::<Header>(json)?.schema_version)
+}
+
+/// Why [`SqliteStore::probe_repo_index`] could not serve an index that exists.
+#[derive(Debug)]
+pub struct IndexOpenRefusal {
+    pub state: IndexRefusalState,
+    /// The error every read surface prints for it, unchanged by the classification.
+    pub error: OkError,
+}
+
+/// Whether the database at `path` declares a `user_version` newer than this binary reads.
+/// Only consulted to classify an open that already failed, through a read-only connection, so
+/// a file that cannot be read at all is `false` and stays an unavailable index.
+fn sqlite_schema_is_newer(path: &Path) -> bool {
+    let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    let version: rusqlite::Result<i64> =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0));
+    version.is_ok_and(|version| version > SQLITE_SUPPORTED_SCHEMA_VERSION)
 }
 
 fn replace_index_rows(
@@ -2487,6 +2621,9 @@ fn replace_index_rows(
     tx.execute("DELETE FROM symbols", []).map_err(storage_err)?;
     tx.execute("DELETE FROM files", []).map_err(storage_err)?;
     tx.execute("DELETE FROM manifests", [])
+        .map_err(storage_err)?;
+    // The rows a withdrawal described are gone, published or staged.
+    tx.execute("DELETE FROM manifest_withdrawals", [])
         .map_err(storage_err)?;
     if manifest == ManifestWrite::Publish {
         tx.execute(
@@ -5999,10 +6136,160 @@ mod tests {
 
         // Withdrawn with no live writer, whatever file a dead one left: unindexed, not
         // being built.
-        store.withdraw_manifest().unwrap();
+        store
+            .withdraw_manifest("an incremental update failed")
+            .unwrap();
         assert!(!store.has_manifest().unwrap());
         std::fs::write(index_lock_path(repo), b"").unwrap();
         assert!(SqliteStore::open_repo_index(repo).unwrap().is_none());
+    }
+
+    /// Each refusal is classified from the index itself, and its error is the one
+    /// `open_repo_index` returns for the same index.
+    #[test]
+    fn probe_classifies_every_refusal_state() {
+        use open_kioku_storage::generations::{IndexRefusalState, IndexWriteLock};
+        let state = |repo: &std::path::Path| {
+            let refusal = SqliteStore::probe_repo_index(repo)
+                .err()
+                .expect("the index is refused");
+            assert_eq!(
+                refusal.error.to_string(),
+                SqliteStore::open_repo_index(repo)
+                    .err()
+                    .expect("the same index is refused")
+                    .to_string()
+            );
+            refusal.state
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let lock = IndexWriteLock::acquire(temp.path(), Duration::from_millis(10)).unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexingInProgress);
+        drop(lock);
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".ok")).unwrap();
+        std::fs::write(
+            temp.path().join(".ok/index.sqlite"),
+            b"this is not a sqlite database",
+        )
+        .unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexUnavailable);
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&make_manifest())
+            .unwrap();
+        let mut manifest = serde_json::to_value(make_manifest()).unwrap();
+        manifest["schema_version"] = json!(open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1);
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE manifests SET json = ?1 WHERE id = 1",
+                params![manifest.to_string()],
+            )
+            .unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexNewerThanBinary);
+
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&make_manifest())
+            .unwrap();
+        Connection::open(&db)
+            .unwrap()
+            .pragma_update(
+                None,
+                "user_version",
+                SQLITE_SUPPORTED_INDEX_SCHEMA_VERSION + 1,
+            )
+            .unwrap();
+        assert_eq!(state(temp.path()), IndexRefusalState::IndexNewerThanBinary);
+    }
+
+    #[test]
+    fn a_withdrawal_reason_is_reported_until_a_manifest_is_published() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let never_indexed = SqliteStore::repo_not_indexed_status(repo).unwrap();
+        assert_eq!(never_indexed.reason, None);
+        assert!(
+            serde_json::to_value(&never_indexed)
+                .unwrap()
+                .get("reason")
+                .is_none(),
+            "the field is absent, not null, when nothing was withdrawn"
+        );
+        assert!(
+            !repo.join(".ok").exists(),
+            "reading the status creates nothing"
+        );
+
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        store.put_manifest(&make_manifest()).unwrap();
+        store.withdraw_manifest("the search stage failed").unwrap();
+        assert!(SqliteStore::open_repo_index(repo).unwrap().is_none());
+        let withdrawn = SqliteStore::repo_not_indexed_status(repo).unwrap();
+        assert!(!withdrawn.indexed);
+        assert_eq!(
+            serde_json::to_value(&withdrawn).unwrap()["reason"],
+            "the search stage failed"
+        );
+        assert_eq!(store.not_indexed_status(repo).unwrap(), withdrawn);
+
+        store.put_manifest(&make_manifest()).unwrap();
+        assert_eq!(store.manifest_withdrawal().unwrap(), None);
+
+        // A binary that does not know the table publishes with its own statement: the trigger
+        // ends the withdrawal, so unpublishing later does not bring the old reason back.
+        store.withdraw_manifest("the search stage failed").unwrap();
+        let manifest_json = serde_json::to_string(&make_manifest()).unwrap();
+        let other_binary = Connection::open(store.path()).unwrap();
+        other_binary
+            .execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+                params![manifest_json],
+            )
+            .unwrap();
+        let rows: i64 = other_binary
+            .query_row("SELECT count(*) FROM manifest_withdrawals", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "publishing removed the withdrawal row");
+        other_binary.execute("DELETE FROM manifests", []).unwrap();
+        assert_eq!(
+            SqliteStore::repo_not_indexed_status(repo).unwrap().reason,
+            None
+        );
+
+        // A row present beside a published manifest, as in a database whose triggers are
+        // missing, is never reported.
+        other_binary
+            .execute_batch(
+                "DROP TRIGGER manifest_insert_ends_withdrawal;
+                 DROP TRIGGER manifest_update_ends_withdrawal;",
+            )
+            .unwrap();
+        other_binary
+            .execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+                params![manifest_json],
+            )
+            .unwrap();
+        other_binary
+            .execute(
+                "INSERT INTO manifest_withdrawals(id, reason, withdrawn_at)
+                 VALUES(1, 'a stale reason', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.manifest_withdrawal().unwrap(), None);
+        assert_eq!(store.not_indexed_status(repo).unwrap().reason, None);
     }
 
     #[test]

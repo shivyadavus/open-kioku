@@ -2432,7 +2432,7 @@ fn demo_creates_indexed_sample_repo() {
     assert!(regex_no_match.contains("regions the indexer did not chunk were not searched"));
     assert!(regex_no_match.contains("\"truncated\": false"));
 
-    let (_, regex_invalid) = run_failure({
+    let regex_invalid = run_usage_error({
         let mut command = ok();
         command
             .arg("--repo")
@@ -2444,8 +2444,8 @@ fn demo_creates_indexed_sample_repo() {
         command
     });
     assert!(
-        regex_invalid.contains("search error"),
-        "invalid pattern should fail with a search error, got: {regex_invalid}"
+        regex_invalid.contains("invalid input: regex parse error"),
+        "an invalid pattern is a usage error, got: {regex_invalid}"
     );
 
     let regex_bounded = run({
@@ -4232,6 +4232,296 @@ fn mcp_repo_status_error(repo: &std::path::Path) -> String {
     response["error"]["message"].as_str().unwrap().to_string()
 }
 
+/// One `tools/call` in a fresh `ok mcp serve` session, returning the response.
+fn mcp_tool_call(
+    repo: &std::path::Path,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    });
+    let output = run_with_stdin(
+        {
+            let mut command = ok();
+            command
+                .arg("mcp")
+                .arg("serve")
+                .arg("--repo")
+                .arg(repo)
+                .arg("--read-only");
+            command
+        },
+        &format!("{request}\n"),
+    );
+    serde_json::from_str(output.lines().next().expect("the session answers")).unwrap()
+}
+
+/// The stderr of a command that must fail as a usage error, exit code 2.
+fn run_usage_error(mut command: Command) -> String {
+    let output = command.output().expect("command should run");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected a usage error\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stderr).expect("stderr should be utf-8")
+}
+
+/// Each argument the caller got wrong exits 2 on the CLI and returns `-32602` on MCP, with the
+/// same `invalid input: …` message where both surfaces take the same argument.
+#[test]
+fn caller_argument_errors_exit_2_and_return_invalid_params() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let cli = |args: &[&str]| {
+        run_usage_error({
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).args(args);
+            command
+        })
+    };
+    let mcp_error = |name: &str, arguments: serde_json::Value| {
+        let response = mcp_tool_call(&repo, name, arguments);
+        assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+        assert!(
+            response["error"].get("data").is_none(),
+            "{name}: {response}"
+        );
+        response["error"]["message"].as_str().unwrap().to_string()
+    };
+
+    // One blank-query message on both surfaces.
+    let blank = format!(
+        "invalid input: {}",
+        open_kioku_storage::BLANK_SEARCH_QUERY_MESSAGE
+    );
+    for query in ["", "   "] {
+        let stderr = cli(&["search", query]);
+        assert!(stderr.contains(&blank), "{stderr}");
+        assert_eq!(
+            mcp_error("search_code", serde_json::json!({"query": query})),
+            blank
+        );
+    }
+
+    let stderr = cli(&["retrieve-context", "bogus"]);
+    assert!(
+        stderr.contains("invalid input: no context handle `bogus`"),
+        "{stderr}"
+    );
+    let message = mcp_error("retrieve_context", serde_json::json!({"handle": "bogus"}));
+    assert!(
+        message.starts_with("invalid input: no context handle `bogus`"),
+        "{message}"
+    );
+
+    // A contract id Open Kioku never issued for this repository, like an unknown handle.
+    for args in [
+        vec!["contract", "show", "missing"],
+        vec![
+            "contract",
+            "verify",
+            "--id",
+            "missing",
+            "--changed",
+            "src/lib.rs",
+        ],
+    ] {
+        let stderr = cli(&args);
+        assert!(
+            stderr.contains("invalid input: no contract `missing` is stored"),
+            "{args:?}: {stderr}"
+        );
+    }
+    let message = mcp_error(
+        "verify_change",
+        serde_json::json!({"contract_id": "missing", "changed_files": ["src/lib.rs"]}),
+    );
+    assert!(
+        message.starts_with("invalid input: no contract `missing` is stored"),
+        "{message}"
+    );
+
+    for (name, arguments) in [
+        ("repo_status", serde_json::json!({"detail": "everything"})),
+        (
+            "plan_change",
+            serde_json::json!({"task": "change Worker::run", "detail": "everything"}),
+        ),
+    ] {
+        let message = mcp_error(name, arguments);
+        assert!(message.starts_with("invalid input: "), "{name}: {message}");
+    }
+
+    // A plan the caller supplies and the contract builder rejects: no primary context and no
+    // allowed files.
+    let planned = mcp_tool_call(
+        &repo,
+        "plan_change",
+        serde_json::json!({"task": "change Worker::run", "format": "json"}),
+    );
+    let mut plan = planned["result"]["structuredContent"].clone();
+    assert!(plan.is_object(), "{planned}");
+    plan["primary_context"] = serde_json::json!([]);
+    plan["recommended_change_boundary"]["allowed_files"] = serde_json::json!([]);
+    let plan_json = plan.to_string();
+    let refused = mcp_error(
+        "plan_change",
+        serde_json::json!({"persist": true, "store": false, "plan_json": plan_json}),
+    );
+    assert!(
+        refused.starts_with("invalid input: contract generation requires"),
+        "{refused}"
+    );
+    let stderr = cli(&[
+        "contract",
+        "create",
+        "--plan-json",
+        &plan_json,
+        "--no-store",
+    ]);
+    assert!(stderr.contains(&refused), "{stderr}");
+
+    // JSON arguments that do not decode.
+    let stderr = cli(&["contract", "create", "--plan-json", "{", "--no-store"]);
+    assert!(
+        stderr.contains("invalid input: --plan-json is malformed"),
+        "{stderr}"
+    );
+    let message = mcp_error(
+        "plan_change",
+        serde_json::json!({"persist": true, "store": false, "plan_json": "{"}),
+    );
+    assert!(
+        message.starts_with("invalid input: `plan_json` is malformed"),
+        "{message}"
+    );
+    let not_a_plan = repo.join("not-a-plan.json");
+    fs::write(&not_a_plan, "{}").unwrap();
+    let stderr = cli(&[
+        "verify",
+        "--plan",
+        not_a_plan.to_str().unwrap(),
+        "--changed",
+        "src/lib.rs",
+    ]);
+    assert!(stderr.contains("is not a valid saved plan"), "{stderr}");
+    let message = mcp_error(
+        "verify_change",
+        serde_json::json!({"plan_json": "{}", "changed_files": ["src/lib.rs"]}),
+    );
+    assert!(
+        message.starts_with("invalid input: `plan_json` is malformed"),
+        "{message}"
+    );
+    let stderr = cli(&[
+        "contract",
+        "verify",
+        "--contract-json",
+        "{",
+        "--changed",
+        "src/lib.rs",
+    ]);
+    assert!(
+        stderr.contains("invalid input: contract JSON is malformed"),
+        "{stderr}"
+    );
+    let message = mcp_error(
+        "verify_change",
+        serde_json::json!({"contract_json": "{", "changed_files": ["src/lib.rs"]}),
+    );
+    assert!(
+        message.starts_with("invalid input: `contract_json` is malformed"),
+        "{message}"
+    );
+
+    // A regex that does not parse: the same message on both surfaces.
+    let message = mcp_error("regex_search", serde_json::json!({"pattern": "pub fn ("}));
+    assert!(
+        message.starts_with("invalid input: regex parse error"),
+        "{message}"
+    );
+    let stderr = cli(&["search", "--regex", "pub fn ("]);
+    assert!(stderr.contains(&message), "{stderr}");
+
+    // Unknown enumerated values and missing arguments; clap rejects the CLI equivalents.
+    for (name, arguments) in [
+        (
+            "search_code",
+            serde_json::json!({"query": "Worker", "mode": "fuzzy"}),
+        ),
+        (
+            "get_references",
+            serde_json::json!({"query": "Worker", "kind": "callsites"}),
+        ),
+        ("get_definition", serde_json::json!({})),
+    ] {
+        let message = mcp_error(name, arguments);
+        assert!(message.starts_with("invalid input: "), "{name}: {message}");
+    }
+}
+
+/// `ok path` and MCP `dependency_path` resolve their arguments through one function, so the
+/// same names give the same route on both surfaces.
+#[test]
+fn path_and_dependency_path_resolve_the_same_nodes() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    for (from, to, from_kind) in [
+        ("src/lib.rs", "Worker", "file:"),
+        ("Worker", "run", "symbol:"),
+    ] {
+        let cli: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(&repo)
+                .arg("--json")
+                .args(["path", from, to]);
+            command
+        }))
+        .unwrap();
+        let response = mcp_tool_call(
+            &repo,
+            "dependency_path",
+            serde_json::json!({"from": from, "to": to}),
+        );
+        let mcp = &response["result"]["structuredContent"];
+        assert!(
+            mcp["from"].as_str().unwrap().starts_with(from_kind),
+            "{response}"
+        );
+        assert_eq!(mcp["edges"], cli, "{from} -> {to}: {response}");
+    }
+
+    // An endpoint the index does not hold is a repository lookup that found nothing, as an
+    // unknown symbol name is: `-32000` and exit 1, with one message on both surfaces.
+    let response = mcp_tool_call(
+        &repo,
+        "dependency_path",
+        serde_json::json!({"from": "src/missing.rs", "to": "Worker"}),
+    );
+    assert_eq!(response["error"]["code"], -32000, "{response}");
+    let unresolved = response["error"]["message"].as_str().unwrap();
+    assert!(
+        unresolved.contains("`src/missing.rs` is not an indexed file path"),
+        "{unresolved}"
+    );
+    let output = ok()
+        .arg("--repo")
+        .arg(&repo)
+        .args(["path", "src/missing.rs", "Worker"])
+        .output()
+        .expect("command should run");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(unresolved), "{stderr}");
+}
+
 /// Holds the index writer lock from a separate process for the tests that need a live writer,
 /// which re-run this test binary through [`spawn_index_lock_holder`] with
 /// `OK_TEST_HOLD_INDEX_LOCK` naming the repository. Without the variable there is nothing to
@@ -4915,6 +5205,10 @@ fn index_from_a_newer_open_kioku_reports_upgrade_or_reindex_on_every_surface() {
         "{doctor}"
     );
     assert!(mcp_repo_status_error(&repo).contains(&expected));
+    assert_eq!(
+        mcp_repo_status(&repo)["error"]["data"]["state"],
+        "index_newer_than_binary"
+    );
 
     // `ok index` is one of the two ways out.
     run({

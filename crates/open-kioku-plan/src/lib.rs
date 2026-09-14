@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub mod contract_builder;
-pub use contract_builder::ContractBuilder;
+pub use contract_builder::{ContractBuilder, PlanOrigin};
 
 const DEFAULT_CONTEXT_LIMIT: usize = 12;
 const MAX_PRIMARY_CONTEXT: usize = 8;

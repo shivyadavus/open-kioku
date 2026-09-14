@@ -307,7 +307,13 @@ pub fn reindex_repo_after_changes<'a>(
         if !staged_partial {
             return Err(err);
         }
-        return Err(match store.withdraw_manifest() {
+        let reason = format!(
+            "an incremental update replaced the changed files' rows and then failed ({err}); the \
+             previous manifest was withdrawn so it is not served over those rows. The rows are \
+             kept; the next change re-indexes in full, or run `ok index {}` now",
+            root.display()
+        );
+        return Err(match store.withdraw_manifest(&reason) {
             Ok(()) => OkError::Index(format!(
                 "{err}; the index manifest was withdrawn, so reads report the repository as \
                  unindexed; the next change re-indexes in full, or run `ok index {}` now",
@@ -987,12 +993,27 @@ mod tests {
             SqliteStore::open_repo_index(repo).unwrap().is_none(),
             "the repository reads as unindexed, not as the previous index"
         );
+        // `repo_status` and `ok --json status` say why, instead of describing an index nobody
+        // built; the reason ends with the same next step as the error.
+        let withdrawn = SqliteStore::repo_not_indexed_status(repo).unwrap();
+        assert!(!withdrawn.indexed);
+        let reason = withdrawn.reason.expect("the withdrawal records its reason");
+        assert!(reason.contains("incremental update"), "{reason}");
+        assert!(
+            reason.ends_with(&format!("or run `ok index {}` now", repo.display())),
+            "{reason}"
+        );
 
         // Repaired, the next event finds no manifest and rebuilds in full.
         fs::remove_file(&search_dir).unwrap();
         let status = reindex_repo_after_changes(repo, [changed.as_path()]).unwrap();
         assert!(!status.partial, "{status:?}");
         assert!(SqliteStore::open_repo_index(repo).unwrap().is_some());
+        assert_eq!(
+            SqliteStore::repo_not_indexed_status(repo).unwrap().reason,
+            None,
+            "a published manifest ends the withdrawal"
+        );
         assert!(open_kioku_search_tantivy::TantivySearchIndex::exists(
             &search_dir
         ));

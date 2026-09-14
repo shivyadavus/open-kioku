@@ -274,12 +274,18 @@ fn lock_file_is_current(_file: &std::fs::File, _path: &Path) -> bool {
 /// The status object `ok --json status` and MCP `repo_status` return for a repository that
 /// has never been indexed, in place of the manifest an indexed repository returns. `indexed`
 /// is the field an agent should branch on; `next_step` is the command that changes it.
+///
+/// `reason` is present only when the index has rows but its manifest was withdrawn (an
+/// incremental `ok watch` update failed after replacing rows), so a client can tell that case
+/// from a repository nobody has indexed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotIndexedStatus {
     pub indexed: bool,
     pub index_path: PathBuf,
     pub message: String,
     pub next_step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 pub fn not_indexed_status(repo: &Path) -> NotIndexedStatus {
@@ -287,7 +293,47 @@ pub fn not_indexed_status(repo: &Path) -> NotIndexedStatus {
         indexed: false,
         index_path: resolve_index_location(repo).sqlite_path(),
         message: not_indexed_message(repo),
-        next_step: format!("ok index {}", repo.display()),
+        next_step: IndexRefusalState::NotIndexed.next_step(repo),
+        reason: None,
+    }
+}
+
+/// Why a read surface refuses to answer from a repository's index.
+///
+/// MCP clients receive it as the `data.state` of a refused tool call, beside the unchanged
+/// message, so they can branch on the state (run `ok index`, wait, upgrade) instead of
+/// matching message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexRefusalState {
+    /// No database, or a database without a published manifest and no live writer.
+    NotIndexed,
+    /// A live writer holds `.ok/index.lock` and has not published the manifest.
+    IndexingInProgress,
+    /// The index exists and cannot be opened or read.
+    IndexUnavailable,
+    /// The database schema or the manifest was written by a newer Open Kioku.
+    IndexNewerThanBinary,
+}
+
+impl IndexRefusalState {
+    /// What to do about the state: the command when one changes it, otherwise the instruction.
+    pub fn next_step(self, repo: &Path) -> String {
+        let repo = repo.display();
+        match self {
+            Self::NotIndexed => format!("ok index {repo}"),
+            Self::IndexingInProgress => {
+                "wait for the running `ok index` or `ok watch` to publish the index, then retry"
+                    .into()
+            }
+            Self::IndexUnavailable => format!(
+                "run `ok doctor {repo}` to see why the index cannot be opened; `ok index {repo}` \
+                 rebuilds it"
+            ),
+            Self::IndexNewerThanBinary => format!(
+                "upgrade Open Kioku, or run `ok index {repo}` to rebuild the index with this version"
+            ),
+        }
     }
 }
 

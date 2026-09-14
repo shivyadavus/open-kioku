@@ -776,37 +776,6 @@ fn normalize_to_repo_relative(repo_root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-/// Resolve a path, symbol name, or explicit `file:`/`symbol:` node id to a graph node id.
-/// A name that resolves to nothing is an error: passing it through produced an empty path
-/// that read as "unconnected" when the truth was "not in the index". The MCP
-/// `dependency_path` tool applies the same check.
-fn resolve_graph_node<S>(store: &S, query: &str) -> anyhow::Result<String>
-where
-    S: MetadataStore + GraphStore + ?Sized,
-{
-    if query.starts_with("file:") || query.starts_with("symbol:") {
-        return match store.node_by_id(query)? {
-            Some(_) => Ok(query.to_string()),
-            None => anyhow::bail!(
-                "`{query}` is not a node in the indexed dependency graph; it may be excluded, unsupported, or added since the last `ok index`"
-            ),
-        };
-    }
-    if let Some(file) = store.get_file_by_path(Path::new(query))? {
-        return Ok(format!("file:{}", file.path.display()));
-    }
-    if let Some(symbol) = store
-        .list_symbols(Some(query), 10, 0)?
-        .into_iter()
-        .find(|symbol| symbol.name == query || symbol.qualified_name.ends_with(query))
-    {
-        return Ok(format!("symbol:{}", symbol.id.0));
-    }
-    anyhow::bail!(
-        "`{query}` is not an indexed file path or symbol name; it may be excluded, unsupported, or added since the last `ok index`"
-    )
-}
-
 fn output<T: serde::Serialize>(json: bool, value: &T, human: impl FnOnce()) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(value)?);

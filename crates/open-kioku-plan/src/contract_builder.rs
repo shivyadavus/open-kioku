@@ -17,6 +17,17 @@ use uuid::Uuid;
 
 pub struct ContractBuilder;
 
+/// Where the plan a contract is built from came from, which decides whose failure a plan the
+/// builder rejects is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanOrigin {
+    /// Planned by the tool for the caller's task: a rejection is the tool's failure.
+    Generated,
+    /// Handed over by the caller (`--plan`, `--plan-json`, MCP `plan`/`plan_json`): a
+    /// rejection is the caller's input.
+    Supplied,
+}
+
 pub fn summarize_policy_for_contract(plan: &PlanReport) -> Option<PolicySignalSummary> {
     let report = architecture_policy_report(plan)?;
     Some(policy_signal_summary_from_report(report))
@@ -27,6 +38,21 @@ impl ContractBuilder {
         Err(OkError::Unsupported(format!(
             "contract generation for `{task}` requires a PlanReport; use ContractBuilder::from_plan"
         )))
+    }
+
+    /// [`from_plan`](Self::from_plan), reporting a rejected supplied plan as
+    /// `OkError::InvalidInput`. Every `OkError::Config` `from_plan` returns rejects the plan's
+    /// content (no evidence references, no files, a contract it cannot make valid or
+    /// traceable), so for a plan the caller supplied it is the caller's input; for a generated
+    /// plan it stays `Config`.
+    pub fn from_plan_with_origin(
+        plan: &PlanReport,
+        origin: PlanOrigin,
+    ) -> Result<ChangeContractV1> {
+        Self::from_plan(plan).map_err(|err| match (origin, err) {
+            (PlanOrigin::Supplied, OkError::Config(message)) => OkError::InvalidInput(message),
+            (_, err) => err,
+        })
     }
 
     pub fn from_plan(plan: &PlanReport) -> Result<ChangeContractV1> {
@@ -826,6 +852,18 @@ mod tests {
         assert!(err
             .to_string()
             .contains("requires at least one plan evidence reference"));
+
+        // The same rejection is the tool's failure for a plan it generated and the caller's
+        // input for a plan the caller supplied.
+        assert!(matches!(
+            ContractBuilder::from_plan_with_origin(&plan, PlanOrigin::Generated),
+            Err(OkError::Config(_))
+        ));
+        assert!(matches!(
+            ContractBuilder::from_plan_with_origin(&plan, PlanOrigin::Supplied),
+            Err(OkError::InvalidInput(message))
+                if message.contains("requires at least one plan evidence reference")
+        ));
     }
 
     #[test]
