@@ -45,9 +45,73 @@ over full strings.
 
 Each dictionary is owned by the table that references it and is emptied with it —
 `replace_graph` clears `graph_strings`, `replace_index` clears `call_site_strings` — so a
-re-index cannot accumulate entries nothing points at. The incremental writers add to a
-dictionary rather than clearing it, which can leave unreferenced entries between full
-re-indexes; the next full index run removes them.
+re-index cannot accumulate entries nothing points at. The incremental writer adds to
+`graph_strings` rather than clearing it, and removes whichever entries the edges it deleted
+referenced once no surviving edge references them, so repeated incremental runs do not grow
+the dictionary either.
+
+### Incremental graph updates
+
+`ok watch` re-indexes through `SqliteStore::stage_files_index_with_graph`, which takes the
+changed files' rows and the complete graph of the new snapshot, in one transaction:
+
+1. A file's edges are removed: every edge anchored at a node the file owns (its file node and
+   its symbols' nodes, in either direction) and every edge whose evidence range lies in the
+   file. The pre-4.0 writer keyed this delete on `evidence.source`, the producing pass name,
+   which never equals a path, so it deleted nothing (#413).
+2. The stored graph is reconciled with the new graph by identity: every stored node and edge
+   the new graph does not hold is removed, and every node and edge of the new graph the store
+   does not hold is added. This is what handles edges whose target moved — a resolved call
+   from an unchanged file into a symbol the changed file renamed ends at a node no file owns,
+   so step 1 cannot see it; the new graph no longer holds it, so step 2 removes it. The pass
+   reads every stored edge id once; it is proportional to the graph, not to the change, and
+   is what makes the incremental graph equal a clean rebuild rather than approximate it.
+3. Unchanged edges keep their stored evidence, including `indexed_at`.
+
+### Publication order
+
+The manifest is the publication marker, written as the last step of an index run.
+
+- **Full runs** (`ok index`, and `ok watch` when it cannot update incrementally) stage the
+  rows in one transaction that also removes the manifest, write the git history and the
+  graph in transactions of their own, rebuild the Tantivy index, and then put the manifest.
+  A reader never opens a manifest over rows or a graph from a different run, and a run that
+  fails partway leaves no manifest, so the repository reads as unindexed until a run
+  completes. From the row transaction until the manifest is put, reads are refused with
+  `indexing in progress` rather than served: the previous index's rows are already gone.
+  A request already dispatched when a full run begins can read rows from both states; the
+  next request is refused until the manifest is published.
+  Building the next index in a staging generation and publishing it with the atomic
+  `active` pointer (`crates/open-kioku-storage/src/generations.rs`) is what would keep the
+  previous index readable during a rebuild; it is not done yet.
+- **Incremental `ok watch` runs** replace the changed files' rows and reconcile the graph in
+  one transaction while the previous manifest stays published, so readers see the new rows
+  and graph as soon as it commits, under the previous manifest's counts and timestamps. The
+  Tantivy index is then rebuilt in place: its directory is removed and recreated. For that
+  stage `ok search` and `search_code` with `mode=code` find either no index, and fall back to
+  lexical search over the SQLite chunks, or an index that is empty until the rebuild commits;
+  `mode=graph` reports the graph search index missing. The new manifest is put last. If any
+  step after the transaction fails, the previous manifest is withdrawn and the error is
+  returned, so the repository reads as unindexed instead of serving this run's rows under
+  the previous manifest with no search index; the next `ok watch` event finds no manifest and
+  rebuilds in full.
+
+SQLite components are therefore consistent per transaction; the search index is not
+versioned with them.
+
+`.ok/index.lock` is an OS advisory lock (`flock` on unix, `LockFileEx` on Windows) that every
+writer holds for its whole run, and the kernel releases it however the writer exits, Ctrl-C
+and OOM kills included. On unix the writer removes the file as it finishes, while still
+holding the lock; on Windows the file stays. A lock file nobody holds is ignored by readers
+and taken over by the next writer at once. On a filesystem where advisory locks do not
+work, `ok index` and `ok watch` fail with `could not lock` and readers treat the lock as
+absent; on a network mount without lock support, the lock is local to each machine and does
+not exclude a writer on another. While a live writer holds the lock and no
+manifest is published, every read surface — `ok status`, `ok doctor`, every read command,
+and the MCP server — reports `indexing in progress` rather than `repository is not indexed`.
+The MCP session survives the failed probe, and a session that already holds a store checks
+for the manifest before each request and probes again when it is gone, so it gives the same
+answer.
 
 Object-level deduplication of evidence was measured and rejected. Evidence objects are 1.0x
 distinct per edge — their `id` is a content hash and `indexed_at` is stamped per run — so a
@@ -422,10 +486,14 @@ them:
 watch never fabricates a graph — but it means watching a repository alone never recovers it.
 Run `ok index` once.
 
-`IndexManifest.schema_version` is bumped to 2 in the same release. A stored manifest whose
-version differs from the current one is not partially indexable, so the incremental path
-(`ok watch`) falls back to a full index rather than updating rows the current reader cannot
-interpret; `ok index` is already a full rebuild.
+`IndexManifest.schema_version` is bumped to 2 in the same release, and to 3 for the typed
+quality notes. A stored manifest whose version differs from the current one is not partially
+indexable, so the incremental path (`ok watch`) falls back to a full index rather than
+updating rows the current reader cannot interpret; `ok index` is already a full rebuild. A
+stored manifest whose version is *newer* than the reader's is refused before its body is
+deserialized, on every surface and on `ok snapshot import`, with one message: the index was
+written by a newer Open Kioku; upgrade Open Kioku or run `ok index` to rebuild it. Older
+manifests still read through serde defaults.
 
 `ok snapshot import` refuses an artifact whose `sqlite_user_version` is below the supported
 version and names the fix, instead of importing a store whose graph would be discarded on

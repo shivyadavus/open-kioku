@@ -64,8 +64,10 @@ pub const HISTORY_SCHEMA_VERSION: u32 = 1;
 /// A stored manifest whose version differs from this one is not partially indexable
 /// (`partial_index_supported`), so the next `ok index` on an index written by an older layout
 /// is a full rebuild rather than an update onto rows the current reader cannot interpret.
-/// Bumped to 2 in 4.0.0 for the compact graph tables.
-pub const INDEX_MANIFEST_SCHEMA_VERSION: u32 = 2;
+/// A stored manifest whose version is *newer* than this one is refused by the reader with
+/// an upgrade-or-reindex message rather than deserialized on a best-effort basis.
+/// Bumped to 2 in 4.0.0 for the compact graph tables, and to 3 for the typed quality notes.
+pub const INDEX_MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
