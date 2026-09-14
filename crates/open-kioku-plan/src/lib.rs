@@ -862,6 +862,7 @@ fn confidence_for_plan(inputs: PlanConfidenceInputs<'_>) -> ConfidenceBreakdown 
                 .count(),
         named_anchor_count: open_kioku_core::named_anchors(task).len(),
         unmatched_anchors: unmatched_anchors.to_vec(),
+        weak_anchors: open_kioku_core::weak_named_anchors(task),
     })
 }
 
@@ -1040,19 +1041,30 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
 }
 
 /// Exact references a plan can point at: exact-authority selections in the pack, indexed
-/// symbol references among the impacts, and SCIP-sourced evidence. Result prose is never
-/// consulted; a substring test for "scip" used to fire on a lexical impact hit whose query
-/// variant named the target file's `scip_setup_report`. `impact.proven_impact` is
-/// deliberately not a source: a proven `Calls` edge is a graph fact about the target's
-/// dependents (often the target file itself), reported in the summary and priced by impact
-/// risk, and it says nothing about whether the selected context anchors the task.
+/// symbol references among the impacts, SCIP-sourced evidence, and proven dependents in
+/// another file. Result prose is never consulted; a substring test for "scip" used to fire on
+/// a lexical impact hit whose query variant named the target file's `scip_setup_report`. A
+/// proven edge counts only when it is cross-file, authoritative, and unambiguous: a same-file
+/// edge, such as `USES_TYPE` between two of the target's own symbols, is the target referring
+/// to itself and says nothing the selection does not, and an ambiguous edge is not proof.
 fn exact_reference_count(
     diagnostics: &open_kioku_core::RetrievalDiagnostics,
     primary_context: &[SearchResult],
     impact: &ImpactReport,
     evidence: &[open_kioku_core::Evidence],
 ) -> usize {
+    let target = Path::new(&impact.target);
     open_kioku_context::exact_authority_selection_count(diagnostics, primary_context)
+        + impact
+            .proven_impact
+            .iter()
+            .filter(|relationship| {
+                relationship.path.as_path() != target
+                    && relationship.authority
+                        == open_kioku_core::RelationshipAuthority::Authoritative
+                    && !relationship.ambiguous
+            })
+            .count()
         + impact
             .direct_impacts
             .iter()
@@ -3495,6 +3507,48 @@ mod tests {
     }
 
     #[test]
+    fn only_cross_file_authoritative_unambiguous_proven_impact_counts_as_exact_reference() {
+        use open_kioku_core::{RelationshipAuthority, RelationshipImpact};
+
+        let proven = |path: &str, edge_type: GraphEdgeType| RelationshipImpact {
+            path: PathBuf::from(path),
+            symbol: None,
+            source: "auth::issue_token".into(),
+            edge_type,
+            authority: RelationshipAuthority::Authoritative,
+            proof_kinds: Vec::new(),
+            ambiguous: false,
+            reason: "fixture".into(),
+        };
+        let mut impact = ImpactReport {
+            proven_impact: vec![
+                proven("src/auth.rs", GraphEdgeType::UsesType),
+                proven("src/session.rs", GraphEdgeType::Calls),
+            ],
+            possible_impact: Vec::new(),
+            target: "src/auth.rs".into(),
+            direct_impacts: Vec::new(),
+            indirect_impacts: Vec::new(),
+            risk_report: RiskReport {
+                level: "low".into(),
+                score: 0.1,
+                reasons: Vec::new(),
+            },
+            evidence: Vec::new(),
+            architecture_policy: None,
+            score_breakdown: Vec::new(),
+        };
+        let diagnostics = open_kioku_core::RetrievalDiagnostics::default();
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+
+        // An ambiguous edge is not proof, even into another file.
+        let mut ambiguous = proven("src/billing.rs", GraphEdgeType::Calls);
+        ambiguous.ambiguous = true;
+        impact.proven_impact.push(ambiguous);
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
+    }
+
+    #[test]
     fn scip_in_an_impact_query_variant_does_not_grant_plan_exact_confidence() {
         // Impact queries are built from the target file's symbol names; a file defining
         // `scip_setup_report` stamps this line on every lexical dependent it finds.
@@ -3539,7 +3593,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_symbol_references_count_as_exact_but_proven_dependents_do_not() {
+    fn indexed_symbol_references_and_cross_file_proven_dependents_count_as_exact() {
         let mut reference_hit = test_search_result("src/publisher.rs");
         reference_hit.match_reason = "exact symbol reference via tree-sitter".into();
         let (_, mut impact) = lexical_impact("token", Vec::new(), reference_hit);
@@ -3559,7 +3613,7 @@ mod tests {
                 ambiguous: false,
                 reason: "calls edge into `issue_token` (exact call site)".into(),
             });
-        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 0);
+        assert_eq!(exact_reference_count(&diagnostics, &[], &impact, &[]), 1);
     }
 
     #[test]

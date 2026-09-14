@@ -503,12 +503,18 @@ pub struct ConfidenceSignalInput {
     pub allowed_file_count: usize,
     pub runtime_signal_count: usize,
     /// Named identifiers in the task (`IssueTokenService`, `reticulate_splines`) as
-    /// [`named_anchors`] extracts them. Zero for a prose-only task.
+    /// [`named_anchors`] extracts them. Zero for a prose-only task; weak anchors are not
+    /// counted.
     pub named_anchor_count: usize,
-    /// The named identifiers no selected context spells, per [`unmatched_named_anchors`].
-    /// When every named identifier is unmatched the repository does not know the thing the
-    /// task is about, and no structural completeness may present that as Medium.
+    /// The named and weak anchors no selected context spells, per
+    /// [`unmatched_named_anchors`]. When every named identifier is unmatched the repository
+    /// does not know the thing the task is about, and no structural completeness may present
+    /// that as Medium.
     pub unmatched_anchors: Vec<String>,
+    /// The task's [`weak_named_anchors`]: hyphenated lowercase words that may be prose. An
+    /// unmatched one is named in a caveat, but never counts toward the all-unmatched blocker
+    /// or its 0.50 cap, because its spelling does not establish that the task named code.
+    pub weak_anchors: Vec<String>,
     /// Fraction of the task's content terms that appear anywhere in the selected
     /// context, in 0..=1. See [`task_relevance_score`].
     ///
@@ -713,35 +719,92 @@ fn task_content_terms(task: &str) -> Vec<String> {
 /// prose. A sentence-initial capital (`Reap the doctor's ...`) is not an identifier, and
 /// ticket references (`ABC-123`) are not anchors. Shared by context and plan so both
 /// surfaces agree on what the task named and therefore on what counts as missing.
+///
+/// An all-lowercase token whose only separator is `-` is spelled the same whether it is a
+/// compound word (`re-index`, `best-effort`) or a lowercase kebab-case identifier
+/// (`get-or-load`), so its spelling cannot establish that the task named code. Such a token
+/// is a weak anchor, returned by [`weak_named_anchors`] and not here, unless the task quotes
+/// it in backticks. A capital, a digit, or an `_` in the token keeps it a named anchor.
 pub fn named_anchors(task: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    for token in task.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
-        let token = token.trim_matches('-');
-        if token.len() < 3 || is_ticket_anchor(token) {
-            continue;
-        }
-        let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
-        let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
-        let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
-        let has_separator = token.contains('_') || token.contains('-');
-        // A capital after the first character is what separates `IssueToken` from a
-        // capitalized verb; `Reap` at the start of a sentence names nothing.
-        let has_internal_upper = token.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
-        if ((has_lower && has_internal_upper) || has_separator || (has_digit && has_upper))
-            && !anchors.iter().any(|existing| existing == token)
+    task_anchors(task)
+        .into_iter()
+        .filter(|(_, strength)| *strength == AnchorStrength::Named)
+        .map(|(anchor, _)| anchor)
+        .collect()
+}
+
+/// The weak anchors of `task`: unquoted all-lowercase tokens whose only separator is `-`.
+/// See [`named_anchors`].
+pub fn weak_named_anchors(task: &str) -> Vec<String> {
+    task_anchors(task)
+        .into_iter()
+        .filter(|(_, strength)| *strength == AnchorStrength::Weak)
+        .map(|(anchor, _)| anchor)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorStrength {
+    Named,
+    Weak,
+}
+
+/// Every anchor of `task` once, in order of first appearance. A token quoted anywhere in the
+/// task is named even where it also appears unquoted.
+fn task_anchors(task: &str) -> Vec<(String, AnchorStrength)> {
+    let mut anchors: Vec<(String, AnchorStrength)> = Vec::new();
+    let spans = task.split('`').collect::<Vec<_>>();
+    for (index, span) in spans.iter().enumerate() {
+        // Odd spans sit between a pair of backticks; an unclosed trailing backtick quotes
+        // nothing.
+        let quoted = index % 2 == 1 && index + 1 < spans.len();
+        for token in span.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
         {
-            anchors.push(token.to_string());
+            let token = token.trim_matches('-');
+            if token.len() < 3 || is_ticket_anchor(token) {
+                continue;
+            }
+            let has_lower = token.chars().any(|ch| ch.is_ascii_lowercase());
+            let has_upper = token.chars().any(|ch| ch.is_ascii_uppercase());
+            let has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+            let has_underscore = token.contains('_');
+            let has_hyphen = token.contains('-');
+            // A capital after the first character is what separates `IssueToken` from a
+            // capitalized verb; `Reap` at the start of a sentence names nothing.
+            let has_internal_upper = token.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+            if !((has_lower && has_internal_upper)
+                || has_underscore
+                || has_hyphen
+                || (has_digit && has_upper))
+            {
+                continue;
+            }
+            let strength = if has_hyphen && !has_underscore && !has_upper && !has_digit && !quoted {
+                AnchorStrength::Weak
+            } else {
+                AnchorStrength::Named
+            };
+            match anchors.iter_mut().find(|(existing, _)| existing == token) {
+                Some(existing) if strength == AnchorStrength::Named => {
+                    existing.1 = AnchorStrength::Named;
+                }
+                Some(_) => {}
+                None => anchors.push((token.to_string(), strength)),
+            }
         }
     }
     anchors
 }
 
-/// The [`named_anchors`] of `task` that none of the top five selected results spells, in
-/// its path, snippet, or symbol names, either verbatim or split into words
-/// (`IssueTokenService` matches `issue token service`). Empty when the task names nothing
-/// or nothing was selected: an empty selection is reported on its own.
+/// The [`named_anchors`] and [`weak_named_anchors`] of `task` that none of the top five
+/// selected results spells, in its path, snippet, or symbol names, either verbatim or split
+/// into words (`IssueTokenService` matches `issue token service`), in task order. Empty when
+/// the task names nothing or nothing was selected: an empty selection is reported on its own.
 pub fn unmatched_named_anchors(task: &str, selected: &[SearchResult]) -> Vec<String> {
-    let anchors = named_anchors(task);
+    let anchors = task_anchors(task)
+        .into_iter()
+        .map(|(anchor, _)| anchor)
+        .collect::<Vec<_>>();
     if anchors.is_empty() || selected.is_empty() {
         return Vec::new();
     }
@@ -819,20 +882,34 @@ impl ConfidenceBreakdown {
                 input.negative_evidence_count
             ));
         }
-        let every_anchor_unmatched = input.named_anchor_count > 0
-            && input.unmatched_anchors.len() >= input.named_anchor_count;
+        // A weak anchor may be a compound word, so it neither decides that every identifier
+        // is unknown nor appears in a blocker asserting that it names nothing.
+        let (weak_unmatched, named_unmatched): (Vec<&str>, Vec<&str>) = input
+            .unmatched_anchors
+            .iter()
+            .map(String::as_str)
+            .partition(|anchor| input.weak_anchors.iter().any(|weak| weak == anchor));
+        let every_anchor_unmatched =
+            input.named_anchor_count > 0 && named_unmatched.len() >= input.named_anchor_count;
         if every_anchor_unmatched {
             blockers.push(format!(
                 "{} task identifier(s) name nothing in the selected context: {}",
-                input.unmatched_anchors.len(),
-                input.unmatched_anchors.join(", ")
+                named_unmatched.len(),
+                named_unmatched.join(", ")
             ));
-        } else if !input.unmatched_anchors.is_empty() {
+        } else if !named_unmatched.is_empty() {
             caveats.push(format!(
                 "{} of {} task identifier(s) name nothing in the selected context: {}",
-                input.unmatched_anchors.len(),
+                named_unmatched.len(),
                 input.named_anchor_count,
-                input.unmatched_anchors.join(", ")
+                named_unmatched.join(", ")
+            ));
+        }
+        if !weak_unmatched.is_empty() {
+            caveats.push(format!(
+                "{} hyphenated task word(s) appear in no selected context: {}",
+                weak_unmatched.len(),
+                weak_unmatched.join(", ")
             ));
         }
         if input.exact_reference_count == 0 {
@@ -4717,15 +4794,15 @@ mod tests {
     use super::{
         count_resolution_notes, named_anchors, negative_evidence_signal_count,
         reconcile_score_breakdown, score_component_total, task_relevance_score,
-        unmatched_named_anchors, Confidence, ConfidenceBreakdown, ConfidenceSignalInput, EdgeId,
-        Evidence, EvidenceQuality, EvidenceSourceType, FileRange, GitChangeKind, GitCommitId,
-        GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge, GraphEdgeType, GraphNode,
-        GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary, IndexCoverage,
-        IndexManifest, IndexMode, IndexQuality, Language, LineRange, NegativeEvidence, NodeId,
-        Owner, PathInterner, QualityNote, QualityNoteKind, Repository, RepositoryId, ScopeId,
-        ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason, SkipSource, SkippedPath,
-        SourceRange, StatusDetail, StringInterner, Symbol, SymbolId, Visibility,
-        HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
+        unmatched_named_anchors, weak_named_anchors, Confidence, ConfidenceBreakdown,
+        ConfidenceSignalInput, EdgeId, Evidence, EvidenceQuality, EvidenceSourceType, FileRange,
+        GitChangeKind, GitCommitId, GitCommitRecord, GitFileTouch, GitSymbolTouch, GraphEdge,
+        GraphEdgeType, GraphNode, GraphNodeType, HistoryRecordId, HistorySnapshot, HistorySummary,
+        IndexCoverage, IndexManifest, IndexMode, IndexQuality, Language, LineRange,
+        NegativeEvidence, NodeId, Owner, PathInterner, QualityNote, QualityNoteKind, Repository,
+        RepositoryId, ScopeId, ScoreComponent, SearchResult, SharedPath, SharedStr, SkipReason,
+        SkipSource, SkippedPath, SourceRange, StatusDetail, StringInterner, Symbol, SymbolId,
+        Visibility, HISTORY_SCHEMA_VERSION, STATUS_SAMPLE_LIMIT,
     };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -5245,6 +5322,7 @@ mod tests {
                 "FrobnicateWidgetManager".into(),
                 "reticulate_splines".into(),
             ],
+            weak_anchors: Vec::new(),
         };
         let all_missing = ConfidenceBreakdown::from_signals(base.clone());
         assert_eq!(all_missing.overall_enum, Confidence::Low);
@@ -5370,6 +5448,114 @@ mod tests {
         );
         assert!(unmatched_named_anchors(task, &[]).is_empty());
         assert!(unmatched_named_anchors("make it faster", &selected).is_empty());
+    }
+
+    #[test]
+    fn hyphenated_lowercase_words_are_weak_anchors_unless_quoted() {
+        let drive_by = "re-index after a drive-by edit";
+        assert!(named_anchors(drive_by).is_empty());
+        assert_eq!(weak_named_anchors(drive_by), vec!["re-index", "drive-by"]);
+        let retries = "make retries best-effort instead of fail-closed";
+        assert!(named_anchors(retries).is_empty());
+        assert_eq!(
+            weak_named_anchors(retries),
+            vec!["best-effort", "fail-closed"]
+        );
+        assert_eq!(
+            named_anchors("Fix FrobnicateWidgetManager"),
+            vec!["FrobnicateWidgetManager"]
+        );
+        assert_eq!(named_anchors("rename get_or_load"), vec!["get_or_load"]);
+
+        // Lowercase kebab-case is spelled like a compound word; only quoting names it.
+        assert!(named_anchors("rename get-or-load").is_empty());
+        assert_eq!(
+            weak_named_anchors("rename get-or-load"),
+            vec!["get-or-load"]
+        );
+        assert_eq!(named_anchors("rename `get-or-load`"), vec!["get-or-load"]);
+        assert!(weak_named_anchors("rename `get-or-load`").is_empty());
+        let quoted_once = "rename get-or-load to `get-or-load`";
+        assert_eq!(named_anchors(quoted_once), vec!["get-or-load"]);
+        assert!(weak_named_anchors(quoted_once).is_empty());
+        assert!(named_anchors("rename `get-or-load").is_empty());
+
+        // A capital, a digit, or an underscore keeps a hyphenated token a named anchor.
+        assert_eq!(
+            named_anchors("set X-Request-Id on retry-v2 and max_retry-count"),
+            vec!["X-Request-Id", "retry-v2", "max_retry-count"]
+        );
+
+        // A weak anchor no selected context spells is still reported as unmatched.
+        let selected = vec![relevance_probe("src/index.rs", "fn reindex() {}")];
+        assert_eq!(
+            unmatched_named_anchors(drive_by, &selected),
+            vec!["re-index", "drive-by"]
+        );
+    }
+
+    #[test]
+    fn unmatched_weak_anchors_never_set_the_identifier_blocker_or_its_cap() {
+        let base = ConfidenceSignalInput {
+            primary_file_count: 3,
+            evidence_count: 12,
+            exact_reference_count: 2,
+            validation_count: 3,
+            validation_with_command_count: 3,
+            // Context and plan list unmatched weak anchors as `anchor` negative evidence.
+            negative_evidence_count: 1,
+            allowed_file_count: 3,
+            runtime_signal_count: 1,
+            task_relevance: 0.8,
+            named_anchor_count: 0,
+            unmatched_anchors: vec!["re-index".into(), "drive-by".into()],
+            weak_anchors: vec!["re-index".into(), "drive-by".into()],
+        };
+        let names_identifier_blocker = |breakdown: &ConfidenceBreakdown| -> bool {
+            breakdown
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("task identifier(s) name nothing"))
+        };
+
+        let weak_only = ConfidenceBreakdown::from_signals(base.clone());
+        assert!(!names_identifier_blocker(&weak_only), "{weak_only:?}");
+        assert!(weak_only.overall_score > 0.50 && weak_only.overall_score <= 0.60);
+        assert_eq!(weak_only.overall_enum, Confidence::Medium);
+        assert!(weak_only.caveats.iter().any(|caveat| caveat
+            == "2 hyphenated task word(s) appear in no selected context: re-index, drive-by"));
+
+        // A matched identifier beside an unmatched weak word: the miss count once equalled
+        // the identifier count here and read as every identifier unmatched.
+        let named_matched = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            named_anchor_count: 1,
+            unmatched_anchors: vec!["drive-by".into()],
+            weak_anchors: vec!["drive-by".into()],
+            ..base.clone()
+        });
+        assert!(
+            !names_identifier_blocker(&named_matched),
+            "{named_matched:?}"
+        );
+        assert!(named_matched.overall_score > 0.50, "{named_matched:?}");
+
+        // Every identifier unmatched: the blocker and cap apply and name the identifier only.
+        let named_missing = ConfidenceBreakdown::from_signals(ConfidenceSignalInput {
+            named_anchor_count: 1,
+            unmatched_anchors: vec!["FrobnicateWidgetManager".into(), "drive-by".into()],
+            weak_anchors: vec!["drive-by".into()],
+            ..base
+        });
+        assert_eq!(named_missing.overall_enum, Confidence::Low);
+        assert!(named_missing.overall_score <= 0.50, "{named_missing:?}");
+        assert!(named_missing.blockers.iter().any(|blocker| {
+            blocker
+            == "1 task identifier(s) name nothing in the selected context: FrobnicateWidgetManager"
+        }));
+        assert!(named_missing
+            .caveats
+            .iter()
+            .any(|caveat| caveat.ends_with("appear in no selected context: drive-by")));
     }
 
     #[test]

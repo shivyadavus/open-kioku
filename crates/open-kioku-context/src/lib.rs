@@ -1697,6 +1697,7 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
             + runtime_signal_count(primary_files, supporting_files),
         named_anchor_count: open_kioku_core::named_anchors(task).len(),
         unmatched_anchors: unmatched_anchors.to_vec(),
+        weak_anchors: open_kioku_core::weak_named_anchors(task),
     })
 }
 
