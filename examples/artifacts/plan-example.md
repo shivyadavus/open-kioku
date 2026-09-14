@@ -29,7 +29,7 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
 - Components:
   - `boundary_tightness` score `0.85`, weight `0.15`, contribution `0.13`: how narrowly allowed edit files bound the proposed change
   - `evidence_density` score `0.90`, weight `0.10`, contribution `0.09`: distinct evidence records over twice the selected primary files, capped at 1.0
-  - `exact_references` score `0.25`, weight `0.20`, contribution `0.05`: selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence
+  - `exact_references` score `0.25`, weight `0.20`, contribution `0.05`: selections backed by exact-authority retrieval, indexed symbol references, or SCIP evidence; a plan also counts proven cross-file dependents
   - `negative_evidence` score `1.00`, weight `0.15`, contribution `0.15`: absence of low-confidence, missing-anchor, or no-match evidence
   - `runtime_corroboration` score `0.25`, weight `0.05`, contribution `0.01`: runtime traces, incidents, or error signals that support the context
   - `task_relevance` score `1.00`, weight `0.20`, contribution `0.20`: share of the task's terms that appear in the selected context
