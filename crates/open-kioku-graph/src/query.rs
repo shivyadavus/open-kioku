@@ -1819,28 +1819,34 @@ mod tests {
         assert!(res.has_more);
     }
 
-    /// Labels are shaped as the graph builder writes them: a File node carries its
-    /// repository-relative path and a symbol node its qualified name, computed here by the same
-    /// `identity::qualified_name` the parser uses, so the examples are tested against real labels.
+    /// Labels are shaped as an index writes them. A File node carries its repository-relative path.
+    /// A symbol node carries the qualified name tree-sitter gives it, which the graph builder copies
+    /// into the label: the path without its extension, `/` as `::`, then `::name`, in every language.
+    /// `symbol_label` mirrors `qualified_name` in open-kioku-tree-sitter; the Java node pins that no
+    /// package prefix is applied, which `identity::qualified_name` would add.
     fn example_store() -> MockGraphStore {
         let mut store = MockGraphStore {
             nodes: std::collections::HashMap::new(),
             edges: Vec::new(),
         };
         let symbol_label = |path: &str, name: &str| {
-            open_kioku_core::identity::qualified_name(
-                std::path::Path::new(path),
-                &open_kioku_core::Language::Rust,
-                None,
-                name,
-            )
-            .expect("a relative Rust path has a qualified name")
+            let stem = std::path::Path::new(path)
+                .with_extension("")
+                .to_string_lossy()
+                .replace(['/', '\\'], "::");
+            format!("{stem}::{name}")
         };
+        let java_path = "src/main/java/com/acme/OrderService.java";
         for (id, label, node_type) in [
             ("file:app", "src/app.rs".to_string(), GraphNodeType::File),
             (
                 "file:config",
                 "src/config.rs".to_string(),
+                GraphNodeType::File,
+            ),
+            (
+                "file:order_service",
+                java_path.to_string(),
                 GraphNodeType::File,
             ),
             (
@@ -1858,6 +1864,11 @@ mod tests {
                 symbol_label("src/config.rs", "parse_config"),
                 GraphNodeType::Function,
             ),
+            (
+                "method:handle_order",
+                symbol_label(java_path, "handle_order"),
+                GraphNodeType::Method,
+            ),
         ] {
             store
                 .nodes
@@ -1867,6 +1878,16 @@ mod tests {
             store.nodes["fn:parse_config"].label,
             "src::config::parse_config"
         );
+        assert_eq!(
+            store.nodes["method:handle_order"].label,
+            "src::main::java::com::acme::OrderService::handle_order"
+        );
+        store.edges.push(test_edge(
+            "defines-handle-order",
+            "file:order_service",
+            "method:handle_order",
+            GraphEdgeType::Defines,
+        ));
 
         for (id, from, to, edge_type) in [
             ("defines-run", "file:app", "fn:run", GraphEdgeType::Defines),

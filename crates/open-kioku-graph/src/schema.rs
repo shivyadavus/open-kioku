@@ -355,7 +355,7 @@ fn query_syntax() -> Vec<String> {
         format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, the source node must name its type, and only forward edges are followed."),
         "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].".into(),
         "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a node variable bound in MATCH, with a single- or double-quoted value.".into(),
-        "A File node's label is its repository-relative path (src/config.rs); a symbol node's label is its qualified name, the path without its extension and the symbol name joined by :: (src::config::parse_config), with Java and Go symbols under their package. label, file_path and qualified_name filters compare against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
+        "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. label, file_path and qualified_name filters compare against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
         "Filter fields are label, id, file_path, qualified_name, source, source_type and confidence; file_path and qualified_name compare against the node label, and graph nodes carry no source, source_type or confidence field, so filters on those match no rows.".into(),
         "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.".into(),
         "RETURN lists node variables bound in MATCH, each at most once; read labels and properties from the returned node objects.".into(),
@@ -379,7 +379,7 @@ fn query_examples() -> Vec<GraphQueryExample> {
         ),
         (
             "MATCH (s:Function)<-[:DEFINES]-(f:File) WHERE s.label =~ '::handle_[^:]*$' RETURN s, f",
-            "The DEFINES edge read in reverse: functions whose own name starts with handle_, and the files that define them.",
+            "The DEFINES edge read in reverse: functions whose own name starts with handle_, and the files that define them. A regex filter is not anchored by the index, so this scans every DEFINES edge in memory and can reach the query timeout on a large index.",
         ),
         (
             "MATCH (a:Function)-[:CALLS *1..3]->(b:Function) WHERE a.label =~ '::run$' RETURN b LIMIT 20",
