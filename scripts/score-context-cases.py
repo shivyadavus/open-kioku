@@ -27,6 +27,13 @@ The report also records the index's coverage (source files discovered versus ind
 per language, with every omission attributed to a skip reason) read from
 `ok --json status`, so a ranking number is never read without knowing how much of the
 corpus the index actually held.
+
+Every aggregate metric is also reported per routed task family under `by_task_family`. A
+case's family is the one its pack reports in `retrieval_diagnostics.routing.task_family`,
+which the router derives from the query text alone, using the `TaskFamily` names from
+open-kioku-core. A family with fewer than MIN_FAMILY_CASES scored cases is reported and
+marked `insufficient`; the baseline comparison never gates on it. See
+docs/retrieval-benchmark.md, "Per-task-family breakdown".
 """
 import argparse
 import json
@@ -294,6 +301,106 @@ YIELD_KEYS = (
     + tuple(f"gold_line_yield_primary@{b}" for b in BUDGETS)
 )
 
+# The families `open_kioku_core::TaskFamily` serializes, in declaration order. They order the
+# report; a name the router emits that is not listed here is still reported, after these.
+# `scripts/tests/test_commit_derived_families.py` pins this tuple to the Rust enum.
+TASK_FAMILIES = (
+    "issue_to_code", "code_to_test", "trace_to_code", "comment_to_context",
+    "edit_to_ripple", "documentation", "mixed_code_docs", "general",
+)
+
+# Fewest scored cases a family needs before the baseline comparison may gate on it. One case
+# changing outcome moves R@k, MRR, or gold_recall@20 by at most 1/n; at 33 cases that is
+# 0.0303, above the 0.03 slack, so a single case could fail the gate on its own. At 34 it is
+# 0.0294.
+MIN_FAMILY_CASES = 34
+
+FAMILY_ASSIGNMENT = "retrieval_diagnostics.routing.task_family"
+
+
+def task_family(pack):
+    """The routed task family the pack reports, or None when the pack carries no routing.
+
+    `classify_task` in open-kioku-context derives it from the query text alone, so for a given
+    build it is a deterministic function of the case. A pack without the field (a binary that
+    predates it) leaves the case unassigned: it stays in every aggregate and in no family.
+    """
+    routing = (pack.get("retrieval_diagnostics") or {}).get("routing") or {}
+    family = routing.get("task_family")
+    return family if isinstance(family, str) and family else None
+
+
+def bootstrap_ci(sample, rng, rounds=1000):
+    """95% percentile interval per metric over `rounds` resamples drawn with `rng`.
+
+    A metric present in fewer than 40 resamples (a yield no resample could compute) gets no
+    interval.
+    """
+    boots = [metrics(rng.choices(sample, k=len(sample))) for _ in range(rounds)]
+    ci = {}
+    for k in metrics(sample):
+        values = sorted(b[k] for b in boots if k in b)
+        if len(values) >= 40:
+            ci[k] = (values[int(len(values) * 0.025)], values[min(int(len(values) * 0.975), len(values) - 1)])
+    return ci
+
+
+def family_breakdown(scored, min_cases=MIN_FAMILY_CASES, seed=7):
+    """The `by_task_family` report section: every aggregate metric over each family's cases.
+
+    `case_coverage` is how much of the scored corpus a family holds and how many of its cases
+    could be scored for yield. Index coverage is a property of the whole index and is not
+    divided by family. Failed queries return no pack and therefore no family; they are counted
+    in the report's aggregate error total only.
+    """
+    groups = {}
+    unassigned = 0
+    for row in scored:
+        family = row.get("task_family")
+        if family is None:
+            unassigned += 1
+            continue
+        groups.setdefault(family, []).append(row)
+    order = [f for f in TASK_FAMILIES if f in groups] + sorted(f for f in groups if f not in TASK_FAMILIES)
+    families = {}
+    for family in order:
+        sample = groups[family]
+        families[family] = {
+            "cases": len(sample),
+            "insufficient": len(sample) < min_cases,
+            "metrics": metrics(sample),
+            # Seeded per family, independently of the aggregate interval, so adding or removing
+            # one family never shifts another's interval.
+            "ci": bootstrap_ci(sample, random.Random(f"{seed}:{family}")),
+            "case_coverage": {
+                "share_of_scored": len(sample) / len(scored),
+                "with_selected_units": sum(1 for r in sample if r.get("gold_file_yield")),
+                "with_line_ranges": sum(1 for r in sample if r.get("line_yield_measurable")),
+            },
+        }
+    return {
+        "assignment": FAMILY_ASSIGNMENT,
+        "min_cases": min_cases,
+        "scored_cases": len(scored),
+        "unassigned_cases": unassigned,
+        "families": families,
+    }
+
+
+def family_lines(section):
+    """Printable per-family rows for a `by_task_family` section."""
+    lines = [
+        f"  -- per routed task family ({section['assignment']}); fewer than {section['min_cases']} "
+        f"cases is insufficient and never gated; {section['unassigned_cases']} unassigned --",
+        f"  {'family':20} {'cases':>5}  {'R@5':>6}  {'R@20':>6}  {'MRR':>6}  {'gold_recall@20':>14}",
+    ]
+    for family, entry in section["families"].items():
+        m = entry["metrics"]
+        note = "  insufficient" if entry["insufficient"] else ""
+        lines.append(f"  {family:20} {entry['cases']:>5}  {m['R@5']:.4f}  {m['R@20']:.4f}  "
+                     f"{m['MRR']:.4f}  {m['gold_recall@20']:>14.4f}{note}")
+    return lines
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -338,6 +445,7 @@ def main():
             "gold_recall": len(gold_set & set(ranked)) / len(gold_set),
             "returned": len(ranked), "top": ranked[:5],
             "confidence": pack.get("confidence_breakdown", {}).get("overall_enum"),
+            "task_family": task_family(pack),
             "secs": time.time() - started,
         }
         units = selected_units(pack, repo)
@@ -362,13 +470,10 @@ def main():
         print("no case scored; every query failed", file=sys.stderr)
         return 1
     summary = metrics(scored)
-    random.seed(7)
-    boots = [metrics(random.choices(scored, k=len(scored))) for _ in range(1000)]
-    ci = {}
-    for k in summary:
-        values = sorted(b[k] for b in boots if k in b)
-        if len(values) >= 40:
-            ci[k] = (values[int(len(values) * 0.025)], values[min(int(len(values) * 0.975), len(values) - 1)])
+    # `random.Random(7)` draws the same sequence the module-level generator did after
+    # `random.seed(7)`, so aggregate intervals match reports scored before this helper existed.
+    ci = bootstrap_ci(scored, random.Random(7))
+    by_family = family_breakdown(scored)
     median_secs = statistics.median(r["secs"] for r in rows)
     coverage, coverage_error = index_coverage(args.ok, repo)
     print(f"\n== {args.label}: {len(scored)} cases scored ({len(rows) - len(scored)} errors), median {median_secs:.1f}s/query ==")
@@ -399,11 +504,14 @@ def main():
                   f"95% CI [{ci['tokens_to_first_gold_p50'][0]:.0f}, {ci['tokens_to_first_gold_p50'][1]:.0f}]   "
                   f"({len(first)}/{len(with_units)} cases reach a gold unit)")
     print(f"  {'coverage':16} {coverage_line(coverage, coverage_error)}")
+    for line in family_lines(by_family):
+        print(line)
     if args.out:
         json.dump({"label": args.label, "metrics": summary, "ci": ci, "median_secs": median_secs,
                    "yield_budgets": list(BUDGETS), "coverage": coverage,
                    "coverage_line": coverage_line(coverage, coverage_error),
-                   "coverage_error": coverage_error, "rows": rows},
+                   "coverage_error": coverage_error, "rows": rows,
+                   "by_task_family": by_family},
                   open(args.out, "w"), indent=1)
     return 0
 

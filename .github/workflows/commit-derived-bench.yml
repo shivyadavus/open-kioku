@@ -166,6 +166,18 @@ jobs:
                   continue
               m = r["metrics"]
               print(f"| {split} | {r.get('coverage_line', 'not recorded')} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
+          print()
+          print("| split | routed task family | cases | R@5 | R@20 | MRR |")
+          print("| --- | --- | ---: | ---: | ---: | ---: |")
+          for split in ("holdout", "dev"):
+              try:
+                  section = json.load(open(f"artifacts/{split}.json")).get("by_task_family") or {}
+              except OSError:
+                  continue
+              for family, f in section.get("families", {}).items():
+                  m = f["metrics"]
+                  note = " (insufficient, not gated)" if f["insufficient"] else ""
+                  print(f"| {split} | {family}{note} | {f['cases']} | {m['R@5']:.4f} | {m['R@20']:.4f} | {m['MRR']:.4f} |")
           PY
 
       - name: Upload reports
