@@ -2517,6 +2517,61 @@ fn demo_creates_indexed_sample_repo() {
     });
     assert!(forbidden_stderr.contains("forbidden boundary edit"));
 
+    // Both invalid-input cases are matched per stderr line rather than by prefix: a build with
+    // the `mem-profile` feature (CI coverage runs `--all-features`) reports allocation totals
+    // on stderr before the error line.
+    let stderr_has_line = |stderr: &str, prefix: &str| {
+        stderr
+            .lines()
+            .any(|line| line.trim_start().starts_with(prefix))
+    };
+    // No change source at all is a usage error clap rejects before the plan is read.
+    let no_source = ok()
+        .arg("--repo")
+        .arg(&repo)
+        .arg("verify")
+        .arg("--plan")
+        .arg(&plan_path)
+        .output()
+        .unwrap();
+    assert_eq!(no_source.status.code(), Some(2));
+    let no_source_stderr = String::from_utf8_lossy(&no_source.stderr);
+    assert!(
+        stderr_has_line(
+            &no_source_stderr,
+            "error: the following required arguments were not provided"
+        ),
+        "{no_source_stderr}"
+    );
+    // A diff that names no file reaches the kernel check, which is caller input too.
+    let empty_diff_path = repo.join("empty.diff");
+    fs::write(&empty_diff_path, "").unwrap();
+    let empty_diff = ok()
+        .arg("--repo")
+        .arg(&repo)
+        .arg("verify")
+        .arg("--plan")
+        .arg(&plan_path)
+        .arg("--diff")
+        .arg(&empty_diff_path)
+        .output()
+        .unwrap();
+    assert_eq!(empty_diff.status.code(), Some(2));
+    let empty_diff_stderr = String::from_utf8_lossy(&empty_diff.stderr);
+    assert!(
+        stderr_has_line(
+            &empty_diff_stderr,
+            "Error: invalid input: verify requires at least one changed file or a non-empty unified diff"
+        ),
+        "{empty_diff_stderr}"
+    );
+    // The same assertion must hold with any diagnostic preamble on stderr, as the coverage
+    // build produces; this pins the matcher without depending on how the binary was built.
+    assert!(stderr_has_line(
+        "ok[mem-profile] peak_live_bytes=1\nError: invalid input: verify requires at least one changed file or a non-empty unified diff\n",
+        "Error: invalid input: verify requires at least one changed file or a non-empty unified diff"
+    ));
+
     let verify_diff_path = repo.join("auth.diff");
     fs::write(
         &verify_diff_path,

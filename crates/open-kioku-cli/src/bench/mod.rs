@@ -1954,6 +1954,7 @@ fn score_workflow_case(
                 check_dependency_delta: false,
                 architecture_policy: None,
                 suppress_plan_validation_pending: false,
+                changed_ranges: Default::default(),
             },
         )?)
     } else {
@@ -2217,6 +2218,7 @@ fn run_contract_bench(args: ContractBenchArgs) -> anyhow::Result<ContractBenchRe
                 check_dependency_delta: case.check_dependency_delta,
                 architecture_policy: load_architecture_policy(&temp_repo.path)?,
                 suppress_plan_validation_pending: false,
+                changed_ranges: Default::default(),
             },
         )?;
         let verification_ms = duration_ms(verification_started.elapsed());

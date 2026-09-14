@@ -20,6 +20,61 @@ fn cleanup_ok_dir(fixture: &str) {
     }
 }
 
+/// Outside test-path files, only a function, method, or test symbol may be persisted as a
+/// test target: a constant or struct beside an inline test module is not one.
+fn assert_test_targets_are_callables(fixture: &str) {
+    let conn = rusqlite::Connection::open(fixture_dir(fixture).join(".ok/index.sqlite")).unwrap();
+    let mut statement = conn
+        .prepare("SELECT t.json, s.json FROM tests t JOIN symbols s ON s.file_id = t.file_id")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap();
+    for row in rows {
+        let (target, symbol) = row.unwrap();
+        let target: serde_json::Value = serde_json::from_str(&target).unwrap();
+        let symbol: serde_json::Value = serde_json::from_str(&symbol).unwrap();
+        if target["name"] != symbol["name"] || target["range"] != symbol["range"] {
+            continue;
+        }
+        let kind = symbol["kind"].as_str().unwrap_or_default();
+        assert!(
+            ["function", "method", "test"]
+                .iter()
+                .any(|callable| kind.eq_ignore_ascii_case(callable)),
+            "{fixture}: `{}` of kind {kind} was persisted as a test target",
+            symbol["name"]
+        );
+    }
+    // `rust-tests-fixture` holds a constant, a struct and a helper beside an inline test module
+    // with a `#[test]` and an `#[rstest]` case stack. It is its own repository so the plan
+    // snapshot over `rust-fixture` keeps one obvious file for its task.
+    if fixture == "rust-tests-fixture" {
+        let mut names_statement = conn.prepare("SELECT json FROM tests").unwrap();
+        let names = names_statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.unwrap()).unwrap()["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for expected in ["clamp_keeps_small_counts", "clamp_bounds_each_case"] {
+            assert!(
+                names.contains(expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+        for unexpected in ["CACHE_LIMIT", "CacheEntry", "clamp_hits", "tests"] {
+            assert!(!names.contains(unexpected), "{unexpected} in {names:?}");
+        }
+    }
+}
+
 fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
     cleanup_ok_dir(fixture);
 
@@ -43,6 +98,7 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
         .success();
 
     assert!(fixture_dir(fixture).join(".ok/index.sqlite").exists());
+    assert_test_targets_are_callables(fixture);
 
     // 3. Status
     let mut cmd = Command::cargo_bin("ok").unwrap();
@@ -84,6 +140,11 @@ fn run_lifecycle_test(fixture: &str, search_term: &str, expected_path: &str) {
 #[test]
 fn test_rust_fixture_lifecycle() {
     run_lifecycle_test("rust-fixture", "add", "src/main.rs");
+}
+
+#[test]
+fn test_rust_tests_fixture_lifecycle() {
+    run_lifecycle_test("rust-tests-fixture", "clamp_hits", "src/lib.rs");
 }
 
 #[test]
@@ -261,6 +322,53 @@ fn test_mcp_plan_change_snapshot() {
         .get("result")
         .cloned()
         .expect("plan_change should return a JSON-RPC result");
+
+    // Every evidence record id is unique. Each evidence line of a primary result resolves to
+    // exactly one record under its derived id; any other ref the result cites resolves to at
+    // most one record, and never to a retrieval record of another file.
+    let plan = &result["structuredContent"];
+    let records = plan["evidence"]
+        .as_array()
+        .expect("plan evidence is an array");
+    let record_ids = records
+        .iter()
+        .map(|record| record["id"].as_str().expect("evidence id").to_string())
+        .collect::<Vec<_>>();
+    let unique_ids = record_ids.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique_ids.len(), record_ids.len(), "{record_ids:?}");
+    for context in plan["primary_context"].as_array().unwrap() {
+        let path = context["path"].as_str().unwrap();
+        let range = match (
+            context["line_range"]["start"].as_u64(),
+            context["line_range"]["end"].as_u64(),
+        ) {
+            (Some(start), Some(end)) => format!("{start}-{end}"),
+            _ => "unknown".to_string(),
+        };
+        for index in 0..context["evidence"].as_array().unwrap().len() {
+            let derived = format!("search:{path}:{range}:{index}");
+            assert_eq!(
+                record_ids.iter().filter(|id| **id == derived).count(),
+                1,
+                "{derived} should resolve to one record"
+            );
+        }
+        for evidence_ref in context["evidence_refs"].as_array().unwrap() {
+            let evidence_ref = evidence_ref.as_str().unwrap();
+            let matching = records
+                .iter()
+                .filter(|record| record["id"] == evidence_ref)
+                .collect::<Vec<_>>();
+            assert!(matching.len() <= 1, "{evidence_ref} names several records");
+            if let (Some(record), true) = (matching.first(), evidence_ref.starts_with("search:")) {
+                assert_eq!(
+                    record["file_range"]["path"].as_str(),
+                    Some(path),
+                    "{evidence_ref} resolved to another file's record"
+                );
+            }
+        }
+    }
 
     // The text content block duplicates structuredContent as pretty-printed JSON;
     // keep only the envelope shape for it.

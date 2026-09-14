@@ -330,7 +330,7 @@ async fn handle_request_with_timeout(
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(json!({"code": -32000, "message": err.to_string()})),
+            error: Some(json!({"code": json_rpc_error_code(&err), "message": err.to_string()})),
         }),
         Err(_) => Some(JsonRpcResponse {
             jsonrpc: "2.0",
@@ -340,6 +340,21 @@ async fn handle_request_with_timeout(
                 json!({"code": -32001, "message": format!("MCP method `{method}` timed out after {}s", timeout.as_secs())}),
             ),
         }),
+    }
+}
+
+/// JSON-RPC `-32602` (invalid params) when the failure is the caller's arguments, the
+/// server-defined `-32000` for everything else.
+fn json_rpc_error_code(err: &anyhow::Error) -> i64 {
+    let invalid_input = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<open_kioku_errors::OkError>()
+            .is_some_and(open_kioku_errors::OkError::is_invalid_input)
+    });
+    if invalid_input {
+        -32602
+    } else {
+        -32000
     }
 }
 
@@ -944,6 +959,7 @@ async fn dispatch(
                         check_dependency_delta,
                         architecture_policy,
                         suppress_plan_validation_pending: false,
+                        changed_ranges: Default::default(),
                     },
                 )?))
         }
@@ -2259,6 +2275,7 @@ fn verify_change_contract_tool(
                 check_dependency_delta,
                 architecture_policy,
                 suppress_plan_validation_pending: false,
+                changed_ranges: Default::default(),
             },
         )?;
     format_contract_verification_output(&report, format_arg(params, "json"))
@@ -3148,6 +3165,43 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknown MCP method or tool"));
+    }
+
+    #[tokio::test]
+    async fn verify_change_without_changed_files_is_invalid_params() {
+        let fixture = McpSnapshotFixture::new();
+        let plan = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"plan","method":"tools/call","params":{"name":"plan_change","arguments":{"task":"publish invoice","format":"json"}}}"#,
+        )
+        .await
+        .expect("plan_change should answer");
+        let plan = plan.result.expect("plan_change should succeed")["structuredContent"].clone();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "verify",
+            "method": "tools/call",
+            "params": {"name": "verify_change", "arguments": {"plan": plan}},
+        })
+        .to_string();
+
+        let response = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            &request,
+        )
+        .await
+        .expect("verify_change should answer");
+
+        let error = response.error.expect("no changed files is an error");
+        assert_eq!(error["code"], -32602);
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid input: verify requires at least one changed file"));
     }
 
     #[tokio::test]

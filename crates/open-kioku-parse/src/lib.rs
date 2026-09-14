@@ -1152,7 +1152,14 @@ pub fn extract_tests(
     symbols: &[Symbol],
     build_hint: Option<&str>,
 ) -> Vec<TestTarget> {
-    let path = file.path.to_string_lossy().to_ascii_lowercase();
+    // A leading separator lets a repository-root `tests/` or `test/` match like a nested one.
+    let path = format!(
+        "/{}",
+        file.path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    );
     let is_test_file = path.contains("/test/")
         || path.contains("/tests/")
         || path.ends_with("_test.rs")
@@ -1162,14 +1169,14 @@ pub fn extract_tests(
         || path.ends_with(".test.ts")
         || path.ends_with("_test.py");
 
+    let lines = content.lines().collect::<Vec<_>>();
     symbols
         .iter()
         .filter(|symbol| {
             is_test_file
-                || symbol.name.starts_with("test")
-                || content
-                    .lines()
-                    .any(|line| line.contains("#[test]") || line.contains("@Test"))
+                || (is_test_symbol_kind(&symbol.kind)
+                    && (symbol.name.starts_with("test")
+                        || has_adjacent_test_annotation(&lines, symbol)))
         })
         .map(|symbol| TestTarget {
             selection_tier: open_kioku_core::TestSelectionTier::default(),
@@ -1206,6 +1213,134 @@ pub fn extract_tests(
             )],
         })
         .collect()
+}
+
+/// Upper bound on the attribute, annotation and doc-comment lines walked above a symbol, so a
+/// pathological stack cannot turn one symbol into a scan of the file.
+const TEST_ANNOTATION_STACK_LIMIT: usize = 64;
+
+/// Attribute and annotation prefixes, after indentation, that mark the next callable as a test.
+/// Matched as prefixes, not substrings.
+const STACKED_TEST_ANNOTATIONS: &[&str] = &[
+    "#[test]",
+    "#[tokio::test",
+    "#[async_std::test",
+    "#[rstest",
+    "#[test_case",
+    "@Test",
+    "@ParameterizedTest",
+    "@RepeatedTest",
+];
+
+/// Declaration prefixes that make a symbol's own first line a test: a JS/TS `it(` or `test(`
+/// call, or a Python `def test_`. Matched on that line only. Above a symbol they are the
+/// previous test's code, not an annotation of this symbol, and `it(` inside `commit(` is never
+/// one because matching is by prefix.
+const DECLARATION_TEST_PREFIXES: &[&str] = &["it(", "test(", "def test_", "async def test_"];
+
+fn is_test_symbol_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
+    )
+}
+
+fn is_stacked_test_annotation(line: &str) -> bool {
+    STACKED_TEST_ANNOTATIONS
+        .iter()
+        .any(|annotation| line.starts_with(annotation))
+}
+
+/// An attribute, annotation, decorator or comment line: the only single lines the walk above a
+/// symbol passes over.
+fn is_annotation_stack_line(line: &str) -> bool {
+    ["#", "@", "//", "/*", "*"]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+fn bracket_balance(line: &str) -> i64 {
+    line.chars()
+        .map(|character| match character {
+            '(' | '[' | '{' => 1,
+            ')' | ']' | '}' => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The first line of a multi-line attribute or annotation that ends at `close`: the nearest
+/// `#[` or `@` line above whose brackets close exactly at `close`, with only argument lines in
+/// between. `None` when `close` is code, such as the last line of the previous test's body.
+fn multiline_attribute_opener(lines: &[&str], close: usize) -> Option<usize> {
+    let closing = lines.get(close)?.trim();
+    if !(closing.ends_with(')') || closing.ends_with(']')) {
+        return None;
+    }
+    let mut balance = bracket_balance(closing);
+    for opener in (0..close).rev().take(TEST_ANNOTATION_STACK_LIMIT) {
+        let line = lines[opener].trim();
+        balance += bracket_balance(line);
+        if line.starts_with("#[") || line.starts_with('@') {
+            return (balance == 0 && bracket_balance(line) > 0).then_some(opener);
+        }
+        let ends_code = line.is_empty()
+            || line.ends_with(';')
+            || line.ends_with('{')
+            || line.ends_with('}')
+            || line.ends_with(':');
+        if ends_code {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether the symbol's first line declares a test, or a test attribute or annotation sits in
+/// the contiguous stack of attribute, annotation, decorator and comment lines directly above
+/// it, including the argument lines of a multi-line `#[should_panic(..)]` or
+/// `@ValueSource({..})`. The walk never passes a line of code, so a helper declared right after
+/// a test body is not a test. Scanned per symbol, not per file: a `#[cfg(test)] mod tests`
+/// elsewhere in the file says nothing about the constant or struct three hundred lines earlier.
+fn has_adjacent_test_annotation(lines: &[&str], symbol: &Symbol) -> bool {
+    let Some(range) = &symbol.range else {
+        return false;
+    };
+    let start = (range.start as usize).saturating_sub(1);
+    let Some(first) = lines.get(start) else {
+        return false;
+    };
+    let first = first.trim_start();
+    if is_stacked_test_annotation(first)
+        || DECLARATION_TEST_PREFIXES
+            .iter()
+            .any(|prefix| first.starts_with(prefix))
+    {
+        return true;
+    }
+    let mut index = start;
+    let mut walked = 0;
+    while index > 0 && walked < TEST_ANNOTATION_STACK_LIMIT {
+        let above = index - 1;
+        let line = lines[above].trim();
+        if is_annotation_stack_line(line) {
+            if is_stacked_test_annotation(line) {
+                return true;
+            }
+            index = above;
+            walked += 1;
+            continue;
+        }
+        let Some(opener) = multiline_attribute_opener(lines, above) else {
+            return false;
+        };
+        if is_stacked_test_annotation(lines[opener].trim()) {
+            return true;
+        }
+        walked += index - opener;
+        index = opener;
+    }
+    false
 }
 
 fn qualified_name(file: &File, content: &str, name: &str) -> String {
@@ -1644,6 +1779,121 @@ endpoint = "https://orders.example.com/v1/orders"
         let tests = extract_tests(&file, src, &symbols, None);
         assert!(!tests.is_empty(), "should detect #[test] function");
         assert!(tests[0].command.as_deref() == Some("cargo test"));
+    }
+
+    #[test]
+    fn constants_and_structs_beside_an_inline_test_module_are_not_test_targets() {
+        let file = rust_file();
+        let src = "pub const LATTICE_ANCHOR_BOOST: f32 = 0.4;\n\npub struct ScoreComponent;\n\npub fn boost() -> f32 {\n    LATTICE_ANCHOR_BOOST\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn boost_is_positive() {\n        assert!(boost() > 0.0);\n    }\n}\n";
+        use crate::{HeuristicParser, Parser};
+        let parsed = HeuristicParser.parse_with_hint(&file, src, None);
+        let names = parsed
+            .tests
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["boost_is_positive"]);
+    }
+
+    #[test]
+    fn annotation_text_inside_another_call_does_not_mark_a_function() {
+        let file = rust_file();
+        let src = "fn flush(store: &Store) {\n    store.commit(latest());\n}\nfn helper() {}\n";
+        let symbols = extract_symbols(&file, src);
+        assert!(extract_tests(&file, src, &symbols, None).is_empty());
+    }
+
+    fn function_symbol(name: &str, start: u32) -> Symbol {
+        Symbol {
+            id: SymbolId::new(format!("symbol-{name}")),
+            name: name.into(),
+            qualified_name: name.into(),
+            kind: SymbolKind::Function,
+            file_id: FileId::new("file-rs"),
+            range: Some(LineRange {
+                start,
+                end: start + 1,
+            }),
+            language: Language::Rust,
+            confidence: Confidence::High,
+            provenance: EvidenceSourceType::TreeSitter,
+            module_id: None,
+            parent_symbol_id: None,
+            scope_id: None,
+            signature: None,
+            visibility: open_kioku_core::Visibility::Unknown,
+        }
+    }
+
+    /// Whether the symbol declared on the line naming `name` counts as annotated.
+    fn annotated(src: &str, name: &str) -> bool {
+        let lines = src.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| {
+                line.contains(&format!("fn {name}(")) || line.contains(&format!(" {name}("))
+            })
+            .expect("the source declares the symbol") as u32
+            + 1;
+        super::has_adjacent_test_annotation(&lines, &function_symbol(name, start))
+    }
+
+    #[test]
+    fn a_test_annotation_above_a_stack_of_attributes_and_comments_marks_the_function() {
+        let rstest = "#[rstest]\n#[case(0, 0)]\n#[case(1, 1)]\n#[case(2, 4)]\n#[case(3, 9)]\nfn squares(#[case] n: u32, #[case] expected: u32) {}\n";
+        assert!(annotated(rstest, "squares"));
+        let should_panic =
+            "#[test]\n#[should_panic(\n    expected = \"boom\"\n)]\nfn panics() {}\n";
+        assert!(annotated(should_panic, "panics"));
+        let tokio = "/// Serialised because it binds a port.\n#[tokio::test(flavor = \"multi_thread\")]\n#[serial]\n#[allow(clippy::unwrap_used)]\n#[cfg_attr(miri, ignore)]\nasync fn binds_port() {}\n";
+        assert!(annotated(tokio, "binds_port"));
+        let java = "@ParameterizedTest\n@ValueSource(strings = {\n    \"\",\n    \" \"\n})\n@DisplayName(\"blank input\")\n@Tag(\"fast\")\nvoid rejectsBlank(String value) {}\n";
+        assert!(annotated(java, "rejectsBlank"));
+    }
+
+    #[test]
+    fn a_helper_declared_right_after_a_test_body_is_not_a_test() {
+        let javascript =
+            "test('rounds', () => {\n  expect(round(1.5)).toBe(2)\n})\nexport function helper() {}\n";
+        assert!(!annotated(javascript, "helper"));
+        let python =
+            "def test_rounds():\n    assert round_half(1.5) == round(2)\ndef helper():\n    pass\n";
+        assert!(!annotated(python, "helper"));
+        assert!(annotated(python, "test_rounds"));
+    }
+
+    #[test]
+    fn the_annotation_stack_ends_at_code_and_blank_lines() {
+        assert!(!annotated(
+            "#[test]\nfn first() {}\nfn second() {}\n",
+            "second"
+        ));
+        assert!(!annotated("#[test]\n\nfn detached() {}\n", "detached"));
+        assert!(!annotated(
+            "let value = compute(input)\nfn after_call() {}\n",
+            "after_call"
+        ));
+    }
+
+    #[test]
+    fn a_repository_root_tests_directory_is_a_test_path() {
+        let file = File {
+            id: FileId::new("root-tests"),
+            repository_id: RepositoryId::new("repo"),
+            path: "tests/cli.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        let src = "fn helper() {}\n";
+        let symbols = extract_symbols(&file, src);
+        assert!(!symbols.is_empty());
+        assert_eq!(
+            extract_tests(&file, src, &symbols, None).len(),
+            symbols.len()
+        );
     }
 
     #[test]

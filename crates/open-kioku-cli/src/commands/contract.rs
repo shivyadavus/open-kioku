@@ -127,6 +127,7 @@ fn handle_contract_command(
                         check_dependency_delta,
                         architecture_policy,
                         suppress_plan_validation_pending: false,
+                        changed_ranges: Default::default(),
                     },
                 )?;
             let failed = matches!(
