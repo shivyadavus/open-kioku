@@ -1524,7 +1524,47 @@ fn coverage_check(
         );
     }
     let low = coverage.languages_below_warn_threshold();
-    if coverage.below_warn_threshold() || !low.is_empty() || coverage.walk_errors > 0 {
+    // Git ignore rules (`.gitignore`, `.git/info/exclude`, `core.excludesFile`) are
+    // written for git, not for this index, so a language they mostly set aside is a
+    // verdict the reader must see even at 100% of what remains. `hidden`, `vendor`,
+    // `fast_mode`, `denied`, `[index] exclude` and `.okignore` are this tool's own
+    // settings and stay in the detail. With the default `[security] allow_hidden_files =
+    // false`, ingest checks `hidden` first, so git-ignored worktrees under `.claude/`
+    // count as hidden; with it on they count here, and `[index] exclude`, checked before
+    // the git rules, is how an intended exclusion is marked.
+    let git_ignored = coverage.languages_mostly_excluded_by(open_kioku_core::SkipSource::GitIgnore);
+    let judged_omission =
+        coverage.below_warn_threshold() || !low.is_empty() || coverage.walk_errors > 0;
+    if judged_omission || !git_ignored.is_empty() {
+        if !git_ignored.is_empty() {
+            message.push_str(&format!(
+                "; mostly git-ignored: {}",
+                git_ignored
+                    .iter()
+                    .take(3)
+                    .map(|(language, excluded, considered)| format!(
+                        "{language} ({} ignored, {} considered)",
+                        group_thousands(*excluded),
+                        group_thousands(*considered)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            if git_ignored.len() > 3 {
+                message.push_str(&format!(
+                    " and {} more (see the table)",
+                    git_ignored.len() - 3
+                ));
+            }
+        }
+        // A judged omission keeps its own advice; the git-ignored languages are still
+        // named in the message.
+        let step = match git_ignored.first() {
+            Some(&(language, excluded, considered)) if !judged_omission => {
+                git_ignore_next_step(language, excluded, considered, git_ignored.len() - 1)
+            }
+            _ => coverage_next_step(coverage),
+        };
         if !low.is_empty() {
             message.push_str(&format!(
                 "; under {INDEX_COVERAGE_WARN_PERCENT:.0}%: {}",
@@ -1547,7 +1587,7 @@ fn coverage_check(
                 status: CheckStatus::Warn,
                 message,
             },
-            Some(coverage_next_step(coverage)),
+            Some(step),
         );
     }
     (
@@ -1558,6 +1598,23 @@ fn coverage_check(
         },
         None,
     )
+}
+
+/// A language git ignore rules mostly set aside: the ratio over what remains can read 100%
+/// while most of that language's source is absent from the index. `git check-ignore`
+/// applies every rule file git reads, so the step cannot name one file.
+fn git_ignore_next_step(language: &str, excluded: usize, considered: usize, more: usize) -> String {
+    let mut step = format!(
+        "Coverage: git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`) govern the largest share of {language} source ({} git-ignored, {} considered); the index follows them, so an absence among those files is not evidence. Remove the rule if they are source an agent should see, or list the paths under `[index] exclude` if the exclusion is intended, then run `ok index .`.",
+        group_thousands(excluded),
+        group_thousands(considered)
+    );
+    if more > 0 {
+        step.push_str(&format!(
+            " {more} more programming language(s) are mostly git-ignored; see the table."
+        ));
+    }
+    step
 }
 
 /// Every discovered source file was set aside by policy: name the setting that did it.

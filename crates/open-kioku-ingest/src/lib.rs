@@ -1634,7 +1634,7 @@ impl ScanLedger {
                     .then(|| top_level_dir(path.strip_prefix(root).unwrap_or(path)))
                     .flatten();
                 self.coverage
-                    .record_policy_exclusion(source, top_dir.as_deref());
+                    .record_policy_exclusion(language, source, top_dir.as_deref());
             }
         }
     }

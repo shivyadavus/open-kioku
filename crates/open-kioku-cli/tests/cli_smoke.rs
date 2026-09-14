@@ -3598,6 +3598,14 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
         status["coverage"]["policy_excluded_by_source"]["security_policy"],
         1
     );
+    assert_eq!(
+        status["coverage"]["policy_excluded_by_language"]["rust"]["detector"],
+        1
+    );
+    assert_eq!(
+        status["coverage"]["policy_excluded_by_language"]["json"]["security_policy"],
+        1
+    );
     assert_eq!(status["quality"]["coverage"]["by_language"]["rust"], *rust);
 
     let doctor = run({
@@ -3607,6 +3615,10 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     });
     let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
     assert_eq!(doctor["coverage"]["by_language"]["rust"], *rust);
+    assert_eq!(
+        doctor["coverage"]["policy_excluded_by_language"],
+        status["coverage"]["policy_excluded_by_language"]
+    );
     let check = doctor["checks"]
         .as_array()
         .unwrap()

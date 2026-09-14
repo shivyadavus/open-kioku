@@ -193,7 +193,7 @@ mod tests {
         for _ in 0..3 {
             coverage.record_discovered(&Language::Rust);
             coverage.record_skipped(&Language::Rust, SkipReason::Ignored);
-            coverage.record_policy_exclusion(SkipSource::GitIgnore, Some("src"));
+            coverage.record_policy_exclusion(&Language::Rust, SkipSource::GitIgnore, Some("src"));
         }
 
         let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
@@ -218,6 +218,176 @@ mod tests {
             check.message
         );
         assert!(step.is_some());
+    }
+
+    /// 12 indexed Rust files beside `excluded` Rust files one policy rule set aside under
+    /// `top_dir`: the shape of a `.gitignore`d `src/` or of a hidden agent worktree.
+    fn rust_coverage_beside_policy_exclusions(
+        excluded: usize,
+        reason: open_kioku_core::SkipReason,
+        source: open_kioku_core::SkipSource,
+        top_dir: &str,
+    ) -> IndexCoverage {
+        use open_kioku_core::Language;
+
+        let mut coverage = IndexCoverage::default();
+        for _ in 0..12 {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_indexed(&Language::Rust, false);
+        }
+        for _ in 0..excluded {
+            coverage.record_discovered(&Language::Rust);
+            coverage.record_skipped(&Language::Rust, reason);
+            coverage.record_policy_exclusion(&Language::Rust, source, Some(top_dir));
+        }
+        coverage
+    }
+
+    /// Git ignore rules are written for git: when they set aside most of a language, 100%
+    /// of what remains says nothing about the files an agent will not find.
+    #[test]
+    fn doctor_coverage_warns_when_gitignore_excludes_most_of_a_language() {
+        use open_kioku_core::{SkipReason, SkipSource};
+
+        let coverage = rust_coverage_beside_policy_exclusions(
+            640,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+            "src",
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Warn),
+            "{}",
+            check.message
+        );
+        assert_eq!(
+            check.message,
+            "12 of 12 programming-language files indexed (100.0%); 12 of 12 recognised files indexed (100.0%) overall; 640 excluded by policy (640 ignored; 640 under src/; `.gitignore` governs the largest share); mostly git-ignored: rust (640 ignored, 12 considered)"
+        );
+        let step = step.expect("a mostly git-ignored language carries a next step");
+        assert!(
+            step.contains("git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`) govern the largest share of rust source"),
+            "{step}"
+        );
+        assert!(
+            step.contains("list the paths under `[index] exclude` if the exclusion is intended"),
+            "{step}"
+        );
+    }
+
+    /// Listing the git-ignored paths under `[index] exclude`, which ingest checks before
+    /// git ignore rules, records them as `config_exclude`: the exclusion is marked
+    /// intended, and the check passes with that setting named.
+    #[test]
+    fn doctor_coverage_passes_when_the_git_ignored_paths_are_under_index_exclude() {
+        use open_kioku_core::{SkipReason, SkipSource};
+
+        let coverage = rust_coverage_beside_policy_exclusions(
+            640,
+            SkipReason::Ignored,
+            SkipSource::ConfigExclude,
+            "src",
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Pass),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .ends_with("640 under src/; `[index] exclude` governs the largest share)"),
+            "{}",
+            check.message
+        );
+        assert!(step.is_none());
+    }
+
+    /// With the default `[security] allow_hidden_files = false`, ingest checks `hidden`
+    /// before git ignore rules, so a git-ignored agent worktree under `.claude/` is a
+    /// hidden-policy exclusion: this tool's own setting, reported in the detail and never
+    /// a verdict. Every other rule this tool owns stays silent too.
+    #[test]
+    fn doctor_coverage_passes_when_a_hidden_worktree_holds_most_of_a_language() {
+        use open_kioku_core::{SkipReason, SkipSource};
+
+        let coverage = rust_coverage_beside_policy_exclusions(
+            640,
+            SkipReason::Hidden,
+            SkipSource::HiddenPolicy,
+            ".claude",
+        );
+        let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Pass),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.ends_with(
+                "640 under .claude/; `[security] allow_hidden_files` governs the largest share)"
+            ),
+            "{}",
+            check.message
+        );
+        assert!(step.is_none());
+
+        for (reason, source) in [
+            (SkipReason::Vendor, SkipSource::Detector),
+            (SkipReason::FastMode, SkipSource::FastMode),
+            (SkipReason::Denied, SkipSource::SecurityPolicy),
+            (SkipReason::Ignored, SkipSource::ConfigExclude),
+            (SkipReason::Ignored, SkipSource::OkIgnore),
+        ] {
+            let coverage = rust_coverage_beside_policy_exclusions(640, reason, source, "lib");
+            let (check, step) = coverage_check(Some(&coverage), IndexMode::Full);
+            assert!(
+                matches!(check.status, CheckStatus::Pass),
+                "{source:?}: {}",
+                check.message
+            );
+            assert!(step.is_none(), "{source:?}");
+        }
+    }
+
+    /// A manifest written before per-language sources were recorded has nothing to judge
+    /// the rule on: the repository-wide detail still names `.gitignore`, and the check
+    /// passes rather than guessing which language the exclusions came from.
+    #[test]
+    fn doctor_coverage_passes_on_a_manifest_without_per_language_policy_sources() {
+        use open_kioku_core::{SkipReason, SkipSource};
+
+        let recorded = rust_coverage_beside_policy_exclusions(
+            640,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+            "src",
+        );
+        let mut encoded = serde_json::to_value(&recorded).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("policy_excluded_by_language")
+            .expect("the current recorder writes per-language sources");
+        let legacy: IndexCoverage = serde_json::from_value(encoded).unwrap();
+        assert!(legacy.policy_excluded_by_language.is_empty());
+
+        let (check, step) = coverage_check(Some(&legacy), IndexMode::Full);
+        assert!(
+            matches!(check.status, CheckStatus::Pass),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .ends_with("`.gitignore` governs the largest share)"),
+            "{}",
+            check.message
+        );
+        assert!(step.is_none());
     }
 
     #[test]
