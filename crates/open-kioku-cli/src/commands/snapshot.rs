@@ -1148,8 +1148,12 @@ fn read_manifest_from_sqlite(path: &Path) -> anyhow::Result<Option<IndexManifest
         })
         .optional()
         .with_context(|| format!("reading index manifest from {}", path.display()))?;
-    raw.map(|json| serde_json::from_str(&json).map_err(Into::into))
+    // The same gate the store applies: an artifact from a newer Open Kioku is refused with
+    // the upgrade-or-reindex message rather than imported and then failing on every read.
+    raw.as_deref()
+        .map(open_kioku_storage_sqlite::decode_index_manifest)
         .transpose()
+        .map_err(Into::into)
 }
 
 fn read_graph_counts_from_sqlite(path: &Path) -> anyhow::Result<(usize, usize)> {

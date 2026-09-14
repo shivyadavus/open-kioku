@@ -180,6 +180,11 @@ pub async fn serve_stdio(repo: PathBuf, config: OkConfig) -> anyhow::Result<()> 
 /// tool inventory still answer, `repo_status` says `indexed: false`, and every other tool
 /// call names `ok index`. Nothing is created on disk, so a read-only server cannot leave an
 /// empty database behind that later reads as an index awaiting rebuild.
+///
+/// A probe that fails — a writer holds the index lock, the database is locked or unreadable,
+/// the manifest is from a newer Open Kioku — does not end the session either. The failure is
+/// the answer to every tool call until a later probe succeeds, so the client is told what is
+/// wrong instead of losing the connection, and stderr carries it once per distinct failure.
 async fn serve<R, W>(
     repo: PathBuf,
     config: OkConfig,
@@ -190,7 +195,8 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut store = SqliteStore::open_repo_index(&repo)?;
+    let mut probe = IndexProbe::default();
+    probe.refresh(&repo);
     let mut last_request = Instant::now();
     let mut lines = reader.lines();
     while let Some(line) = lines.next_line().await? {
@@ -199,12 +205,19 @@ where
         }
         // Reopen after idling so another process's `ok index` becomes visible, and keep
         // looking while unindexed so an index built after startup is served without a
-        // restart; the unindexed probe is one `stat`.
-        if store.is_none() || store_idle_expired(last_request) {
-            store = SqliteStore::open_repo_index(&repo)?;
+        // restart; the unindexed probe is one `stat`. A full `ok index` removes the manifest
+        // when it stages its rows and publishes it last, so a store whose manifest has gone
+        // is probed again too (one indexed lookup) rather than answering `indexed: false`, or
+        // from a graph and search index being rewritten, through the handle it cached.
+        let withdrawn = probe
+            .store
+            .as_ref()
+            .is_some_and(|store| !store.has_manifest().unwrap_or(false));
+        if probe.store.is_none() || withdrawn || store_idle_expired(last_request) {
+            probe.refresh(&repo);
         }
         last_request = Instant::now();
-        if let Some(response) = handle_line(&repo, store.as_ref(), &config, &line).await {
+        if let Some(response) = handle_line(&repo, probe.served(), &config, &line).await {
             writer
                 .write_all(format!("{}\n", serde_json::to_string(&response)?).as_bytes())
                 .await?;
@@ -214,9 +227,53 @@ where
     Ok(())
 }
 
+/// The store a session serves, with the reason it has none when the last probe failed.
+#[derive(Default)]
+struct IndexProbe {
+    store: Option<SqliteStore>,
+    failure: Option<String>,
+}
+
+impl IndexProbe {
+    fn refresh(&mut self, repo: &Path) {
+        match SqliteStore::open_repo_index(repo) {
+            Ok(store) => {
+                self.store = store;
+                self.failure = None;
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if self.failure.as_deref() != Some(message.as_str()) {
+                    eprintln!("open-kioku mcp: index unavailable: {message}");
+                }
+                self.store = None;
+                self.failure = Some(message);
+            }
+        }
+    }
+
+    fn served(&self) -> ServedIndex<'_> {
+        match (&self.store, &self.failure) {
+            (Some(store), _) => ServedIndex::Ready(store),
+            (None, Some(failure)) => ServedIndex::Unavailable(failure),
+            (None, None) => ServedIndex::Unindexed,
+        }
+    }
+}
+
+/// What a request is answered from.
+#[derive(Clone, Copy)]
+enum ServedIndex<'a> {
+    Ready(&'a SqliteStore),
+    /// Never indexed: `repo_status` says so, every other tool names `ok index`.
+    Unindexed,
+    /// The index exists but the last probe could not serve it, for this reason.
+    Unavailable(&'a str),
+}
+
 async fn handle_line(
     repo: &Path,
-    store: Option<&SqliteStore>,
+    store: ServedIndex<'_>,
     config: &OkConfig,
     line: &str,
 ) -> Option<JsonRpcResponse> {
@@ -233,7 +290,7 @@ async fn handle_line(
 
 async fn handle_request(
     repo: &Path,
-    store: Option<&SqliteStore>,
+    store: ServedIndex<'_>,
     config: &OkConfig,
     request: JsonRpcRequest,
 ) -> Option<JsonRpcResponse> {
@@ -242,7 +299,7 @@ async fn handle_request(
 
 async fn handle_request_with_timeout(
     repo: &Path,
-    store: Option<&SqliteStore>,
+    store: ServedIndex<'_>,
     config: &OkConfig,
     request: JsonRpcRequest,
     timeout: Duration,
@@ -329,14 +386,45 @@ fn require_authoritative_relationships(store: &SqliteStore) -> anyhow::Result<()
 
 async fn dispatch_request(
     repo: &Path,
-    store: Option<&SqliteStore>,
+    store: ServedIndex<'_>,
     config: &OkConfig,
     method: &str,
     params: Value,
 ) -> anyhow::Result<Value> {
     match store {
-        Some(store) => dispatch(repo, store, config, method, params).await,
-        None => dispatch_unindexed(repo, config, method, params),
+        ServedIndex::Ready(store) => dispatch(repo, store, config, method, params).await,
+        ServedIndex::Unindexed => dispatch_unindexed(repo, config, method, params),
+        ServedIndex::Unavailable(failure) => dispatch_unavailable(config, method, params, failure),
+    }
+}
+
+/// What the server answers while the index exists but cannot be served: the handshake and
+/// the tool inventory still work; every tool, `repo_status` included, is refused with the
+/// probe's own message, because an `indexed: false` here would send the client to `ok index`
+/// while one may be running.
+fn dispatch_unavailable(
+    config: &OkConfig,
+    method: &str,
+    params: Value,
+    failure: &str,
+) -> anyhow::Result<Value> {
+    let refuse = |name: &str| {
+        if retired_tool_guidance(name).is_none() && tool_category(name).is_some() {
+            anyhow::anyhow!("{failure}")
+        } else {
+            unknown_method_error(name)
+        }
+    };
+    match method {
+        "initialize" => Ok(initialize_response(&params)),
+        "tools/list" => Ok(tools_list_response(config)),
+        "tools/call" => Err(refuse(
+            params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )),
+        other => Err(refuse(other)),
     }
 }
 
@@ -2977,7 +3065,7 @@ mod tests {
 
         let string_id = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"req-1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
         )
@@ -2988,7 +3076,7 @@ mod tests {
 
         let numeric_id = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#,
         )
@@ -2999,7 +3087,7 @@ mod tests {
 
         let initialized_notification = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
         )
@@ -3008,7 +3096,7 @@ mod tests {
 
         let missing_method = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"missing-method","params":{}}"#,
         )
@@ -3017,7 +3105,7 @@ mod tests {
         assert_eq!(missing_method.id, Some(json!("missing-method")));
         assert_eq!(missing_method.error.unwrap()["code"], -32600);
 
-        let malformed = handle_line(Path::new("."), Some(&store), &config, "{")
+        let malformed = handle_line(Path::new("."), ServedIndex::Ready(&store), &config, "{")
             .await
             .expect("parse errors should return an error response");
         assert_eq!(malformed.id, None);
@@ -3025,7 +3113,7 @@ mod tests {
 
         let malformed_unicode = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"bad-unicode","method":"initialize","params":{"client":"\uD800"}}"#,
         )
@@ -3036,7 +3124,7 @@ mod tests {
 
         let unknown_method = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"unknown-method","method":"missing_method","params":{}}"#,
         )
@@ -3047,7 +3135,7 @@ mod tests {
 
         let tool_error = handle_line(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             r#"{"jsonrpc":"2.0","id":"tool-error","method":"tools/call","params":{"name":"missing_tool","arguments":{}}}"#,
         )
@@ -3068,7 +3156,7 @@ mod tests {
         let config = OkConfig::default();
         let timeout = handle_request_with_timeout(
             Path::new("."),
-            Some(&store),
+            ServedIndex::Ready(&store),
             &config,
             JsonRpcRequest {
                 id: Some(json!("timeout")),
@@ -3197,9 +3285,14 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":"recent-failures","method":"find_recent_failures","params":{"limit":1}}"#,
             ),
         ] {
-            let response = handle_line(&fixture.repo, Some(&fixture.store), &fixture.config, line)
-                .await
-                .expect("snapshot request should return a response");
+            let response = handle_line(
+                &fixture.repo,
+                ServedIndex::Ready(&fixture.store),
+                &fixture.config,
+                line,
+            )
+            .await
+            .expect("snapshot request should return a response");
             assert_mcp_snapshot(name, &response);
         }
     }
@@ -3324,6 +3417,253 @@ mod tests {
         let message = response["error"]["message"].as_str().unwrap();
         assert_eq!(message, not_indexed_message(&repo));
         assert!(!message.contains("legacy index"), "{message}");
+    }
+
+    async fn responses_for(repo: &Path, input: &str) -> Vec<Value> {
+        let mut output = Vec::new();
+        serve(
+            repo.to_path_buf(),
+            OkConfig::default(),
+            BufReader::new(input.as_bytes()),
+            &mut output,
+        )
+        .await
+        .expect("a probe failure must not end the session");
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// A probe that cannot open the index answers the request that triggered it and the
+    /// session goes on: the next request is answered too, and the handshake and inventory
+    /// never depended on the store.
+    #[tokio::test]
+    async fn unreadable_index_database_does_not_end_the_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        fs::create_dir_all(repo.join(".ok")).unwrap();
+        fs::write(
+            repo.join(".ok/index.sqlite"),
+            b"this is not a sqlite database",
+        )
+        .unwrap();
+
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"main"}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        assert_eq!(responses.len(), 4, "{responses:?}");
+        for index in [0, 2] {
+            let error = &responses[index]["error"];
+            assert_eq!(error["code"], -32000, "{responses:?}");
+            let message = error["message"].as_str().unwrap();
+            assert!(message.contains("database"), "{message}");
+            assert!(
+                !message.starts_with("repository is not indexed"),
+                "an index that cannot be opened is not an unindexed repository: {message}"
+            );
+        }
+        assert!(responses[1]["result"]["tools"].is_array(), "{responses:?}");
+        let unknown = responses[3]["error"]["message"].as_str().unwrap();
+        assert!(unknown.contains("unknown MCP method or tool"), "{unknown}");
+    }
+
+    /// While `.ok/index.lock` is held and no manifest is published, every tool says the
+    /// index is being built — not that the repository is unindexed, which would send the
+    /// client to start a second `ok index`.
+    #[tokio::test]
+    async fn index_lock_without_a_manifest_reports_indexing_in_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let lock = open_kioku_storage::generations::IndexWriteLock::acquire(
+            &repo,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        let expected = format!(
+            "index error: {}",
+            open_kioku_storage::generations::indexing_in_progress_message(&repo)
+        );
+
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_references","arguments":{"query":"main"}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        assert_eq!(responses.len(), 3, "{responses:?}");
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "open-kioku");
+        for response in &responses[1..] {
+            assert_eq!(response["error"]["code"], -32000, "{response}");
+            assert_eq!(response["error"]["message"], expected, "{response}");
+        }
+
+        // Released however the writer ended, and a file a killed writer left behind holds
+        // nothing: unindexed again, in the unindexed words.
+        drop(lock);
+        let lock_path = open_kioku_storage::generations::index_lock_path(&repo);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, b"").unwrap();
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        let status: Value = serde_json::from_str(
+            responses[0]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["indexed"], false, "{status}");
+    }
+
+    /// A session that already serves an index notices a full `ok index` starting — the
+    /// staged write removes the manifest while the writer holds the lock — and answers
+    /// `indexing in progress` instead of `indexed: false` from its cached store; once the
+    /// lock is released with no manifest published, it answers unindexed.
+    #[tokio::test]
+    async fn ready_session_probes_again_when_the_manifest_is_withdrawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let db = repo.join(".ok/index.sqlite");
+        SqliteStore::open(&db)
+            .unwrap()
+            .put_manifest(&fixture_manifest())
+            .unwrap();
+        let expected = format!(
+            "index error: {}",
+            open_kioku_storage::generations::indexing_in_progress_message(&repo)
+        );
+
+        let (mut client_input, server_input) = tokio::io::duplex(1 << 16);
+        let (server_output, client_output) = tokio::io::duplex(1 << 20);
+        let session = serve(
+            repo.clone(),
+            OkConfig::default(),
+            BufReader::new(server_input),
+            server_output,
+        );
+        let driver = async move {
+            let mut responses = BufReader::new(client_output).lines();
+            let repo_status = concat!(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n"
+            );
+
+            client_input
+                .write_all(
+                    concat!(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_files","arguments":{}}}"#,
+                        "\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let first: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert!(
+                first.get("error").is_none(),
+                "served from the index: {first}"
+            );
+
+            let lock = open_kioku_storage::generations::IndexWriteLock::acquire(
+                &repo,
+                Duration::from_millis(10),
+            )
+            .unwrap();
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute("DELETE FROM manifests", [])
+                .unwrap();
+            client_input
+                .write_all(repo_status.as_bytes())
+                .await
+                .unwrap();
+            let second: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(second["error"]["code"], -32000, "{second}");
+            assert_eq!(second["error"]["message"], expected, "{second}");
+
+            drop(lock);
+            client_input
+                .write_all(repo_status.as_bytes())
+                .await
+                .unwrap();
+            let third: Value =
+                serde_json::from_str(&responses.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(
+                third["result"]["structuredContent"]["indexed"], false,
+                "{third}"
+            );
+            // End of input ends the session.
+            drop(client_input);
+        };
+        let (served, ()) = tokio::join!(session, driver);
+        served.expect("the session ends cleanly at end of input");
+    }
+
+    /// An index written by a newer Open Kioku is refused with the upgrade-or-reindex
+    /// message on every tool, and the session keeps serving.
+    #[tokio::test]
+    async fn manifest_from_a_newer_open_kioku_is_refused_with_the_upgrade_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let store = SqliteStore::open(repo.join(".ok/index.sqlite")).unwrap();
+        let mut manifest = serde_json::to_value(fixture_manifest()).unwrap();
+        manifest["schema_version"] = json!(open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1);
+        rusqlite::Connection::open(store.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO manifests(id, json) VALUES(1, ?1)",
+                rusqlite::params![manifest.to_string()],
+            )
+            .unwrap();
+        drop(store);
+
+        let responses = responses_for(
+            &repo,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"main"}}}"#,
+                "\n"
+            ),
+        )
+        .await;
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        let expected = format!(
+            "index error: {}",
+            open_kioku_storage_sqlite::newer_index_message(
+                open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1
+            )
+        );
+        for response in &responses {
+            assert_eq!(response["error"]["code"], -32000, "{response}");
+            assert_eq!(response["error"]["message"], expected, "{response}");
+        }
     }
 
     #[tokio::test]

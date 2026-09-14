@@ -3934,3 +3934,393 @@ fn agent_setup_adopts_a_hand_written_entry_and_refuses_an_incompatible_one_befor
         "--check must not recommend a command that fails on this state:\n{check_stdout}\n{check_stderr}"
     );
 }
+
+fn init_and_index_worker_repo() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    // `ok doctor <repo>` canonicalizes the positional path; the messages name the path, so
+    // hand every command the canonical one.
+    let repo = temp.path().canonicalize().unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub struct Worker;\nimpl Worker { pub fn run(&self) {} }\n",
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(&repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    (temp, repo)
+}
+
+/// The `repo_status` response of a fresh MCP session, after checking that the session
+/// answered `tools/list` afterwards, whatever the probe found.
+fn mcp_repo_status(repo: &std::path::Path) -> serde_json::Value {
+    let output = run_with_stdin(
+        {
+            let mut command = ok();
+            command
+                .arg("mcp")
+                .arg("serve")
+                .arg("--repo")
+                .arg(repo)
+                .arg("--read-only");
+            command
+        },
+        concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            "\n"
+        ),
+    );
+    let responses = output
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses.len(),
+        2,
+        "the session must outlive the probe: {output}"
+    );
+    assert!(responses[1]["result"]["tools"].is_array(), "{output}");
+    responses.into_iter().next().unwrap()
+}
+
+fn mcp_repo_status_error(repo: &std::path::Path) -> String {
+    let response = mcp_repo_status(repo);
+    assert_eq!(response["error"]["code"], -32000, "{response}");
+    response["error"]["message"].as_str().unwrap().to_string()
+}
+
+/// Holds the index writer lock from a separate process for
+/// `index_lock_reports_in_progress_only_while_a_live_process_holds_it`, which re-runs this test
+/// binary with `OK_TEST_HOLD_INDEX_LOCK` naming the repository and then kills it. Without the
+/// variable there is nothing to hold and it returns at once. It also returns when its stdin
+/// closes, so a parent that fails before the kill does not leave it running.
+#[test]
+fn hold_index_lock_for_a_parent_test() {
+    let Some(repo) = std::env::var_os("OK_TEST_HOLD_INDEX_LOCK") else {
+        return;
+    };
+    let _lock = open_kioku_storage::generations::IndexWriteLock::acquire(
+        std::path::Path::new(&repo),
+        std::time::Duration::from_secs(10),
+    )
+    .expect("the parent test leaves the lock free");
+    let mut sink = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+}
+
+/// `.ok/index.lock` means "indexing in progress" only while a live process holds it. A file
+/// with no holder — what Ctrl-C, an OOM kill, or a crash during `ok index` leaves — is ignored
+/// by every read surface and taken over by the next `ok index`, instead of wedging reads until
+/// a person deletes it.
+#[test]
+fn index_lock_reports_in_progress_only_while_a_live_process_holds_it() {
+    use open_kioku_storage::generations::{
+        index_lock_path, index_write_in_progress, indexing_in_progress_message,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().canonicalize().unwrap();
+    let repo = repo.as_path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub struct Worker;\n").unwrap();
+    let lock_path = index_lock_path(repo);
+    let expected = indexing_in_progress_message(repo);
+    assert!(expected.starts_with("indexing in progress"), "{expected}");
+    let json_status = |repo: &std::path::Path| -> serde_json::Value {
+        let status = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").arg("status");
+            command
+        });
+        serde_json::from_str(&status).unwrap()
+    };
+
+    // A lock file nobody holds: the repository is simply unindexed.
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    fs::write(&lock_path, b"").unwrap();
+    assert_eq!(json_status(repo)["indexed"], false);
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).args(["search", "Worker"]);
+        command
+    });
+    assert!(stderr.contains("repository is not indexed"), "{stderr}");
+    assert_eq!(
+        mcp_repo_status(repo)["result"]["structuredContent"]["indexed"],
+        false
+    );
+
+    // A live process holds it: every surface says the index is being built.
+    let mut holder = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "hold_index_lock_for_a_parent_test",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env("OK_TEST_HOLD_INDEX_LOCK", repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the lock holder should spawn");
+    let waiting_since = std::time::Instant::now();
+    while !index_write_in_progress(repo) {
+        if let Some(status) = holder.try_wait().unwrap() {
+            panic!("the lock holder exited before taking the lock: {status}");
+        }
+        assert!(
+            waiting_since.elapsed() < std::time::Duration::from_secs(60),
+            "the lock holder never took the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    for args in [
+        vec!["status"],
+        vec!["--json", "status"],
+        vec!["search", "Worker"],
+        vec!["impact", "--file", "src/lib.rs"],
+    ] {
+        let (_stdout, stderr) = run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).args(&args);
+            command
+        });
+        assert!(stderr.contains(&expected), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("repository is not indexed"),
+            "{args:?} must not call an index being built unindexed: {stderr}"
+        );
+    }
+    let (doctor, _stderr) = run_failure({
+        let mut command = ok();
+        command.arg("doctor").arg(repo);
+        command
+    });
+    assert!(
+        doctor.contains("[fail] index") && doctor.contains(&expected),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains("Wait for the running `ok index`"),
+        "{doctor}"
+    );
+    assert!(mcp_repo_status_error(repo).contains(&expected));
+
+    // Killed, as Ctrl-C or the OOM killer would: no destructor runs, so the file stays, and
+    // the kernel has released the lock anyway.
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    assert!(lock_path.exists(), "a killed writer leaves its lock file");
+    assert!(!index_write_in_progress(repo));
+    assert_eq!(json_status(repo)["indexed"], false);
+    assert_eq!(
+        mcp_repo_status(repo)["result"]["structuredContent"]["indexed"],
+        false
+    );
+    let started = std::time::Instant::now();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(25),
+        "`ok index` must take over an unheld lock file, not wait out the 30 s writer timeout"
+    );
+    assert_eq!(json_status(repo)["indexed"], true);
+}
+
+/// The manifest is written after the graph and the search index, so a run that fails between
+/// them publishes nothing: the repository reads as unindexed, not as an index whose graph or
+/// search side is half of the previous one.
+#[test]
+fn index_run_that_fails_after_the_rows_publishes_no_manifest() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], true, "{status}");
+
+    // A regular file where the search index directory goes fails the search stage, which
+    // runs after the rows and the graph are written.
+    let search_dir = open_kioku_storage::generations::resolve_index_location(&repo).tantivy_dir();
+    fs::remove_dir_all(&search_dir).unwrap();
+    fs::write(&search_dir, b"not a directory").unwrap();
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    assert!(stderr.contains("Not a directory"), "{stderr}");
+    assert!(
+        !open_kioku_storage::generations::index_write_in_progress(&repo),
+        "a failed run releases the writer lock"
+    );
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], false, "{status}");
+    assert!(status["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("repository is not indexed"));
+    let response = mcp_repo_status(&repo);
+    assert_eq!(
+        response["result"]["structuredContent"]["indexed"], false,
+        "{response}"
+    );
+
+    // Repaired, the next run publishes again. The failed run adopted the legacy layout into
+    // a generation directory (a move, before the stage that failed), so resolve the path anew.
+    let search_dir = open_kioku_storage::generations::resolve_index_location(&repo).tantivy_dir();
+    fs::remove_file(&search_dir).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], true, "{status}");
+}
+
+fn bump_manifest_schema_version(db_path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let raw: String = conn
+        .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    manifest["schema_version"] =
+        serde_json::json!(open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1);
+    manifest["from_a_newer_open_kioku"] = serde_json::json!(true);
+    conn.execute(
+        "UPDATE manifests SET json = ?1 WHERE id = 1",
+        rusqlite::params![manifest.to_string()],
+    )
+    .unwrap();
+}
+
+/// An index whose manifest was written by a newer Open Kioku is refused everywhere with one
+/// sentence naming the two ways out, on the live index and on a snapshot artifact alike.
+#[test]
+fn index_from_a_newer_open_kioku_reports_upgrade_or_reindex_on_every_surface() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    let expected = open_kioku_storage_sqlite::newer_index_message(
+        open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION + 1,
+    );
+
+    // A snapshot exported by this version, rewritten as a newer version would have written
+    // its manifest: the import refuses it and leaves the live index alone.
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("snapshot")
+            .arg("export")
+            .arg("--quality")
+            .arg("fast");
+        command
+    });
+    let artifact_path = repo.join(".ok/artifacts/index.snapshot.zst");
+    let metadata_path = repo.join(".ok/artifacts/index.snapshot.json");
+    let newer_db = repo.join("newer.sqlite");
+    zstd::stream::copy_decode(
+        fs::File::open(&artifact_path).unwrap(),
+        fs::File::create(&newer_db).unwrap(),
+    )
+    .unwrap();
+    bump_manifest_schema_version(&newer_db);
+    zstd::stream::copy_encode(
+        fs::File::open(&newer_db).unwrap(),
+        fs::File::create(&artifact_path).unwrap(),
+        3,
+    )
+    .unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    metadata["original_size_bytes"] = serde_json::json!(fs::metadata(&newer_db).unwrap().len());
+    metadata["compressed_size_bytes"] =
+        serde_json::json!(fs::metadata(&artifact_path).unwrap().len());
+    fs::write(&metadata_path, metadata.to_string()).unwrap();
+    let index_path = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let live_index = fs::read(&index_path).unwrap();
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("snapshot")
+            .arg("import");
+        command
+    });
+    assert!(stderr.contains(&expected), "{stderr}");
+    assert_eq!(fs::read(&index_path).unwrap(), live_index);
+
+    // The live index, rewritten the same way.
+    bump_manifest_schema_version(&index_path);
+    for args in [
+        vec!["status"],
+        vec!["--json", "status"],
+        vec!["search", "Worker"],
+        vec!["symbol", "definition", "Worker"],
+        vec!["snapshot", "export"],
+    ] {
+        let (_stdout, stderr) = run_failure({
+            let mut command = ok();
+            command.arg("--repo").arg(&repo).args(&args);
+            command
+        });
+        assert!(stderr.contains(&expected), "{args:?}: {stderr}");
+    }
+    let (doctor, _stderr) = run_failure({
+        let mut command = ok();
+        command.arg("doctor").arg(&repo);
+        command
+    });
+    assert!(
+        doctor.contains("[fail] index") && doctor.contains(&expected),
+        "{doctor}"
+    );
+    assert!(mcp_repo_status_error(&repo).contains(&expected));
+
+    // `ok index` is one of the two ways out.
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["indexed"], true, "{status}");
+    assert_eq!(
+        status["schema_version"],
+        open_kioku_core::INDEX_MANIFEST_SCHEMA_VERSION
+    );
+}

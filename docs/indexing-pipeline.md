@@ -10,13 +10,14 @@
 8. Detect language from extension.
 9. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback. A file that cannot be read (removed or permission-denied between discovery and parsing) or that crashes a grammar is dropped from the index, recorded as a `SkipReason::Error` entry in `skip_counts` / `skipped_paths` with source `filesystem` or `parser`, and surfaced as a phase warning. No single file aborts the index.
 10. Import configured SCIP indexes when present, merging SCIP symbols and occurrences with extracted facts.
-11. Store files, symbols, chunks, tests, imports, occurrences, and the index manifest in SQLite.
+11. Store files, symbols, chunks, tests, imports, and occurrences in SQLite, in one transaction that also removes the previous index manifest.
 12. Build and persist graph nodes and edges in SQLite.
 13. Rebuild the Tantivy BM25 index from indexed chunks and symbols. Identifiers are indexed whole and as their CamelCase/snake_case parts (`FieldMapper` -> `fieldmapper`, `field`, `mapper`); parts live in a separate field queried at half weight so a whole-word match always outranks a part match. Indexes built before this keep working until the next `ok index`.
-14. Build search results from Tantivy, falling back to SQLite-backed in-memory lexical search if a legacy index is missing.
-15. Produce context, impact, test, and architecture answers from indexed facts.
+14. Publish the index manifest. Until then no manifest is published, and readers report `indexing in progress` while the writer holds `.ok/index.lock`; see `docs/storage-model.md`, "Publication order".
+15. Build search results from Tantivy, falling back to SQLite-backed in-memory lexical search if the Tantivy index is missing.
+16. Produce context, impact, test, and architecture answers from indexed facts.
 
-The pipeline is designed for incremental indexing by content hash. The current implementation replaces the SQLite index atomically in one transaction; changed-file scheduling is the next step behind the same storage traits.
+`ok index` runs every step above. `ok watch` re-indexes changed files incrementally through the same storage traits: it replaces their rows and reconciles the graph in one transaction under the previous manifest, rebuilds the Tantivy index, and publishes the new manifest last; see `docs/storage-model.md`, "Incremental graph updates" and "Publication order".
 
 ## Coverage
 

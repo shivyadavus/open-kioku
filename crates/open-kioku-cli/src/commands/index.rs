@@ -21,7 +21,13 @@ fn index_repo_with_config(
     mode: IndexMode,
 ) -> anyhow::Result<open_kioku_ingest::IndexSnapshot> {
     let reporter = Arc::new(Mutex::new(IndexProgressReporter::new()));
-    let _lock = IndexWriteLock::acquire(repo, &reporter)?;
+    report_index_stage(
+        &reporter,
+        "lock",
+        "waiting for exclusive index writer lock".to_string(),
+    );
+    let _lock = IndexWriteLock::acquire(repo, IndexWriteLock::DEFAULT_WAIT)?;
+    report_index_stage(&reporter, "lock", "acquired index writer lock".to_string());
     // RI3.6: migrate legacy layouts into the generation layout exactly once, under the
     // write lock (a directory move, not a data copy). Readers resolve both layouts.
     if let Some(generation) = open_kioku_storage::generations::adopt_legacy_layout(repo)? {
@@ -54,7 +60,9 @@ fn index_repo_with_config(
         ),
     );
     let store = open_store_for_write(repo)?;
-    store.replace_index_with_documents(
+    // The manifest is the publication marker, written last (below) so a concurrent reader
+    // never opens one whose graph or search index is still being written.
+    store.stage_index_with_documents(
         IndexData {
             manifest: &snapshot.manifest,
             files: &snapshot.files,
@@ -121,6 +129,7 @@ fn index_repo_with_config(
         &snapshot.symbols,
         &nodes,
     )?;
+    store.put_manifest(&snapshot.manifest)?;
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
 }
@@ -144,55 +153,6 @@ fn parse_index_mode(value: &str) -> anyhow::Result<IndexMode> {
         other => anyhow::bail!(
             "unsupported index mode: {other}; expected full, balanced, fast, or cross-project"
         ),
-    }
-}
-
-struct IndexWriteLock {
-    path: PathBuf,
-    _file: fs::File,
-}
-
-impl IndexWriteLock {
-    fn acquire(repo: &Path, reporter: &Arc<Mutex<IndexProgressReporter>>) -> anyhow::Result<Self> {
-        let ok_dir = repo.join(".ok");
-        fs::create_dir_all(&ok_dir)?;
-        let lock_path = ok_dir.join("index.lock");
-        report_index_stage(
-            reporter,
-            "lock",
-            "waiting for exclusive index writer lock".to_string(),
-        );
-        let started_waiting = Instant::now();
-        let file = loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(file) => break file,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if started_waiting.elapsed() > Duration::from_secs(30) {
-                        anyhow::bail!(
-                            "index is locked by another writer or a stale lock at {}; remove it only if no ok index process is running",
-                            lock_path.display()
-                        );
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                }
-                Err(err) => return Err(err.into()),
-            }
-        };
-        report_index_stage(reporter, "lock", "acquired index writer lock".to_string());
-        Ok(Self {
-            path: lock_path,
-            _file: file,
-        })
-    }
-}
-
-impl Drop for IndexWriteLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }
 

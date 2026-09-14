@@ -20,13 +20,14 @@ fn repo_relative_path(repo: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// The published manifest, or `None` for a repository nobody has indexed. An index being
+/// built, one from a newer Open Kioku, or one that cannot be opened is an error carrying the
+/// same sentence every other read surface prints for it.
 fn load_index_manifest(repo: &Path) -> anyhow::Result<Option<IndexManifest>> {
-    let index_path =
-        open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
-    if !index_path.exists() {
-        return Ok(None);
+    match SqliteStore::open_repo_index(repo)? {
+        Some(store) => Ok(store.manifest()?),
+        None => Ok(None),
     }
-    Ok(SqliteStore::open_existing(&index_path)?.manifest()?)
 }
 
 /// Whether the repository's index has a graph awaiting `ok index`. `false` without an index:
@@ -1112,48 +1113,48 @@ fn doctor_report(repo: &Path) -> DoctorReport {
     // 3. .ok/index.sqlite
     let index_path =
         open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
-    if index_path.exists() {
-        match SqliteStore::open_existing(&index_path).and_then(|store| store.manifest()) {
-            Ok(Some(manifest)) => checks.push(DoctorCheck {
+    match SqliteStore::open_repo_index(&repo).and_then(|store| match store {
+        Some(store) => store.manifest(),
+        None => Ok(None),
+    }) {
+        Ok(Some(manifest)) => checks.push(DoctorCheck {
+            name: "index",
+            status: CheckStatus::Pass,
+            message: format!(
+                "{} files, {} symbols, indexed at {}",
+                manifest.file_count, manifest.symbol_count, manifest.indexed_at
+            ),
+        }),
+        // No database, or a database without a manifest (what a 4.0.0 read surface left
+        // behind): the unindexed case, in the unindexed words, not a warning about a manifest.
+        Ok(None) => {
+            checks.push(DoctorCheck {
                 name: "index",
-                status: CheckStatus::Pass,
-                message: format!(
-                    "{} files, {} symbols, indexed at {}",
-                    manifest.file_count, manifest.symbol_count, manifest.indexed_at
-                ),
-            }),
-            // A database without a manifest is what a 4.0.0 read surface left behind; it is
-            // the unindexed case, in the unindexed words, not a warning about a manifest.
-            Ok(None) => {
-                checks.push(DoctorCheck {
-                    name: "index",
-                    status: CheckStatus::Fail,
-                    message: open_kioku_storage::generations::not_indexed_message(&repo),
-                });
-                next_steps.push(format!(
-                    "Run `ok index {}` before connecting an MCP client.",
-                    repo.display()
-                ));
-            }
-            Err(err) => {
-                checks.push(DoctorCheck {
-                    name: "index",
-                    status: CheckStatus::Fail,
-                    message: err.to_string(),
-                });
+                status: CheckStatus::Fail,
+                message: open_kioku_storage::generations::not_indexed_message(&repo),
+            });
+            next_steps.push(format!(
+                "Run `ok index {}` before connecting an MCP client.",
+                repo.display()
+            ));
+        }
+        Err(err) => {
+            checks.push(DoctorCheck {
+                name: "index",
+                status: CheckStatus::Fail,
+                message: err.to_string(),
+            });
+            // The store already distinguishes an index being built (the writer holds the
+            // lock and the manifest is not published yet) from one that cannot be opened.
+            if open_kioku_storage::generations::index_write_in_progress(&repo) {
+                next_steps.push(
+                    "Wait for the running `ok index` to finish, then run `ok doctor` again."
+                        .into(),
+                );
+            } else {
                 next_steps.push("Remove .ok/index.sqlite and run `ok index .` again.".into());
             }
         }
-    } else {
-        checks.push(DoctorCheck {
-            name: "index",
-            status: CheckStatus::Fail,
-            message: open_kioku_storage::generations::not_indexed_message(&repo),
-        });
-        next_steps.push(format!(
-            "Run `ok index {}` before connecting an MCP client.",
-            repo.display()
-        ));
     }
 
     // The index check above opens the store, which is the call that discards a pre-4.0 edge

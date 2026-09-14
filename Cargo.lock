@@ -3034,6 +3034,7 @@ name = "open-kioku-storage"
 version = "4.0.0"
 dependencies = [
  "chrono",
+ "fs4",
  "open-kioku-core",
  "open-kioku-errors",
  "serde",
@@ -3138,6 +3139,7 @@ dependencies = [
  "open-kioku-semantic",
  "open-kioku-storage",
  "open-kioku-storage-sqlite",
+ "rusqlite",
  "tempfile",
  "toml",
 ]
