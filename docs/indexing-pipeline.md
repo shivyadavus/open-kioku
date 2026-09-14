@@ -35,6 +35,9 @@ can never drop files silently. `IndexQuality.coverage` (JSON: `quality.coverage`
   `config_exclude`, `security_policy`, `detector`, `fast_mode`, `symlink_policy`) and by
   top-level directory (`.claude`, `.github`; `.` for files at the root). Both are empty on
   a manifest written before they were recorded; every other number reads the same way.
+- `policy_excluded_by_language`: the same source counts per language key
+  (`{"rust": {"git_ignore": 640, "hidden_policy": 30}}`). Empty on a manifest written
+  before it was recorded, which reads as no per-language data and never warns.
 
 What is counted:
 
@@ -86,7 +89,14 @@ column for policy exclusions, and the ratio over the considered files), then an
 with the top three judged skip reasons, when the programming-language ratio falls under
 98%, when a programming language with at least 50 considered files falls under 98%,
 when a programming language is missing 20 or more considered files regardless of
-percentage, or when any walk error occurred. Pruned directories and walk errors are appended to the summary
+percentage, or when any walk error occurred. It also warns when `.gitignore` excludes at
+least 20 files of a programming language and more files than that language has
+considered (`mostly git-ignored: rust (640 ignored, 12 considered)`), naming `.gitignore`
+in the next step: `.gitignore` is written for git, so it can remove most of a language's
+source behind a 100% ratio. `hidden`, `vendor`, `fast_mode`, `denied`, `[index] exclude`
+and `.okignore` exclusions never warn; they are this tool's own settings. The hidden rule
+is checked before `.gitignore`, so a git-ignored worktree under `.claude/` counts as
+`hidden` and does not trigger it. Pruned directories and walk errors are appended to the summary
 line whenever nonzero; pruned directories alone do not force a warning, since `target/`
 and `node_modules/` are pruned on nearly every repository. A repository with no
 recognised programming source reports `no programming-language files discovered` rather

@@ -3022,6 +3022,12 @@ pub struct IndexCoverage {
     /// files at the root count under `.`. Redacted paths are not recorded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub policy_excluded_dirs: BTreeMap<String, usize>,
+    /// `policy_excluded_by_source` split by language key, so a verdict can tell a
+    /// language `.gitignore` mostly set aside from one the hidden-file rule trimmed.
+    /// Empty on manifests written before it was recorded, which read as no per-language
+    /// data rather than as nothing excluded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub policy_excluded_by_language: BTreeMap<String, BTreeMap<SkipSource, usize>>,
 }
 
 impl IndexCoverage {
@@ -3079,11 +3085,22 @@ impl IndexCoverage {
             .or_default() += 1;
     }
 
-    /// The detail `record_skipped` cannot carry for a policy skip: which rule chose it
-    /// and where the file lives. `top_dir` is the first path component, or `None` for a
-    /// redacted path.
-    pub fn record_policy_exclusion(&mut self, source: SkipSource, top_dir: Option<&str>) {
+    /// The detail `record_skipped` cannot carry for a policy skip: which rule chose it,
+    /// across the repository and for `language`, and where the file lives. `top_dir` is
+    /// the first path component, or `None` for a redacted path.
+    pub fn record_policy_exclusion(
+        &mut self,
+        language: &Language,
+        source: SkipSource,
+        top_dir: Option<&str>,
+    ) {
         *self.policy_excluded_by_source.entry(source).or_default() += 1;
+        *self
+            .policy_excluded_by_language
+            .entry(language.key().to_owned())
+            .or_default()
+            .entry(source)
+            .or_default() += 1;
         if let Some(dir) = top_dir {
             *self.policy_excluded_dirs.entry(dir.to_owned()).or_default() += 1;
         }
@@ -3255,6 +3272,31 @@ impl IndexCoverage {
             })
             .collect::<Vec<_>>();
         languages.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+        languages
+    }
+
+    /// Programming languages where `source` excluded at least
+    /// `INDEX_COVERAGE_MISSING_FILES_WARN` files and more files than the language has
+    /// considered, as `(language, excluded, considered)`, most excluded first. A rule
+    /// that sets aside most of a language changes what an absence means even when the
+    /// ratio over what remains is 100%. Empty on a manifest written before per-language
+    /// sources were recorded: missing data is not evidence of a dominant rule.
+    pub fn languages_mostly_excluded_by(&self, source: SkipSource) -> Vec<(&str, usize, usize)> {
+        let mut languages = self
+            .policy_excluded_by_language
+            .iter()
+            .filter(|(language, _)| language_key_is_programming(language))
+            .filter_map(|(language, sources)| {
+                let excluded = sources.get(&source).copied().unwrap_or(0);
+                let considered = self
+                    .by_language
+                    .get(language)
+                    .map_or(0, LanguageCoverage::considered);
+                (excluded >= INDEX_COVERAGE_MISSING_FILES_WARN && excluded > considered)
+                    .then_some((language.as_str(), excluded, considered))
+            })
+            .collect::<Vec<_>>();
+        languages.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         languages
     }
 
@@ -4976,7 +5018,11 @@ mod tests {
         for _ in 0..1_485 {
             coverage.record_discovered(&Language::Rust);
             coverage.record_skipped(&Language::Rust, SkipReason::Hidden);
-            coverage.record_policy_exclusion(SkipSource::HiddenPolicy, Some(".claude"));
+            coverage.record_policy_exclusion(
+                &Language::Rust,
+                SkipSource::HiddenPolicy,
+                Some(".claude"),
+            );
         }
         coverage.record_discovered(&Language::Rust);
         coverage.record_skipped(&Language::Rust, SkipReason::TooLarge);
@@ -5632,7 +5678,11 @@ mod index_coverage_tests {
         coverage.record_indexed(&Language::Java, false);
         coverage.record_indexed(&Language::Java, true);
         coverage.record_skipped(&Language::Java, SkipReason::SecretPolicy);
-        coverage.record_policy_exclusion(SkipSource::SecurityPolicy, Some("config"));
+        coverage.record_policy_exclusion(
+            &Language::Java,
+            SkipSource::SecurityPolicy,
+            Some("config"),
+        );
         coverage.record_discovered(&Language::Python);
         coverage.record_skipped(&Language::Python, SkipReason::TooLarge);
         coverage.record_discovered(&Language::Python);
@@ -5710,6 +5760,118 @@ mod index_coverage_tests {
             ]
         );
         assert_eq!(coverage.by_language["go"].percent(), Some(100.0));
+    }
+
+    /// A policy exclusion is counted for its language as well as for the repository, and
+    /// a rule dominates a programming language only with at least
+    /// `INDEX_COVERAGE_MISSING_FILES_WARN` files and more than the language considers.
+    #[test]
+    fn policy_exclusions_are_counted_per_language_and_source() {
+        let mut coverage = IndexCoverage::default();
+        let mut add = |language: &Language,
+                       indexed: usize,
+                       excluded: usize,
+                       reason: SkipReason,
+                       source: SkipSource| {
+            for _ in 0..indexed {
+                coverage.record_discovered(language);
+                coverage.record_indexed(language, false);
+            }
+            for _ in 0..excluded {
+                coverage.record_discovered(language);
+                coverage.record_skipped(language, reason);
+                coverage.record_policy_exclusion(language, source, Some("src"));
+            }
+        };
+        // Dominated: 25 git-ignored beside 3 considered.
+        add(
+            &Language::Rust,
+            3,
+            25,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+        );
+        // A hidden worktree in the same language is counted apart from the git-ignored files.
+        add(
+            &Language::Rust,
+            0,
+            30,
+            SkipReason::Hidden,
+            SkipSource::HiddenPolicy,
+        );
+        // Under the file count: 19 git-ignored beside nothing considered.
+        add(
+            &Language::Go,
+            0,
+            19,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+        );
+        // Not more than considered: 40 git-ignored beside 40 indexed.
+        add(
+            &Language::Java,
+            40,
+            40,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+        );
+        // Config languages never qualify however many files are ignored.
+        add(
+            &Language::Yaml,
+            0,
+            90,
+            SkipReason::Ignored,
+            SkipSource::GitIgnore,
+        );
+
+        assert_eq!(
+            coverage.policy_excluded_by_language["rust"],
+            BTreeMap::from([(SkipSource::GitIgnore, 25), (SkipSource::HiddenPolicy, 30)])
+        );
+        assert_eq!(
+            coverage.policy_excluded_by_language["yaml"],
+            BTreeMap::from([(SkipSource::GitIgnore, 90)])
+        );
+        assert_eq!(
+            coverage.policy_excluded_by_source[&SkipSource::GitIgnore],
+            25 + 19 + 40 + 90
+        );
+        for (language, entry) in &coverage.by_language {
+            let recorded = coverage
+                .policy_excluded_by_language
+                .get(language)
+                .map_or(0, |sources| sources.values().sum::<usize>());
+            assert_eq!(recorded, entry.excluded_by_policy(), "{language}");
+        }
+        assert_eq!(
+            coverage.languages_mostly_excluded_by(SkipSource::GitIgnore),
+            vec![("rust", 25, 3)]
+        );
+        assert_eq!(
+            coverage.languages_mostly_excluded_by(SkipSource::HiddenPolicy),
+            vec![("rust", 30, 3)]
+        );
+
+        let encoded = serde_json::to_value(&coverage).unwrap();
+        let decoded: IndexCoverage = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, coverage);
+
+        // A manifest written before the map existed has no per-language data to judge.
+        let mut legacy = encoded;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("policy_excluded_by_language")
+            .unwrap();
+        let legacy: IndexCoverage = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.policy_excluded_by_language.is_empty());
+        assert!(legacy
+            .languages_mostly_excluded_by(SkipSource::GitIgnore)
+            .is_empty());
+        assert_eq!(
+            legacy.policy_excluded_by_source,
+            coverage.policy_excluded_by_source
+        );
     }
 
     #[test]
