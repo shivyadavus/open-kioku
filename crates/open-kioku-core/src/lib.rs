@@ -1968,6 +1968,19 @@ pub struct InheritanceSite {
     pub range: SourceRange,
 }
 
+/// A Rust `mod name;` or `mod name { ... }` declaration. A module path leads to a file only through
+/// a declaration with no body and no `path` attribute, made outside any inline module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModuleDeclarationSite {
+    pub file_id: FileId,
+    /// Scope enclosing the declaration, which tells a declaration nested in an inline module apart.
+    pub scope_id: Option<ScopeId>,
+    pub name: String,
+    pub has_body: bool,
+    pub has_path_attribute: bool,
+    pub range: SourceRange,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SyntaxFacts {
     pub symbols: Vec<Symbol>,
@@ -1977,6 +1990,8 @@ pub struct SyntaxFacts {
     pub calls: Vec<CallSite>,
     pub bindings: Vec<Binding>,
     pub inheritance: Vec<InheritanceSite>,
+    #[serde(default)]
+    pub module_declarations: Vec<ModuleDeclarationSite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
