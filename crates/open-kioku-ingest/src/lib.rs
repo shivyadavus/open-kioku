@@ -46,6 +46,7 @@ pub mod project_model;
 pub mod relationships;
 pub mod resolver;
 pub mod runtime;
+mod rust_use_path;
 pub mod symbol_registry;
 pub mod validation;
 
@@ -599,6 +600,7 @@ impl Indexer {
         let mut bindings = Vec::new();
         let mut call_sites = Vec::new();
         let mut import_sites = Vec::new();
+        let mut module_declarations = Vec::new();
         let mut export_sites = Vec::new();
         let mut inheritance_sites = Vec::new();
         let mut chunks = Vec::new();
@@ -610,6 +612,7 @@ impl Indexer {
             bindings.extend(file.syntax.bindings);
             call_sites.extend(file.syntax.calls);
             import_sites.extend(file.syntax.imports);
+            module_declarations.extend(file.syntax.module_declarations);
             export_sites.extend(file.syntax.exports);
             inheritance_sites.extend(file.syntax.inheritance);
             chunks.extend(file.chunks);
@@ -665,6 +668,13 @@ impl Indexer {
         import_registry.resolve_symbols(&symbol_index, &file_map);
 
         let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
+        let rust_modules = imports::RustModuleTree::new(
+            &files,
+            &project_model,
+            &module_declarations,
+            &scope_index,
+        );
+        import_registry.resolve_rust_item_imports(&symbol_index, &scope_index, &rust_modules);
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());
@@ -2967,8 +2977,13 @@ fn stable_id(value: &str) -> String {
 }
 
 fn extract_imports_from_syntax(sites: &[open_kioku_core::ImportSite]) -> Vec<Import> {
+    // A stored import row is keyed by file, path and start line. A grouped Rust `use` emits one
+    // site per binding, so `use a::{B, B as C};` names one path twice on one line; the bindings
+    // stay distinct in the import registry, which reads the sites rather than these rows.
+    let mut seen = HashSet::new();
     sites
         .iter()
+        .filter(|site| seen.insert((&site.file_id, site.source.as_str(), site.range.start_line)))
         .map(|site| Import {
             file_id: site.file_id.clone(),
             imported: site.source.clone(),

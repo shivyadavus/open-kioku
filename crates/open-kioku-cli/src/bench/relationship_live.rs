@@ -537,7 +537,7 @@ fn live_fixture_files(case: &RelationshipBenchCase) -> anyhow::Result<Vec<(PathB
             && matches!(case.scenario.as_str(), "metamorphic_a" | "metamorphic_b" | "unsupported_feature"));
     let adversarial = !positive_syntax;
     let files = match &case.relationship {
-        GraphEdgeType::Calls => live_call_fixture(case.language, adversarial, &case.scenario),
+        GraphEdgeType::Calls => live_call_fixture(case.language, adversarial, &case.scenario)?,
         GraphEdgeType::References => live_reference_fixture(case.language),
         GraphEdgeType::UsesType => live_type_fixture(case.language, positive_syntax),
         GraphEdgeType::Implements => live_implements_fixture(case.language, positive_syntax),
@@ -564,13 +564,92 @@ fn live_call_fixture(
     language: RelationshipBenchLanguage,
     adversarial: bool,
     scenario: &str,
-) -> Vec<(PathBuf, String)> {
+) -> anyhow::Result<Vec<(PathBuf, String)>> {
+    if let Some((files, must_emit)) = rust_item_import_call_fixture(scenario) {
+        // Falling back to the single-file fixture would let a mislabeled case pass or fail on a
+        // same-scope call that says nothing about imports.
+        if language != RelationshipBenchLanguage::Rust || adversarial == must_emit {
+            anyhow::bail!(
+                "{scenario} is defined only for a Rust {} case, got {language:?}",
+                if must_emit { "must_emit" } else { "must_not_emit" }
+            );
+        }
+        return Ok(files);
+    }
     let content = if adversarial {
         adversarial_call_source(language, scenario)
     } else {
         positive_call_source(language)
     };
-    vec![(PathBuf::from(main_path(language)), content)]
+    Ok(vec![(PathBuf::from(main_path(language)), content)])
+}
+
+/// Multi-file Rust fixtures for calls through `use` item imports, with whether the call must be
+/// authoritative. Each is a package with its own manifest, since the crate root is read from it.
+fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String)>, bool)> {
+    const CALLER: &str = "use crate::target::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
+    let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
+        "cross_module_item_import" => (
+            vec![
+                ("src/lib.rs", "pub mod caller;\npub mod target;\n"),
+                ("src/target.rs", "pub fn target_fn() {}\n"),
+                ("src/caller.rs", CALLER),
+            ],
+            true,
+        ),
+        // The production `spawn` is the unresolved `tokio::spawn`; the tests module's import is
+        // not in scope there.
+        "sibling_scope_import" => (
+            vec![
+                ("src/lib.rs", "pub mod testing;\npub mod worker;\n"),
+                ("src/testing.rs", "pub fn spawn<F>(_task: F) {}\n"),
+                (
+                    "src/worker.rs",
+                    "use tokio::spawn;\n\npub fn caller_fn() {\n    spawn(async {});\n}\n\n#[cfg(test)]\nmod tests {\n    use crate::testing::spawn;\n\n    #[test]\n    fn spawns_in_tests() {\n        spawn(async {});\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `super` inside `mod tests` is `outer::inner`, not `outer`, although `outer.rs` defines
+        // `target_fn`.
+        "inline_module_super_import" => (
+            vec![
+                ("src/lib.rs", "pub mod outer;\n"),
+                ("src/outer.rs", "pub mod inner;\n\npub fn target_fn() {}\n"),
+                (
+                    "src/outer/inner.rs",
+                    "pub fn helper() {}\n\n#[cfg(test)]\nmod tests {\n    use super::target_fn;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `callee.rs` beside `callee/mod.rs` leaves the module file ambiguous. The module is not
+        // named `target`: discovery skips any `target/` directory as build output, which would
+        // index only one of the two files.
+        "ambiguous_module_file" => (
+            vec![
+                ("src/lib.rs", "pub mod caller;\npub mod callee;\n"),
+                ("src/callee.rs", "pub fn target_fn() {}\n"),
+                ("src/callee/mod.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::callee::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        _ => return None,
+    };
+    let mut fixture = vec![(
+        PathBuf::from("Cargo.toml"),
+        "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string(),
+    )];
+    fixture.extend(
+        files
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_string())),
+    );
+    Some((fixture, must_emit))
 }
 
 fn positive_call_source(language: RelationshipBenchLanguage) -> String {

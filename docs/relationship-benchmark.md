@@ -8,7 +8,7 @@ Open Kioku treats authoritative repository relationships as structural truth, no
 
 More than 40% of cases are negative, ambiguous, fail-closed, or `MustNotEmit` probes. The corpus includes same-name collisions, unrelated receivers, alias/import ambiguity, lexical shadowing, test/production collisions, constructor/function and static/instance collisions, unknown receivers, dynamic dispatch, overload and inheritance collisions, local/import shadowing, multiple exact reference sites, unresolved external targets, generated/vendor skipped paths, malformed/partial source, and deterministic metamorphic variants.
 
-`benchmarks/relationship-ci-cases.json` is the compact one-case-per-cohort subset used by normal CI. It does not replace the full release corpus.
+`benchmarks/relationship-ci-cases.json` is the compact subset used by normal CI: one case per cohort plus targeted regression cases. The Rust `CALLS` regressions (`ci-rust-calls-02` to `-05`) write multi-file packages: a call through a cross-module item import must emit, and a `mod tests` import leaking to production code, `super::` inside an inline module, and `callee.rs` beside `callee/mod.rs` must not. CI asserts its exact case count, so adding a case means updating that count in `.github/workflows/ci.yml`. It does not replace the full release corpus.
 
 ## Capability contract
 

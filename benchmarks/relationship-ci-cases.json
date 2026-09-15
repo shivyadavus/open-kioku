@@ -25,6 +25,80 @@
       "notes": "Frozen RI3 relationship conformance case. Authoritative expectation is allowed only for cohorts declared production-authoritative; unsupported cohorts must fail closed."
     },
     {
+      "id": "ci-rust-calls-02-cross_module_item_import",
+      "fixture_id": "ci/ri3/rust/calls/cross_module_item_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:cross_module_item_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "cross_module_item_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:cross_module_item_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: `use crate::target::target_fn;` in one module and a bare `target_fn()` call must bind through the item import to the one module-level symbol the path names."
+    },
+    {
+      "id": "ci-rust-calls-03-sibling_scope_import",
+      "fixture_id": "ci/ri3/rust/calls/sibling_scope_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:sibling_scope_import:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "sibling_scope_import",
+      "notes": "Regression case: a file-level `use tokio::spawn;` stays unresolved, and `mod tests { use crate::testing::spawn; }` must not become the authoritative target of the production `spawn()` call."
+    },
+    {
+      "id": "ci-rust-calls-04-inline_module_super_import",
+      "fixture_id": "ci/ri3/rust/calls/inline_module_super_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:inline_module_super_import:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "inline_module_super_import",
+      "notes": "Regression case: `super` inside an inline `mod tests` names the file's own module, so `use super::target_fn;` must not bind to the same-named function in the parent's parent module."
+    },
+    {
+      "id": "ci-rust-calls-05-ambiguous_module_file",
+      "fixture_id": "ci/ri3/rust/calls/ambiguous_module_file",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:ambiguous_module_file:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "ambiguous_module_file",
+      "notes": "Regression case: `callee.rs` beside `callee/mod.rs`, each defining `target_fn`, leaves `use crate::callee::target_fn;` unbound."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",
