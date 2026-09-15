@@ -1,7 +1,179 @@
+use crate::query::{DEFAULT_MAX_DEPTH, HARD_MAX_DEPTH, HARD_ROW_LIMIT};
 use open_kioku_core::{
-    EdgeTypeSpec, EvidenceGraphSchema, IndexManifest, NodeTypeSpec, OptionalEvidenceSpec,
-    PropertySpec,
+    EdgeTypeSpec, EvidenceGraphSchema, GraphEdgeType, GraphNodeType, GraphQueryExample,
+    IndexManifest, NodeTypeSpec, OptionalEvidenceSpec, PropertySpec, UnsupportedGraphQueryForm,
 };
+
+/// Node types in schema order. The schema advertises these and the query parser resolves and lists
+/// types from them, so the two cannot disagree. The compiler does not tie this list to
+/// `GraphNodeType` (only `node_type_name`'s match is exhaustive); `type_lists_hold_every_variant`
+/// fails when a variant is missing.
+pub(crate) const NODE_TYPES: [GraphNodeType; 23] = [
+    GraphNodeType::File,
+    GraphNodeType::Directory,
+    GraphNodeType::Module,
+    GraphNodeType::Package,
+    GraphNodeType::Class,
+    GraphNodeType::Trait,
+    GraphNodeType::Interface,
+    GraphNodeType::Function,
+    GraphNodeType::Method,
+    GraphNodeType::Field,
+    GraphNodeType::Endpoint,
+    GraphNodeType::DatabaseTable,
+    GraphNodeType::Collection,
+    GraphNodeType::Queue,
+    GraphNodeType::Topic,
+    GraphNodeType::ConfigKey,
+    GraphNodeType::Test,
+    GraphNodeType::BuildTarget,
+    GraphNodeType::RuntimeError,
+    GraphNodeType::Ticket,
+    GraphNodeType::PullRequest,
+    GraphNodeType::Resource,
+    GraphNodeType::ArchitectureComponent,
+];
+
+/// Edge types in schema order, shared with the parser the same way as `NODE_TYPES`.
+pub(crate) const EDGE_TYPES: [GraphEdgeType; 29] = [
+    GraphEdgeType::Contains,
+    GraphEdgeType::Defines,
+    GraphEdgeType::References,
+    GraphEdgeType::UsesType,
+    GraphEdgeType::Calls,
+    GraphEdgeType::Implements,
+    GraphEdgeType::Extends,
+    GraphEdgeType::Imports,
+    GraphEdgeType::DependsOn,
+    GraphEdgeType::ExposesEndpoint,
+    GraphEdgeType::CallsEndpoint,
+    GraphEdgeType::ReadsConfig,
+    GraphEdgeType::WritesConfig,
+    GraphEdgeType::ReadsTable,
+    GraphEdgeType::WritesTable,
+    GraphEdgeType::PublishesEvent,
+    GraphEdgeType::ConsumesEvent,
+    GraphEdgeType::Tests,
+    GraphEdgeType::TestCovers,
+    GraphEdgeType::Validates,
+    GraphEdgeType::OwnedBy,
+    GraphEdgeType::ChangedBy,
+    GraphEdgeType::FailedIn,
+    GraphEdgeType::BelongsTo,
+    GraphEdgeType::MentionedIn,
+    GraphEdgeType::RelatedToTicket,
+    GraphEdgeType::SimilarTo,
+    GraphEdgeType::SemanticallyRelated,
+    GraphEdgeType::DerivedFrom,
+];
+
+/// The schema name, which is also the key graph type statistics are stored under.
+pub(crate) fn node_type_name(node_type: &GraphNodeType) -> &'static str {
+    match node_type {
+        GraphNodeType::File => "File",
+        GraphNodeType::Directory => "Directory",
+        GraphNodeType::Module => "Module",
+        GraphNodeType::Package => "Package",
+        GraphNodeType::Class => "Class",
+        GraphNodeType::Trait => "Trait",
+        GraphNodeType::Interface => "Interface",
+        GraphNodeType::Function => "Function",
+        GraphNodeType::Method => "Method",
+        GraphNodeType::Field => "Field",
+        GraphNodeType::Endpoint => "Endpoint",
+        GraphNodeType::DatabaseTable => "DatabaseTable",
+        GraphNodeType::Collection => "Collection",
+        GraphNodeType::Queue => "Queue",
+        GraphNodeType::Topic => "Topic",
+        GraphNodeType::ConfigKey => "ConfigKey",
+        GraphNodeType::Test => "Test",
+        GraphNodeType::BuildTarget => "BuildTarget",
+        GraphNodeType::RuntimeError => "RuntimeError",
+        GraphNodeType::Ticket => "Ticket",
+        GraphNodeType::PullRequest => "PullRequest",
+        GraphNodeType::Resource => "Resource",
+        GraphNodeType::ArchitectureComponent => "ArchitectureComponent",
+    }
+}
+
+pub(crate) fn edge_type_name(edge_type: &GraphEdgeType) -> &'static str {
+    match edge_type {
+        GraphEdgeType::Contains => "Contains",
+        GraphEdgeType::Defines => "Defines",
+        GraphEdgeType::References => "References",
+        GraphEdgeType::UsesType => "UsesType",
+        GraphEdgeType::Calls => "Calls",
+        GraphEdgeType::Implements => "Implements",
+        GraphEdgeType::Extends => "Extends",
+        GraphEdgeType::Imports => "Imports",
+        GraphEdgeType::DependsOn => "DependsOn",
+        GraphEdgeType::ExposesEndpoint => "ExposesEndpoint",
+        GraphEdgeType::CallsEndpoint => "CallsEndpoint",
+        GraphEdgeType::ReadsConfig => "ReadsConfig",
+        GraphEdgeType::WritesConfig => "WritesConfig",
+        GraphEdgeType::ReadsTable => "ReadsTable",
+        GraphEdgeType::WritesTable => "WritesTable",
+        GraphEdgeType::PublishesEvent => "PublishesEvent",
+        GraphEdgeType::ConsumesEvent => "ConsumesEvent",
+        GraphEdgeType::Tests => "Tests",
+        GraphEdgeType::TestCovers => "TestCovers",
+        GraphEdgeType::Validates => "Validates",
+        GraphEdgeType::OwnedBy => "OwnedBy",
+        GraphEdgeType::ChangedBy => "ChangedBy",
+        GraphEdgeType::FailedIn => "FailedIn",
+        GraphEdgeType::BelongsTo => "BelongsTo",
+        GraphEdgeType::MentionedIn => "MentionedIn",
+        GraphEdgeType::RelatedToTicket => "RelatedToTicket",
+        GraphEdgeType::SimilarTo => "SimilarTo",
+        GraphEdgeType::SemanticallyRelated => "SemanticallyRelated",
+        GraphEdgeType::DerivedFrom => "DerivedFrom",
+    }
+}
+
+/// The serialized snake_case spelling: `database_table` for the schema's `DatabaseTable`.
+pub(crate) fn node_type_query_spelling(node_type: &GraphNodeType) -> String {
+    underscored(node_type_name(node_type))
+}
+
+/// Edge types serialize as SCREAMING_SNAKE_CASE: the schema's `DependsOn` is `DEPENDS_ON`.
+pub(crate) fn edge_type_query_spelling(edge_type: &GraphEdgeType) -> String {
+    underscored(edge_type_name(edge_type)).to_ascii_uppercase()
+}
+
+/// Resolves a node type named in a query. The schema's spelling and the serialized one are both
+/// accepted, case-insensitively, so every name the schema advertises parses and queries written
+/// against the serialized names keep working.
+pub(crate) fn node_type_for_query_name(name: &str) -> Option<GraphNodeType> {
+    NODE_TYPES
+        .iter()
+        .find(|node_type| {
+            name.eq_ignore_ascii_case(node_type_name(node_type))
+                || name.eq_ignore_ascii_case(&node_type_query_spelling(node_type))
+        })
+        .cloned()
+}
+
+/// Resolves an edge type named in a query, accepting `DependsOn` and `DEPENDS_ON` alike.
+pub(crate) fn edge_type_for_query_name(name: &str) -> Option<GraphEdgeType> {
+    EDGE_TYPES
+        .iter()
+        .find(|edge_type| {
+            name.eq_ignore_ascii_case(edge_type_name(edge_type))
+                || name.eq_ignore_ascii_case(&edge_type_query_spelling(edge_type))
+        })
+        .cloned()
+}
+
+fn underscored(name: &str) -> String {
+    let mut spelling = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if index > 0 && character.is_ascii_uppercase() {
+            spelling.push('_');
+        }
+        spelling.push(character.to_ascii_lowercase());
+    }
+    spelling
+}
 
 pub fn current_schema(store: Option<&dyn open_kioku_storage::GraphStore>) -> EvidenceGraphSchema {
     current_schema_with_manifest(store, None)
@@ -11,68 +183,12 @@ pub fn current_schema_with_manifest(
     store: Option<&dyn open_kioku_storage::GraphStore>,
     manifest: Option<&IndexManifest>,
 ) -> EvidenceGraphSchema {
-    let node_variants = vec![
-        "File",
-        "Directory",
-        "Module",
-        "Package",
-        "Class",
-        "Trait",
-        "Interface",
-        "Function",
-        "Method",
-        "Field",
-        "Endpoint",
-        "DatabaseTable",
-        "Collection",
-        "Queue",
-        "Topic",
-        "ConfigKey",
-        "Test",
-        "BuildTarget",
-        "RuntimeError",
-        "Ticket",
-        "PullRequest",
-        "Resource",
-        "ArchitectureComponent",
-    ];
-
-    let edge_variants = vec![
-        "Contains",
-        "Defines",
-        "References",
-        "UsesType",
-        "Calls",
-        "Implements",
-        "Extends",
-        "Imports",
-        "DependsOn",
-        "ExposesEndpoint",
-        "CallsEndpoint",
-        "ReadsConfig",
-        "WritesConfig",
-        "ReadsTable",
-        "WritesTable",
-        "PublishesEvent",
-        "ConsumesEvent",
-        "Tests",
-        "TestCovers",
-        "Validates",
-        "OwnedBy",
-        "ChangedBy",
-        "FailedIn",
-        "BelongsTo",
-        "MentionedIn",
-        "RelatedToTicket",
-        "SimilarTo",
-        "SemanticallyRelated",
-    ];
-
     let node_stats = store.and_then(|s| s.node_type_stats().ok());
     let edge_stats = store.and_then(|s| s.edge_type_stats().ok());
 
     let mut node_types = Vec::new();
-    for name in node_variants {
+    for node_type in &NODE_TYPES {
+        let name = node_type_name(node_type);
         let mut count = None;
         let mut evidence_available = None;
         let mut freshness = None;
@@ -101,7 +217,8 @@ pub fn current_schema_with_manifest(
     }
 
     let mut edge_types = Vec::new();
-    for name in edge_variants {
+    for edge_type in &EDGE_TYPES {
+        let name = edge_type_name(edge_type);
         let mut count = None;
         let mut evidence_available = None;
         let mut freshness = None;
@@ -176,6 +293,9 @@ pub fn current_schema_with_manifest(
         edge_types,
         evidence_source_types: evidence_source_types(),
         query_features: query_features(),
+        syntax: query_syntax(),
+        examples: query_examples(),
+        unsupported: unsupported_query_forms(),
         optional_evidence: optional_evidence(manifest),
         caveats: schema_caveats(manifest),
         indexed_at: manifest.map(|m| m.indexed_at.to_rfc3339()),
@@ -221,6 +341,163 @@ fn query_features() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+// Every sentence here must describe `query.rs` as it behaves. The parser tests run every example
+// against builder-shaped labels and reject every `unsupported` entry, but no test reads these
+// sentences: change them together with the grammar.
+fn query_syntax() -> Vec<String> {
+    vec![
+        "A query is MATCH <path> [WHERE <filter> [AND <filter>]...] RETURN <variable>[, <variable>]..., optionally followed by LIMIT <n> and OFFSET <n> in either order; keywords are case-insensitive.".into(),
+        "A path is exactly one edge pattern between two nodes, such as (f:File)-[:DEFINES]->(s:Function) or (s:Function)<-[:DEFINES]-(f:File); a MATCH without an edge pattern is rejected.".into(),
+        "A node is (variable:Type); the variable and the :Type are each optional, so (f), (:File) and () are nodes.".into(),
+        "A one-hop edge is -[:TYPE]-> or <-[:TYPE]-, and it must name its type to run.".into(),
+        format!("A multi-hop edge is -[:TYPE *min..max]-> with 1 <= min <= max, where max may not exceed the depth cap ({DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}); the :TYPE is optional, the source node must name its type, and only forward edges are followed."),
+        "Type names are case-insensitive and may be written as node_types and edge_types name them or in their underscored form: (t:DatabaseTable) or (t:database_table), [:DependsOn] or [:DEPENDS_ON].".into(),
+        "A filter is variable.field = 'text', variable.field STARTS_WITH 'text', or variable.field =~ 'regex' on a node variable bound in MATCH, with a single- or double-quoted value.".into(),
+        "A File node's label is its repository-relative path (src/config.rs). A symbol node's label is that path without its extension, with / replaced by ::, followed by ::name (src::config::parse_config); this holds for every language, Java and Go included, with no package prefix and no segment dropped (src/main/java/com/acme/OrderService.java gives src::main::java::com::acme::OrderService::handle), except in a file where tree-sitter finds no symbols and a regex fallback names them. label, file_path and qualified_name filters compare against that whole label, except that a one-hop label = filter also matches a bare symbol name (parse_config) through the index.".into(),
+        "Filter fields are label, id, file_path, qualified_name, source, source_type and confidence; file_path and qualified_name compare against the node label, and graph nodes carry no source, source_type or confidence field, so filters on those match no rows.".into(),
+        "=~ applies to label, file_path and qualified_name only, with a valid regex of at most 100 bytes.".into(),
+        "RETURN lists node variables bound in MATCH, each at most once; read labels and properties from the returned node objects.".into(),
+        format!("LIMIT is clamped to {HARD_ROW_LIMIT} rows, and a write-like or composition keyword (CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL, LOAD, UNION, WITH, FOREACH) rejects the whole query."),
+    ]
+}
+
+fn query_examples() -> Vec<GraphQueryExample> {
+    [
+        (
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f, s LIMIT 10",
+            "Functions and the files that define them.",
+        ),
+        (
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE f.file_path STARTS_WITH 'src/' RETURN s",
+            "Functions defined in files under src/; file_path compares against the File node label, which is its path.",
+        ),
+        (
+            "MATCH (caller:Function)-[:CALLS]->(callee:Function) WHERE callee.label = 'src::config::parse_config' RETURN caller",
+            "Direct callers of parse_config in src/config.rs, named by its full qualified label.",
+        ),
+        (
+            "MATCH (s:Function)<-[:DEFINES]-(f:File) WHERE s.label =~ '::handle_[^:]*$' RETURN s, f",
+            "The DEFINES edge read in reverse: functions whose own name starts with handle_, and the files that define them. A regex filter is not anchored by the index, so this scans every DEFINES edge in memory and can reach the query timeout on a large index.",
+        ),
+        (
+            "MATCH (a:Function)-[:CALLS *1..3]->(b:Function) WHERE a.label =~ '::run$' RETURN b LIMIT 20",
+            "Functions reachable within one to three CALLS hops from functions named run. A multi-hop query walks forward from every Function node before its filters apply, so on a large index it can reach the query timeout; a one-hop query with label = is anchored by the index and much cheaper.",
+        ),
+        (
+            "MATCH (f:File)-[:IMPORTS]->(g:File) WHERE g.file_path = 'src/config.rs' RETURN f",
+            "Files whose imports resolve to src/config.rs.",
+        ),
+    ]
+    .into_iter()
+    .map(|(query, description)| GraphQueryExample {
+        query: query.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+fn unsupported_query_forms() -> Vec<UnsupportedGraphQueryForm> {
+    vec![
+        unsupported(
+            "isolated_node",
+            "MATCH (f:File) RETURN f",
+            "Match the node through an edge pattern, such as MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f; a node with no edges cannot be matched.",
+        ),
+        unsupported(
+            "property_access_in_return",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN f.file_path",
+            "RETURN f and read its label or properties from the returned node; filter properties in WHERE.",
+        ),
+        unsupported(
+            "return_expressions",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN count(s)",
+            "RETURN node variables only; aggregates, DISTINCT, AS aliases and * are not parsed.",
+        ),
+        unsupported(
+            "clauses_after_return",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) RETURN s ORDER BY s",
+            "Only LIMIT <n> and OFFSET <n> may follow RETURN; there is no ordering clause, and OFFSET replaces SKIP.",
+        ),
+        unsupported(
+            "more_than_one_edge_pattern",
+            "MATCH (f:File)-[:DEFINES]->(a:Function)-[:CALLS]->(b:Function) RETURN f, b",
+            "Run one query per edge, or use a multi-hop range when every hop has the same edge type.",
+        ),
+        unsupported(
+            "edge_variable",
+            "MATCH (a:Function)-[c:CALLS]->(b:Function) RETURN a, b",
+            "Omit the edge variable and write -[:CALLS]->; edges cannot be bound, filtered or returned.",
+        ),
+        unsupported(
+            "undirected_edge",
+            "MATCH (a:Function)-[:CALLS]-(b:Function) RETURN a, b",
+            "Give the edge a direction with -[:CALLS]-> or <-[:CALLS]-, one query per direction.",
+        ),
+        unsupported(
+            "one_hop_edge_without_type",
+            "MATCH (a:Function)-[]->(b) RETURN a, b",
+            "Name the edge type, such as -[:CALLS]->.",
+        ),
+        unsupported(
+            "reverse_multi_hop",
+            "MATCH (b:Function)<-[:CALLS *1..2]-(a:Function) RETURN a, b",
+            "Write the path forward: MATCH (a:Function)-[:CALLS *1..2]->(b:Function) RETURN a, b.",
+        ),
+        unsupported(
+            "unbounded_variable_length_edge",
+            "MATCH (a:Function)-[:CALLS *]->(b:Function) RETURN b",
+            "Give an explicit hop range, such as -[:CALLS *1..3]->.",
+        ),
+        unsupported(
+            "hop_range_above_depth_cap",
+            "MATCH (a:Function)-[:CALLS *1..6]->(b:Function) RETURN b",
+            format!("Keep max hops within the depth cap: {DEFAULT_MAX_DEPTH} unless raised, never above {HARD_MAX_DEPTH}."),
+        ),
+        unsupported(
+            "multi_hop_without_source_type",
+            "MATCH (a)-[:CALLS *1..2]->(b:Function) RETURN b",
+            "Give the source node a type, such as (a:Function)-[:CALLS *1..2]->(b).",
+        ),
+        unsupported(
+            "or_or_not_in_where",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label = 'main' OR s.label = 'run' RETURN s",
+            "Combine filters with AND only; for alternatives on label, file_path or qualified_name use =~ '^(main|run)$'.",
+        ),
+        unsupported(
+            "other_filter_operators",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE s.label CONTAINS 'parse' RETURN s",
+            "Use =, STARTS_WITH or =~; =~ 'parse' matches a substring of label, file_path or qualified_name.",
+        ),
+        unsupported(
+            "unsupported_filter_field",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) WHERE f.protocol = 'http' RETURN f",
+            "Filter on label, id, file_path or qualified_name, and read other properties from the returned nodes.",
+        ),
+        unsupported(
+            "inline_property_map",
+            "MATCH (f:File {label: 'src/main.rs'})-[:DEFINES]->(s:Function) RETURN s",
+            "Move the condition to WHERE: WHERE f.label = 'src/main.rs'.",
+        ),
+        unsupported(
+            "write_or_composition_keyword",
+            "MATCH (f:File)-[:DEFINES]->(s:Function) DETACH DELETE s",
+            "The query language is read-only; CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL, LOAD, UNION, WITH and FOREACH reject the query.",
+        ),
+    ]
+}
+
+fn unsupported(
+    form: &str,
+    example: &str,
+    alternative: impl Into<String>,
+) -> UnsupportedGraphQueryForm {
+    UnsupportedGraphQueryForm {
+        form: form.to_string(),
+        example: example.to_string(),
+        alternative: alternative.into(),
+    }
 }
 
 fn optional_evidence(manifest: Option<&IndexManifest>) -> Vec<OptionalEvidenceSpec> {
@@ -339,11 +616,15 @@ mod tests {
 
         // Verify node types has the correct counts
         assert_eq!(schema1.node_types.len(), 23);
-        assert_eq!(schema1.edge_types.len(), 28);
+        assert_eq!(schema1.edge_types.len(), 29);
         assert!(schema1
             .edge_types
             .iter()
             .any(|edge| edge.name == "UsesType"));
+        assert!(schema1
+            .edge_types
+            .iter()
+            .any(|edge| edge.name == "DerivedFrom"));
         assert!(schema1
             .feature_flags
             .contains(&"relationship_proofs".to_string()));
@@ -361,6 +642,124 @@ mod tests {
             .iter()
             .all(|evidence| evidence.status == "unknown"));
         assert!(schema1.indexed_at.is_none());
+    }
+
+    #[test]
+    fn schema_describes_the_query_language_with_examples_and_rejected_forms() {
+        let schema = current_schema(None);
+
+        assert!(!schema.syntax.is_empty());
+        assert!(schema.examples.len() >= 4);
+        assert!(schema
+            .examples
+            .iter()
+            .any(|example| example.query.contains(" WHERE ") && example.query.contains('.')));
+        assert!(schema
+            .examples
+            .iter()
+            .any(|example| example.query.contains(" *")));
+        for form in [
+            "isolated_node",
+            "property_access_in_return",
+            "reverse_multi_hop",
+        ] {
+            assert!(
+                schema.unsupported.iter().any(|entry| entry.form == form),
+                "unsupported forms must list {form}"
+            );
+        }
+    }
+
+    fn enum_values(schema: &serde_json::Value, values: &mut std::collections::BTreeSet<String>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    match (key.as_str(), child) {
+                        ("enum", serde_json::Value::Array(items)) => values.extend(
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str().map(str::to_string)),
+                        ),
+                        _ => enum_values(child, values),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    enum_values(item, values);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // A variant left out of NODE_TYPES or EDGE_TYPES compiles, and the parser would then reject
+    // it; the enums' JSON schemas are the independent source of every serialized variant. A
+    // documented variant appears under `oneOf`, so the walk collects every `enum` array.
+    #[test]
+    fn type_lists_hold_every_variant() {
+        let mut node_variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(GraphNodeType)).unwrap(),
+            &mut node_variants,
+        );
+        let listed_nodes = NODE_TYPES
+            .iter()
+            .map(node_type_query_spelling)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_nodes.len(),
+            NODE_TYPES.len(),
+            "NODE_TYPES repeats a type"
+        );
+        assert_eq!(
+            listed_nodes, node_variants,
+            "NODE_TYPES must hold every GraphNodeType variant"
+        );
+
+        let mut edge_variants = std::collections::BTreeSet::new();
+        enum_values(
+            &serde_json::to_value(schemars::schema_for!(GraphEdgeType)).unwrap(),
+            &mut edge_variants,
+        );
+        let listed_edges = EDGE_TYPES
+            .iter()
+            .map(edge_type_query_spelling)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            listed_edges.len(),
+            EDGE_TYPES.len(),
+            "EDGE_TYPES repeats a type"
+        );
+        assert_eq!(
+            listed_edges, edge_variants,
+            "EDGE_TYPES must hold every GraphEdgeType variant"
+        );
+    }
+
+    #[test]
+    fn query_spellings_use_the_serialized_type_names() {
+        assert_eq!(
+            node_type_query_spelling(&GraphNodeType::DatabaseTable),
+            "database_table"
+        );
+        assert_eq!(node_type_query_spelling(&GraphNodeType::File), "file");
+        assert_eq!(
+            edge_type_query_spelling(&GraphEdgeType::DependsOn),
+            "DEPENDS_ON"
+        );
+        for node_type in &NODE_TYPES {
+            assert_eq!(
+                serde_json::to_value(node_type).unwrap(),
+                node_type_query_spelling(node_type)
+            );
+        }
+        for edge_type in &EDGE_TYPES {
+            assert_eq!(
+                serde_json::to_value(edge_type).unwrap(),
+                edge_type_query_spelling(edge_type)
+            );
+        }
     }
 
     #[test]
