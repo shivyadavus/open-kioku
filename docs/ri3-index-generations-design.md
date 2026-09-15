@@ -1,6 +1,7 @@
-# RI3.6 design: atomic multi-store index generations
+# Design: atomic multi-store index generations
 
-Status: proposed (design for issue #242). Informed by the 2026-08-31 large-corpus
+Status: phase 1 (layout, adoption, pointer) shipped in 3.1.0; issue #242 tracks the
+remaining phases. Informed by the 2026-08-31 large-corpus
 profiling recorded in #329 and `docs/large-java-validation-2026-08-31.md`.
 
 ## Measured motivation
@@ -21,7 +22,7 @@ On a 16.5k-file Java corpus (247k symbols, 1.5M graph edges, 495k semantic vecto
 4. The semantic store already solves this correctly at small scale:
    `build_and_promote` builds into a fresh directory and atomically renames
    `current` → `previous`, with fail-closed manifest compatibility checks
-   (`source_index_fingerprint`). RI3.6 generalizes that working pattern to every store.
+   (`source_index_fingerprint`). This design generalizes that working pattern to every store.
 
 ## Design
 

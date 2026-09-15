@@ -1,10 +1,10 @@
 # Frozen relationship conformance benchmark
 
-Open Kioku treats authoritative repository relationships as structural truth, not ranking hints. The RI3 relationship benchmark is the release gate that checks whether those relationships remain precise, reproducible, and proof-backed across the Tier-1 language surface.
+Open Kioku treats authoritative repository relationships as structural truth, not ranking hints. The relationship conformance benchmark is the release gate that checks whether those relationships remain precise, reproducible, and proof-backed across the Tier-1 language surface.
 
 ## Release corpus
 
-`benchmarks/relationship-cases.json` is the frozen V3 corpus. It contains 336 cases across Rust, TypeScript, JavaScript, Python, Java, and Go: 56 cases per language and eight cases in every language × relationship cohort for `CALLS`, `REFERENCES`, `USES_TYPE`, `IMPLEMENTS`, `EXTENDS`, `IMPORTS`, and `DEPENDS_ON`.
+`benchmarks/relationship-cases.json` is the frozen release corpus. It contains 336 cases across Rust, TypeScript, JavaScript, Python, Java, and Go: 56 cases per language and eight cases in every language × relationship cohort for `CALLS`, `REFERENCES`, `USES_TYPE`, `IMPLEMENTS`, `EXTENDS`, `IMPORTS`, and `DEPENDS_ON`.
 
 More than 40% of cases are negative, ambiguous, fail-closed, or `MustNotEmit` probes. The corpus includes same-name collisions, unrelated receivers, alias/import ambiguity, lexical shadowing, test/production collisions, constructor/function and static/instance collisions, unknown receivers, dynamic dispatch, overload and inheritance collisions, local/import shadowing, multiple exact reference sites, unresolved external targets, generated/vendor skipped paths, malformed/partial source, and deterministic metamorphic variants.
 
@@ -34,11 +34,11 @@ Every language × relationship cohort has a metamorphic group. Variants are inde
 
 The scorer canonicalizes the complete authoritative relationship identity, including endpoints, proof kinds, exact source ranges, and resolver strategies. Metamorphic equivalence therefore means the structural truth and its proof identity are identical, not merely that two cases both passed.
 
-A dedicated watch/index regression also compares relationship graph output after an incremental update with a clean rebuild from the same final source state, so partial-index persistence cannot silently diverge from clean RI3 relationship truth.
+A dedicated watch/index regression also compares relationship graph output after an incremental update with a clean rebuild from the same final source state, so partial-index persistence cannot silently diverge from the relationship truth of a clean rebuild.
 
 ## Release thresholds
 
-`benchmarks/relationship-thresholds.json` is strict and versioned. The V3 release contract requires at least:
+`benchmarks/relationship-thresholds.json` is strict and versioned. The release contract requires at least:
 
 - 300 frozen cases and 50 cases per Tier-1 language;
 - 8 cases per language × relationship cohort;
@@ -80,7 +80,7 @@ The `--write` path also emits deterministic Markdown and capability companion re
 
 ## Approved baseline
 
-Open Kioku 2.x did not have a frozen relationship-conformance baseline, so V3 must not invent a historical comparison. `benchmarks/relationship-baseline.json` is the first approved relationship baseline and is created only after the full frozen corpus passes the release policy on the reviewed implementation.
+Open Kioku 2.x did not have a frozen relationship-conformance baseline, so the 3.x benchmark must not invent a historical comparison. `benchmarks/relationship-baseline.json` is the first approved relationship baseline and is created only after the full frozen corpus passes the release policy on the reviewed implementation.
 
 `./scripts/validate-relationship-baseline.py` compares the deterministic projection of a new report against that checked-in baseline. It intentionally excludes commit-specific run metadata while retaining corpus/schema identity, the observation digest, all quality/cohort metrics, proof/strategy distributions, capability results, and metamorphic equivalence. A baseline change is therefore an explicit reviewed product decision rather than an automatic CI update.
 
