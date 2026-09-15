@@ -171,6 +171,8 @@ ok mcp install gemini --repo .            # Gemini CLI: prints the JSON server e
 
 Step-by-step guides: [Claude Code](https://www.openkioku.com/claude-code-setup.html) · [Cursor](https://www.openkioku.com/cursor-setup.html) · [Codex](https://www.openkioku.com/codex-setup.html) · [Gemini CLI](https://www.openkioku.com/gemini-cli-setup.html) · CI: [`open-kioku-action`](https://github.com/shivyadavus/open-kioku-action) ([`docs/github-action.md`](docs/github-action.md))
 
+Every `ok mcp install` client, with its generated config shape and how to confirm the connection: [`docs/guides/cross-harness-setup.md`](docs/guides/cross-harness-setup.md)
+
 ## Why Local
 
 - No hosted index and no source upload: everything lives under the repository's `.ok/` directory, and `ok prove` shares counts and scores without source snippets.
@@ -195,6 +197,8 @@ Semantic retrieval is optional and local (`ok --repo . semantic index`, then `ok
 ## Language Support
 
 Tree-sitter parsing and symbol extraction cover **Rust, Python, TypeScript/TSX, JavaScript/JSX, Go, and Java**. YAML and JSON are parsed structurally; file/chunk indexing also covers TOML, SQL, Markdown, Terraform, and other repository text. Language-aware resolution adds scope, import, receiver/type, containment, and inheritance semantics where supported.
+
+Exact Java definitions and references from a `scip-java` index: [`docs/guides/java-scip.md`](docs/guides/java-scip.md)
 
 ## Useful Commands
 

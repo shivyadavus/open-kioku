@@ -160,7 +160,7 @@ Use these issue labels consistently:
 | --- | --- |
 | `P0` | Release-blocking correctness, security, or data-loss risk |
 | `P1` | Core product behavior or quality gate |
-| `P2` | Adoption, docs, examples, or contributor experience |
+| `P2` | Onboarding, docs, examples, or contributor experience |
 | `bug` | Broken existing behavior |
 | `enhancement` | New capability |
 | `docs` | Documentation-only or documentation-led change |

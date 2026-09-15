@@ -1,4 +1,4 @@
-# CC5.2 ANN scale evidence (50K → 1M vectors)
+# ANN scale evidence (50K → 1M vectors)
 
 Checked-in evidence for issue #232: the persistent ANN backend measured across
 the full requested matrix, with the exact-flat oracle as ground truth. This
