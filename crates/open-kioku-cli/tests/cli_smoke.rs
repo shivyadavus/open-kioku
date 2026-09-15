@@ -4129,6 +4129,567 @@ fn doctor_reports_a_source_tree_excluded_by_policy_with_its_governing_setting() 
     assert!(step.contains("`.gitignore` governs that"), "{step}");
 }
 
+/// `src/` holds 25 Rust files, `FrobnicateRegistry` among them, beside two files under `app/`.
+/// With `git_ignore_src`, `.gitignore` lists `src/`. Initialised and indexed.
+fn coverage_gap_fixture(git_ignore_src: bool) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("app")).unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("app/main.rs"),
+        "pub fn live_entry() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("app/session.rs"),
+        "pub fn refresh_session() -> u32 {\n    2\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/registry.rs"),
+        "pub struct FrobnicateRegistry;\n",
+    )
+    .unwrap();
+    for index in 0..24 {
+        fs::write(
+            repo.join(format!("src/widget_{index}.rs")),
+            format!("pub fn widget_{index}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    if git_ignore_src {
+        fs::write(repo.join(".gitignore"), "src/\n").unwrap();
+    }
+    for step in ["init", "index"] {
+        run({
+            let mut command = ok();
+            command.arg(step).arg(repo);
+            command
+        });
+    }
+    temp
+}
+
+const COVERAGE_GAP_TASK: &str = "fix FrobnicateRegistry lookup in live_entry";
+
+/// `[context, plan, status]` for `task` as JSON from the CLI, then the same three from MCP
+/// `build_context_pack`, `plan_change` and `repo_status`.
+fn coverage_surfaces(
+    repo: &std::path::Path,
+    task: &str,
+) -> ([serde_json::Value; 3], [serde_json::Value; 3]) {
+    let parse = |output: String| -> serde_json::Value {
+        serde_json::from_str(&output).expect("command prints JSON")
+    };
+    let cli_context = parse(run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("context")
+            .arg(task)
+            .arg("--format")
+            .arg("json");
+        command
+    }));
+    let cli_plan = parse(run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("plan")
+            .arg(task)
+            .arg("--format")
+            .arg("json");
+        command
+    }));
+    let cli_status = parse(run({
+        let mut command = ok();
+        command.arg("--json").arg("status").arg(repo);
+        command
+    }));
+
+    let requests = [
+        (
+            "build_context_pack",
+            serde_json::json!({"task": task, "format": "json"}),
+        ),
+        (
+            "plan_change",
+            serde_json::json!({"task": task, "format": "json"}),
+        ),
+        ("repo_status", serde_json::json!({})),
+    ];
+    let stdin = requests
+        .iter()
+        .enumerate()
+        .map(|(id, (name, arguments))| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let output = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &stdin,
+    );
+    let mut responses = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON-RPC line"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), requests.len(), "{output}");
+    responses.sort_by_key(|response| response["id"].as_u64());
+    let mcp = |index: usize| {
+        let result = &responses[index]["result"];
+        assert!(result.is_object(), "{}", responses[index]);
+        result["structuredContent"].clone()
+    };
+    (
+        [cli_context, cli_plan, cli_status],
+        [mcp(0), mcp(1), mcp(2)],
+    )
+}
+
+fn coverage_negative_evidence(report: &serde_json::Value) -> Option<&serde_json::Value> {
+    report["negative_evidence"]
+        .as_array()
+        .expect("negative_evidence list")
+        .iter()
+        .find(|item| item["scope"] == "coverage")
+}
+
+fn coverage_caveats(report: &serde_json::Value) -> Vec<String> {
+    report["confidence_breakdown"]["caveats"]
+        .as_array()
+        .expect("caveats list")
+        .iter()
+        .filter_map(|caveat| caveat.as_str())
+        // Gap caveats only. `UNRECORDED_COVERAGE_CAVEAT` also begins "index coverage", and on
+        // a fixture without a coverage record the bare prefix would count the wrong sentence.
+        .filter(|caveat| {
+            *caveat != open_kioku_core::UNRECORDED_COVERAGE_CAVEAT
+                && *caveat != open_kioku_core::UNREADABLE_COVERAGE_CAVEAT
+                && caveat.starts_with("index coverage: ")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A task naming a symbol defined in git-ignored source gets the coverage caveat, the
+/// `coverage` negative evidence, the `index_coverage` component and a Low label from context and
+/// plan on both surfaces, never a probe saying the name does not exist, and `repo_status` reports
+/// the same verdict `ok --json status` does.
+#[test]
+fn git_ignored_source_reaches_context_plan_and_status_on_cli_and_mcp() {
+    let temp = coverage_gap_fixture(true);
+    let (cli, mcp) = coverage_surfaces(temp.path(), COVERAGE_GAP_TASK);
+    for (surface, reports) in [("cli", &cli), ("mcp", &mcp)] {
+        for (kind, report) in [("context", &reports[0]), ("plan", &reports[1])] {
+            let label = format!("{surface} {kind}");
+            let item = coverage_negative_evidence(report)
+                .unwrap_or_else(|| panic!("{label}: no coverage negative evidence: {report}"));
+            assert!(
+                item["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore)"),
+                "{label}: {item}"
+            );
+            assert!(
+                item["inspected_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| source == "coverage:rust:git_ignore"),
+                "{label}: {item}"
+            );
+            assert!(
+                report["negative_evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|item| item["suggested_next_probe"].as_str())
+                    .all(|probe| !probe.contains("does not exist")),
+                "{label}: {report}"
+            );
+            let confidence = &report["confidence_breakdown"];
+            assert_eq!(confidence["overall_enum"], "low", "{label}: {confidence}");
+            assert!(
+                confidence["overall_score"].as_f64().unwrap() <= 0.50,
+                "{label}: {confidence}"
+            );
+            assert_eq!(coverage_caveats(report).len(), 1, "{label}: {confidence}");
+            assert!(
+                confidence["components"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|component| component["signal"] == "index_coverage"
+                        && component["evidence_ids"]
+                            == serde_json::json!(["coverage:rust:git_ignore"])),
+                "{label}: {confidence}"
+            );
+        }
+    }
+    for index in 0..2 {
+        assert_eq!(coverage_caveats(&cli[index]), coverage_caveats(&mcp[index]));
+        // The same item on both surfaces, compared field by field rather than whole. `ok
+        // context` renders the pack to JSON text, where the f32 `confidence` prints as `0.9`;
+        // MCP builds the value in memory, where the same f32 widens to `0.8999999761581421`.
+        // The stored number is identical, so only its JSON spelling differs.
+        let cli_item = coverage_negative_evidence(&cli[index]).expect("cli coverage item");
+        let mcp_item = coverage_negative_evidence(&mcp[index]).expect("mcp coverage item");
+        for field in [
+            "scope",
+            "query",
+            "reason",
+            "inspected_sources",
+            "suggested_next_probe",
+        ] {
+            assert_eq!(cli_item[field], mcp_item[field], "{field}");
+        }
+        let cli_confidence = cli_item["confidence"].as_f64().expect("cli confidence");
+        let mcp_confidence = mcp_item["confidence"].as_f64().expect("mcp confidence");
+        assert!(
+            (cli_confidence - mcp_confidence).abs() < 1e-6,
+            "{cli_confidence} vs {mcp_confidence}"
+        );
+    }
+
+    let gaps = &cli[2]["coverage_gaps"];
+    assert_eq!(gaps, &mcp[2]["coverage_gaps"]);
+    assert_eq!(gaps.as_array().map(Vec::len), Some(1), "{gaps}");
+    assert_eq!(gaps[0]["language"], "rust");
+    assert_eq!(gaps[0]["cause"], "git_ignore");
+    assert_eq!(gaps[0]["missing_files"], 25);
+    assert_eq!(gaps[0]["language_files"], 27);
+}
+
+/// The same repository without the ignore rule: no coverage signal anywhere, and an empty
+/// verdict on both status surfaces.
+#[test]
+fn complete_coverage_adds_no_coverage_signal_on_cli_or_mcp() {
+    let temp = coverage_gap_fixture(false);
+    let (cli, mcp) = coverage_surfaces(temp.path(), COVERAGE_GAP_TASK);
+    for (surface, reports) in [("cli", &cli), ("mcp", &mcp)] {
+        for (kind, report) in [("context", &reports[0]), ("plan", &reports[1])] {
+            let label = format!("{surface} {kind}");
+            assert!(
+                coverage_negative_evidence(report).is_none(),
+                "{label}: {report}"
+            );
+            assert!(coverage_caveats(report).is_empty(), "{label}: {report}");
+            let confidence = &report["confidence_breakdown"];
+            assert!(
+                confidence["components"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|component| component["signal"] != "index_coverage"),
+                "{label}: {confidence}"
+            );
+            assert!(
+                confidence["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|blocker| blocker.as_str())
+                    .all(|blocker| !blocker.contains("index excluded")),
+                "{label}: {confidence}"
+            );
+        }
+        assert_eq!(
+            reports[2]["coverage_gaps"],
+            serde_json::json!([]),
+            "{surface}: {}",
+            reports[2]
+        );
+    }
+}
+
+/// A Python repository whose answer lives in `src/`. With `with_venv`, a git-ignored `venv/`
+/// holds 30 site-packages modules, more than `src/` holds. Discovery descends into git-ignored
+/// directories and records each file as `git_ignore`, so that is a coverage gap; only
+/// name-pruned directories (`.venv`, `build`, `dist`, `node_modules`, `target`) count as one
+/// pruned directory instead.
+fn python_venv_fixture(with_venv: bool) -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join(".gitignore"), "venv/\n").unwrap();
+    fs::write(
+        repo.join("src/session.py"),
+        "def refresh_session_token(session):\n    session.expires_at = session.issued_at + 3600\n    return session\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/accounts.py"),
+        "class AccountStore:\n    def load(self, account_id):\n        return account_id\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/billing.py"),
+        "def charge_invoice(invoice):\n    return invoice\n",
+    )
+    .unwrap();
+    if with_venv {
+        for index in 0..30 {
+            let package = repo.join(format!("venv/lib/python3.12/site-packages/package_{index}"));
+            fs::create_dir_all(&package).unwrap();
+            fs::write(
+                package.join("__init__.py"),
+                format!("def helper_{index}():\n    return {index}\n"),
+            )
+            .unwrap();
+        }
+    }
+    for step in ["init", "index"] {
+        run({
+            let mut command = ok();
+            command.arg(step).arg(repo);
+            command
+        });
+    }
+    temp
+}
+
+/// Rust source beside a git-ignored `venv/` that holds the repository's only Python. The gap
+/// is Python; the selection can only be Rust, which is the control for "a gap in a language
+/// the selection does not use". It needs its own repository: on a handful of files the pack
+/// selects nearly everything, so a Rust file sitting beside Python source would not isolate it.
+fn rust_source_venv_fixture() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join(".gitignore"), "venv/\n").unwrap();
+    fs::write(
+        repo.join("src/rotation.rs"),
+        "pub fn rotate_widget_key(previous: u32) -> u32 {\n    previous + 1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub mod rotation;\n\npub fn widget_entry() -> u32 {\n    rotation::rotate_widget_key(1)\n}\n",
+    )
+    .unwrap();
+    for index in 0..30 {
+        let package = repo.join(format!("venv/lib/python3.12/site-packages/package_{index}"));
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("__init__.py"),
+            format!("def helper_{index}():\n    return {index}\n"),
+        )
+        .unwrap();
+    }
+    for step in ["init", "index"] {
+        run({
+            let mut command = ok();
+            command.arg(step).arg(repo);
+            command
+        });
+    }
+    temp
+}
+
+/// A git-ignored `venv/` larger than `src/` is a majority Python gap. A Python answer is
+/// capped below `High` even though the task's identifier resolves in `src/`: the label follows
+/// what the index holds, not how the task was phrased. A Rust answer over the same index is
+/// untouched, and the same repository without `venv/` reports no gap at all - the two controls
+/// that make this fail if the cap were dropped or applied everywhere.
+#[test]
+fn a_git_ignored_venv_caps_a_python_answer_and_leaves_a_rust_answer_alone() {
+    let python_task = "fix refresh_session_token expiry handling";
+    let rust_task = "fix rotate_widget_key rotation";
+    let with_venv = python_venv_fixture(true);
+    let without_venv = python_venv_fixture(false);
+
+    let language_blocker = |report: &serde_json::Value| -> Vec<String> {
+        report["confidence_breakdown"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .filter_map(|blocker| blocker.as_str())
+            .filter(|blocker| blocker.starts_with("the selected context is in a language"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let preflight_verdict = |repo: &std::path::Path, task: &str| -> String {
+        let out = run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("preflight")
+                .arg(task)
+                .arg("--format")
+                .arg("json");
+            command
+        });
+        let value: serde_json::Value = serde_json::from_str(&out).expect("preflight json");
+        value["verdict"].as_str().expect("verdict").to_owned()
+    };
+
+    // The Python answer: gap reported, selection in the gap's language, capped below High.
+    let (cli, mcp) = coverage_surfaces(with_venv.path(), python_task);
+    let gaps = &cli[2]["coverage_gaps"];
+    assert_eq!(gaps.as_array().map(Vec::len), Some(1), "{gaps}");
+    assert_eq!(gaps[0]["language"], "python");
+    assert_eq!(gaps[0]["missing_files"], 30);
+    for (surface, reports) in [("cli", &cli), ("mcp", &mcp)] {
+        for (index, kind) in [(0, "context"), (1, "plan")] {
+            let label = format!("{surface} {kind}");
+            let report = &reports[index];
+            assert!(
+                coverage_negative_evidence(report).is_some(),
+                "{label}: {report}"
+            );
+            assert_eq!(
+                language_blocker(report).len(),
+                1,
+                "{label}: expected the excluded-language blocker: {report}"
+            );
+            let confidence = &report["confidence_breakdown"];
+            // The cap is an f32 `0.74`, which widens to 0.7400000095367432 in JSON, so the
+            // comparison carries an f32-epsilon tolerance rather than testing the encoder.
+            assert!(
+                confidence["overall_score"].as_f64().unwrap() <= 0.74 + 1e-6,
+                "{label}: {confidence}"
+            );
+            assert!(
+                confidence["overall_enum"] != "exact" && confidence["overall_enum"] != "high",
+                "{label}: {confidence}"
+            );
+        }
+    }
+    // The field an agent branches on, not only the label it displays: a majority gap in the
+    // language being edited withholds `safe_to_start`, like an unresolved import does.
+    assert_eq!(
+        preflight_verdict(with_venv.path(), python_task),
+        "start_with_caution"
+    );
+    // The control: the same task over the index without the gap still starts safely, so a
+    // trigger that fired for any reason at all would turn this red.
+    assert_eq!(
+        preflight_verdict(without_venv.path(), python_task),
+        "safe_to_start"
+    );
+
+    // Control one: Rust source whose only Python sits in the git-ignored tree. The gap is
+    // still reported - it is a fact about the index, not about the task - but the cap must not
+    // apply, because the excluded files cannot hold a Rust definition.
+    let rust_repo = rust_source_venv_fixture();
+    let (rust_cli, _) = coverage_surfaces(rust_repo.path(), rust_task);
+    assert_eq!(rust_cli[2]["coverage_gaps"][0]["language"], "python");
+    for (index, kind) in [(0, "context"), (1, "plan")] {
+        let report = &rust_cli[index];
+        assert!(
+            coverage_negative_evidence(report).is_some(),
+            "rust {kind}: the gap is a fact about the index, reported for any task: {report}"
+        );
+        assert!(
+            language_blocker(report).is_empty(),
+            "rust {kind}: a python gap must not cap a rust selection: {report}"
+        );
+    }
+
+    // Control two: the same repository without `venv/` reports no gap at all.
+    let (base_cli, base_mcp) = coverage_surfaces(without_venv.path(), python_task);
+    assert_eq!(base_cli[2]["coverage_gaps"], serde_json::json!([]));
+    assert_eq!(base_mcp[2]["coverage_gaps"], serde_json::json!([]));
+    for (index, kind) in [(0, "context"), (1, "plan")] {
+        let report = &base_cli[index];
+        assert!(
+            coverage_negative_evidence(report).is_none(),
+            "{kind}: {report}"
+        );
+        assert!(language_blocker(report).is_empty(), "{kind}: {report}");
+    }
+}
+
+/// The human surfaces print the gap beside the coverage summary. Without this, a refactor
+/// collapsing the coverage print back into a single `summary_line()` call passes fmt, clippy,
+/// every test and every snapshot family, and the defect returns silently: the summary ratio is
+/// computed over considered files, so it reads near-100% on exactly the repository a gap
+/// describes. All three surfaces print the same sentence.
+#[test]
+fn coverage_gaps_are_printed_by_index_status_and_markdown() {
+    let gapped = coverage_gap_fixture(true);
+    let sentence =
+        "index coverage: 25 of 27 rust source files (92.6%) are not indexed (git-ignore)";
+
+    let indexed = run({
+        let mut command = ok();
+        command.arg("index").arg(gapped.path());
+        command
+    });
+    assert!(
+        indexed.contains(&format!("coverage gap: {sentence}")),
+        "ok index must print the gap beside the summary: {indexed}"
+    );
+
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(gapped.path()).arg("status");
+        command
+    });
+    assert!(
+        status.contains(&format!("Coverage gap: {sentence}")),
+        "ok status must print the gap: {status}"
+    );
+
+    let markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(gapped.path())
+            .arg("status")
+            .arg("--markdown");
+        command
+    });
+    assert!(
+        markdown.contains("| Coverage gaps |") && markdown.contains(sentence),
+        "ok status --markdown must carry the gap row: {markdown}"
+    );
+
+    // Control: a fully covered repository prints none of it, so an unconditional print would
+    // turn this red rather than pass unnoticed.
+    let covered = coverage_gap_fixture(false);
+    let indexed = run({
+        let mut command = ok();
+        command.arg("index").arg(covered.path());
+        command
+    });
+    assert!(!indexed.contains("coverage gap:"), "{indexed}");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(covered.path()).arg("status");
+        command
+    });
+    assert!(!status.contains("Coverage gap:"), "{status}");
+    let markdown = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(covered.path())
+            .arg("status")
+            .arg("--markdown");
+        command
+    });
+    assert!(!markdown.contains("| Coverage gaps |"), "{markdown}");
+}
+
 #[test]
 fn index_reports_coverage_in_summary_status_and_doctor() {
     let temp = tempfile::tempdir().unwrap();

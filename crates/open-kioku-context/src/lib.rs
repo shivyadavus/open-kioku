@@ -2,11 +2,11 @@ use chrono::Utc;
 use open_kioku_core::{
     negative_evidence_scope, AnalysisFact, ChangeBoundary, CodeChunk, Confidence,
     ConfidenceBreakdown, ConfidenceSignalInput, ContextBudget, ContextPack, ContextSelectedUnit,
-    ContextUnitKind, Evidence, EvidenceId, EvidenceSourceType, File, FileRange, GraphEdge,
-    GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence, RetrievalAuthority,
-    RetrievalDiagnostics, RetrievalSourceCount, RetrievalSourceKind, RetrievalTrace,
-    RetrievalUnitKey, RiskReport, RuntimeSignal, ScoreComponent, SearchResult, Symbol,
-    ValidationPlan,
+    ContextUnitKind, CoverageGap, CoverageInput, Evidence, EvidenceId, EvidenceSourceType, File,
+    FileRange, GraphEdge, GraphEdgeType, GraphNodeType, HistorySignalQuery, NegativeEvidence,
+    RetrievalAuthority, RetrievalDiagnostics, RetrievalSourceCount, RetrievalSourceKind,
+    RetrievalTrace, RetrievalUnitKey, RiskReport, RuntimeSignal, ScoreComponent, SearchResult,
+    Symbol, ValidationPlan,
 };
 use open_kioku_errors::Result;
 use open_kioku_impact::ImpactEngine;
@@ -869,6 +869,25 @@ impl<'a> ContextPackBuilder<'a> {
             &evidence,
         );
         let unmatched_anchors = open_kioku_core::unmatched_named_anchors(task, &primary_files);
+        // The coverage verdict of the manifest the index published, the record `repo_status`
+        // reports: an absence among files the index never read is not evidence.
+        // A manifest with no coverage record, and one that cannot be read at all, are both
+        // reported as unavailable rather than as full coverage. The read never fails the pack,
+        // which built without consulting the manifest before this.
+        // Only the coverage subtree is read: a full manifest decode is dominated by quality
+        // notes and skipped paths, and this runs on every pack. A record that is absent, and a
+        // manifest that cannot be read at all, are both reported as unavailable rather than as
+        // full coverage; the read never fails the pack, which built without consulting the
+        // manifest before this.
+        let coverage = match self.store.index_coverage() {
+            Ok(Some(coverage)) => CoverageInput::Recorded(coverage.gaps()),
+            Ok(None) => CoverageInput::Unavailable,
+            // The read failed rather than the index having published nothing; the pack says so
+            // instead of claiming the index omitted nothing, and still builds. `ok plan` takes
+            // the full manifest and still fails on this state.
+            Err(_) => CoverageInput::Unreadable,
+        };
+        let primary_languages = primary_language_keys(self.store, coverage.gaps(), &primary_files)?;
         // Negative evidence is built first: the confidence breakdown counts the items it
         // lists, so the blocker it reports is traceable to the list the pack publishes.
         let negative_evidence = negative_evidence_for_context(NegativeEvidenceInputs {
@@ -879,6 +898,7 @@ impl<'a> ContextPackBuilder<'a> {
             runtime_signals: &runtime_signals,
             exact_reference_count,
             unmatched_anchors: &unmatched_anchors,
+            coverage: &coverage,
         });
         let mut confidence_breakdown = confidence_for_context(ContextConfidenceInputs {
             task,
@@ -891,6 +911,8 @@ impl<'a> ContextPackBuilder<'a> {
             allowed_file_count: allowed_files.len(),
             evidence_count: open_kioku_core::distinct_evidence_count(&evidence),
             runtime_signal_count_value: runtime_signals.len(),
+            coverage: &coverage,
+            primary_language_keys: &primary_languages,
         });
         if let Some(missing) = retrieval_diagnostics
             .selection
@@ -1550,6 +1572,7 @@ struct NegativeEvidenceInputs<'a> {
     runtime_signals: &'a [RuntimeSignal],
     exact_reference_count: usize,
     unmatched_anchors: &'a [String],
+    coverage: &'a CoverageInput,
 }
 
 /// `unmatched` anchors split into (hyphenated task words, identifiers), each in task order.
@@ -1583,9 +1606,13 @@ fn anchor_miss_reason(identifiers: &[&str], words: &[&str]) -> String {
     parts.join("; ")
 }
 
-fn anchor_miss_probe(identifiers: &[&str]) -> &'static str {
+/// With a majority coverage gap the index never read most of a language, so a name it does
+/// not hold is not thereby absent from the repository.
+fn anchor_miss_probe(identifiers: &[&str], excluded_source: bool) -> &'static str {
     if identifiers.is_empty() {
         "Run `ok search <word>` for each hyphenated word; a word the index does not hold may be ordinary prose rather than a name in this repository."
+    } else if excluded_source {
+        "Run `ok search <identifier>` for each name; the index excluded most of a language's source (see the `coverage` negative evidence), so a name it does not hold may be defined in those files."
     } else {
         "Run `ok search <identifier>` for each name; a name the index does not hold either does not exist in this repository or needs `ok index`."
     }
@@ -1600,6 +1627,7 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
         runtime_signals,
         exact_reference_count,
         unmatched_anchors,
+        coverage,
     } = inputs;
     let mut items = Vec::new();
     if primary_files.is_empty() {
@@ -1625,9 +1653,18 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
             ],
             reason: anchor_miss_reason(&identifiers, &words),
             confidence: 0.85,
-            suggested_next_probe: Some(anchor_miss_probe(&identifiers).into()),
+            suggested_next_probe: Some(
+                anchor_miss_probe(
+                    &identifiers,
+                    coverage.gaps().iter().any(CoverageGap::is_majority),
+                )
+                .into(),
+            ),
         });
     }
+    // A gap says what is missing; no record says nobody measured; an unreadable one says the
+    // read failed. One item covers whichever holds.
+    items.extend(NegativeEvidence::for_coverage_input(task, coverage));
     if exact_reference_count == 0 {
         items.push(NegativeEvidence {
             query: task.into(),
@@ -1712,6 +1749,39 @@ struct ContextConfidenceInputs<'a> {
     allowed_file_count: usize,
     evidence_count: usize,
     runtime_signal_count_value: usize,
+    coverage: &'a CoverageInput,
+    primary_language_keys: &'a [String],
+}
+
+/// Language keys (`rust`, `python`) of `selected`, sorted and deduplicated, for the coverage-gap
+/// caps in [`ConfidenceBreakdown::from_signals`]. Only a majority coverage gap reads them, so
+/// without one nothing is looked up. A selection whose symbol carries its language uses it;
+/// any other is resolved from its indexed file record, read by path once per distinct path, so
+/// the work is bounded by the selection rather than the index. Plans call this too, so both
+/// surfaces compare a gap with the same languages.
+pub fn primary_language_keys(
+    store: &dyn OkStore,
+    coverage_gaps: &[CoverageGap],
+    selected: &[SearchResult],
+) -> Result<Vec<String>> {
+    if !coverage_gaps.iter().any(CoverageGap::is_majority) {
+        return Ok(Vec::new());
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    let mut read_paths = std::collections::BTreeSet::new();
+    for result in selected {
+        if let Some(symbol) = &result.symbol {
+            keys.insert(symbol.language.key().to_owned());
+            continue;
+        }
+        if !read_paths.insert(result.path.as_path()) {
+            continue;
+        }
+        if let Some(file) = store.get_file_by_path(&result.path)? {
+            keys.insert(file.language.key().to_owned());
+        }
+    }
+    Ok(keys.into_iter().collect())
 }
 
 fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBreakdown {
@@ -1726,6 +1796,8 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         allowed_file_count,
         evidence_count,
         runtime_signal_count_value,
+        coverage,
+        primary_language_keys,
     } = inputs;
     // Relevance is measured over what the caller will actually be handed.
     let mut selected = primary_files.to_vec();
@@ -1750,6 +1822,8 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         named_anchor_count: open_kioku_core::named_anchors(task).len(),
         unmatched_anchors: unmatched_anchors.to_vec(),
         weak_anchors: open_kioku_core::weak_named_anchors(task),
+        coverage: coverage.clone(),
+        primary_language_keys: primary_language_keys.to_vec(),
     })
 }
 
@@ -6877,6 +6951,7 @@ mod tests {
             runtime_signals: &[],
             exact_reference_count: exact,
             unmatched_anchors: &[],
+            coverage: &CoverageInput::default(),
         });
         assert!(negative
             .iter()
@@ -6893,6 +6968,8 @@ mod tests {
             allowed_file_count: 1,
             evidence_count: 2,
             runtime_signal_count_value: 0,
+            coverage: &CoverageInput::default(),
+            primary_language_keys: &[],
         });
         assert_ne!(breakdown.overall_enum, Confidence::Exact);
         assert!(breakdown.overall_score <= 0.74, "{breakdown:?}");
@@ -6946,6 +7023,7 @@ mod tests {
                 runtime_signals: &[],
                 exact_reference_count: 1,
                 unmatched_anchors: unmatched,
+                coverage: &CoverageInput::default(),
             })
             .into_iter()
             .find(|item| item.scope == negative_evidence_scope::ANCHOR)
@@ -7055,6 +7133,7 @@ mod tests {
             runtime_signals: &[],
             exact_reference_count: 0,
             unmatched_anchors: &unmatched,
+            coverage: &CoverageInput::default(),
         });
         let anchor = negative
             .iter()
@@ -7080,6 +7159,8 @@ mod tests {
             allowed_file_count: 1,
             evidence_count: 1,
             runtime_signal_count_value: 0,
+            coverage: &CoverageInput::default(),
+            primary_language_keys: &[],
         });
         assert_eq!(breakdown.overall_enum, Confidence::Low);
         assert!(breakdown.overall_score <= 0.50, "{breakdown:?}");
@@ -7109,6 +7190,7 @@ mod tests {
             runtime_signals: &[],
             exact_reference_count: 0,
             unmatched_anchors: &unmatched,
+            coverage: &CoverageInput::default(),
         });
         assert_eq!(
             open_kioku_core::negative_evidence_signal_count(&negative),
@@ -7125,6 +7207,8 @@ mod tests {
             allowed_file_count: 1,
             evidence_count: 1,
             runtime_signal_count_value: 0,
+            coverage: &CoverageInput::default(),
+            primary_language_keys: &[],
         });
         assert!(breakdown.overall_score <= 0.60, "{breakdown:?}");
         assert!(breakdown
@@ -7135,6 +7219,150 @@ mod tests {
             .caveats
             .iter()
             .any(|caveat| caveat.contains("1 of 2") && caveat.contains("reticulate_splines")));
+    }
+
+    /// Rust source git ignore rules mostly excluded: 25 ignored files beside 2 indexed.
+    fn git_ignored_rust_gaps() -> Vec<CoverageGap> {
+        let mut coverage = open_kioku_core::IndexCoverage::default();
+        for index in 0..27 {
+            coverage.record_discovered(&Language::Rust);
+            if index < 2 {
+                coverage.record_indexed(&Language::Rust, false);
+            } else {
+                coverage.record_skipped(&Language::Rust, open_kioku_core::SkipReason::Ignored);
+                coverage.record_policy_exclusion(
+                    &Language::Rust,
+                    open_kioku_core::SkipSource::GitIgnore,
+                    Some("src"),
+                );
+            }
+        }
+        coverage.gaps()
+    }
+
+    #[test]
+    fn identifiers_beside_git_ignored_source_are_a_coverage_gap_not_absent_code() {
+        let task = "fix the null check in FrobnicateWidgetManager::reticulate_splines";
+        let mut partial = lexical_hit("src/widgets.rs", "lexical match", "lexical evidence");
+        partial.snippet = "impl FrobnicateWidgetManager { fn frobnicate(&self) {} }".into();
+        let partial = vec![partial];
+        let unmatched = open_kioku_core::unmatched_named_anchors(task, &partial);
+        assert_eq!(unmatched, vec!["reticulate_splines".to_string()]);
+        let gaps = git_ignored_rust_gaps();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+
+        let pack = |coverage: &CoverageInput| {
+            let negative = negative_evidence_for_context(NegativeEvidenceInputs {
+                task,
+                primary_files: &partial,
+                supporting_files: &[],
+                tests: &[],
+                runtime_signals: &[],
+                exact_reference_count: 0,
+                unmatched_anchors: &unmatched,
+                coverage,
+            });
+            let breakdown = confidence_for_context(ContextConfidenceInputs {
+                task,
+                primary_files: &partial,
+                supporting_files: &[],
+                tests: &[],
+                negative_evidence: &negative,
+                exact_reference_count: 0,
+                unmatched_anchors: &unmatched,
+                allowed_file_count: 1,
+                evidence_count: 1,
+                runtime_signal_count_value: 0,
+                coverage,
+                primary_language_keys: &[],
+            });
+            (negative, breakdown)
+        };
+
+        let (negative, breakdown) = pack(&CoverageInput::Recorded(gaps.clone()));
+        let coverage = negative
+            .iter()
+            .find(|item| item.scope == negative_evidence_scope::COVERAGE)
+            .expect("coverage negative evidence");
+        assert!(
+            coverage
+                .reason
+                .contains("25 of 27 rust source files (92.6%) are not indexed (git-ignore)"),
+            "{}",
+            coverage.reason
+        );
+        assert!(coverage
+            .inspected_sources
+            .iter()
+            .any(|source| source == "coverage:rust:git_ignore"));
+        let anchor = negative
+            .iter()
+            .find(|item| item.scope == negative_evidence_scope::ANCHOR)
+            .expect("anchor negative evidence");
+        assert!(
+            anchor
+                .suggested_next_probe
+                .as_deref()
+                .is_some_and(
+                    |probe| !probe.contains("does not exist") && probe.contains("coverage")
+                ),
+            "{anchor:?}"
+        );
+        // The coverage item is priced by the `index_coverage` caps, not counted again.
+        assert_eq!(
+            open_kioku_core::negative_evidence_signal_count(&negative),
+            1
+        );
+        assert_eq!(breakdown.overall_enum, Confidence::Low);
+        assert!(breakdown.overall_score <= 0.50, "{breakdown:?}");
+        assert!(breakdown
+            .caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("index coverage: 25 of 27 rust source files")));
+        assert!(
+            breakdown
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("rust (25 of 27 files, git-ignore)")),
+            "{:?}",
+            breakdown.blockers
+        );
+        let component = breakdown
+            .components
+            .iter()
+            .find(|component| component.signal == "index_coverage")
+            .expect("index_coverage component");
+        assert_eq!(
+            component.evidence_ids,
+            vec!["coverage:rust:git_ignore".to_string()]
+        );
+        assert!(component.contribution.abs() < f32::EPSILON);
+
+        // Complete coverage: no coverage item, caveat, blocker, or component, and the anchor
+        // probe keeps its wording.
+        let (negative, breakdown) = pack(&CoverageInput::default());
+        assert!(negative
+            .iter()
+            .all(|item| item.scope != negative_evidence_scope::COVERAGE));
+        assert!(breakdown
+            .caveats
+            .iter()
+            .all(|caveat| !caveat.starts_with("index coverage")));
+        assert!(breakdown
+            .blockers
+            .iter()
+            .all(|blocker| !blocker.contains("index excluded")));
+        assert!(breakdown
+            .components
+            .iter()
+            .all(|component| component.signal != "index_coverage"));
+        assert!(negative
+            .iter()
+            .find(|item| item.scope == negative_evidence_scope::ANCHOR)
+            .and_then(|item| item.suggested_next_probe.as_deref())
+            .is_some_and(
+                |probe| probe.contains("does not exist in this repository or needs `ok index`")
+            ));
     }
 
     #[test]

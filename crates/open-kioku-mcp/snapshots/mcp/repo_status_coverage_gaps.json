@@ -1,0 +1,199 @@
+{
+  "id": "repo-status-gaps",
+  "jsonrpc": "2.0",
+  "result": {
+    "analysis_semantics": {
+      "descriptor": {
+        "exact_index_ingestion_version": "exact-occurrence-v1",
+        "graph_emission_version": "ri3-graph-emission-v1",
+        "language_adapter_versions": {
+          "go": "ri3-language-semantics-v1",
+          "java": "ri3-language-semantics-v1",
+          "javascript": "ri3-language-semantics-v1",
+          "python": "ri3-language-semantics-v1",
+          "rust": "ri3-language-semantics-v1",
+          "typescript": "ri3-language-semantics-v1"
+        },
+        "parser_semantics": {
+          "go": "tier1-parser-semantics-v4",
+          "java": "tier1-parser-semantics-v4",
+          "javascript": "tier1-parser-semantics-v4",
+          "python": "tier1-parser-semantics-v4",
+          "rust": "tier1-parser-semantics-v4",
+          "typescript": "tier1-parser-semantics-v4"
+        },
+        "project_resolver_version": "project-resolver-v1",
+        "proof_policy_version": "ri3-proof-policy-v1",
+        "relationship_resolver_version": "ri3-relationship-resolver-v2",
+        "stable_identity_version": "stable-identity-v1",
+        "version": 1
+      },
+      "fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d"
+    },
+    "analysis_semantics_status": {
+      "affected_components": [],
+      "affected_languages": [],
+      "current_fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d",
+      "reasons": [],
+      "recommended_action": "none",
+      "status": "compatible",
+      "stored_fingerprint": "199a0e92b5693ce9e55247315944749d737c3e20140047abfd5e0d03d4a4da8d"
+    },
+    "chunk_count": 1,
+    "coverage": {
+      "by_language": {
+        "rust": {
+          "discovered": 27,
+          "generated": 0,
+          "indexed": 2,
+          "skipped": {
+            "ignored": 25
+          }
+        }
+      },
+      "discovered": 27,
+      "generated": 0,
+      "indexed": 2,
+      "policy_excluded_by_language": {
+        "rust": {
+          "git_ignore": 25
+        }
+      },
+      "policy_excluded_by_source": {
+        "git_ignore": 25
+      },
+      "policy_excluded_dirs": {
+        "src": 25
+      },
+      "pruned_dirs": 0,
+      "skipped": {
+        "ignored": 25
+      },
+      "walk_errors": 0
+    },
+    "coverage_gaps": [
+      {
+        "cause": "git_ignore",
+        "governing_setting": "git ignore rules (`.gitignore`, `.git/info/exclude`, or `core.excludesFile`)",
+        "language": "rust",
+        "language_files": 27,
+        "missing_files": 25,
+        "reason": "git-ignore"
+      }
+    ],
+    "file_count": 2,
+    "generation_id": null,
+    "graph_rebuild_required": false,
+    "index_mode": "full",
+    "indexed": true,
+    "indexed_at": "<indexed_at>",
+    "languages": [
+      "rust"
+    ],
+    "phase_reports": [],
+    "quality": {
+      "architecture_facts": 0,
+      "build_systems": [],
+      "codeql_databases": 0,
+      "coverage": {
+        "by_language": {
+          "rust": {
+            "discovered": 27,
+            "generated": 0,
+            "indexed": 2,
+            "skipped": {
+              "ignored": 25
+            }
+          }
+        },
+        "discovered": 27,
+        "generated": 0,
+        "indexed": 2,
+        "policy_excluded_by_language": {
+          "rust": {
+            "git_ignore": 25
+          }
+        },
+        "policy_excluded_by_source": {
+          "git_ignore": 25
+        },
+        "policy_excluded_dirs": {
+          "src": 25
+        },
+        "pruned_dirs": 0,
+        "skipped": {
+          "ignored": 25
+        },
+        "walk_errors": 0
+      },
+      "coverage_reports": 0,
+      "git_history_facts": 0,
+      "import_count": 0,
+      "index_mode": "full",
+      "junit_reports": 0,
+      "pending_pre_redaction_compaction": false,
+      "phase_reports": [],
+      "quality_notes": {
+        "by_kind": {},
+        "sample": [],
+        "total": 0
+      },
+      "redacted_files": null,
+      "runtime_analysis_facts": 0,
+      "scip_enabled": false,
+      "scip_exact_references": 0,
+      "scip_indexes_imported": 0,
+      "scip_mode": "",
+      "scip_occurrences": 0,
+      "scip_symbols": 0,
+      "semantic_provider_notes": [],
+      "skip_counts": {},
+      "skipped_paths": {
+        "by_reason": {},
+        "sample": [],
+        "total": 0
+      },
+      "static_analysis_facts": 0,
+      "test_count": 0
+    },
+    "repository": {
+      "branch": "main",
+      "commit": "abc123",
+      "id": "repo",
+      "indexed_at": "<indexed_at>",
+      "name": "mcp-fixture",
+      "root": "."
+    },
+    "schema_version": 1,
+    "semantic_lifecycle": {
+      "ann_active": false,
+      "ann_profile": null,
+      "backend": "exact-flat",
+      "corrupt": false,
+      "current_dir": "<current_dir>",
+      "dimensions": 384,
+      "disk_usage_bytes": 0,
+      "distance": "cosine",
+      "embedding_implementation": "open-kioku-local-hash-v1",
+      "failed_count": 0,
+      "indexed_count": 0,
+      "last_rebuilt_at": null,
+      "manifest": null,
+      "model": "local-hash",
+      "model_artifact_sha256": null,
+      "notes": [
+        "semantic search is disabled in ok.toml; `ok semantic index` is explicit local opt-in"
+      ],
+      "provider": "local",
+      "ready": false,
+      "rebuild_reasons": [],
+      "rebuild_required": false,
+      "stale": false,
+      "stale_count": 0,
+      "stale_ratio": null,
+      "state": "disabled",
+      "vector_count": 0
+    },
+    "symbol_count": 2
+  }
+}

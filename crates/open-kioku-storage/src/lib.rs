@@ -2,8 +2,9 @@ use open_kioku_core::{
     AnalysisFact, ChurnSummary, CodeChunk, DocumentSection, EvidenceSourceType, File, FileId,
     FileProvenance, GitCochangeEdge, GitCommitRecord, GraphEdge, GraphEdgeType, GraphNode,
     GraphNodeType, HistorySignalQuery, HistorySignalSummary, HistorySnapshot, HistorySummary,
-    ImpactReport, Import, IndexManifest, ScoreComponent, SearchResult, SimilarChangeQuery,
-    SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance, TestTarget,
+    ImpactReport, Import, IndexCoverage, IndexManifest, ScoreComponent, SearchResult,
+    SimilarChangeQuery, SimilarChangeReport, Symbol, SymbolId, SymbolOccurrence, SymbolProvenance,
+    TestTarget,
 };
 use open_kioku_errors::{OkError, Result};
 
@@ -15,6 +16,23 @@ pub trait MetadataStore: Send + Sync {
     fn initialize(&self) -> Result<()>;
     fn put_manifest(&self, manifest: &IndexManifest) -> Result<()>;
     fn manifest(&self) -> Result<Option<IndexManifest>>;
+
+    /// The index coverage record alone, without decoding the rest of the manifest.
+    ///
+    /// Context packs read this on every build to price coverage gaps, and a full manifest
+    /// decode is dominated by `quality.quality_notes` and `quality.skipped_paths`. Decoding one
+    /// index of this repository (381 files, 9,866 quality notes, 4,370 skipped paths) measured
+    /// tens of milliseconds per call on a local workstation - 60 ms median in one run and 98 ms
+    /// in another - against roughly 5 ms for the subtree read. Treat the ratio as the point
+    /// rather than either figure.
+    /// The default decodes the whole manifest; a backing store that can read the subtree
+    /// directly should override this. `None` means the index published no coverage record,
+    /// which callers report rather than treating as full coverage.
+    fn index_coverage(&self) -> Result<Option<IndexCoverage>> {
+        Ok(self
+            .manifest()?
+            .and_then(|manifest| manifest.quality.coverage))
+    }
     fn replace_index(&self, data: IndexData<'_>) -> Result<()>;
     fn replace_index_with_documents(
         &self,
