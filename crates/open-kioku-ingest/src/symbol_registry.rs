@@ -6,7 +6,6 @@ use open_kioku_core::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const COMMON_NAME_CAP: usize = 32;
 const MAX_TOKENS_PER_CHUNK: usize = 80;
@@ -290,71 +289,58 @@ pub fn resolve_symbol_edges(
     scip_available: bool,
 ) -> RegistryReport {
     let registry = SymbolRegistry::new(symbols, import_resolutions);
-    let unresolved_count = AtomicUsize::new(0);
     // Scoped to this run: dropped with the report, so nothing accumulates in a
     // long-lived process. Shared across the rayon workers below.
     let interner = StringInterner::new();
 
+    // The collect keeps chunk order whatever order the workers finish in. Workers return only
+    // how many tokens stayed unresolved, not the names.
     let per_chunk_results: Vec<_> = chunks
         .par_iter()
         .map(|chunk| {
-            let mut facts = Vec::new();
-            let mut notes = Vec::new();
-            let mut seen = HashSet::new();
-
-            for token_use in token_uses(&chunk.text)
-                .into_iter()
-                .take(MAX_TOKENS_PER_CHUNK)
-            {
-                if chunk
-                    .symbol_id
-                    .as_ref()
-                    .and_then(|id| registry.by_id.get(id))
-                    .is_some_and(|symbol| symbol.name == token_use.token)
-                {
-                    continue;
-                }
-                let resolution = registry.resolve(chunk, &token_use.token);
-                let resolved_id = resolution
-                    .symbol
-                    .as_ref()
-                    .map(|symbol| symbol.id.0.as_str())
-                    .unwrap_or("<unresolved>");
-                let dedup_key = (
-                    token_use.token.clone(),
-                    token_use.line,
-                    resolved_id.to_owned(),
-                );
-                if !seen.insert(dedup_key) {
-                    continue;
-                }
-
-                if let Some(note) = quality_note(&token_use.token, &resolution) {
-                    notes.push(note);
-                }
-                if let Some(fact) =
-                    fact_for_resolution(chunk, &token_use, &resolution, scip_available, &interner)
-                {
-                    facts.push(fact);
-                } else if unresolved_count.load(Ordering::Relaxed) < MAX_UNRESOLVED_NOTES {
-                    unresolved_count.fetch_add(1, Ordering::Relaxed);
-                    notes.push(QualityNote::new(
-                        QualityNoteKind::SymbolRegistryUnresolved,
-                        format!(
-                            "symbol registry unresolved `{}` in chunk {}",
-                            token_use.token, chunk.id
-                        ),
-                    ));
-                }
-            }
-            (facts, notes)
+            let resolution = resolve_chunk(&registry, chunk, scip_available, &interner);
+            (
+                resolution.facts,
+                resolution.notes,
+                resolution.unresolved.len(),
+            )
         })
         .collect();
 
     let mut report = RegistryReport::default();
-    for (facts, notes) in per_chunk_results {
+    let mut unresolved_budget = MAX_UNRESOLVED_NOTES;
+    let mut unresolved_total = 0usize;
+    for (chunk, (facts, notes, unresolved_count)) in chunks.iter().zip(per_chunk_results) {
+        unresolved_total += unresolved_count;
         report.analysis_facts.extend(facts);
         report.quality_notes.extend(notes);
+        // The unresolved-note cap is spent in chunk order. A counter shared by the workers let
+        // whichever chunks finished first claim it, so one build reported different unresolved
+        // names on every run (#461). Only the chunks that fill the cap are resolved again to
+        // recover their token names; holding every chunk's names would cost memory in
+        // proportion to the repository.
+        if unresolved_budget == 0 || unresolved_count == 0 {
+            continue;
+        }
+        let tokens = resolve_chunk(&registry, chunk, scip_available, &interner).unresolved;
+        for token in tokens.into_iter().take(unresolved_budget) {
+            report.quality_notes.push(QualityNote::new(
+                QualityNoteKind::SymbolRegistryUnresolved,
+                format!("symbol registry unresolved `{token}` in chunk {}", chunk.id),
+            ));
+            unresolved_budget -= 1;
+        }
+    }
+    // Without this the cap reads as a repository fact: 64 unresolved names and ten thousand
+    // produce the same list. The names beyond the cap are not carried, but their number is.
+    if unresolved_total > MAX_UNRESOLVED_NOTES {
+        report.quality_notes.push(QualityNote::new(
+            QualityNoteKind::SymbolRegistryUnresolved,
+            format!(
+                "symbol registry unresolved cap is {MAX_UNRESOLVED_NOTES}; {} more unresolved name(s) not listed ({unresolved_total} total)",
+                unresolved_total - MAX_UNRESOLVED_NOTES
+            ),
+        ));
     }
 
     report.quality_notes.sort();
@@ -362,6 +348,69 @@ pub fn resolve_symbol_edges(
     report.analysis_facts.sort_by(|a, b| a.id.cmp(&b.id));
     report.analysis_facts.dedup_by(|a, b| a.id == b.id);
     report
+}
+
+struct ChunkResolution {
+    facts: Vec<AnalysisFact>,
+    notes: Vec<QualityNote>,
+    /// Tokens no strategy resolved, each once, in order of first use.
+    unresolved: Vec<String>,
+}
+
+fn resolve_chunk(
+    registry: &SymbolRegistry,
+    chunk: &CodeChunk,
+    scip_available: bool,
+    interner: &StringInterner,
+) -> ChunkResolution {
+    let mut facts = Vec::new();
+    let mut notes = Vec::new();
+    let mut unresolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for token_use in token_uses(&chunk.text)
+        .into_iter()
+        .take(MAX_TOKENS_PER_CHUNK)
+    {
+        if chunk
+            .symbol_id
+            .as_ref()
+            .and_then(|id| registry.by_id.get(id))
+            .is_some_and(|symbol| symbol.name == token_use.token)
+        {
+            continue;
+        }
+        let resolution = registry.resolve(chunk, &token_use.token);
+        let resolved_id = resolution
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.id.0.as_str())
+            .unwrap_or("<unresolved>");
+        let dedup_key = (
+            token_use.token.clone(),
+            token_use.line,
+            resolved_id.to_owned(),
+        );
+        if !seen.insert(dedup_key) {
+            continue;
+        }
+
+        if let Some(note) = quality_note(&token_use.token, &resolution) {
+            notes.push(note);
+        }
+        if let Some(fact) =
+            fact_for_resolution(chunk, &token_use, &resolution, scip_available, interner)
+        {
+            facts.push(fact);
+        } else if !unresolved.contains(&token_use.token) {
+            unresolved.push(token_use.token);
+        }
+    }
+    ChunkResolution {
+        facts,
+        notes,
+        unresolved,
+    }
 }
 
 fn resolution_from_candidates(
@@ -374,6 +423,9 @@ fn resolution_from_candidates(
         symbol_rank(left)
             .cmp(&symbol_rank(right))
             .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+            // Same-named symbols stay adjacent by id, so `dedup_by` below removes every repeat
+            // whatever order the registry lists them in.
+            .then_with(|| left.id.0.cmp(&right.id.0))
     });
     candidates.dedup_by(|a, b| a.id == b.id);
     match candidates.len() {
@@ -819,6 +871,85 @@ mod tests {
             note.kind == QualityNoteKind::SymbolRegistryUnresolved
                 && note.message.contains("missingCall")
         }));
+    }
+
+    #[test]
+    fn unresolved_note_cap_follows_chunk_order_not_worker_scheduling() {
+        let symbols = vec![symbol(
+            "caller",
+            "entry",
+            "main",
+            "app::main",
+            SymbolKind::Function,
+        )];
+        // Three distinct unresolved calls per chunk, one repeated on a later line: 30 chunks
+        // overfill the cap, and the repeat must not spend a second slot.
+        let chunks = (0..30)
+            .map(|index| {
+                chunk(
+                    &format!("c{index:02}"),
+                    "entry",
+                    Some("caller"),
+                    &format!(
+                        "absentAlpha{index:02}();\nabsentBravo{index:02}();\nabsentCharlie{index:02}();\nabsentAlpha{index:02}();"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for index in 0..=MAX_UNRESOLVED_NOTES / 3 {
+            for name in ["Alpha", "Bravo", "Charlie"] {
+                if expected.len() < MAX_UNRESOLVED_NOTES {
+                    expected.push(format!(
+                        "symbol registry unresolved `absent{name}{index:02}` in chunk c{index:02}"
+                    ));
+                }
+            }
+        }
+        expected.sort();
+        for threads in [1, 2, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for _ in 0..5 {
+                let report = pool.install(|| resolve_symbol_edges(&chunks, &symbols, &[], false));
+                let unresolved = report
+                    .quality_notes
+                    .iter()
+                    .filter(|note| note.kind == QualityNoteKind::SymbolRegistryUnresolved)
+                    .map(|note| note.message.clone())
+                    .filter(|message| message.contains("in chunk"))
+                    .collect::<Vec<_>>();
+                assert_eq!(unresolved, expected, "{threads} worker thread(s)");
+                // 30 chunks * 3 distinct names = 90, so the cap hides 26 of them and says so.
+                assert!(
+                    report.quality_notes.iter().any(|note| note.message
+                        == format!(
+                            "symbol registry unresolved cap is {MAX_UNRESOLVED_NOTES}; {} more unresolved name(s) not listed (90 total)",
+                            90 - MAX_UNRESOLVED_NOTES
+                        )),
+                    "the cap must report how many names it withheld: {:?}",
+                    report.quality_notes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_candidates_are_counted_once_in_any_order() {
+        let first = symbol("a", "x", "Session", "pkg::Session", SymbolKind::Class);
+        let second = symbol("b", "y", "Session", "pkg::Session", SymbolKind::Class);
+        for candidates in [
+            vec![first.clone(), second.clone(), first.clone()],
+            vec![second.clone(), first.clone(), first.clone()],
+            vec![first.clone(), first.clone(), second.clone()],
+        ] {
+            let resolution =
+                resolution_from_candidates("test", candidates, Confidence::High, false).unwrap();
+            assert_eq!(resolution.candidates, 2);
+            assert!(resolution.symbol.is_none());
+        }
     }
 
     #[test]

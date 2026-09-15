@@ -1901,14 +1901,17 @@ fn augment_primary_with_runtime(
         }
     }
     primary.extend(additions);
-    primary.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    primary.sort_by(compare_scored_results);
     primary.truncate(limit.max(1));
     Ok(())
+}
+
+/// Descending score, then repository position.
+fn compare_scored_results(a: &SearchResult, b: &SearchResult) -> std::cmp::Ordering {
+    b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| candidates::compare_result_position(a, b))
 }
 
 fn runtime_seed_result(
@@ -2852,7 +2855,7 @@ fn rerank_fused_for_task_with_files(
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| candidates::compare_result_position(a, b))
     });
     results
 }
@@ -4481,6 +4484,102 @@ mod tests {
             &generated,
         );
         assert!(ranked[0].path.ends_with("impl_alpha.py"));
+    }
+
+    #[test]
+    fn equally_ranked_results_keep_path_then_line_range_order() {
+        let intent = TaskSearchIntent::parse("tidy the frame rendering");
+        let result = |path: &str, start: u32| SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange {
+                start,
+                end: start + 5,
+            }),
+            snippet: String::new(),
+            symbol: None,
+            score: 0.4,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
+        };
+        let inputs = vec![
+            result("src/b.rs", 30),
+            result("src/b.rs", 10),
+            result("src/a.rs", 50),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for input in [inputs, reversed] {
+            let ranked = rerank_fused_for_task_with_files(
+                input,
+                &intent,
+                &RetrievalDiagnostics::default(),
+                &RankingOptions::default(),
+                &std::collections::BTreeSet::new(),
+            );
+            let order = ranked
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.to_string_lossy().into_owned(),
+                        result.line_range.as_ref().map(|range| range.start),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                vec![
+                    ("src/a.rs".to_string(), Some(50)),
+                    ("src/b.rs".to_string(), Some(10)),
+                    ("src/b.rs".to_string(), Some(30)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn scored_results_break_equal_scores_on_path_then_line_range() {
+        let result = |path: &str, start: u32, score: f32| SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange::single(start)),
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
+        };
+        let mut results = [
+            result("src/b.rs", 7, 0.5),
+            result("src/c.rs", 1, 0.9),
+            result("src/b.rs", 3, 0.5),
+            result("src/a.rs", 9, 0.5),
+        ];
+        results.sort_by(compare_scored_results);
+        let order = results
+            .iter()
+            .map(|result| {
+                (
+                    result.path.to_string_lossy().into_owned(),
+                    result.line_range.as_ref().map(|range| range.start),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                ("src/c.rs".to_string(), Some(1)),
+                ("src/a.rs".to_string(), Some(9)),
+                ("src/b.rs".to_string(), Some(3)),
+                ("src/b.rs".to_string(), Some(7)),
+            ]
+        );
     }
 
     #[test]

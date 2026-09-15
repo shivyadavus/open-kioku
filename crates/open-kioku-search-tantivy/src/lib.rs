@@ -5,16 +5,17 @@ use open_kioku_core::{
 use open_kioku_errors::{OkError, Result};
 use open_kioku_evidence::EvidenceBuilder;
 use open_kioku_storage::SearchIndex;
+use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{Query, QueryParser};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value,
+    Field, IndexRecordOption, Schema, TantivyDocument, TextFieldIndexing, TextOptions, Value, FAST,
 };
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use tantivy::{doc, Index};
+use tantivy::{doc, DocAddress, DocId, Index, Score, Searcher, SegmentReader};
 
 pub struct TantivySearchIndex {
     index: Index,
@@ -28,6 +29,8 @@ struct TantivyFields {
     chunk_json: Field,
     file_json: Field,
     symbol_json: Field,
+    /// Absent from indexes written before documents carried a repository-order rank.
+    order_key: Option<Field>,
 }
 
 impl TantivySearchIndex {
@@ -81,7 +84,8 @@ impl TantivySearchIndex {
             .iter()
             .map(|symbol| (symbol.id.0.as_str(), symbol))
             .collect::<HashMap<_, _>>();
-        for chunk in chunks {
+        let order_ranks = document_order_ranks(chunks, graph_nodes, &files_by_id, &symbols_by_id);
+        for (index, chunk) in chunks.iter().enumerate() {
             let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) else {
                 continue;
             };
@@ -93,35 +97,26 @@ impl TantivySearchIndex {
                 .map(serde_json::to_string)
                 .transpose()?
                 .unwrap_or_default();
-            writer
-                .add_document(doc!(
-                    self.fields.path => file.path.to_string_lossy().to_string(),
-                    self.fields.content => format!("{}\n{}", file.path.display(), chunk.text),
-                    self.fields.chunk_json => serde_json::to_string(chunk)?,
-                    self.fields.file_json => serde_json::to_string(file)?,
-                    self.fields.symbol_json => symbol_json,
-                ))
-                .map_err(search_err)?;
+            let mut document = doc!(
+                self.fields.path => file.path.to_string_lossy().to_string(),
+                self.fields.content => format!("{}\n{}", file.path.display(), chunk.text),
+                self.fields.chunk_json => serde_json::to_string(chunk)?,
+                self.fields.file_json => serde_json::to_string(file)?,
+                self.fields.symbol_json => symbol_json,
+            );
+            if let Some(order_key) = self.fields.order_key {
+                document.add_u64(order_key, order_ranks[index]);
+            }
+            writer.add_document(document).map_err(search_err)?;
         }
-        for node in graph_nodes {
-            let file = node
-                .file_id
-                .as_ref()
-                .and_then(|id| files_by_id.get(id.0.as_str()).copied())
-                .or_else(|| {
-                    node.symbol_id.as_ref().and_then(|id| {
-                        symbols_by_id
-                            .get(id.0.as_str())
-                            .and_then(|symbol| files_by_id.get(symbol.file_id.0.as_str()).copied())
-                    })
-                });
+        for (index, node) in graph_nodes.iter().enumerate() {
+            let Some(file) = graph_node_file(node, &files_by_id, &symbols_by_id) else {
+                continue;
+            };
             let symbol = node
                 .symbol_id
                 .as_ref()
                 .and_then(|id| symbols_by_id.get(id.0.as_str()).copied());
-            let Some(file) = file else {
-                continue;
-            };
             let symbol_json = symbol
                 .map(serde_json::to_string)
                 .transpose()?
@@ -136,15 +131,17 @@ impl TantivySearchIndex {
                 text: graph_node_text(node, file, symbol),
                 symbol_id: node.symbol_id.clone(),
             };
-            writer
-                .add_document(doc!(
-                    self.fields.path => file.path.to_string_lossy().to_string(),
-                    self.fields.content => graph_chunk.text.clone(),
-                    self.fields.chunk_json => serde_json::to_string(&graph_chunk)?,
-                    self.fields.file_json => serde_json::to_string(file)?,
-                    self.fields.symbol_json => symbol_json,
-                ))
-                .map_err(search_err)?;
+            let mut document = doc!(
+                self.fields.path => file.path.to_string_lossy().to_string(),
+                self.fields.content => graph_chunk.text.clone(),
+                self.fields.chunk_json => serde_json::to_string(&graph_chunk)?,
+                self.fields.file_json => serde_json::to_string(file)?,
+                self.fields.symbol_json => symbol_json,
+            );
+            if let Some(order_key) = self.fields.order_key {
+                document.add_u64(order_key, order_ranks[chunks.len() + index]);
+            }
+            writer.add_document(document).map_err(search_err)?;
         }
         writer.commit().map_err(search_err)?;
         Ok(())
@@ -188,12 +185,7 @@ impl TantivySearchIndex {
             let Ok(query) = parser.parse_query(&variant) else {
                 continue;
             };
-            let top_docs = searcher
-                .search(
-                    &query,
-                    &TopDocs::with_limit(limit.saturating_mul(4).max(limit)).order_by_score(),
-                )
-                .map_err(search_err)?;
+            let top_docs = self.top_docs(&searcher, &query, limit.saturating_mul(4).max(limit))?;
             for (score, address) in top_docs {
                 let document: TantivyDocument = searcher.doc(address).map_err(search_err)?;
                 let chunk: CodeChunk = required_json(&document, self.fields.chunk_json)?;
@@ -280,14 +272,142 @@ impl TantivySearchIndex {
                 });
             }
         }
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(compare_search_results);
         results.truncate(limit);
         Ok(results)
     }
+
+    /// The best `limit` documents by score, breaking equal scores on repository order.
+    fn top_docs(
+        &self,
+        searcher: &Searcher,
+        query: &dyn Query,
+        limit: usize,
+    ) -> Result<Vec<(Score, DocAddress)>> {
+        // One hit past the limit shows whether the limit falls inside a run of equal scores.
+        // When it does not, the kept set is the same whichever tied documents the pruned score
+        // collector visited first, and `compare_search_results` orders them afterwards.
+        let mut hits = searcher
+            .search(query, &TopDocs::with_limit(limit + 1).order_by_score())
+            .map_err(search_err)?;
+        let limit_splits_a_tie =
+            limit > 0 && hits.len() > limit && hits[limit - 1].0 <= hits[limit].0;
+        if !limit_splits_a_tie || self.fields.order_key.is_none() {
+            // An index written before the order key existed keeps Tantivy's address tie-break
+            // until the next `ok index` rebuilds it with the current schema.
+            hits.truncate(limit);
+            return Ok(hits);
+        }
+        // Scoring every match on the order key costs more than pruned collection, so it is
+        // reserved for the queries whose result set a tie would otherwise decide.
+        let collector = TopDocs::with_limit(limit).tweak_score(|segment_reader: &SegmentReader| {
+            let order = segment_reader.fast_fields().u64(ORDER_KEY_FIELD).ok();
+            move |doc: DocId, score: Score| {
+                let rank = order
+                    .as_ref()
+                    .and_then(|column| column.first(doc))
+                    .unwrap_or(u64::MAX);
+                // The collector keeps the largest keys, so the rank is reversed: on equal
+                // scores the document earlier in repository order wins.
+                (score, Reverse(rank))
+            }
+        });
+        Ok(searcher
+            .search(query, &collector)
+            .map_err(search_err)?
+            .into_iter()
+            .map(|((score, _), address)| (score, address))
+            .collect())
+    }
+}
+
+/// Descending score, then repository position. Search results that tie on score come back in
+/// the same order from every index of the same tree.
+fn compare_search_results(left: &SearchResult, right: &SearchResult) -> Ordering {
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.path.cmp(&right.path))
+        .then_with(|| line_range_bounds(left).cmp(&line_range_bounds(right)))
+        .then_with(|| left.evidence_refs.cmp(&right.evidence_refs))
+}
+
+fn line_range_bounds(result: &SearchResult) -> Option<(u32, u32)> {
+    result
+        .line_range
+        .as_ref()
+        .map(|range| (range.start, range.end))
+}
+
+/// Each document's rank in repository order: code chunks, then graph nodes, each by path, line
+/// range and id. Indexed as a fast field, it is what the collector breaks equal scores on when
+/// the result limit falls between them.
+///
+/// Tantivy itself breaks them by document address, which follows how its indexing threads
+/// split documents into segments rather than anything in the repository. Re-indexing one tree
+/// could therefore reorder tied search results, and through rank fusion the context paths
+/// built from them (#468). Documents that are skipped for want of a file keep `u64::MAX`.
+fn document_order_ranks(
+    chunks: &[CodeChunk],
+    graph_nodes: &[GraphNode],
+    files_by_id: &HashMap<&str, &File>,
+    symbols_by_id: &HashMap<&str, &Symbol>,
+) -> Vec<u64> {
+    let mut order = Vec::with_capacity(chunks.len() + graph_nodes.len());
+    for (index, chunk) in chunks.iter().enumerate() {
+        if let Some(file) = files_by_id.get(chunk.file_id.0.as_str()) {
+            order.push((
+                0u8,
+                file.path.as_path(),
+                chunk.range.start,
+                chunk.range.end,
+                chunk.id.as_str(),
+                index,
+            ));
+        }
+    }
+    for (index, node) in graph_nodes.iter().enumerate() {
+        if let Some(file) = graph_node_file(node, files_by_id, symbols_by_id) {
+            let range = node
+                .symbol_id
+                .as_ref()
+                .and_then(|id| symbols_by_id.get(id.0.as_str()))
+                .and_then(|symbol| symbol.range.as_ref());
+            order.push((
+                1u8,
+                file.path.as_path(),
+                range.map_or(1, |range| range.start),
+                range.map_or(1, |range| range.end),
+                node.id.0.as_str(),
+                chunks.len() + index,
+            ));
+        }
+    }
+    order.sort_unstable();
+    let mut ranks = vec![u64::MAX; chunks.len() + graph_nodes.len()];
+    for (rank, entry) in order.iter().enumerate() {
+        ranks[entry.5] = rank as u64;
+    }
+    ranks
+}
+
+/// The file a graph node is indexed under: its own, or else its symbol's.
+fn graph_node_file<'a>(
+    node: &GraphNode,
+    files_by_id: &HashMap<&str, &'a File>,
+    symbols_by_id: &HashMap<&str, &Symbol>,
+) -> Option<&'a File> {
+    node.file_id
+        .as_ref()
+        .and_then(|id| files_by_id.get(id.0.as_str()).copied())
+        .or_else(|| {
+            node.symbol_id.as_ref().and_then(|id| {
+                symbols_by_id
+                    .get(id.0.as_str())
+                    .and_then(|symbol| files_by_id.get(symbol.file_id.0.as_str()).copied())
+            })
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -363,8 +483,12 @@ fn schema() -> Schema {
     builder.add_text_field("chunk_json", stored_text.clone());
     builder.add_text_field("file_json", stored_text.clone());
     builder.add_text_field("symbol_json", code_text);
+    builder.add_u64_field(ORDER_KEY_FIELD, FAST);
     builder.build()
 }
+
+/// Fast field holding each document's rank in repository order; see `document_order_ranks`.
+const ORDER_KEY_FIELD: &str = "order_key";
 
 /// Name of the identifier-aware tokenizer used by code text fields.
 ///
@@ -615,6 +739,7 @@ fn fields(schema: Schema) -> Result<TantivyFields> {
         chunk_json: field(&schema, "chunk_json")?,
         file_json: field(&schema, "file_json")?,
         symbol_json: field(&schema, "symbol_json")?,
+        order_key: schema.get_field(ORDER_KEY_FIELD).ok(),
     })
 }
 
@@ -667,6 +792,131 @@ fn snippet(text: &str, query: &str) -> String {
 
 fn search_err(err: tantivy::TantivyError) -> OkError {
     OkError::Search(err.to_string())
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::{compare_search_results, rebuild_disk_index, TantivySearchIndex, ORDER_KEY_FIELD};
+    use open_kioku_core::{
+        CodeChunk, File, FileId, Language, LineRange, RepositoryId, SearchResult,
+    };
+    use open_kioku_storage::SearchIndex;
+
+    /// `count` files whose single chunk is identical, so every search score ties.
+    fn tied_fixture(count: usize) -> (Vec<File>, Vec<CodeChunk>) {
+        let files = (0..count)
+            .map(|index| File {
+                id: FileId::new(format!("file-{index:02}")),
+                repository_id: RepositoryId::new("repo"),
+                path: format!("src/widget_{index:02}.rs").into(),
+                language: Language::Rust,
+                size_bytes: 64,
+                content_hash: format!("hash-{index:02}"),
+                is_generated: false,
+                is_vendor: false,
+            })
+            .collect::<Vec<_>>();
+        let chunks = files
+            .iter()
+            .map(|file| CodeChunk {
+                id: format!("chunk-{}", file.id.0),
+                file_id: file.id.clone(),
+                range: LineRange { start: 1, end: 3 },
+                language: Language::Rust,
+                text: "pub fn render() -> u32 {\n    frame\n}".into(),
+                symbol_id: None,
+            })
+            .collect::<Vec<_>>();
+        (files, chunks)
+    }
+
+    fn result(path: &str, start: u32, score: f32) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            line_range: Some(LineRange {
+                start,
+                end: start + 2,
+            }),
+            snippet: String::new(),
+            symbol: None,
+            score,
+            match_reason: String::new(),
+            evidence: Vec::new(),
+            evidence_refs: Vec::new(),
+            confidence: 0.5,
+            score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
+        }
+    }
+
+    #[test]
+    fn search_results_break_equal_scores_on_path_then_line_range() {
+        let inputs = vec![
+            result("src/b.rs", 30, 1.0),
+            result("src/c.rs", 1, 2.0),
+            result("src/b.rs", 4, 1.0),
+            result("src/a.rs", 90, 1.0),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut results in [inputs, reversed] {
+            results.sort_by(compare_search_results);
+            let order = results
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.to_string_lossy().into_owned(),
+                        result.line_range.as_ref().map(|range| range.start),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                vec![
+                    ("src/c.rs".to_string(), Some(1)),
+                    ("src/a.rs".to_string(), Some(90)),
+                    ("src/b.rs".to_string(), Some(4)),
+                    ("src/b.rs".to_string(), Some(30)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn tied_documents_are_collected_in_repository_order_whatever_the_indexing_order() {
+        // Twenty tied documents and a limit of two: the collector keeps eight, so which eight
+        // it keeps, not only their order, has to follow the repository.
+        let (files, chunks) = tied_fixture(20);
+        let mut reversed = chunks.clone();
+        reversed.reverse();
+        for chunks in [chunks, reversed] {
+            let temp = tempfile::tempdir().unwrap();
+            let index = rebuild_disk_index(temp.path(), &chunks, &files, &[]).unwrap();
+            let paths = index
+                .search("render", 2)
+                .unwrap()
+                .into_iter()
+                .map(|result| result.path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(paths, vec!["src/widget_00.rs", "src/widget_01.rs"]);
+        }
+    }
+
+    #[test]
+    fn an_index_written_without_the_order_key_still_searches() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut builder = tantivy::schema::Schema::builder();
+        for (_, entry) in super::schema().fields() {
+            if entry.name() != ORDER_KEY_FIELD {
+                builder.add_field(entry.clone());
+            }
+        }
+        tantivy::Index::create_in_dir(temp.path(), builder.build()).unwrap();
+        let mut index = TantivySearchIndex::open_or_create(temp.path()).unwrap();
+        let (files, chunks) = tied_fixture(3);
+        index.rebuild(&chunks, &files, &[]).unwrap();
+        assert_eq!(index.search("render", 5).unwrap().len(), 3);
+    }
 }
 
 #[cfg(test)]

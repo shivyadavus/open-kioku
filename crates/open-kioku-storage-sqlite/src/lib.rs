@@ -980,7 +980,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT json FROM chunks WHERE file_id = ?1 ORDER BY start_line")
+            .prepare("SELECT json FROM chunks WHERE file_id = ?1 ORDER BY start_line, end_line, id")
             .map_err(storage_err)?;
         let rows = stmt
             .query_map(params![&file_id.0], |row| row.get::<_, String>(0))
@@ -994,7 +994,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT json FROM chunks ORDER BY file_id, start_line")
+            .prepare("SELECT json FROM chunks ORDER BY file_id, start_line, end_line, id")
             .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -1069,7 +1069,7 @@ impl MetadataStore for SqliteStore {
             .lock()
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
-            .prepare("SELECT json FROM tests ORDER BY file_id")
+            .prepare("SELECT json FROM tests ORDER BY file_id, id")
             .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -1105,7 +1105,7 @@ impl MetadataStore for SqliteStore {
         let rows = if let Some(source_type) = source_type {
             let mut stmt = conn
                 .prepare(
-                    "SELECT json FROM analysis_facts WHERE source_type = ?1 ORDER BY file_id, target LIMIT ?2",
+                    "SELECT json FROM analysis_facts WHERE source_type = ?1 ORDER BY file_id, target, id LIMIT ?2",
                 )
                 .map_err(storage_err)?;
             let rows = stmt
@@ -1116,7 +1116,7 @@ impl MetadataStore for SqliteStore {
             collect_json(rows)?
         } else {
             let mut stmt = conn
-                .prepare("SELECT json FROM analysis_facts ORDER BY file_id, target LIMIT ?1")
+                .prepare("SELECT json FROM analysis_facts ORDER BY file_id, target, id LIMIT ?1")
                 .map_err(storage_err)?;
             let rows = stmt
                 .query_map(params![limit], |row| row.get::<_, String>(0))
@@ -1140,7 +1140,7 @@ impl MetadataStore for SqliteStore {
         let rows = if let Some(source_type) = source_type {
             let mut stmt = conn
                 .prepare(
-                    "SELECT json FROM analysis_facts WHERE file_id = ?1 AND source_type = ?2 ORDER BY target LIMIT ?3",
+                    "SELECT json FROM analysis_facts WHERE file_id = ?1 AND source_type = ?2 ORDER BY target, id LIMIT ?3",
                 )
                 .map_err(storage_err)?;
             let rows = stmt
@@ -1153,7 +1153,7 @@ impl MetadataStore for SqliteStore {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT json FROM analysis_facts WHERE file_id = ?1 ORDER BY target LIMIT ?2",
+                    "SELECT json FROM analysis_facts WHERE file_id = ?1 ORDER BY target, id LIMIT ?2",
                 )
                 .map_err(storage_err)?;
             let rows = stmt
@@ -1212,7 +1212,7 @@ impl MetadataStore for SqliteStore {
             .map_err(|_| OkError::Storage("sqlite mutex poisoned".into()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT json FROM occurrences WHERE symbol_id = ?1 AND is_definition = 0 ORDER BY file_id LIMIT ?2",
+                "SELECT json FROM occurrences WHERE symbol_id = ?1 AND is_definition = 0 ORDER BY file_id, id LIMIT ?2",
             )
             .map_err(storage_err)?;
         let rows = stmt
@@ -3562,9 +3562,12 @@ impl GraphStore for SqliteStore {
         // dependency — a test does not depend on the module it is named after — and `neighbors`
         // backs `module_dependencies`, which callers read as imports and dependents. Consumers
         // that want it ask for it by type through `edges_by_type_for_node`.
+        // Ordered by edge id before the limit: row order is insertion order, which an incremental
+        // `ok watch` update changes, so a high-degree node kept a different set of edges than a
+        // fresh index of the same tree.
         let mut stmt = conn
             .prepare(&format!(
-                "{} WHERE (e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom' LIMIT ?2",
+                "{} WHERE (e.from_sid = ?1 OR e.to_sid = ?1) AND e.edge_type != 'DerivedFrom' ORDER BY e.id LIMIT ?2",
                 compact::EDGE_SELECT
             ))
             .map_err(storage_err)?;
@@ -6991,6 +6994,123 @@ mod tests {
             .edges_by_type_for_node(GraphEdgeType::DerivedFrom, "file:a.rs", false, 10, 0)
             .unwrap();
         assert_eq!(typed.len(), 1);
+    }
+
+    #[test]
+    fn capped_reference_reads_keep_the_same_occurrences_whatever_the_write_order() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "a.rs"), make_file("f2", "b.rs")];
+        let occurrence = |file: &str, line: u32| SymbolOccurrence {
+            symbol_id: SymbolId::new("s1"),
+            file_id: FileId::new(file),
+            range: Some(LineRange::single(line)),
+            source_range: None,
+            is_definition: false,
+            confidence: Confidence::Exact,
+            provenance: EvidenceSourceType::StaticAnalysis,
+        };
+        // Six references across two files: `file_id` cannot order them on its own, and this read
+        // is capped (exact_reference_impacts asks for 100 per symbol), so a non-total order let a
+        // fresh index keep a different set of references for the same symbol.
+        let forward = vec![
+            occurrence("f1", 1),
+            occurrence("f1", 2),
+            occurrence("f1", 3),
+            occurrence("f2", 1),
+            occurrence("f2", 2),
+            occurrence("f2", 3),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let mut kept_per_write_order = Vec::new();
+        for occurrences in [forward, reversed] {
+            store
+                .replace_index(IndexData {
+                    manifest: &manifest,
+                    files: &files,
+                    symbols: &[],
+                    occurrences: &occurrences,
+                    chunks: &[],
+                    imports: &[],
+                    tests: &[],
+                    analysis_facts: &[],
+                    scopes: &[],
+                    bindings: &[],
+                    call_sites: &[],
+                })
+                .unwrap();
+            kept_per_write_order.push(
+                store
+                    .references_for_symbol(&SymbolId::new("s1"), 3)
+                    .unwrap()
+                    .into_iter()
+                    .map(|occurrence| {
+                        (
+                            occurrence.file_id.0,
+                            occurrence.range.map(|range| range.start),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(kept_per_write_order[0].len(), 3);
+        assert_eq!(
+            kept_per_write_order[0], kept_per_write_order[1],
+            "a capped reference read must keep the same occurrences whatever order they were written in"
+        );
+    }
+
+    #[test]
+    fn neighbor_reads_keep_the_lowest_edge_ids_whatever_the_write_order() {
+        let store = make_store();
+        let manifest = make_manifest();
+        let files = vec![make_file("f1", "a.rs")];
+        store
+            .replace_index(IndexData {
+                manifest: &manifest,
+                files: &files,
+                symbols: &[],
+                occurrences: &[],
+                chunks: &[],
+                imports: &[],
+                tests: &[],
+                analysis_facts: &[],
+                scopes: &[],
+                bindings: &[],
+                call_sites: &[],
+            })
+            .unwrap();
+        let node = |path: &str| GraphNode {
+            id: NodeId::new(format!("file:{path}")),
+            node_type: GraphNodeType::File,
+            label: path.into(),
+            ..Default::default()
+        };
+        let edge = |id: &str, to: &str| GraphEdge {
+            id: EdgeId::new(id),
+            from: NodeId::new("file:a.rs"),
+            to: NodeId::new(format!("file:{to}")),
+            edge_type: GraphEdgeType::Imports,
+            ..Default::default()
+        };
+        let nodes = [node("a.rs"), node("b.rs"), node("c.rs"), node("d.rs")];
+        let forward = [
+            edge("e-1", "b.rs"),
+            edge("e-2", "c.rs"),
+            edge("e-3", "d.rs"),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        for edges in [reversed, forward] {
+            store.replace_graph(&nodes, &edges).unwrap();
+            let (_, kept) = store.neighbors("file:a.rs", 2).unwrap();
+            let ids = kept
+                .iter()
+                .map(|edge| edge.id.0.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec!["e-1", "e-2"]);
+        }
     }
 
     #[test]

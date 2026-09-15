@@ -165,11 +165,7 @@ impl<'a> ImpactEngine<'a> {
                 );
             }
             direct = group_direct_impacts(dedupe_results(direct));
-            direct.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            direct.sort_by(compare_impact_results);
             direct.truncate(25);
             direct
         } else {
@@ -197,11 +193,7 @@ impl<'a> ImpactEngine<'a> {
                 }
             }
         }
-        indirect.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indirect.sort_by(compare_impact_results);
         indirect.dedup_by(|a, b| a.path == b.path);
         indirect.truncate(15);
         let mut reasons = Vec::new();
@@ -1236,19 +1228,18 @@ fn group_direct_impacts(results: Vec<SearchResult>) -> Vec<SearchResult> {
 
 fn merge_direct_group(mut chunks: Vec<SearchResult>) -> Option<SearchResult> {
     let line_start = |result: &SearchResult| result.line_range.as_ref().map(|range| range.start);
-    chunks.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| line_start(a).cmp(&line_start(b)))
-    });
+    chunks.sort_by(compare_impact_results);
     let mut chunks = chunks.into_iter();
     let mut representative = chunks.next()?;
     let mut others = chunks.collect::<Vec<_>>();
     if others.is_empty() {
         return Some(representative);
     }
-    others.sort_by_key(|result| line_start(result));
+    others.sort_by(|left, right| {
+        line_start(left)
+            .cmp(&line_start(right))
+            .then_with(|| left.evidence_refs.cmp(&right.evidence_refs))
+    });
     let mut evidence_refs = aligned_evidence_refs(&representative);
     let mut evidence = std::mem::take(&mut representative.evidence);
     let mut unlisted = Vec::new();
@@ -1461,6 +1452,25 @@ fn best_occurrence_snippet(
         .chars()
         .take(240)
         .collect()
+}
+
+/// Descending score, then repository position: path, line range, and the evidence ids the
+/// result was published with. Impacts are truncated after this sort, so equal scores ordered by
+/// whatever their stream produced decided which files the report kept.
+fn compare_impact_results(left: &SearchResult, right: &SearchResult) -> std::cmp::Ordering {
+    let bounds = |result: &SearchResult| {
+        result
+            .line_range
+            .as_ref()
+            .map(|range| (range.start, range.end))
+    };
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.path.cmp(&right.path))
+        .then_with(|| bounds(left).cmp(&bounds(right)))
+        .then_with(|| left.evidence_refs.cmp(&right.evidence_refs))
 }
 
 fn dedupe_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
@@ -1732,6 +1742,67 @@ mod tests {
             confidence: 0.5,
             score_breakdown: Vec::new(),
             exact_reference_provenance: None,
+        }
+    }
+
+    #[test]
+    fn impact_results_break_equal_scores_on_path_then_line_range() {
+        let inputs = vec![
+            chunk_hit("src/b.rs", 40, 0.5, "b later"),
+            chunk_hit("src/c.rs", 1, 0.9, "c strongest"),
+            chunk_hit("src/b.rs", 4, 0.5, "b earlier"),
+            chunk_hit("src/a.rs", 90, 0.5, "a"),
+        ];
+        let mut reversed = inputs.clone();
+        reversed.reverse();
+        for mut results in [inputs, reversed] {
+            results.sort_by(compare_impact_results);
+            let order = results
+                .iter()
+                .map(|result| {
+                    (
+                        result.path.to_string_lossy().into_owned(),
+                        result.line_range.as_ref().map(|range| range.start),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                order,
+                vec![
+                    ("src/c.rs".to_string(), Some(1)),
+                    ("src/a.rs".to_string(), Some(90)),
+                    ("src/b.rs".to_string(), Some(4)),
+                    ("src/b.rs".to_string(), Some(40)),
+                ]
+            );
+            // The report truncates after this sort, so the kept impacts must not depend on the
+            // order the streams produced them in.
+            results.truncate(2);
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                vec!["src/c.rs".to_string(), "src/a.rs".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn a_grouped_impact_keeps_one_representative_whatever_the_chunk_order() {
+        let chunks = vec![
+            chunk_hit("src/a.rs", 30, 0.4, "later chunk"),
+            chunk_hit("src/a.rs", 5, 0.4, "earlier chunk"),
+        ];
+        let mut reversed = chunks.clone();
+        reversed.reverse();
+        for group in [chunks, reversed] {
+            let merged = merge_direct_group(group).expect("group merges into one impact");
+            assert_eq!(
+                merged.line_range.as_ref().map(|range| range.start),
+                Some(5),
+                "the lowest-lined chunk of a tied group represents it"
+            );
         }
     }
 

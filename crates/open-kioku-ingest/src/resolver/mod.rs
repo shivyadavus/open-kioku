@@ -392,13 +392,19 @@ impl ManifestIndex {
         let mut index = ManifestIndex::default();
         let mut config_count = 0usize;
         let mut alias_count = 0usize;
-        for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            !matches!(
-                name.as_ref(),
-                ".git" | ".ok" | "target" | "node_modules" | "vendor"
-            )
-        }) {
+        // Sorted so the manifests and aliases kept under the caps below are the same on every
+        // copy of the tree, whatever order its filesystem lists entries in.
+        for entry in WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    ".git" | ".ok" | "target" | "node_modules" | "vendor"
+                )
+            })
+        {
             let entry = entry.map_err(|err| OkError::Index(err.to_string()))?;
             if !entry.file_type().is_file() {
                 continue;

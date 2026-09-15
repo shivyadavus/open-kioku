@@ -1433,6 +1433,87 @@ fn snapshot_fixture_repo() -> tempfile::TempDir {
     temp
 }
 
+#[test]
+fn fresh_indexes_of_one_tree_agree_on_context_order_and_quality_notes() {
+    // Every widget file matches the task identically, so their search scores tie and only the
+    // tie-break decides their order. The second copy is written in reverse because some
+    // filesystems list directory entries in creation order.
+    let copies = [
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    ];
+    for (copy_index, copy) in copies.iter().enumerate() {
+        let repo = copy.path();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        let mut order = (0..16).collect::<Vec<usize>>();
+        if copy_index == 1 {
+            order.reverse();
+        }
+        for index in order {
+            fs::write(
+                repo.join(format!("src/widget_{index:02}.rs")),
+                format!(
+                    "pub fn render_widget_{index:02}(frame: u32) -> u32 {{\n    absent_alpha_{index:02}();\n    absent_bravo_{index:02}();\n    absent_charlie_{index:02}();\n    absent_delta_{index:02}();\n    absent_echo_{index:02}();\n    frame\n}}\n"
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    let observe = |repo: &std::path::Path| {
+        run({
+            let mut command = ok();
+            command.arg("init").arg(repo);
+            command
+        });
+        run({
+            let mut command = ok();
+            command.env("RAYON_NUM_THREADS", "4").arg("index").arg(repo);
+            command
+        });
+        let pack: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command
+                .arg("--repo")
+                .arg(repo)
+                .arg("--json")
+                .arg("context")
+                .arg("render widget frame");
+            command
+        }))
+        .unwrap();
+        let paths = ["primary_files", "supporting_files"]
+            .iter()
+            .flat_map(|key| pack[*key].as_array().cloned().unwrap_or_default())
+            .map(|result| format!("{} {}", result["path"], result["line_range"]))
+            .collect::<Vec<_>>();
+        let status: serde_json::Value = serde_json::from_str(&run({
+            let mut command = ok();
+            command.arg("--json").arg("status").arg(repo).arg("--full");
+            command
+        }))
+        .unwrap();
+        let mut notes = status["quality"]["quality_notes"].to_string();
+        for root in [repo.to_path_buf(), repo.canonicalize().unwrap()] {
+            notes = notes.replace(&root.display().to_string(), "<root>");
+        }
+        (paths, notes)
+    };
+
+    let (baseline_paths, baseline_notes) = observe(copies[0].path());
+    assert!(
+        baseline_paths.len() >= 2,
+        "the task must select several tied files: {baseline_paths:?}"
+    );
+    assert!(baseline_notes.contains("symbol registry unresolved"));
+    for copy in &copies[1..] {
+        let (paths, notes) = observe(copy.path());
+        assert_eq!(paths, baseline_paths);
+        assert_eq!(notes, baseline_notes);
+    }
+}
+
 /// Set the marker `SqliteStore::open` leaves behind when it discards a pre-4.0 edge layout.
 fn mark_graph_rebuild_required(repo: &std::path::Path) {
     let conn = rusqlite::Connection::open(repo.join(".ok/index.sqlite")).unwrap();
