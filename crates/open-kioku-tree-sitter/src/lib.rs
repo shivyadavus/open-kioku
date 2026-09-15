@@ -886,7 +886,7 @@ fn extract_binding(
                 let declared_type = node
                     .child_by_field_name("type")
                     .and_then(|t| t.utf8_text(source_bytes).ok())
-                    .map(|s| s.to_string());
+                    .and_then(|text| rust_declared_type(node, text, source_bytes));
                 let inferred_type = node
                     .child_by_field_name("value")
                     .and_then(|v| infer_type_from_expr(file, source_bytes, v));
@@ -901,7 +901,9 @@ fn extract_binding(
                 let declared_type = node
                     .child_by_field_name("type")
                     .and_then(|t| t.utf8_text(source_bytes).ok())
-                    .map(|s| s.trim_start_matches('&').trim().to_string());
+                    .and_then(|text| {
+                        rust_declared_type(node, text.trim_start_matches('&').trim(), source_bytes)
+                    });
                 if let Some(n) = name {
                     extracted.push((n, declared_type, None));
                 }
@@ -965,6 +967,46 @@ fn extract_binding(
     }
 }
 
+/// A Rust binding's written type, unless it names a type parameter of an enclosing function, impl
+/// or trait: in `fn f<Token: Parse>(t: Token)` the type of `t` is generic, not an item named
+/// `Token`.
+fn rust_declared_type(binding: Node<'_>, type_text: &str, source: &[u8]) -> Option<String> {
+    let base = type_text.trim_start_matches('&').trim();
+    let base = base.strip_prefix("mut ").unwrap_or(base).trim();
+    let base = base.split('<').next().unwrap_or(base).trim();
+    if rust_enclosing_type_parameters(binding, source)
+        .iter()
+        .any(|name| name == base)
+    {
+        None
+    } else {
+        Some(type_text.to_string())
+    }
+}
+
+fn rust_enclosing_type_parameters(node: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        if let Some(parameters) = ancestor.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            for parameter in named_children(&mut cursor) {
+                if parameter.kind() != "type_parameter" {
+                    continue;
+                }
+                if let Some(name) = parameter
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        current = ancestor.parent();
+    }
+    names
+}
+
 fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<String> {
     let kind = expr.kind();
     match file.language {
@@ -980,10 +1022,13 @@ fn infer_type_from_expr(file: &File, source: &[u8], expr: Node<'_>) -> Option<St
         Language::Rust => {
             if kind == "call_expression" {
                 if let Some(function) = expr.child_by_field_name("function") {
+                    // Recorded as the whole call path, `Foo::bar()`: the call names `Foo` but may
+                    // return anything, so resolution proves the type from `bar`'s signature.
                     if function.kind() == "scoped_identifier" {
-                        if let Some(path) = function.child_by_field_name("path") {
-                            return path.utf8_text(source).ok().map(|s| s.to_string());
-                        }
+                        return function
+                            .utf8_text(source)
+                            .ok()
+                            .map(|path| format!("{path}()"));
                     }
                 }
             } else if kind == "struct_expression" {
@@ -1832,6 +1877,63 @@ mod ri3_rust_use_import_site_tests {
         assert!(sites[0].bindings.is_empty());
         assert_eq!(sites[1].source, "self::auth::issue_token");
         assert_eq!(sites[1].bindings, vec![name("issue_token", "issue_token")]);
+    }
+}
+
+#[cfg(test)]
+mod ri3_rust_binding_type_tests {
+    use super::parse_file;
+    use open_kioku_core::{Binding, File, FileId, Language, RepositoryId};
+
+    fn rust_bindings(source: &str) -> Vec<Binding> {
+        let file = File {
+            id: FileId::new("file:src/caller.rs"),
+            repository_id: RepositoryId::new("repo"),
+            path: "src/caller.rs".into(),
+            language: Language::Rust,
+            size_bytes: 0,
+            content_hash: "hash".into(),
+            is_generated: false,
+            is_vendor: false,
+        };
+        parse_file(&file, source)
+            .expect("Rust binding fixture should parse")
+            .bindings
+    }
+
+    fn binding<'b>(bindings: &'b [Binding], name: &str) -> &'b Binding {
+        bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .unwrap_or_else(|| panic!("binding `{name}`: {bindings:?}"))
+    }
+
+    #[test]
+    fn rust_path_call_initializer_is_recorded_as_the_whole_call_path() {
+        let bindings = rust_bindings(
+            "pub fn run() {\n    let handle = Server::spawn();\n    let config = Config { port: 1 };\n}\n",
+        );
+        let handle = binding(&bindings, "handle");
+        assert_eq!(handle.declared_type, None);
+        assert_eq!(handle.inferred_type.as_deref(), Some("Server::spawn()"));
+        assert_eq!(
+            binding(&bindings, "config").inferred_type.as_deref(),
+            Some("Config")
+        );
+    }
+
+    #[test]
+    fn rust_type_naming_an_enclosing_type_parameter_is_not_recorded() {
+        let bindings = rust_bindings(
+            "pub fn parse<Token: Parse>(token: Token, raw: &Raw) {\n    let copy: Token = token;\n}\n\nimpl<Item> Queue<Item> {\n    pub fn push(&mut self, item: Item) {}\n}\n",
+        );
+        assert_eq!(binding(&bindings, "token").declared_type, None);
+        assert_eq!(binding(&bindings, "copy").declared_type, None);
+        assert_eq!(binding(&bindings, "item").declared_type, None);
+        assert_eq!(
+            binding(&bindings, "raw").declared_type.as_deref(),
+            Some("Raw")
+        );
     }
 }
 

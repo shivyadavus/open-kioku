@@ -660,12 +660,23 @@ impl Indexer {
                 register_file_key(&mut file_map, stem.to_string(), &file.id);
             }
         }
+        // The module-key map is built without the owning crate, so Rust imports are left to the
+        // crate-aware `resolve_rust_imports` below.
+        let rust_file_ids = files
+            .iter()
+            .filter(|file| file.language == Language::Rust)
+            .map(|file| file.id.clone())
+            .collect::<HashSet<_>>();
         for site in &import_sites {
-            import_registry.resolve_site(site, &file_map);
+            if rust_file_ids.contains(&site.file_id) {
+                import_registry.insert_unresolved_site(site);
+            } else {
+                import_registry.resolve_site(site, &file_map);
+            }
         }
 
         let symbol_index = open_kioku_resolution::SymbolIndex::build(symbols.clone());
-        import_registry.resolve_symbols(&symbol_index, &file_map);
+        import_registry.resolve_symbols_skipping(&symbol_index, &file_map, &rust_file_ids);
 
         let scope_index = open_kioku_resolution::ScopeIndex::build(scopes.clone());
         let rust_modules = imports::RustModuleTree::new(
@@ -674,7 +685,7 @@ impl Indexer {
             &module_declarations,
             &scope_index,
         );
-        import_registry.resolve_rust_item_imports(&symbol_index, &scope_index, &rust_modules);
+        import_registry.resolve_rust_imports(&symbol_index, &scope_index, &rust_modules);
         let binding_index = open_kioku_resolution::BindingIndex::build(bindings.clone());
         let mut inheritance_index =
             open_kioku_resolution::InheritanceIndex::build(inheritance_sites.clone());

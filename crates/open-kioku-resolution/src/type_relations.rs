@@ -23,8 +23,8 @@ pub(crate) struct ParentTypeCandidate {
     pub bindings: BTreeSet<ParentBindingKind>,
 }
 
-/// `scopes` narrows import bindings to those visible from the child's defining scope; an inheritance
-/// site has no scope of its own. Without it every import of the name in the file is considered.
+/// With `scopes`, imports are looked up from the child's defining scope, since an inheritance site
+/// has no scope of its own; without it, every import of the name in the file is one set.
 pub(crate) fn collect_parent_type_candidates(
     child: &Symbol,
     parent_name: &str,
@@ -55,23 +55,17 @@ pub(crate) fn collect_parent_type_candidates(
         }
     }
 
-    // An unresolved import of this name may be the real parent, so it leaves the import route
-    // without candidates rather than letting a resolved sibling answer alone.
-    let visible_imports = crate::context::visible_import_bindings(
+    // As for calls, the nearest import of the name in scope decides.
+    if let crate::context::ScopedImport::Resolved(bindings) = crate::context::scoped_import(
         repository,
         scopes,
+        &child.language,
         &child.file_id,
         child.scope_id.as_ref(),
         parent_name,
-    )
-    .into_iter()
-    .filter(|binding| !binding.is_glob)
-    .collect::<Vec<_>>();
-    if visible_imports
-        .iter()
-        .all(|binding| binding.target_symbol.is_some() || binding.target_file.is_some())
-    {
-        for binding in visible_imports {
+        |binding| binding.target_symbol.is_some() || binding.target_file.is_some(),
+    ) {
+        for binding in bindings {
             if let Some(target) = &binding.target_symbol {
                 if symbols
                     .get(target)

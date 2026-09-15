@@ -8,7 +8,13 @@ Open Kioku treats authoritative repository relationships as structural truth, no
 
 More than 40% of cases are negative, ambiguous, fail-closed, or `MustNotEmit` probes. The corpus includes same-name collisions, unrelated receivers, alias/import ambiguity, lexical shadowing, test/production collisions, constructor/function and static/instance collisions, unknown receivers, dynamic dispatch, overload and inheritance collisions, local/import shadowing, multiple exact reference sites, unresolved external targets, generated/vendor skipped paths, malformed/partial source, and deterministic metamorphic variants.
 
-`benchmarks/relationship-ci-cases.json` is the compact subset used by normal CI: one case per cohort plus targeted regression cases. The Rust `CALLS` regressions (`ci-rust-calls-02` to `-05`) write multi-file packages: a call through a cross-module item import must emit, and a `mod tests` import leaking to production code, `super::` inside an inline module, and `callee.rs` beside `callee/mod.rs` must not. CI asserts its exact case count, so adding a case means updating that count in `.github/workflows/ci.yml`. It does not replace the full release corpus.
+`benchmarks/relationship-ci-cases.json` is the compact subset used by normal CI: one case per cohort plus targeted regression cases. The Rust `CALLS` regressions (`ci-rust-calls-02` to `-15`) write multi-file packages, and the live producer fails a case if any of its `.rs` files was not indexed.
+- **Must emit:** a call through a cross-module item import, and its grouped, aliased twin in the same metamorphic group; a call through `crate::` inside the importing workspace member, with a same-text module in the other member.
+- **Must not emit:**
+  - imports that are not in scope at the call: a `mod tests` import from production code, a file-level import inside a `mod` block that globs another module (as a bare call and as a typed call), and a file-level import shadowed by an unresolved block import;
+  - paths the module tree does not support: `super::` inside an inline module, a relative import from a file mounted by `#[path]`, a stale file beside `#[path]`, a name that is both a submodule and a function, and `callee.rs` beside `callee/mod.rs` (rustc rejects that layout, but the index still has to fail closed on it);
+  - `crate::` reaching another workspace member's same-text module;
+  - a receiver typed from a path call whose indexed return type is not the path's type. CI asserts its exact case count, so adding a case means updating that count in `.github/workflows/ci.yml`. It does not replace the full release corpus.
 
 ## Capability contract
 
