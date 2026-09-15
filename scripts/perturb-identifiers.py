@@ -2,8 +2,8 @@
 """Perturb the identifiers in commit-derived cases, and report a paired run per class.
 
 Commit subjects are written by the author who just edited the file, so they spell identifiers
-in the repository's own casing. A task handed to an agent does not: it says `CollectionsUtils`
-for `CollectionUtils`, `num_frames` for `NumFrames`, or simply mistypes. A near-miss resolver
+in the repository's own casing. A task handed to an agent does not: it says `ChannelsUtils`
+for `ChannelUtils`, `num_slots` for `NumSlots`, or simply mistypes. A near-miss resolver
 measured on commit subjects will always report "no change", because there are almost no near
 misses in the corpus. This builds a corpus that has them.
 

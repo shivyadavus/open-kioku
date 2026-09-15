@@ -458,26 +458,26 @@ mod tests {
             symbols: vec![
                 symbol(
                     "prefix",
-                    "SearchServiceCleanupOnLostMasterIT",
-                    "server::SearchServiceCleanupOnLostMasterIT",
+                    "LedgerServiceRetryOnLostLeaderIT",
+                    "core::LedgerServiceRetryOnLostLeaderIT",
                     SymbolKind::Class,
                 ),
                 symbol(
                     "field",
-                    "searchService",
-                    "server::TransportSearchAction::searchService",
+                    "ledgerService",
+                    "core::TransportLedgerAction::ledgerService",
                     SymbolKind::Field,
                 ),
                 symbol(
                     "class",
-                    "SearchService",
-                    "server::search::SearchService::SearchService",
+                    "LedgerService",
+                    "core::ledger::LedgerService::LedgerService",
                     SymbolKind::Class,
                 ),
                 symbol(
                     "ctor",
-                    "SearchService",
-                    "server::search::SearchService::SearchService",
+                    "LedgerService",
+                    "core::ledger::LedgerService::LedgerService",
                     SymbolKind::Method,
                 ),
             ],
@@ -485,7 +485,7 @@ mod tests {
         };
 
         let definition = SymbolEngine::new(&store)
-            .definition("SearchService")
+            .definition("LedgerService")
             .unwrap();
 
         assert_eq!(definition.id.0, "class");

@@ -375,9 +375,9 @@ const MAX_TOKEN_LEN: usize = 40;
 /// Tokenizer that indexes each identifier both whole and as its CamelCase / snake_case parts,
 /// emitted at the same position so phrase queries still line up.
 ///
-/// `FieldMapper` becomes `fieldmapper`, `field`, `mapper`; `max_new_tokens` becomes `max`,
-/// `new`, `tokens`. Without this a prose task like "batch mappings" cannot reach
-/// `FieldMapper.java` at all: the default tokenizer only knows the whole word, and query-side
+/// `SlotPlanner` becomes `slotplanner`, `slot`, `planner`; `min_free_blocks` becomes `min`,
+/// `free`, `blocks`. Without this a prose task like "slot planner" cannot reach
+/// `SlotPlanner.java` at all: the default tokenizer only knows the whole word, and query-side
 /// splitting (which we already do) cannot recover parts the index never stored. On the
 /// identifier-heavy Java corpus this is the single largest lexical lever measured in the
 /// literature (+28% NDCG@10 for Java, +82% for Go, ~0 for Python, which snake_case already
@@ -682,14 +682,14 @@ mod tokenizer_tests {
     #[test]
     fn identifiers_are_indexed_whole_and_as_parts_at_one_position() {
         assert_eq!(
-            texts("FieldMapper max_new_tokens"),
+            texts("SlotPlanner min_free_blocks"),
             vec![
-                ("fieldmapper".into(), 0),
-                ("field".into(), 0),
-                ("mapper".into(), 0),
-                ("max".into(), 1),
-                ("new".into(), 2),
-                ("tokens".into(), 3),
+                ("slotplanner".into(), 0),
+                ("slot".into(), 0),
+                ("planner".into(), 0),
+                ("min".into(), 1),
+                ("free".into(), 2),
+                ("blocks".into(), 3),
             ]
         );
     }
@@ -697,15 +697,15 @@ mod tokenizer_tests {
     #[test]
     fn plain_words_acronyms_and_paths_behave_like_the_default_tokenizer() {
         assert_eq!(
-            texts("modules/ip-location/GeoIpProcessor.java"),
+            texts("plugins/rate-limit/RateLimitFilter.java"),
             vec![
-                ("modules".into(), 0),
-                ("ip".into(), 1),
-                ("location".into(), 2),
-                ("geoipprocessor".into(), 3),
-                ("geo".into(), 3),
-                ("ip".into(), 3),
-                ("processor".into(), 3),
+                ("plugins".into(), 0),
+                ("rate".into(), 1),
+                ("limit".into(), 2),
+                ("ratelimitfilter".into(), 3),
+                ("rate".into(), 3),
+                ("limit".into(), 3),
+                ("filter".into(), 3),
                 ("java".into(), 4),
             ]
         );

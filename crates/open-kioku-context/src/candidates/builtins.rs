@@ -507,8 +507,8 @@ impl<'a> BuiltinCandidateContext<'a> {
                 let result = result_for_test(file, &test, overlap as f32);
                 // A test whose name shares a word with the task is a lexical hint, not
                 // corroboration. Fusion orders candidates by authority before score, so when
-                // this stream declared itself Corroborating every `*ProcessorTests` in a large
-                // Java repository outranked the processor itself for "geoip processor": the
+                // this stream declared itself Corroborating every `*EnforcerTests` in a large
+                // Java repository outranked the enforcer itself for "quota enforcer": the
                 // first 20 primary files were all tests. Corroboration has to come from a
                 // second, independent source, and it is derived at fusion time.
                 Some((
@@ -1184,8 +1184,8 @@ fn retrieval_terms(request: &CandidateRequest) -> Vec<String> {
 }
 
 /// Words that overlap with almost any test or fact name without saying anything about the task.
-/// "tests for geoip processor" must not rank `ForEachProcessorTests` level with
-/// `GeoIpProcessorTests` because of "for", and commit verbs like "fix" match `testFixedDelay`.
+/// "tests for quota enforcer" must not rank `ForEachEnforcerTests` level with
+/// `QuotaEnforcerTests` because of "for", and commit verbs like "fix" match `testFixedDelay`.
 fn is_overlap_stopword(term: &str) -> bool {
     crate::is_task_stopword(term)
         || matches!(
@@ -1391,15 +1391,15 @@ mod exact_authority_tests {
     #[test]
     fn overlap_terms_drop_function_words_and_commit_verbs() {
         let request = CandidateRequest::new(
-            "Fix tests for the geoip processor",
-            vec!["Fix tests for the geoip processor".into(), "geoip".into()],
+            "Fix tests for the quota enforcer",
+            vec!["Fix tests for the quota enforcer".into(), "quota".into()],
             10,
         );
         assert_eq!(
             retrieval_terms(&request),
             vec![
-                "geoip".to_string(),
-                "processor".to_string(),
+                "enforcer".to_string(),
+                "quota".to_string(),
                 "tests".to_string()
             ]
         );

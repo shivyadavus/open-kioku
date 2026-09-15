@@ -1,9 +1,9 @@
 //! Identifier lattice: the bridge from task vocabulary to the repository's own identifiers.
 //!
-//! A task says `CollectionsUtils Tests`; the repository says `CollectionUtilsTests`. Lexical
+//! A task says `ChannelsUtils Tests`; the repository says `ChannelUtilsTests`. Lexical
 //! retrieval is substring-based, so it reaches a longer form from a shorter one but never the
 //! reverse, and never an identifier whose parts are the task's parts in a different inflection. Between a fifth and a quarter of the
-//! remaining holdout misses on a 10k-file Java service and a Python ML library (~4k files) were
+//! remaining holdout misses on the Java (10k files) and Python (~4k files) corpora were
 //! of this shape.
 //!
 //! The lattice never invents vocabulary. Every expansion is an identifier that exists in the
@@ -48,7 +48,7 @@ const MIN_STEM_LEN: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LatticeRelation {
-    /// Same light stem (`images` / `image`, `CollectionsUtils` / `CollectionUtils`).
+    /// Same light stem (`images` / `image`, `ChannelsUtils` / `ChannelUtils`).
     Stem,
     /// One edit apart, and the task's spelling is absent from the repository.
     OneEdit,
@@ -74,7 +74,7 @@ pub(crate) struct LatticeTerm {
     /// name the task actually asked to edit.
     pub from_primary: bool,
     pub relation: LatticeRelation,
-    /// The name is spread across more files than one edit target can be (`num_frames` is a
+    /// The name is spread across more files than one edit target can be (`num_slots` is a
     /// parameter in dozens). Such a hop still widens retrieval, but it names nothing in
     /// particular, so it must not confer the named-target tier on every file that has it.
     pub ambiguous: bool,
@@ -323,8 +323,8 @@ pub(crate) fn expand(
 
     let mut expansion = LatticeExpansion::default();
     for probe in identifier_probes {
-        // `ImageBackbone` is already inside `ImageBackboneModel`, and `read_frame` inside
-        // `read_frame_buffer`: the lexical index reaches both without help. Expanding them only
+        // `AudioEncoder` is already inside `AudioEncoderModel`, and `read_chunk` inside
+        // `read_chunk_buffer`: the lexical index reaches both without help. Expanding them only
         // re-tiered every file in the module and cost the true target its lead.
         if probe.exact || probe.reachable {
             continue;
@@ -338,7 +338,7 @@ pub(crate) fn expand(
             expansion.unreached_identifiers.push(probe.original);
             continue;
         }
-        // Shortest first: substring matching lets `CollectionUtils` reach `CollectionUtilsTests`,
+        // Shortest first: substring matching lets `ChannelUtils` reach `ChannelUtilsTests`,
         // so the longer neighbour adds nothing but another pass.
         matches.sort_by(|a, b| {
             a.1.cmp(&b.1)
@@ -491,8 +491,8 @@ impl Scan {
         for (index, probe) in identifier_probes.iter_mut().enumerate() {
             let full = (1u32 << probe.parts.len()) - 1;
             // The repository's spelling of the task's identifier re-inflects its parts; it
-            // neither drops them nor adds new ones. `MaxNewTokens` is not
-            // `_with_max_new_tokens`, whatever the parts have in common — allowing one spare
+            // neither drops them nor adds new ones. `MinFreeBlocks` is not
+            // `_with_min_free_blocks`, whatever the parts have in common — allowing one spare
             // part let a test helper outrank the module the task was about.
             if self.covered[index] == full && part_count == probe.parts.len() {
                 if probe.lower.as_bytes() == name.to_ascii_lowercase().as_bytes() {
@@ -509,9 +509,9 @@ impl Scan {
 }
 
 /// Whether a task token is shaped like source code rather than hyphenated prose. A task's
-/// anchors include hyphenated phrases (`right-trimmed`, `kernel-direct`) because a hyphen can
+/// anchors include hyphenated phrases (`strip-tailed`, `queue-direct`) because a hyphen can
 /// separate a real name; re-inflecting their parts against the whole symbol table reaches
-/// incidental helpers (`right-trimmed` found a test utility named `right_trim`) and cost the true
+/// incidental helpers (`strip-tailed` found a test utility named `strip_tail`) and cost the true
 /// target its rank. Code names carry an inner case change, an underscore, or digits beside
 /// capitals; lower-case hyphenated words carry none of the three.
 fn is_code_shaped(value: &str) -> bool {
@@ -675,7 +675,7 @@ fn within_one_edit_bytes(a: &[u8], b: &[u8]) -> bool {
 
 /// CamelCase and snake_case parts of an identifier, as slices of the original. Mirrors the
 /// index tokenizer's boundaries: a lower-case letter or digit followed by an upper-case letter
-/// (`fieldMapper`), and the last upper-case letter of a run before a lower-case letter
+/// (`slotPlanner`), and the last upper-case letter of a run before a lower-case letter
 /// (`HTTPServer` is `HTTP`, `Server`).
 fn for_each_part(value: &str, mut visit: impl FnMut(&str)) {
     for_each_part_ranges(value, |start, end| visit(&value[start..end]));
@@ -818,19 +818,19 @@ mod tests {
         for_each_part("HTTPServerConfig_v2", |part| parts.push(part.to_string()));
         assert_eq!(parts, strings(&["HTTP", "Server", "Config", "v2"]));
         parts.clear();
-        for_each_part("max_new_tokens", |part| parts.push(part.to_string()));
-        assert_eq!(parts, strings(&["max", "new", "tokens"]));
+        for_each_part("min_free_blocks", |part| parts.push(part.to_string()));
+        assert_eq!(parts, strings(&["min", "free", "blocks"]));
     }
 
     #[test]
     fn misinflected_identifier_reaches_the_repository_spelling() {
         let symbols = vec![
-            symbol("CollectionUtils"),
-            symbol("CollectionUtilsTests"),
+            symbol("ChannelUtils"),
+            symbol("ChannelUtilsTests"),
             symbol("ArrayUtils"),
         ];
-        let files = vec![file("server/src/test/java/util/CollectionUtilsTests.java")];
-        let expansion = expand_primary(&strings(&["CollectionsUtils"]), &files, &symbols);
+        let files = vec![file("core/src/test/java/util/ChannelUtilsTests.java")];
+        let expansion = expand_primary(&strings(&["ChannelsUtils"]), &files, &symbols);
         // The shorter identifier reaches the longer one by substring; only it is added.
         assert_eq!(
             expansion
@@ -838,9 +838,9 @@ mod tests {
                 .iter()
                 .map(|term| term.term.as_str())
                 .collect::<Vec<_>>(),
-            vec!["CollectionUtils"]
+            vec!["ChannelUtils"]
         );
-        assert_eq!(expansion.identifiers[0].origin, "CollectionsUtils");
+        assert_eq!(expansion.identifiers[0].origin, "ChannelsUtils");
         assert_eq!(expansion.identifiers[0].relation, LatticeRelation::Stem);
         assert!(expansion.unreached_identifiers.is_empty());
     }
@@ -848,65 +848,65 @@ mod tests {
     #[test]
     fn one_part_identifiers_and_part_supersets_are_not_reached() {
         let symbols = vec![
-            symbol("SliceBuilder"),
-            symbol("testByteSlicingArray"),
-            symbol("NearestVectorFieldValues"),
-            symbol("NearestVectorValuesTests"),
+            symbol("SliceWriter"),
+            symbol("testByteSlicingBuffer"),
+            symbol("SparseMatrixBlockRows"),
+            symbol("SparseMatrixRowsTests"),
         ];
         // `_slice` is a word with a separator, not an identifier with parts to re-inflect.
         let word = expand_primary(&strings(&["_slice"]), &[], &symbols);
         assert!(word.is_empty());
         assert!(word.unreached_identifiers.is_empty());
-        // `NearestVectorValues` sits inside `NearestVectorValuesTests`, which substring retrieval
+        // `SparseMatrixRows` sits inside `SparseMatrixRowsTests`, which substring retrieval
         // already reaches; and the five-part field is not the same identifier in any case.
-        let superset = expand_primary(&strings(&["NearestVectorValues"]), &[], &symbols);
+        let superset = expand_primary(&strings(&["SparseMatrixRows"]), &[], &symbols);
         assert!(superset.is_empty(), "{superset:?}");
         // With only the longer, differently-inflected field present, the part-count cap still
         // rejects it: three parts do not become five.
         let capped = expand_primary(
-            &strings(&["NearestVectorValue"]),
+            &strings(&["SparseMatrixRow"]),
             &[],
-            &[symbol("NearestVectorScriptFieldValuesTests")],
+            &[symbol("SparseMatrixDenseBlockRowsTests")],
         );
         assert!(capped.identifiers.is_empty(), "{capped:?}");
     }
 
     #[test]
     fn an_identifier_substring_search_already_reaches_is_not_expanded() {
-        // Every file that matters mentions `ImageBackboneModel`, and plain substring retrieval
-        // finds them from `ImageBackbone`; expanding would only re-tier the whole module.
+        // Every file that matters mentions `AudioEncoderModel`, and plain substring retrieval
+        // finds them from `AudioEncoder`; expanding would only re-tier the whole module.
         let symbols = vec![
-            symbol("ImageBackbone"),
-            symbol("ImageBackboneModel"),
-            symbol("ImageBackboneConfig"),
-            symbol("read_frame_buffer"),
+            symbol("AudioEncoder"),
+            symbol("AudioEncoderModel"),
+            symbol("AudioEncoderConfig"),
+            symbol("read_chunk_buffer"),
         ];
-        for probe in ["ImageBackbone", "read_frame"] {
+        for probe in ["AudioEncoder", "read_chunk"] {
             let expansion = expand_primary(&strings(&[probe]), &[], &symbols);
             assert!(expansion.is_empty(), "{probe}: {expansion:?}");
             assert!(expansion.unreached_identifiers.is_empty());
         }
         // The misspelling is a substring of nothing, so it is still expanded — to the
         // identifier whose parts it re-inflects, not to the longer names built on it.
-        let typo = expand_primary(&strings(&["ImageBackbones"]), &[], &symbols);
+        let typo = expand_primary(&strings(&["AudioEncoders"]), &[], &symbols);
         assert_eq!(
             typo.identifiers
                 .iter()
                 .map(|term| term.term.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ImageBackbone"]
+            vec!["AudioEncoder"]
         );
     }
 
     #[test]
     fn hyphenated_prose_is_not_treated_as_an_identifier() {
-        let symbols = vec![symbol("right_trim"), symbol("CollectionUtils")];
-        let prose = expand_primary(&strings(&["right-trimmed", "kernel-direct"]), &[], &symbols);
+        let symbols = vec![symbol("strip_tail"), symbol("ChannelUtils")];
+        let prose = expand_primary(&strings(&["strip-tailed", "queue-direct"]), &[], &symbols);
         assert!(prose.is_empty(), "{prose:?}");
         // Nor is it reported as missing vocabulary: it was never a code name to look for.
         assert!(prose.unreached_identifiers.is_empty());
         // A snake_case or CamelCase token still is one.
-        assert!(!expand_primary(&strings(&["right_trimmed"]), &[], &symbols)
+        assert!(!expand_primary(&strings(&["strip_tailed"]), &[], &symbols)
             .identifiers
             .is_empty());
     }
@@ -919,7 +919,7 @@ mod tests {
             .map(|i| format!("seg{i}"))
             .collect::<Vec<_>>()
             .join("_");
-        let symbols = vec![symbol(&huge), symbol("CollectionUtils")];
+        let symbols = vec![symbol(&huge), symbol("ChannelUtils")];
         let expansion = expand_primary(&strings(&[huge.as_str()]), &[], &symbols);
         assert!(expansion.is_empty(), "{expansion:?}");
         assert!(expansion.unreached_identifiers.is_empty());
@@ -944,9 +944,9 @@ mod tests {
         // substring of many paths, and a hop to a file stem has no symbol at all.
         let files = ["a", "b", "c", "d", "e", "f"]
             .iter()
-            .map(|dir| file(&format!("src/{dir}/image_loader.py")))
+            .map(|dir| file(&format!("src/{dir}/audio_reader.py")))
             .collect::<Vec<_>>();
-        let expansion = expand_primary(&strings(&["ImageLoaders"]), &files, &[]);
+        let expansion = expand_primary(&strings(&["AudioReaders"]), &files, &[]);
         assert_eq!(expansion.identifiers.len(), 1);
         assert!(
             expansion.identifiers[0].ambiguous,
@@ -957,65 +957,62 @@ mod tests {
 
     #[test]
     fn exact_identifier_is_not_expanded() {
-        let symbols = vec![symbol("CollectionUtils"), symbol("CollectionUtilsTests")];
-        let expansion = expand_primary(&strings(&["CollectionUtils"]), &[], &symbols);
+        let symbols = vec![symbol("ChannelUtils"), symbol("ChannelUtilsTests")];
+        let expansion = expand_primary(&strings(&["ChannelUtils"]), &[], &symbols);
         assert!(expansion.is_empty());
         assert!(expansion.unreached_identifiers.is_empty());
     }
 
     #[test]
     fn typo_in_a_long_part_is_corrected_only_when_the_repository_lacks_that_spelling() {
-        let symbols = vec![symbol("ReaderUtils"), symbol("HeaderUtils")];
-        // `Header` exists, so `HeaderUtils` is exact and nothing is expanded.
-        let exact = expand_primary(&strings(&["HeaderUtils"]), &[], &symbols);
+        let symbols = vec![symbol("LoaderUtils"), symbol("LeaderUtils")];
+        // `Leader` exists, so `LeaderUtils` is exact and nothing is expanded.
+        let exact = expand_primary(&strings(&["LeaderUtils"]), &[], &symbols);
         assert!(exact.is_empty());
-        // `Haeder` exists nowhere: one transposition reaches `Header`; `Reader` is three
+        // `Laeder` exists nowhere: one transposition reaches `Leader`; `Loader` is two
         // edits away and is not offered.
-        let typo = expand_primary(&strings(&["HaederUtils"]), &[], &symbols);
+        let typo = expand_primary(&strings(&["LaederUtils"]), &[], &symbols);
         let names = typo
             .identifiers
             .iter()
             .map(|term| term.term.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, vec!["HeaderUtils"]);
+        assert_eq!(names, vec!["LeaderUtils"]);
         assert!(typo
             .identifiers
             .iter()
             .all(|term| term.relation == LatticeRelation::OneEdit));
-        // `Readr` is a five-letter part: too short for an edit to be trusted.
-        let short = expand_primary(&strings(&["ReadrUtils"]), &[], &symbols);
+        // `Loadr` is a five-letter part: too short for an edit to be trusted.
+        let short = expand_primary(&strings(&["LoadrUtils"]), &[], &symbols);
         assert!(short.identifiers.is_empty());
-        assert_eq!(short.unreached_identifiers, strings(&["ReadrUtils"]));
+        assert_eq!(short.unreached_identifiers, strings(&["LoadrUtils"]));
     }
 
     #[test]
     fn a_name_many_files_carry_is_kept_but_flagged_ambiguous() {
-        // `num_frames` is a parameter across a whole package: reaching it widens retrieval,
+        // `num_slots` is a parameter across a whole package: reaching it widens retrieval,
         // but it names no single edit target, so it must not confer the named-target tier.
         let mut symbols = (0..6)
             .map(|index| {
-                let mut sym = symbol("num_frames");
-                sym.id = SymbolId::new(format!("num_frames-{index}"));
+                let mut sym = symbol("num_slots");
+                sym.id = SymbolId::new(format!("num_slots-{index}"));
                 sym.file_id = FileId::new(format!("file-{index}"));
                 sym
             })
             .collect::<Vec<_>>();
-        symbols.push(symbol("CollectionUtils"));
-        let expansion = expand_primary(&strings(&["NumFrames", "CollectionsUtils"]), &[], &symbols);
+        symbols.push(symbol("ChannelUtils"));
+        let expansion = expand_primary(&strings(&["NumSlots", "ChannelsUtils"]), &[], &symbols);
         let flags = expansion
             .identifiers
             .iter()
             .map(|term| (term.term.as_str(), term.ambiguous))
             .collect::<Vec<_>>();
-        assert_eq!(
-            flags,
-            vec![("num_frames", true), ("CollectionUtils", false)]
-        );
+        assert_eq!(flags, vec![("num_slots", true), ("ChannelUtils", false)]);
     }
 
     #[test]
     fn unreached_identifier_is_reported_as_negative_evidence() {
-        let symbols = vec![symbol("CollectionUtils")];
+        let symbols = vec![symbol("ChannelUtils")];
         let expansion = expand_primary(&strings(&["QuantumFluxCapacitor"]), &[], &symbols);
         assert!(expansion.is_empty());
         assert_eq!(
@@ -1026,10 +1023,10 @@ mod tests {
 
     #[test]
     fn file_stems_count_as_vocabulary() {
-        let files = vec![file("src/processors/image_loaders.py")];
-        let expansion = expand_primary(&strings(&["ImageLoader"]), &files, &[]);
+        let files = vec![file("src/codecs/audio_readers.py")];
+        let expansion = expand_primary(&strings(&["AudioReader"]), &files, &[]);
         assert_eq!(expansion.identifiers.len(), 1);
-        assert_eq!(expansion.identifiers[0].term, "image_loaders");
+        assert_eq!(expansion.identifiers[0].term, "audio_readers");
     }
 
     #[test]
