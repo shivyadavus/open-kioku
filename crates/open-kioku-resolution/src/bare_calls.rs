@@ -394,6 +394,17 @@ mod tests {
         scopes: Vec<Scope>,
         test: impl FnOnce(&ResolutionContext<'_>) -> T,
     ) -> T {
+        with_language_resolution_context(Language::Rust, symbols, bindings, imports, scopes, test)
+    }
+
+    fn with_language_resolution_context<T>(
+        language: Language,
+        symbols: Vec<Symbol>,
+        bindings: Vec<Binding>,
+        imports: Vec<ImportBinding>,
+        scopes: Vec<Scope>,
+        test: impl FnOnce(&ResolutionContext<'_>) -> T,
+    ) -> T {
         let file_id = FileId::new("file:src/lib.rs");
         let scopes = ScopeIndex::build(scopes);
         let symbol_index = SymbolIndex::build(symbols);
@@ -403,12 +414,12 @@ mod tests {
         for import in imports {
             repository.imports.insert(import);
         }
-        let semantics = open_kioku_languages::semantics_for(&Language::Rust).unwrap();
+        let semantics = open_kioku_languages::semantics_for(&language).unwrap();
         let context = ResolutionContext::new(
             &file_id,
             std::path::Path::new("src/lib.rs"),
             None,
-            Language::Rust,
+            language,
             &repository,
             &symbol_index,
             &scopes,
@@ -790,6 +801,198 @@ mod tests {
             ResolutionOutcome::Proven { candidate } => Some(candidate.target_symbol_id.0),
             _ => None,
         }
+    }
+
+    /// `from <module> import <name>` recorded at `scope_id` and bound to `symbol:<module>:<name>`.
+    fn python_import(scope_id: &str, module: &str, name: &str) -> ImportBinding {
+        ImportBinding {
+            imported_name: name.into(),
+            rule: ImportBindingRule::ModuleKey,
+            ..import_binding(
+                scope_id,
+                name,
+                module,
+                Some(&format!("symbol:{module}:{name}")),
+            )
+        }
+    }
+
+    /// A Python module with `if TYPE_CHECKING:`, `try:` and `except ImportError:` bodies, and
+    /// `def load():` and `def helper():`, whose body has an `if` body of its own.
+    fn python_block_layout() -> Vec<Scope> {
+        vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:if", Some("scope:file"), ScopeKind::Block),
+            scope("scope:try", Some("scope:file"), ScopeKind::Block),
+            scope("scope:except", Some("scope:file"), ScopeKind::Block),
+            scope("scope:load", Some("scope:file"), ScopeKind::Function),
+            scope("scope:load:body", Some("scope:load"), ScopeKind::Block),
+            scope("scope:helper", Some("scope:file"), ScopeKind::Function),
+            scope("scope:helper:body", Some("scope:helper"), ScopeKind::Block),
+            scope(
+                "scope:helper:if",
+                Some("scope:helper:body"),
+                ScopeKind::Block,
+            ),
+        ]
+    }
+
+    #[test]
+    fn python_import_in_a_block_binds_in_the_enclosing_function_or_module() {
+        let symbols = || {
+            vec![
+                symbol("symbol:fast:encode", "encode", "file:fast.py", None),
+                symbol("symbol:slow:encode", "encode", "file:slow.py", None),
+            ]
+        };
+        let python = |imports: Vec<ImportBinding>, test: &dyn Fn(&ResolutionContext<'_>)| {
+            with_language_resolution_context(
+                Language::Python,
+                symbols(),
+                Vec::new(),
+                imports,
+                python_block_layout(),
+                test,
+            )
+        };
+
+        // `try: from fast import encode` at module level binds in the module.
+        python(vec![python_import("scope:try", "fast", "encode")], &|ctx| {
+            assert_eq!(
+                proven_bare_call_target(ctx, "scope:load:body", "encode").as_deref(),
+                Some("symbol:fast:encode")
+            );
+        });
+
+        // The same import in an `if` body inside `def helper():` binds in `helper` only.
+        python(
+            vec![python_import("scope:helper:if", "fast", "encode")],
+            &|ctx| {
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:helper:body", "encode").as_deref(),
+                    Some("symbol:fast:encode")
+                );
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:load:body", "encode"),
+                    None
+                );
+            },
+        );
+
+        // `try: from fast import encode` / `except ImportError: from slow import encode`: both
+        // bind the name in the module, so both stay candidates and neither is proven.
+        python(
+            vec![
+                python_import("scope:try", "fast", "encode"),
+                python_import("scope:except", "slow", "encode"),
+            ],
+            &|ctx| match resolve_bare_call_outcome(&call_in("scope:load:body", "encode"), ctx) {
+                ResolutionOutcome::Ambiguous { candidates, .. }
+                | ResolutionOutcome::Unresolved { candidates, .. } => {
+                    let targets = candidates
+                        .into_iter()
+                        .map(|candidate| candidate.target_symbol_id.0)
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        targets,
+                        BTreeSet::from([
+                            "symbol:fast:encode".to_string(),
+                            "symbol:slow:encode".to_string(),
+                        ])
+                    );
+                }
+                other => panic!("two imports of the name must not prove one target: {other:?}"),
+            },
+        );
+    }
+
+    #[test]
+    fn python_class_body_import_is_not_visible_in_its_methods() {
+        // `from a import g` at module level, and `class C:` whose body has `from b import g` and
+        // `def m(self): g()`.
+        let scopes = vec![
+            scope("scope:file", None, ScopeKind::File),
+            scope("scope:C", Some("scope:file"), ScopeKind::Class),
+            scope("scope:C:body", Some("scope:C"), ScopeKind::Block),
+            scope("scope:m", Some("scope:C:body"), ScopeKind::Function),
+            scope("scope:m:body", Some("scope:m"), ScopeKind::Block),
+        ];
+        with_language_resolution_context(
+            Language::Python,
+            vec![
+                symbol("symbol:a:g", "g", "file:a.py", None),
+                symbol("symbol:b:g", "g", "file:b.py", None),
+            ],
+            Vec::new(),
+            vec![
+                python_import("scope:file", "a", "g"),
+                python_import("scope:C:body", "b", "g"),
+            ],
+            scopes,
+            |ctx| {
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:m:body", "g").as_deref(),
+                    Some("symbol:a:g"),
+                    "a method body resolves free names in the module, not the class body"
+                );
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:C:body", "g").as_deref(),
+                    Some("symbol:b:g"),
+                    "the class body sees its own import"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn python_type_imported_under_type_checking_is_a_candidate_in_module_level_code() {
+        // `if TYPE_CHECKING: from app.models import User`, then `def load(u: User)` and
+        // `class Admin(User)`.
+        let user = SymbolId::new("symbol:app.models:User");
+        with_language_resolution_context(
+            Language::Python,
+            vec![Symbol {
+                kind: SymbolKind::Class,
+                ..symbol(&user.0, "User", "file:app/models.py", None)
+            }],
+            Vec::new(),
+            vec![python_import("scope:if", "app.models", "User")],
+            python_block_layout(),
+            |ctx| {
+                assert_eq!(
+                    crate::typed_calls::collect_type_candidate_origins(
+                        ctx,
+                        &ScopeId::new("scope:load"),
+                        "User"
+                    ),
+                    vec![(user.clone(), true)]
+                );
+                let admin = Symbol {
+                    kind: SymbolKind::Class,
+                    language: Language::Python,
+                    ..symbol(
+                        "symbol:Admin",
+                        "Admin",
+                        "file:src/lib.rs",
+                        Some("scope:file"),
+                    )
+                };
+                let parents = crate::type_relations::collect_parent_type_candidates(
+                    &admin,
+                    "User",
+                    ctx.symbols,
+                    ctx.repository,
+                    Some(ctx.scopes),
+                );
+                assert_eq!(
+                    parents
+                        .iter()
+                        .map(|candidate| candidate.target.clone())
+                        .collect::<Vec<_>>(),
+                    vec![user.clone()]
+                );
+            },
+        );
     }
 
     #[test]

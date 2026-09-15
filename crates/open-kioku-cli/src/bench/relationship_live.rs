@@ -120,8 +120,8 @@ fn produce_live_relationship_case(
         config.semantic.enabled = false;
         let mut snapshot = Indexer::default().index_repo_with_mode(&root, &config, IndexMode::Full)?;
         if case.relationship == GraphEdgeType::Calls {
-            if let Some((fixture, _)) = rust_item_import_call_fixture(&case.scenario) {
-                require_rust_fixture_files_indexed(case, &fixture, &snapshot)?;
+            if let Some((_, (fixture, _))) = scoped_import_call_fixture(&case.scenario) {
+                require_fixture_source_files_indexed(case, &fixture, &snapshot)?;
             }
         }
         inject_reference_fixture_occurrence(case, &mut snapshot)?;
@@ -570,13 +570,13 @@ fn live_call_fixture(
     adversarial: bool,
     scenario: &str,
 ) -> anyhow::Result<Vec<(PathBuf, String)>> {
-    if let Some((files, must_emit)) = rust_item_import_call_fixture(scenario) {
+    if let Some((fixture_language, (files, must_emit))) = scoped_import_call_fixture(scenario) {
         // Falling back to the single-file fixture would let a mislabeled case pass or fail on a
         // same-scope call that says nothing about imports.
-        if language != RelationshipBenchLanguage::Rust || adversarial == must_emit {
+        if language != fixture_language || adversarial == must_emit {
             anyhow::bail!(
-                "{scenario} is defined only for a Rust {} case, got {language:?}",
-                if must_emit { "must_emit" } else { "must_not_emit" }
+                "{scenario} is defined only for a {fixture_language:?} {} case, got {language:?}",
+                if must_emit { "must_emit" } else { "non-emission" }
             );
         }
         return Ok(files);
@@ -589,10 +589,63 @@ fn live_call_fixture(
     Ok(vec![(PathBuf::from(main_path(language)), content)])
 }
 
+/// A multi-file fixture's files, and whether its call must be authoritative.
+type ImportCallFixture = (Vec<(PathBuf, String)>, bool);
+
+/// The multi-file fixture for a call through an import, with its language.
+fn scoped_import_call_fixture(
+    scenario: &str,
+) -> Option<(RelationshipBenchLanguage, ImportCallFixture)> {
+    rust_item_import_call_fixture(scenario)
+        .map(|fixture| (RelationshipBenchLanguage::Rust, fixture))
+        .or_else(|| {
+            python_block_import_call_fixture(scenario)
+                .map(|fixture| (RelationshipBenchLanguage::Python, fixture))
+        })
+}
+
+/// Multi-file Python fixtures for calls through imports made inside a `try:` body, with whether
+/// the call must be authoritative. An `if` or `try` body is not a namespace in Python.
+fn python_block_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
+    const TARGET: &str = "def target_fn(value):\n    return value\n";
+    let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
+        "try_block_import" => (
+            vec![
+                ("src/codec.py", TARGET),
+                (
+                    "src/main.py",
+                    "try:\n    from codec import target_fn\nexcept ImportError:\n    pass\n\n\ndef caller_fn():\n    target_fn(1)\n",
+                ),
+            ],
+            true,
+        ),
+        // Either import may bind `target_fn` at run time, so both stay candidates.
+        "try_except_alternative_imports" => (
+            vec![
+                ("src/fast_codec.py", TARGET),
+                ("src/slow_codec.py", TARGET),
+                (
+                    "src/main.py",
+                    "try:\n    from fast_codec import target_fn\nexcept ImportError:\n    from slow_codec import target_fn\n\n\ndef caller_fn():\n    target_fn(1)\n",
+                ),
+            ],
+            false,
+        ),
+        _ => return None,
+    };
+    Some((
+        files
+            .into_iter()
+            .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+            .collect(),
+        must_emit,
+    ))
+}
+
 /// Multi-file Rust fixtures for calls through `use` imports, with whether the call must be
 /// authoritative. Each lists its manifests, since the crate root is read from the nearest
 /// `Cargo.toml`.
-fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String)>, bool)> {
+fn rust_item_import_call_fixture(scenario: &str) -> Option<ImportCallFixture> {
     const PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const CALLER: &str = "use crate::target::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
     const WORKSPACE: &str = "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n";
@@ -845,7 +898,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String
 
 /// A Rust source file discovery skipped would let a negative case pass for the wrong reason, as a
 /// module named `target/` once did.
-fn require_rust_fixture_files_indexed(
+fn require_fixture_source_files_indexed(
     case: &RelationshipBenchCase,
     fixture: &[(PathBuf, String)],
     snapshot: &open_kioku_ingest::IndexSnapshot,
@@ -853,7 +906,10 @@ fn require_rust_fixture_files_indexed(
     let missing = fixture
         .iter()
         .map(|(path, _)| path)
-        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "rs" || extension == "py")
+        })
         .filter(|path| !snapshot.files.iter().any(|file| &file.path == *path))
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
