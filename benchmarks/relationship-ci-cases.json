@@ -281,6 +281,48 @@
       "notes": "Regression case: `legacy/session.rs` mounted by `#[path]` as `crate::session` must not resolve `use super::target_fn;` to `legacy::target_fn`."
     },
     {
+      "id": "ci-rust-calls-16-super_glob_module_import",
+      "fixture_id": "ci/ri3/rust/calls/super_glob_module_import",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:super_glob_module_import:source"
+      },
+      "expected_outcome": "must_emit",
+      "scenario": "super_glob_module_import",
+      "expected_target": {
+        "kind": "symbol",
+        "selector": "target_fn",
+        "identity": "symbol:rust:calls:super_glob_module_import:target"
+      },
+      "expected_proof_kinds": [
+        "exact_call_site",
+        "import_binding",
+        "qualified_name"
+      ],
+      "notes": "Regression case: a call inside `mod tests { use super::*; }` binds through the file-level `use crate::target::target_fn;`, which the glob names."
+    },
+    {
+      "id": "ci-rust-calls-17-super_glob_second_glob",
+      "fixture_id": "ci/ri3/rust/calls/super_glob_second_glob",
+      "split": "development",
+      "language": "rust",
+      "relationship": "CALLS",
+      "capability_state": "authoritative",
+      "source": {
+        "kind": "symbol",
+        "selector": "caller_fn",
+        "identity": "symbol:rust:calls:super_glob_second_glob:source"
+      },
+      "expected_outcome": "must_not_emit",
+      "scenario": "super_glob_second_glob",
+      "notes": "Regression case: `mod tests { use super::*; use crate::fakes::*; }` could take `target_fn` from either glob, so the call must not bind to the parent's import. rustc rejects the call as ambiguous; the index must still fail closed."
+    },
+    {
       "id": "ci-rust-references-01-metamorphic_a",
       "fixture_id": "ci/ri3/rust/references/metamorphic_a",
       "split": "development",

@@ -762,6 +762,34 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String
             ],
             false,
         ),
+        // `mod tests { use super::*; }` sees the file's `use crate::target::target_fn;`.
+        "super_glob_module_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod caller;\npub mod target;\n"),
+                ("src/target.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::target::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // Both globs could supply `target_fn`. rustc rejects the call as ambiguous; the index must
+        // not pick the parent's import.
+        "super_glob_second_glob" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod caller;\npub mod fakes;\npub mod target;\n"),
+                ("src/target.rs", "pub fn target_fn() {}\n"),
+                ("src/fakes.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::target::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use crate::fakes::*;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
         // The production `spawn` is the unresolved `tokio::spawn`; the tests module's import is
         // not in scope there.
         "sibling_scope_import" => (

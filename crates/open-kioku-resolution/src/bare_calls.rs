@@ -781,6 +781,154 @@ mod tests {
         });
     }
 
+    fn proven_bare_call_target(
+        ctx: &ResolutionContext<'_>,
+        scope_id: &str,
+        callee: &str,
+    ) -> Option<String> {
+        match resolve_bare_call_outcome(&call_in(scope_id, callee), ctx) {
+            ResolutionOutcome::Proven { candidate } => Some(candidate.target_symbol_id.0),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn super_glob_in_a_mod_block_continues_into_the_parent_module() {
+        // `use crate::auth::spawn;` at file level; `mod tests { use super::*; fn t() { spawn() } }`.
+        let scopes = || {
+            vec![
+                scope("scope:file", None, ScopeKind::File),
+                scope("scope:tests", Some("scope:file"), ScopeKind::Module),
+                scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
+            ]
+        };
+        let symbols = || {
+            vec![
+                symbol("symbol:spawn", "spawn", "file:src/auth.rs", None),
+                symbol("symbol:fake_spawn", "spawn", "file:src/fakes.rs", None),
+            ]
+        };
+        let file_import = || {
+            import_binding(
+                "scope:file",
+                "spawn",
+                "crate::auth::spawn",
+                Some("symbol:spawn"),
+            )
+        };
+        let super_glob = || glob_import("scope:tests", "super::*");
+        let cases = [
+            (
+                "`use super::*;` reaches the file's import",
+                vec![file_import(), super_glob()],
+                Some("symbol:spawn"),
+            ),
+            (
+                "a second glob may supply the name",
+                vec![
+                    file_import(),
+                    super_glob(),
+                    glob_import("scope:tests", "crate::fakes::*"),
+                ],
+                None,
+            ),
+            (
+                "an explicit import in the module shadows the glob",
+                vec![
+                    file_import(),
+                    super_glob(),
+                    import_binding(
+                        "scope:tests",
+                        "spawn",
+                        "crate::fakes::spawn",
+                        Some("symbol:fake_spawn"),
+                    ),
+                ],
+                Some("symbol:fake_spawn"),
+            ),
+            (
+                "an unresolved explicit import in the module is not bypassed",
+                vec![
+                    file_import(),
+                    super_glob(),
+                    import_binding("scope:tests", "spawn", "tokio::spawn", None),
+                ],
+                None,
+            ),
+            (
+                "a glob of another module does not continue into the parent",
+                vec![
+                    file_import(),
+                    glob_import("scope:tests", "self::helpers::*"),
+                ],
+                None,
+            ),
+        ];
+        for (layout, imports, expected) in cases {
+            with_resolution_context(symbols(), Vec::new(), imports, scopes(), |ctx| {
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:tests:t", "spawn").as_deref(),
+                    expected,
+                    "{layout}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn super_super_glob_climbs_two_modules_and_never_past_the_file() {
+        let file_import = || {
+            import_binding(
+                "scope:file",
+                "spawn",
+                "crate::auth::spawn",
+                Some("symbol:spawn"),
+            )
+        };
+        let symbols = || vec![symbol("symbol:spawn", "spawn", "file:src/auth.rs", None)];
+        // `mod outer { mod inner { use super::super::*; fn t() { spawn() } } }`.
+        let nested = || {
+            vec![
+                scope("scope:file", None, ScopeKind::File),
+                scope("scope:outer", Some("scope:file"), ScopeKind::Module),
+                scope("scope:inner", Some("scope:outer"), ScopeKind::Module),
+                scope("scope:inner:t", Some("scope:inner"), ScopeKind::Function),
+            ]
+        };
+        with_resolution_context(
+            symbols(),
+            Vec::new(),
+            vec![file_import(), glob_import("scope:inner", "super::super::*")],
+            nested(),
+            |ctx| {
+                assert_eq!(
+                    proven_bare_call_target(ctx, "scope:inner:t", "spawn").as_deref(),
+                    Some("symbol:spawn")
+                );
+            },
+        );
+        // `use super::*;` in `inner` names `outer`, which imports nothing.
+        with_resolution_context(
+            symbols(),
+            Vec::new(),
+            vec![file_import(), glob_import("scope:inner", "super::*")],
+            nested(),
+            |ctx| assert_eq!(proven_bare_call_target(ctx, "scope:inner:t", "spawn"), None),
+        );
+        // From a module directly in the file, `super::super` is outside the file.
+        with_resolution_context(
+            symbols(),
+            Vec::new(),
+            vec![file_import(), glob_import("scope:tests", "super::super::*")],
+            vec![
+                scope("scope:file", None, ScopeKind::File),
+                scope("scope:tests", Some("scope:file"), ScopeKind::Module),
+                scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
+            ],
+            |ctx| assert_eq!(proven_bare_call_target(ctx, "scope:tests:t", "spawn"), None),
+        );
+    }
+
     #[test]
     fn imported_item_call_is_proven_with_import_binding_and_qualified_name_proofs() {
         // `use crate::auth::issue_token as run;` bound by the import registry, then `run()`.
