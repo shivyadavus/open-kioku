@@ -1,10 +1,11 @@
-use crate::context::ResolutionContext;
+use crate::context::{ResolutionContext, ScopedImport};
 use crate::evidence::{ResolutionEvidence, ResolutionEvidenceKind};
 use crate::pipeline::{evaluate_candidates, ResolutionCandidate, ResolutionOutcome};
 use open_kioku_core::{
     CallSite, Confidence, EvidenceSourceType, FileRange, GraphEdgeType, Language, LineRange,
     RelationshipProof, RelationshipProofKind, SymbolId, SymbolKind,
 };
+use open_kioku_semantic_model::ImportBindingRule;
 
 pub(crate) fn resolve_bare_call_outcome(
     call: &CallSite,
@@ -81,24 +82,19 @@ pub(crate) fn resolve_bare_call_outcome(
         }
     }
 
-    // Only imports in scope at the call count, and one that is unresolved leaves the import step
-    // without proof: with `use tokio::spawn;` at file level, `mod tests { use crate::testing::spawn; }`
-    // must not answer for production code, and the unresolved import may be the real target.
-    let visible_imports = ctx
-        .visible_import_bindings(&call.scope_id, &call.callee_name)
-        .into_iter()
-        .filter(|binding| !binding.is_glob)
-        .collect::<Vec<_>>();
-    if !visible_imports.is_empty()
-        && visible_imports
-            .iter()
-            .all(|binding| binding.target_symbol.is_some())
+    // The nearest import of the name in scope decides. An unresolved one, or a glob in a nearer
+    // scope, leaves the import rule without a candidate: the unresolved import may be the real
+    // target, and a resolved import further out is shadowed.
+    if let ScopedImport::Resolved(bindings) =
+        ctx.scoped_import(&call.scope_id, &call.callee_name, |binding| {
+            binding.target_symbol.is_some()
+        })
     {
-        let mut imported_targets = visible_imports
+        let mut imported_targets = bindings
             .iter()
             .filter_map(|binding| binding.target_symbol.clone())
             .collect::<Vec<_>>();
-        let (strategy, message) = if ctx.language == Language::Rust {
+        if ctx.language == Language::Rust {
             // A Rust `use` also binds tuple structs and constants by name; as for same-scope and
             // same-file calls, only a function is a call target.
             imported_targets.retain(|target| {
@@ -106,6 +102,11 @@ pub(crate) fn resolve_bare_call_outcome(
                     .get(target)
                     .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
             });
+        }
+        let (strategy, message) = if bindings
+            .iter()
+            .all(|binding| binding.rule == ImportBindingRule::RustModulePath)
+        {
             (
                 "rust_item_import",
                 "bare call candidate from a Rust item import bound by its module path",
@@ -330,7 +331,7 @@ mod tests {
         Binding, BindingId, CallSiteId, FileId, Language, ReceiverKind, RelationshipAuthority,
         Scope, ScopeId, ScopeKind, SourceRange, Symbol, SymbolKind, Visibility,
     };
-    use open_kioku_semantic_model::{ImportBinding, ImportOrigin};
+    use open_kioku_semantic_model::{ImportBinding, ImportOrigin, GLOB_IMPORT_LOCAL_NAME};
     use std::collections::BTreeSet;
 
     fn symbol(id: &str, name: &str, file: &str, scope_id: Option<&str>) -> Symbol {
@@ -517,6 +518,20 @@ mod tests {
             is_type_only: false,
             is_glob: false,
             evidence: Vec::new(),
+            rule: if target.is_some() {
+                ImportBindingRule::RustModulePath
+            } else {
+                ImportBindingRule::ModuleKey
+            },
+        }
+    }
+
+    fn glob_import(scope_id: &str, source: &str) -> ImportBinding {
+        ImportBinding {
+            local_name: GLOB_IMPORT_LOCAL_NAME.into(),
+            imported_name: GLOB_IMPORT_LOCAL_NAME.into(),
+            is_glob: true,
+            ..import_binding(scope_id, GLOB_IMPORT_LOCAL_NAME, source, None)
         }
     }
 
@@ -568,14 +583,121 @@ mod tests {
 
         let (scopes, imports) = sibling_scope_layout(true);
         with_resolution_context(spawn(), Vec::new(), imports, scopes, |ctx| {
-            for scope_id in ["scope:run", "scope:tests:t"] {
-                let outcome = resolve_bare_call_outcome(&call_in(scope_id, "spawn"), ctx);
-                assert!(
-                    !matches!(outcome, ResolutionOutcome::Proven { .. }),
-                    "the unresolved `tokio::spawn` is in scope in {scope_id}: {outcome:?}"
-                );
-            }
+            let production = resolve_bare_call_outcome(&call_in("scope:run", "spawn"), ctx);
+            assert!(
+                !matches!(production, ResolutionOutcome::Proven { .. }),
+                "the unresolved `tokio::spawn` is the import in scope in `run`: {production:?}"
+            );
+            // A Rust `mod` block does not see the file's `use tokio::spawn;`.
+            let in_tests = resolve_bare_call_outcome(&call_in("scope:tests:t", "spawn"), ctx);
+            assert!(
+                matches!(in_tests, ResolutionOutcome::Proven { .. }),
+                "the tests module's call binds through its own import: {in_tests:?}"
+            );
         });
+    }
+
+    #[test]
+    fn rust_mod_block_does_not_see_the_enclosing_files_imports() {
+        // `use crate::auth::spawn;` at file level, `mod tests { [use crate::fakes::*;] fn t() }`.
+        let scopes = || {
+            vec![
+                scope("scope:file", None, ScopeKind::File),
+                scope("scope:run", Some("scope:file"), ScopeKind::Function),
+                scope("scope:tests", Some("scope:file"), ScopeKind::Module),
+                scope("scope:tests:t", Some("scope:tests"), ScopeKind::Function),
+            ]
+        };
+        let file_import = || {
+            import_binding(
+                "scope:file",
+                "spawn",
+                "crate::auth::spawn",
+                Some("symbol:spawn"),
+            )
+        };
+        let spawn = || vec![symbol("symbol:spawn", "spawn", "file:src/auth.rs", None)];
+
+        for imports in [
+            vec![file_import()],
+            vec![file_import(), glob_import("scope:tests", "crate::fakes::*")],
+        ] {
+            with_resolution_context(spawn(), Vec::new(), imports, scopes(), |ctx| {
+                let in_run = resolve_bare_call_outcome(&call_in("scope:run", "spawn"), ctx);
+                assert!(
+                    matches!(in_run, ResolutionOutcome::Proven { .. }),
+                    "{in_run:?}"
+                );
+                let in_tests = resolve_bare_call_outcome(&call_in("scope:tests:t", "spawn"), ctx);
+                assert!(
+                    !matches!(in_tests, ResolutionOutcome::Proven { .. }),
+                    "the file-level import is not in scope inside `mod tests`: {in_tests:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn nearest_import_decides_and_a_nearer_glob_leaves_the_name_unresolved() {
+        // `use crate::a::f;` at file level; inside `fn run`, a block with its own import.
+        let scopes = || {
+            vec![
+                scope("scope:file", None, ScopeKind::File),
+                scope("scope:run", Some("scope:file"), ScopeKind::Function),
+                scope("scope:block", Some("scope:run"), ScopeKind::Block),
+            ]
+        };
+        let symbols = || {
+            vec![
+                symbol("symbol:a:f", "f", "file:src/a.rs", None),
+                symbol("symbol:b:f", "f", "file:src/b.rs", None),
+            ]
+        };
+        let file_import = || import_binding("scope:file", "f", "crate::a::f", Some("symbol:a:f"));
+        let proven_target = |outcome: ResolutionOutcome| match outcome {
+            ResolutionOutcome::Proven { candidate } => Some(candidate.target_symbol_id.0),
+            _ => None,
+        };
+
+        let cases = [
+            (
+                "a resolved block import shadows the file's",
+                vec![
+                    file_import(),
+                    import_binding("scope:block", "f", "crate::b::f", Some("symbol:b:f")),
+                ],
+                Some("symbol:b:f"),
+            ),
+            (
+                "an unresolved block import does not fall back to the file's",
+                vec![
+                    file_import(),
+                    import_binding("scope:block", "f", "crate::b::f", None),
+                ],
+                None,
+            ),
+            (
+                "a block glob may supply the name",
+                vec![file_import(), glob_import("scope:block", "crate::b::*")],
+                None,
+            ),
+        ];
+        for (layout, imports, expected) in cases {
+            with_resolution_context(symbols(), Vec::new(), imports, scopes(), |ctx| {
+                assert_eq!(
+                    proven_target(resolve_bare_call_outcome(&call_in("scope:block", "f"), ctx))
+                        .as_deref(),
+                    expected,
+                    "{layout}"
+                );
+                assert_eq!(
+                    proven_target(resolve_bare_call_outcome(&call_in("scope:run", "f"), ctx))
+                        .as_deref(),
+                    Some("symbol:a:f"),
+                    "{layout}: outside the block the file's import decides"
+                );
+            });
+        }
     }
 
     #[test]
@@ -640,8 +762,21 @@ mod tests {
             );
         });
 
+        // A Rust `mod` block does not see the file's unresolved `use real::Clock;`.
         let (scopes, imports) = sibling_scope_layout(true);
         with_resolution_context(fake_clock(), Vec::new(), rebind(imports), scopes, |ctx| {
+            assert_eq!(
+                candidates(ctx, "scope:tests:t"),
+                vec![SymbolId::new("symbol:FakeClock")]
+            );
+            assert!(candidates(ctx, "scope:run").is_empty());
+        });
+
+        // A glob in a nearer scope may supply the name instead.
+        let (scopes, imports) = sibling_scope_layout(false);
+        let mut imports = rebind(imports);
+        imports.push(glob_import("scope:tests:t", "crate::fakes::*"));
+        with_resolution_context(fake_clock(), Vec::new(), imports, scopes, |ctx| {
             assert!(candidates(ctx, "scope:tests:t").is_empty());
         });
     }

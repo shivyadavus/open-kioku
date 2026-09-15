@@ -1,45 +1,116 @@
 use crate::evidence::ResolutionEvidence;
 use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
 use crate::inheritance::InheritanceIndex;
-use open_kioku_core::{Confidence, FileId, Language, ModuleId, ScopeId, SymbolId};
+use open_kioku_core::{Confidence, FileId, Language, ModuleId, ScopeId, ScopeKind, SymbolId};
 use open_kioku_languages::semantics::LanguageSemantics;
-use open_kioku_semantic_model::{ImportBinding, SemanticRepository};
+use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
 
 /// Scope id the import registry gives a binding whose site recorded no scope.
 const UNSCOPED_IMPORT: &str = "global";
 
-/// Import bindings of `name` in `file_id` declared in `scope_id`, in a scope enclosing it, or at no
-/// recorded scope. A binding in a sibling scope, such as `mod tests { use ...; }` seen from
-/// production code, is not in scope there. Without a scope index or a use-site scope every binding
-/// of the name in the file is returned.
-pub(crate) fn visible_import_bindings<'r>(
+/// What the imports in scope at a use site say about one name.
+#[derive(Debug)]
+pub(crate) enum ScopedImport<'r> {
+    /// No import in scope names it.
+    NotImported,
+    /// The nearest scope that imports the name binds it, and every binding there is resolved.
+    Resolved(Vec<&'r ImportBinding>),
+    /// The nearest import of the name is unresolved, or a glob import in a nearer scope may supply
+    /// the name instead.
+    Unresolved,
+}
+
+/// Looks `name` up through the scopes enclosing `scope_id`, nearest first. An import shadows the
+/// same name imported further out, and an explicit import shadows a glob in its own scope. A Rust
+/// `mod` block does not see the imports of the module around it, so the walk stops at one:
+/// `use crate::auth::f;` at file level does not reach `mod tests { use crate::fakes::*; }`.
+/// Without a scope index or a use-site scope, every import of the name in the file is one set.
+pub(crate) fn scoped_import<'r>(
     repository: &'r SemanticRepository,
     scopes: Option<&ScopeIndex>,
+    language: &Language,
     file_id: &FileId,
     scope_id: Option<&ScopeId>,
     name: &str,
-) -> Vec<&'r ImportBinding> {
-    let Some(bindings) = repository
+    is_resolved: impl Fn(&ImportBinding) -> bool,
+) -> ScopedImport<'r> {
+    let named = file_imports(repository, file_id, name)
+        .iter()
+        .filter(|binding| !binding.is_glob)
+        .collect::<Vec<_>>();
+    let globs = file_imports(repository, file_id, GLOB_IMPORT_LOCAL_NAME);
+    let settle = |bindings: Vec<&'r ImportBinding>| {
+        if bindings.iter().all(|binding| is_resolved(binding)) {
+            ScopedImport::Resolved(bindings)
+        } else {
+            ScopedImport::Unresolved
+        }
+    };
+
+    let (Some(scopes), Some(scope_id)) = (scopes, scope_id) else {
+        return if !named.is_empty() {
+            settle(named)
+        } else if !globs.is_empty() {
+            ScopedImport::Unresolved
+        } else {
+            ScopedImport::NotImported
+        };
+    };
+
+    let mut current = Some(scope_id);
+    let mut steps = 0usize;
+    while let Some(id) = current {
+        let here = named
+            .iter()
+            .copied()
+            .filter(|binding| &binding.scope_id == id)
+            .collect::<Vec<_>>();
+        if !here.is_empty() {
+            return settle(here);
+        }
+        if globs.iter().any(|binding| &binding.scope_id == id) {
+            return ScopedImport::Unresolved;
+        }
+        let scope = scopes.get(id);
+        if *language == Language::Rust && scope.is_some_and(|scope| scope.kind == ScopeKind::Module)
+        {
+            return ScopedImport::NotImported;
+        }
+        steps += 1;
+        if steps > scopes.scopes.len() {
+            break;
+        }
+        current = scope.and_then(|scope| scope.parent_id.as_ref());
+    }
+
+    let unscoped = named
+        .iter()
+        .copied()
+        .filter(|binding| binding.scope_id.0 == UNSCOPED_IMPORT)
+        .collect::<Vec<_>>();
+    if !unscoped.is_empty() {
+        settle(unscoped)
+    } else if globs
+        .iter()
+        .any(|binding| binding.scope_id.0 == UNSCOPED_IMPORT)
+    {
+        ScopedImport::Unresolved
+    } else {
+        ScopedImport::NotImported
+    }
+}
+
+fn file_imports<'r>(
+    repository: &'r SemanticRepository,
+    file_id: &FileId,
+    local_name: &str,
+) -> &'r [ImportBinding] {
+    repository
         .imports
         .by_file_local_name
-        .get(&(file_id.clone(), name.to_string()))
-    else {
-        return Vec::new();
-    };
-    let (Some(scopes), Some(scope_id)) = (scopes, scope_id) else {
-        return bindings.iter().collect();
-    };
-    let enclosing = std::iter::successors(Some(scope_id), |id| {
-        scopes.get(id).and_then(|scope| scope.parent_id.as_ref())
-    })
-    .take(scopes.scopes.len() + 1)
-    .collect::<Vec<_>>();
-    bindings
-        .iter()
-        .filter(|binding| {
-            binding.scope_id.0 == UNSCOPED_IMPORT || enclosing.contains(&&binding.scope_id)
-        })
-        .collect()
+        .get(&(file_id.clone(), local_name.to_string()))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,18 +188,22 @@ impl<'a> ResolutionContext<'a> {
         }
     }
 
-    /// Import bindings of `name` in this file visible from `scope_id`.
-    pub(crate) fn visible_import_bindings(
+    /// What the imports of this file in scope at `scope_id` say about `name`; see
+    /// [`scoped_import`].
+    pub(crate) fn scoped_import(
         &self,
         scope_id: &ScopeId,
         name: &str,
-    ) -> Vec<&'a ImportBinding> {
-        visible_import_bindings(
+        is_resolved: impl Fn(&ImportBinding) -> bool,
+    ) -> ScopedImport<'a> {
+        scoped_import(
             self.repository,
             Some(self.scopes),
+            &self.language,
             self.file_id,
             Some(scope_id),
             name,
+            is_resolved,
         )
     }
 }

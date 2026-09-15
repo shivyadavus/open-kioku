@@ -17,6 +17,11 @@ pub(crate) struct RustUsePath {
     /// Path below the crate root with the `crate`/`self`/`super` prefix applied. A glob import
     /// keeps its trailing `*`.
     pub(crate) segments: Vec<String>,
+    /// The importing file's module as its path implies (`["auth", "keys"]` for `auth/keys.rs`).
+    pub(crate) importer_module: Vec<String>,
+    /// The path is `self::`/`super::`, so it is only as sound as `importer_module`, which a
+    /// `#[path]` declaration or a missing `mod` declaration makes wrong.
+    pub(crate) relative: bool,
 }
 
 impl RustUsePath {
@@ -64,6 +69,10 @@ pub(crate) fn map_rust_use_path(
         importer_module.pop();
     }
 
+    let importer_module_names = importer_module
+        .iter()
+        .map(|segment| segment.to_string())
+        .collect::<Vec<_>>();
     let mut parts = use_path.split("::");
     let first = parts.next()?;
     let mut segments = match first {
@@ -94,6 +103,8 @@ pub(crate) fn map_rust_use_path(
     Some(RustUsePath {
         src_root,
         segments: segments.into_iter().map(str::to_string).collect(),
+        importer_module: importer_module_names,
+        relative: first != "crate",
     })
 }
 
@@ -118,6 +129,27 @@ mod tests {
             root.to_string(),
             parts.iter().map(|part| part.to_string()).collect(),
         ))
+    }
+
+    #[test]
+    fn mapped_paths_record_the_importer_module_and_whether_they_are_relative() {
+        let relative = map_rust_use_path(
+            Path::new(""),
+            Path::new("src/auth/keys.rs"),
+            "super::issue_token",
+        )
+        .expect("super path maps");
+        assert!(relative.relative);
+        assert_eq!(relative.importer_module, vec!["auth", "keys"]);
+
+        let absolute = map_rust_use_path(
+            Path::new(""),
+            Path::new("src/auth/mod.rs"),
+            "crate::session::open",
+        )
+        .expect("crate path maps");
+        assert!(!absolute.relative);
+        assert_eq!(absolute.importer_module, vec!["auth"]);
     }
 
     #[test]

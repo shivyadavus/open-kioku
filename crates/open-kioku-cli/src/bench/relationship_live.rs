@@ -119,6 +119,11 @@ fn produce_live_relationship_case(
         config.history.enabled = false;
         config.semantic.enabled = false;
         let mut snapshot = Indexer::default().index_repo_with_mode(&root, &config, IndexMode::Full)?;
+        if case.relationship == GraphEdgeType::Calls {
+            if let Some((fixture, _)) = rust_item_import_call_fixture(&case.scenario) {
+                require_rust_fixture_files_indexed(case, &fixture, &snapshot)?;
+            }
+        }
         inject_reference_fixture_occurrence(case, &mut snapshot)?;
         if case.scenario == "metamorphic_b" {
             // Exercise order independence after parsing/indexing: graph construction and proof
@@ -584,23 +589,184 @@ fn live_call_fixture(
     Ok(vec![(PathBuf::from(main_path(language)), content)])
 }
 
-/// Multi-file Rust fixtures for calls through `use` item imports, with whether the call must be
-/// authoritative. Each is a package with its own manifest, since the crate root is read from it.
+/// Multi-file Rust fixtures for calls through `use` imports, with whether the call must be
+/// authoritative. Each lists its manifests, since the crate root is read from the nearest
+/// `Cargo.toml`.
 fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String)>, bool)> {
+    const PACKAGE: &str = "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
     const CALLER: &str = "use crate::target::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n";
+    const WORKSPACE: &str = "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\nresolver = \"2\"\n";
+    const PACKAGE_A: &str = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const PACKAGE_B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    const SESSION_B: &str = "use crate::auth::issue_token;\n\npub fn caller_fn() {\n    issue_token();\n}\n";
     let (files, must_emit): (Vec<(&str, &str)>, bool) = match scenario {
         "cross_module_item_import" => (
             vec![
+                ("Cargo.toml", PACKAGE),
                 ("src/lib.rs", "pub mod caller;\npub mod target;\n"),
                 ("src/target.rs", "pub fn target_fn() {}\n"),
                 ("src/caller.rs", CALLER),
             ],
             true,
         ),
+        // The same call range and target as `cross_module_item_import`, through a grouped, aliased
+        // import; the alias has the item's length so the call site is identical.
+        "cross_module_item_import_alias" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod caller;\npub mod target;\n"),
+                ("src/target.rs", "pub fn target_fn() {}\npub struct Other;\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::target::{target_fn as mint_call, Other};\n\npub fn caller_fn() {\n    mint_call();\n}\n",
+                ),
+            ],
+            true,
+        ),
+        // A `mod` block does not see the file's imports: `target_fn` in `tests` comes from the
+        // glob, not from `crate::auth`.
+        "module_scope_glob_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod auth;\npub mod caller;\npub mod fakes;\n"),
+                ("src/auth.rs", "pub fn target_fn() {}\n"),
+                ("src/fakes.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::auth::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\n#[cfg(test)]\nmod tests {\n    use crate::fakes::*;\n\n    fn caller_fn() {\n        target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The typed-call form: `Token` in `tests` is the glob's, not the file's `crate::auth::Token`.
+        "module_scope_type_import" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod auth;\npub mod caller;\npub mod fakes;\n"),
+                ("src/auth.rs", "pub struct Token;\n\nimpl Token {\n    pub fn target_fn(&self) {}\n}\n"),
+                ("src/fakes.rs", "pub struct Token;\n\nimpl Token {\n    pub fn target_fn(&self) {}\n}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::auth::Token;\n\npub fn production(value: Token) {\n    value.target_fn();\n}\n\n#[cfg(test)]\nmod tests {\n    use crate::fakes::*;\n\n    fn caller_fn(value: Token) {\n        value.target_fn();\n    }\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // Crate `a`'s `auth/issue_token.rs` has the module-key text crate `b` imports, and crate
+        // `b` re-exports its own `issue_token`, which the index does not follow.
+        "workspace_cross_crate_import" => (
+            vec![
+                ("Cargo.toml", WORKSPACE),
+                ("crates/a/Cargo.toml", PACKAGE_A),
+                ("crates/a/src/lib.rs", "pub mod auth;\n"),
+                ("crates/a/src/auth/mod.rs", "pub mod issue_token;\n"),
+                ("crates/a/src/auth/issue_token.rs", "pub fn issue_token() {}\n"),
+                ("crates/b/Cargo.toml", PACKAGE_B),
+                ("crates/b/src/lib.rs", "pub mod auth;\npub mod helpers;\npub mod session;\n"),
+                ("crates/b/src/auth.rs", "pub use crate::helpers::issue_token;\n"),
+                ("crates/b/src/helpers.rs", "pub fn issue_token() {}\n"),
+                ("crates/b/src/session.rs", SESSION_B),
+            ],
+            false,
+        ),
+        // The same import resolves inside crate `b` when `b` defines the item.
+        "workspace_same_crate_import" => (
+            vec![
+                ("Cargo.toml", WORKSPACE),
+                ("crates/a/Cargo.toml", PACKAGE_A),
+                ("crates/a/src/lib.rs", "pub mod auth;\n"),
+                ("crates/a/src/auth/mod.rs", "pub mod issue_token;\n"),
+                ("crates/a/src/auth/issue_token.rs", "pub fn issue_token() {}\n"),
+                ("crates/b/Cargo.toml", PACKAGE_B),
+                ("crates/b/src/lib.rs", "pub mod auth;\npub mod session;\n"),
+                ("crates/b/src/auth.rs", "pub fn issue_token() {}\n"),
+                ("crates/b/src/session.rs", SESSION_B),
+            ],
+            true,
+        ),
+        // `auth::target_fn` names both a declared submodule and a function.
+        "submodule_named_like_item" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod auth;\npub mod caller;\n"),
+                ("src/auth/mod.rs", "pub mod target_fn;\n\npub fn target_fn() {}\n"),
+                ("src/auth/target_fn.rs", "pub fn helper() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::auth::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `Server::spawn` returns a `ServerHandle`, so `handle` must not be typed as `Server`. The
+        // two `#[cfg]` variants keep the `spawn` call itself unproven.
+        "inferred_constructor_receiver" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod caller;\npub mod server;\n"),
+                (
+                    "src/server.rs",
+                    "pub struct Server;\npub struct ServerHandle;\n\nimpl Server {\n    #[cfg(unix)]\n    pub fn spawn() -> ServerHandle {\n        ServerHandle\n    }\n\n    #[cfg(not(unix))]\n    pub fn spawn() -> ServerHandle {\n        ServerHandle\n    }\n\n    pub fn shutdown(&self) {}\n}\n\nimpl ServerHandle {\n    pub fn shutdown(&self) {}\n}\n",
+                ),
+                (
+                    "src/caller.rs",
+                    "use crate::server::Server;\n\npub fn caller_fn() {\n    let handle = Server::spawn();\n    handle.shutdown();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // The block's `use crate::b::target_fn;` shadows the file's `use crate::a::target_fn;` and
+        // resolves through a re-export the index does not follow.
+        "block_import_shadowing" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "pub mod a;\npub mod b;\npub mod c;\npub mod caller;\n"),
+                ("src/a.rs", "pub fn target_fn() {}\n"),
+                ("src/b.rs", "pub use crate::c::target_fn;\n"),
+                ("src/c.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::a::target_fn;\n\npub fn production() {\n    target_fn();\n}\n\npub fn caller_fn() {\n    use crate::b::target_fn;\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `#[path = "auth_v2.rs"] mod auth;` leaves `auth.rs` stale.
+        "path_attribute_stale_module" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                ("src/lib.rs", "#[path = \"auth_v2.rs\"]\npub mod auth;\npub mod caller;\n"),
+                ("src/auth_v2.rs", "pub fn target_fn() {}\n"),
+                ("src/auth.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/caller.rs",
+                    "use crate::auth::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
+        // `legacy/session.rs` is mounted as `crate::session`, so its `super` is the crate root,
+        // not the `legacy` module whose `mod.rs` also defines `target_fn`.
+        "path_attribute_importer" => (
+            vec![
+                ("Cargo.toml", PACKAGE),
+                (
+                    "src/lib.rs",
+                    "pub mod legacy;\n#[path = \"legacy/session.rs\"]\npub mod session;\n\npub fn target_fn() {}\n",
+                ),
+                ("src/legacy/mod.rs", "pub fn target_fn() {}\n"),
+                (
+                    "src/legacy/session.rs",
+                    "use super::target_fn;\n\npub fn caller_fn() {\n    target_fn();\n}\n",
+                ),
+            ],
+            false,
+        ),
         // The production `spawn` is the unresolved `tokio::spawn`; the tests module's import is
         // not in scope there.
         "sibling_scope_import" => (
             vec![
+                ("Cargo.toml", PACKAGE),
                 ("src/lib.rs", "pub mod testing;\npub mod worker;\n"),
                 ("src/testing.rs", "pub fn spawn<F>(_task: F) {}\n"),
                 (
@@ -614,6 +780,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String
         // `target_fn`.
         "inline_module_super_import" => (
             vec![
+                ("Cargo.toml", PACKAGE),
                 ("src/lib.rs", "pub mod outer;\n"),
                 ("src/outer.rs", "pub mod inner;\n\npub fn target_fn() {}\n"),
                 (
@@ -628,6 +795,7 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String
         // index only one of the two files.
         "ambiguous_module_file" => (
             vec![
+                ("Cargo.toml", PACKAGE),
                 ("src/lib.rs", "pub mod caller;\npub mod callee;\n"),
                 ("src/callee.rs", "pub fn target_fn() {}\n"),
                 ("src/callee/mod.rs", "pub fn target_fn() {}\n"),
@@ -640,16 +808,35 @@ fn rust_item_import_call_fixture(scenario: &str) -> Option<(Vec<(PathBuf, String
         ),
         _ => return None,
     };
-    let mut fixture = vec![(
-        PathBuf::from("Cargo.toml"),
-        "[package]\nname = \"bench\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".to_string(),
-    )];
-    fixture.extend(
-        files
-            .into_iter()
-            .map(|(path, content)| (PathBuf::from(path), content.to_string())),
-    );
+    let fixture = files
+        .into_iter()
+        .map(|(path, content)| (PathBuf::from(path), content.to_string()))
+        .collect();
     Some((fixture, must_emit))
+}
+
+/// A Rust source file discovery skipped would let a negative case pass for the wrong reason, as a
+/// module named `target/` once did.
+fn require_rust_fixture_files_indexed(
+    case: &RelationshipBenchCase,
+    fixture: &[(PathBuf, String)],
+    snapshot: &open_kioku_ingest::IndexSnapshot,
+) -> anyhow::Result<()> {
+    let missing = fixture
+        .iter()
+        .map(|(path, _)| path)
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .filter(|path| !snapshot.files.iter().any(|file| &file.path == *path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "case {} did not index fixture file(s): {}",
+            case.id,
+            missing.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn positive_call_source(language: RelationshipBenchLanguage) -> String {
