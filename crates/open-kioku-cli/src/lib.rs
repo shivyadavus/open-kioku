@@ -37,7 +37,7 @@ use open_kioku_patch::{
 use open_kioku_plan::{ContractBuilder, PlanEngine, PlanFormat, PreflightFormat, PreflightReport};
 use open_kioku_ranking::{
     rerank_baseline, rerank_with_options, top_score_signals, RankingMode, RankingOptions,
-    RankingSignal, RankingWeights,
+    RankingSignal, RankingWeights, TextRelevanceScale,
 };
 use open_kioku_search_regex::{regex_search_index, search_chunks, MAX_REGEX_SCAN_FILES};
 use open_kioku_search_tantivy::{

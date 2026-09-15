@@ -370,6 +370,7 @@ fn ranking_options_for_repo(repo: &Path) -> anyhow::Result<RankingOptions> {
         weights: ranking_weights_from_config(&config.ranking),
         mode: RankingMode::Fusion,
         query: None,
+        text_relevance_scale: TextRelevanceScale::Raw,
     })
 }
 

@@ -1,4 +1,18 @@
 use open_kioku_core::{ScoreComponent, SearchResult};
+use std::borrow::Cow;
+
+/// Signals a lexical producer attaches to the score it wrote into `SearchResult.score`: the
+/// Tantivy index's `bm25_relevance` and the in-memory fallback's `lexical_relevance`. Only
+/// candidates carrying one of them set a scaled `text_relevance`.
+const LEXICAL_ORIGIN_SIGNALS: [&str; 2] = ["bm25_relevance", "lexical_relevance"];
+
+/// The components a lexical producer's `SearchResult.score` is made of: the base score and
+/// Tantivy's query-variant boost. Kept at weight 0 beside a scaled `text_relevance`, since
+/// the boosted score is what gets scaled.
+const LEXICAL_SCORE_PARTS: [&str; 3] =
+    ["bm25_relevance", "lexical_relevance", "query_variant_boost"];
+
+const TEXT_RELEVANCE_RATIONALE: &str = "BM25 or lexical score from indexed text";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingWeights {
@@ -52,11 +66,33 @@ pub enum RankingSignal {
     SemanticSimilarity,
 }
 
+/// How `text_relevance` is put on the scale of the signals it is summed with.
+///
+/// `Raw` is what every shipped surface ranks with. The lexical score is unbounded boosted
+/// BM25 while the other signals are bounded, so a bounded signal can only reorder near-ties.
+/// The two scaled forms exist so the retrieval benchmark can measure them as advisory arms
+/// before any default moves. None of them is an `ok.toml` setting. `Baseline` mode never
+/// scales, whatever this says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum TextRelevanceScale {
+    #[default]
+    Raw,
+    /// Divided by the highest lexical score in the pool, so the top lexical hit reads 1.0.
+    /// A positive per-query constant: with every other weight at zero the order is the raw
+    /// order, and it does not depend on how deep the pool was fetched or on corpus size.
+    PoolMax,
+    /// `(k + 1) / (k + rank)`, where rank counts the pool's strictly higher lexical scores,
+    /// so equal scores share a rank and the path tie-break cannot leak into the value.
+    Rank { k: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankingOptions {
     pub weights: RankingWeights,
     pub mode: RankingMode,
     pub query: Option<String>,
+    pub text_relevance_scale: TextRelevanceScale,
 }
 
 impl Default for RankingOptions {
@@ -65,6 +101,7 @@ impl Default for RankingOptions {
             weights: RankingWeights::default(),
             mode: RankingMode::Fusion,
             query: None,
+            text_relevance_scale: TextRelevanceScale::Raw,
         }
     }
 }
@@ -98,6 +135,13 @@ struct SignalSpec<'a> {
 
 impl RankingFeatures {
     pub fn from_result(result: &SearchResult, query: Option<&str>) -> Self {
+        Self::assess(result, query).0
+    }
+
+    /// The features, and whether the result is semantic-only. A scaled `text_relevance` is set
+    /// by, and applied to, only candidates that carry a lexical component and are not
+    /// semantic-only; every other candidate gets none.
+    fn assess(result: &SearchResult, query: Option<&str>) -> (Self, bool) {
         let path = result.path.to_string_lossy().to_ascii_lowercase();
         let reason = result.match_reason.to_ascii_lowercase();
         // Every signal below reads a persisted `ScoreComponent` emitted by the
@@ -158,7 +202,7 @@ impl RankingFeatures {
             .map(|_| 1.0)
             .unwrap_or_default();
 
-        Self {
+        let features = Self {
             text_relevance,
             exact_reference: exact_reference + symbol_name_hit,
             graph_proximity,
@@ -173,7 +217,8 @@ impl RankingFeatures {
             memory_signal,
             path_quality_penalty,
             semantic_similarity,
-        }
+        };
+        (features, semantic_only)
     }
 }
 
@@ -188,6 +233,7 @@ pub fn rerank_baseline(results: Vec<SearchResult>) -> Vec<SearchResult> {
             weights: RankingWeights::default(),
             mode: RankingMode::Baseline,
             query: None,
+            text_relevance_scale: TextRelevanceScale::Raw,
         },
     )
 }
@@ -202,6 +248,7 @@ pub fn rerank_without_signal(
             weights: RankingWeights::default(),
             mode: RankingMode::WithoutSignal(signal),
             query: None,
+            text_relevance_scale: TextRelevanceScale::Raw,
         },
     )
 }
@@ -217,8 +264,15 @@ pub fn rerank_with_options(
             }
         }
         RankingMode::Fusion | RankingMode::WithoutSignal(_) => {
-            for result in &mut results {
-                apply_fusion(result, options);
+            let query = options.query.as_deref();
+            let assessed = results
+                .iter()
+                .map(|result| RankingFeatures::assess(result, query))
+                .collect::<Vec<_>>();
+            let text_scale = TextScale::for_pool(options.text_relevance_scale, &results, &assessed);
+            for (result, (features, semantic_only)) in results.iter_mut().zip(assessed) {
+                let input = text_scale.fusion_input(result, features, semantic_only);
+                apply_fusion(result, options, input);
             }
         }
     }
@@ -261,8 +315,216 @@ pub fn top_score_signals(result: &SearchResult, limit: usize) -> Vec<String> {
         .collect()
 }
 
-fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
-    let features = RankingFeatures::from_result(result, options.query.as_deref());
+/// The pool-level half of a scaled `text_relevance`, read from the candidates as retrieved,
+/// before fusion rewrites their breakdowns.
+struct TextScale {
+    scale: TextRelevanceScale,
+    /// Positive, finite scores of lexical-origin candidates that are not semantic-only, highest
+    /// first. Always empty for `Raw`.
+    lexical_scores: Vec<f32>,
+}
+
+/// What `apply_fusion` sums for one candidate once its text scale is settled.
+struct FusionInput {
+    features: RankingFeatures,
+    text_rationale: Cow<'static, str>,
+    /// The producer's lexical components, kept at zero weight when `text_relevance` is scaled,
+    /// so the unscaled score stays in the breakdown without being counted twice.
+    retained: Vec<ScoreComponent>,
+}
+
+impl FusionInput {
+    fn unscaled(features: RankingFeatures, text_rationale: Cow<'static, str>) -> Self {
+        Self {
+            features,
+            text_rationale,
+            retained: Vec::new(),
+        }
+    }
+}
+
+impl TextScale {
+    fn for_pool(
+        scale: TextRelevanceScale,
+        results: &[SearchResult],
+        assessed: &[(RankingFeatures, bool)],
+    ) -> Self {
+        let mut lexical_scores = match scale {
+            TextRelevanceScale::Raw => Vec::new(),
+            TextRelevanceScale::PoolMax | TextRelevanceScale::Rank { .. } => results
+                .iter()
+                .zip(assessed)
+                .filter_map(|(result, (_, semantic_only))| {
+                    (!semantic_only && is_lexical_origin(result)).then_some(result.score)
+                })
+                .filter(|score| score.is_finite() && *score > 0.0)
+                .collect(),
+        };
+        lexical_scores.sort_by(|left, right| right.total_cmp(left));
+        Self {
+            scale,
+            lexical_scores,
+        }
+    }
+
+    fn fusion_input(
+        &self,
+        result: &SearchResult,
+        mut features: RankingFeatures,
+        semantic_only: bool,
+    ) -> FusionInput {
+        let rank_k = match self.scale {
+            TextRelevanceScale::Raw => {
+                return FusionInput::unscaled(features, TEXT_RELEVANCE_RATIONALE.into())
+            }
+            TextRelevanceScale::PoolMax => None,
+            TextRelevanceScale::Rank { k } => Some(k),
+        };
+        let score = if result.score.is_finite() {
+            result.score
+        } else {
+            0.0
+        };
+        let path = result.path.to_string_lossy().to_ascii_lowercase();
+        // Only a candidate that joined the lexical pool is scaled against it. A git co-change
+        // candidate, or a semantic hit that a test path keeps from being semantic-only, would
+        // otherwise take a share of a maximum, or a rank, it never contributed to.
+        if semantic_only || !is_lexical_origin(result) {
+            let reason = if semantic_only {
+                "it is semantic-only"
+            } else {
+                "it carries no lexical component"
+            };
+            features.text_relevance = 0.0;
+            // Its own score is a similarity or history score, bounded like the signals it is
+            // summed with, so the penalty takes a bounded share of it.
+            features.path_quality_penalty = path_quality_penalty(&path, score.clamp(0.0, 1.0));
+            return FusionInput {
+                features,
+                text_rationale: TEXT_RELEVANCE_RATIONALE.into(),
+                retained: vec![ScoreComponent::new(
+                    "text_relevance_excluded",
+                    score,
+                    0.0,
+                    0.0,
+                    0.0,
+                    result.derived_evidence_ids(),
+                    format!(
+                        "no text relevance: {reason}, so it neither sets nor takes the pool's lexical scale"
+                    ),
+                )],
+            };
+        }
+        // A pool with no positive lexical score has nothing to scale by. Borrowing a zero
+        // maximum would invent a scale, so the raw score stays, and a weight-0 component says
+        // why even when that score is 0 and no `text_relevance` component is written.
+        let Some(&max) = self.lexical_scores.first() else {
+            let mut input = FusionInput::unscaled(
+                features,
+                "BM25 or lexical score from indexed text, left unscaled: no candidate in the pool carries a positive lexical score".into(),
+            );
+            input.retained.push(ScoreComponent::new(
+                "text_relevance_unscaled",
+                score,
+                score.clamp(-1.0, 1.0),
+                0.0,
+                0.0,
+                result.derived_evidence_ids(),
+                "left unscaled: no candidate in the pool carries a positive lexical score",
+            ));
+            return input;
+        };
+        let (scaled, text_rationale, scale_component) = match rank_k {
+            None => {
+                let scaled = score / max;
+                (
+                    scaled,
+                    format!(
+                        "{TEXT_RELEVANCE_RATIONALE}: the boosted lexical score divided by the pool's top lexical score ({score} / {max})"
+                    ),
+                    ScoreComponent::new(
+                        "text_relevance_pool_max",
+                        max,
+                        scaled,
+                        0.0,
+                        0.0,
+                        result.derived_evidence_ids(),
+                        format!(
+                            "the pool's top lexical score, which divides this candidate's lexical score {score}"
+                        ),
+                    ),
+                )
+            }
+            Some(k) => {
+                let rank = self.lexical_scores.partition_point(|&other| other > score) + 1;
+                let scaled = if score > 0.0 {
+                    (k as f32 + 1.0) / (k as f32 + rank as f32)
+                } else {
+                    0.0
+                };
+                (
+                    scaled,
+                    format!(
+                        "{TEXT_RELEVANCE_RATIONALE}: replaced by its lexical rank, (k + 1) / (k + rank) with k = {k} and rank {rank} (lexical score {score})"
+                    ),
+                    ScoreComponent::new(
+                        "text_relevance_rank",
+                        rank as f32,
+                        scaled,
+                        0.0,
+                        0.0,
+                        result.derived_evidence_ids(),
+                        format!(
+                            "this candidate's rank among the pool's lexical scores, scaled as (k + 1) / (k + rank) with k = {k}"
+                        ),
+                    ),
+                )
+            }
+        };
+        features.text_relevance = scaled;
+        // The penalty is a share of the score it is summed against.
+        features.path_quality_penalty = path_quality_penalty(&path, scaled);
+        let mut retained = result
+            .score_breakdown
+            .iter()
+            .filter(|component| LEXICAL_SCORE_PARTS.contains(&component.signal.as_str()))
+            .map(|component| {
+                ScoreComponent::new(
+                    component.signal.clone(),
+                    component.raw_value,
+                    component.normalized_value,
+                    0.0,
+                    0.0,
+                    component.evidence_ids.clone(),
+                    format!(
+                        "{}; recorded at weight 0: part of the lexical score {score}, which is summed only as a scaled text_relevance",
+                        component.rationale
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        retained.push(scale_component);
+        FusionInput {
+            features,
+            text_rationale: text_rationale.into(),
+            retained,
+        }
+    }
+}
+
+fn is_lexical_origin(result: &SearchResult) -> bool {
+    result
+        .score_breakdown
+        .iter()
+        .any(|component| LEXICAL_ORIGIN_SIGNALS.contains(&component.signal.as_str()))
+}
+
+fn apply_fusion(result: &mut SearchResult, options: &RankingOptions, input: FusionInput) {
+    let FusionInput {
+        features,
+        text_rationale,
+        retained,
+    } = input;
     let weights = options.weights;
     let disabled = match options.mode {
         RankingMode::WithoutSignal(signal) => Some(signal),
@@ -277,7 +539,7 @@ fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
             raw_value: features.text_relevance,
             weight: weights.text_relevance,
             evidence_ids: evidence_ids.clone(),
-            rationale: "BM25 or lexical score from indexed text",
+            rationale: &text_rationale,
         },
         SignalSpec {
             signal: RankingSignal::ExactReference,
@@ -386,6 +648,9 @@ fn apply_fusion(result: &mut SearchResult, options: &RankingOptions) {
         },
     ] {
         push_signal(result, disabled, spec);
+    }
+    for component in retained {
+        result.add_score_component(component);
     }
     result.score = open_kioku_core::score_component_total(&result.score_breakdown);
     result.reconcile_score_breakdown();
@@ -802,7 +1067,7 @@ mod tests {
     }
     use super::{
         rerank, rerank_baseline, rerank_with_options, rerank_without_signal, top_score_signals,
-        RankingOptions, RankingSignal, RankingWeights,
+        RankingMode, RankingOptions, RankingSignal, RankingWeights, TextRelevanceScale,
     };
     use open_kioku_core::{
         Confidence, EvidenceSourceType, FileId, Language, LineRange, ScoreComponent, SearchResult,
@@ -1107,5 +1372,527 @@ mod tests {
             .score_breakdown
             .iter()
             .any(|component| component.signal == "semantic_similarity"));
+    }
+
+    const SCALED: [TextRelevanceScale; 2] = [
+        TextRelevanceScale::PoolMax,
+        TextRelevanceScale::Rank { k: 10 },
+    ];
+
+    fn lexical_result(path: &str, score: f32) -> SearchResult {
+        SearchResult {
+            path: PathBuf::from(path),
+            line_range: Some(LineRange::single(1)),
+            snippet: "some code".into(),
+            symbol: None,
+            score,
+            match_reason: "tantivy hybrid lexical match".into(),
+            evidence: vec!["BM25 lexical match from local Tantivy index".into()],
+            evidence_refs: Vec::new(),
+            confidence: 0.6,
+            score_breakdown: vec![ScoreComponent::single(
+                "bm25_relevance",
+                score,
+                vec!["lexical".into()],
+                "BM25 score from local Tantivy index",
+            )],
+        }
+    }
+
+    fn component<'a>(result: &'a SearchResult, signal: &str) -> Option<&'a ScoreComponent> {
+        result
+            .score_breakdown
+            .iter()
+            .find(|component| component.signal == signal)
+    }
+
+    fn result_at<'a>(results: &'a [SearchResult], path: &str) -> &'a SearchResult {
+        results
+            .iter()
+            .find(|result| result.path == Path::new(path))
+            .expect("path is in the ranked pool")
+    }
+
+    fn ranked_paths(results: &[SearchResult]) -> Vec<PathBuf> {
+        results.iter().map(|result| result.path.clone()).collect()
+    }
+
+    fn scaled_options(scale: TextRelevanceScale) -> RankingOptions {
+        RankingOptions {
+            text_relevance_scale: scale,
+            ..RankingOptions::default()
+        }
+    }
+
+    fn text_only_weights() -> RankingWeights {
+        RankingWeights {
+            text_relevance: 1.0,
+            exact_reference: 0.0,
+            graph_proximity: 0.0,
+            boundary_fit: 0.0,
+            runtime_corroboration: 0.0,
+            git_cochange: 0.0,
+            validation_proximity: 0.0,
+            memory_signal: 0.0,
+            path_quality: 0.0,
+            semantic_similarity: 0.0,
+        }
+    }
+
+    /// Thirty lexical candidates, the highest at 45.0 x `magnitude`, with persisted graph and
+    /// runtime components, a test path and a vendor path, so default weights have signals to sum.
+    fn signal_pool(magnitude: f32) -> Vec<SearchResult> {
+        (0..30)
+            .map(|index| {
+                let path = match index {
+                    3 => "vendor/dep/unit_03.rs".to_string(),
+                    7 => "src/unit_07_test.rs".to_string(),
+                    _ => format!("src/unit_{index:02}.rs"),
+                };
+                let mut result = lexical_result(&path, (45.0 - index as f32 * 1.25) * magnitude);
+                if index % 4 == 1 {
+                    result.score_breakdown.push(ScoreComponent::adjustment(
+                        "graph_proximity",
+                        0.8,
+                        vec![format!("graph:{index}")],
+                        "persisted graph proximity",
+                    ));
+                }
+                if index % 5 == 2 {
+                    result.score_breakdown.push(ScoreComponent::adjustment(
+                        "runtime_corroboration",
+                        0.5,
+                        vec![format!("runtime:{index}")],
+                        "persisted runtime evidence",
+                    ));
+                }
+                result
+            })
+            .collect()
+    }
+
+    #[test]
+    fn raw_scale_is_the_default_and_keeps_the_unscaled_breakdown() {
+        assert_eq!(
+            RankingOptions::default().text_relevance_scale,
+            TextRelevanceScale::Raw
+        );
+        let results = rerank(vec![
+            lexical_result("src/b.rs", 22.5),
+            lexical_result("src/a.rs", 45.0),
+        ]);
+        let text = component(&results[0], "text_relevance").expect("text relevance is recorded");
+        assert_eq!(text.raw_value, 45.0);
+        assert_eq!(text.rationale, "BM25 or lexical score from indexed text");
+        assert!(results
+            .iter()
+            .all(|result| component(result, "bm25_relevance").is_none()));
+    }
+
+    #[test]
+    fn text_relevance_is_scaled_by_the_pool_maximum() {
+        let results = rerank_with_options(
+            vec![
+                lexical_result("src/c.rs", 10.0),
+                lexical_result("src/a.rs", 45.0),
+                lexical_result("src/b.rs", 22.5),
+            ],
+            &scaled_options(TextRelevanceScale::PoolMax),
+        );
+        for (path, expected, raw) in [
+            ("src/a.rs", 1.0, 45.0),
+            ("src/b.rs", 0.5, 22.5),
+            ("src/c.rs", 10.0 / 45.0, 10.0),
+        ] {
+            let result = result_at(&results, path);
+            let text = component(result, "text_relevance").expect("text relevance is recorded");
+            assert!(
+                (text.raw_value - expected).abs() < 1e-6,
+                "{path}: {}",
+                text.raw_value
+            );
+            assert!(
+                text.rationale.contains("/ 45)"),
+                "the rationale must name the scale: {}",
+                text.rationale
+            );
+            let bm25 = component(result, "bm25_relevance").expect("the raw BM25 component is kept");
+            assert_eq!((bm25.raw_value, bm25.contribution), (raw, 0.0));
+            let divisor = component(result, "text_relevance_pool_max")
+                .expect("the divisor is recorded as a number, not only in prose");
+            assert_eq!((divisor.raw_value, divisor.contribution), (45.0, 0.0));
+            assert_eq!(divisor.normalized_value, text.raw_value);
+        }
+        assert_eq!(
+            ranked_paths(&results),
+            vec![
+                PathBuf::from("src/a.rs"),
+                PathBuf::from("src/b.rs"),
+                PathBuf::from("src/c.rs")
+            ]
+        );
+    }
+
+    #[test]
+    fn rank_scale_gives_equal_lexical_scores_the_same_rank() {
+        let results = rerank_with_options(
+            vec![
+                lexical_result("src/a.rs", 30.0),
+                lexical_result("src/b.rs", 30.0),
+                lexical_result("src/c.rs", 12.0),
+            ],
+            &scaled_options(TextRelevanceScale::Rank { k: 10 }),
+        );
+        let text =
+            |path| component(result_at(&results, path), "text_relevance").map(|c| c.raw_value);
+        assert_eq!(text("src/a.rs"), Some(1.0));
+        assert_eq!(text("src/b.rs"), Some(1.0));
+        // Two scores sit above it, so it is rank 3, not rank 2.
+        assert_eq!(text("src/c.rs"), Some(11.0 / 13.0));
+        let rank = component(result_at(&results, "src/c.rs"), "text_relevance_rank")
+            .expect("the rank is recorded as a number, not only in prose");
+        assert_eq!((rank.raw_value, rank.contribution), (3.0, 0.0));
+    }
+
+    #[test]
+    fn scaled_text_relevance_reproduces_the_raw_order_when_every_other_weight_is_zero() {
+        // Scrambled scores with a four-way tie at 20.5, a vendor path, a test path, and a
+        // file stem the second query names exactly, so the identity tier is exercised too.
+        let pool = || {
+            (0..24)
+                .map(|index| {
+                    let path = match index {
+                        5 => "vendor/dep/unit_05.rs".to_string(),
+                        9 => "src/unit_09_test.rs".to_string(),
+                        _ => format!("src/unit_{index:02}.rs"),
+                    };
+                    let score = if index % 8 == 0 {
+                        20.5
+                    } else {
+                        3.0 + ((index * 7) % 24) as f32 * 1.75
+                    };
+                    lexical_result(&path, score)
+                })
+                .collect::<Vec<_>>()
+        };
+        for query in [None, Some("unit_03".to_string())] {
+            let options = |scale| RankingOptions {
+                weights: text_only_weights(),
+                mode: RankingMode::Fusion,
+                query: query.clone(),
+                text_relevance_scale: scale,
+            };
+            let raw = rerank_with_options(pool(), &options(TextRelevanceScale::Raw));
+            for scale in SCALED {
+                let scaled = rerank_with_options(pool(), &options(scale));
+                assert_eq!(
+                    ranked_paths(&scaled),
+                    ranked_paths(&raw),
+                    "{scale:?} reordered the pool for query {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_text_relevance_is_invariant_to_pool_depth_and_paging() {
+        // The CLI fetches 100 candidates for `--limit 20` and 200 for `--limit 50`. A tail of
+        // lower-scoring candidates stands in for the deeper fetch: the first two pages must keep
+        // their paths and their fused scores bit for bit, which a min-max scale would not.
+        for scale in SCALED {
+            let options = scaled_options(scale);
+            let shallow = rerank_with_options(signal_pool(1.0), &options);
+            let mut deep_pool = signal_pool(1.0);
+            deep_pool.extend((0..100).map(|index| {
+                lexical_result(
+                    &format!("src/tail/filler_{index:03}.rs"),
+                    0.6 - index as f32 * 0.005,
+                )
+            }));
+            let deep = rerank_with_options(deep_pool, &options);
+            let page = |results: &[SearchResult]| {
+                results
+                    .iter()
+                    .map(|result| (result.path.clone(), result.score.to_bits()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                page(&shallow[..10]),
+                page(&deep[..10]),
+                "{scale:?} moved the first page"
+            );
+            assert_eq!(
+                page(&shallow[10..20]),
+                page(&deep[10..20]),
+                "{scale:?} moved the second page"
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_text_relevance_is_invariant_to_lexical_score_magnitude() {
+        // BM25 magnitude moves with corpus size and query length; the scaled value must not.
+        for scale in SCALED {
+            let options = scaled_options(scale);
+            let unit = rerank_with_options(signal_pool(1.0), &options);
+            let magnified = rerank_with_options(signal_pool(3.7), &options);
+            assert_eq!(ranked_paths(&unit), ranked_paths(&magnified), "{scale:?}");
+            for (left, right) in unit.iter().zip(&magnified) {
+                assert!(
+                    (left.score - right.score).abs() < 1e-5,
+                    "{scale:?} {}: {} against {}",
+                    left.path.display(),
+                    left.score,
+                    right.score
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_candidates_do_not_set_the_text_scale() {
+        // A cosine of 0.99 above a lexical score of 0.5: had the semantic score set the scale,
+        // the lexical hit would read 0.505 under PoolMax and 11/12 under Rank.
+        let lexical = lexical_result("src/lexical.rs", 0.5);
+        let mut semantic = make_result("src/semantic.rs", 0.99);
+        semantic.match_reason = "semantic vector match".into();
+        semantic.score_breakdown = vec![ScoreComponent::single(
+            "semantic_similarity",
+            0.99,
+            vec!["semantic".into()],
+            "semantic-only fixture",
+        )];
+        for scale in SCALED {
+            let results = rerank_with_options(
+                vec![semantic.clone(), lexical.clone()],
+                &scaled_options(scale),
+            );
+            let lexical_text = component(result_at(&results, "src/lexical.rs"), "text_relevance")
+                .expect("the lexical hit keeps its text relevance");
+            assert_eq!(lexical_text.raw_value, 1.0, "{scale:?}");
+            assert!(
+                component(result_at(&results, "src/semantic.rs"), "text_relevance").is_none(),
+                "{scale:?}: a semantic-only candidate carries no text relevance"
+            );
+        }
+    }
+
+    #[test]
+    fn in_memory_lexical_fallback_scores_are_scaled_by_the_pool_maximum() {
+        let fallback = |path: &str, score: f32| {
+            let mut result = lexical_result(path, score);
+            result.match_reason = "lexical substring match".into();
+            result.score_breakdown = vec![ScoreComponent::single(
+                "lexical_relevance",
+                score,
+                vec!["lexical".into()],
+                "lexical phrase/token score adjusted for generated and vendor paths",
+            )];
+            result
+        };
+        let results = rerank_with_options(
+            vec![fallback("src/low.rs", 2.0), fallback("src/high.rs", 8.0)],
+            &scaled_options(TextRelevanceScale::PoolMax),
+        );
+        for (path, expected, raw) in [("src/high.rs", 1.0, 8.0), ("src/low.rs", 0.25, 2.0)] {
+            let result = result_at(&results, path);
+            assert_eq!(
+                component(result, "text_relevance").map(|c| c.raw_value),
+                Some(expected),
+                "{path}"
+            );
+            let kept = component(result, "lexical_relevance")
+                .expect("the fallback's own component is kept");
+            assert_eq!((kept.raw_value, kept.contribution), (raw, 0.0));
+        }
+    }
+
+    #[test]
+    fn path_quality_penalty_is_proportional_to_scaled_text_relevance() {
+        // Unscaled, the vendor penalty is -0.65 x 45 = -29.25, an exile tier rather than a
+        // proportional penalty. Scaled, it cannot exceed 0.65 of a text relevance of at most 1.
+        for scale in SCALED {
+            let results = rerank_with_options(
+                vec![
+                    lexical_result("vendor/dep/lib.rs", 45.0),
+                    lexical_result("src/lib.rs", 45.0),
+                ],
+                &scaled_options(scale),
+            );
+            assert_eq!(results[0].path, Path::new("src/lib.rs"), "{scale:?}");
+            let penalty = component(result_at(&results, "vendor/dep/lib.rs"), "path_quality")
+                .expect("the vendor path is still penalised");
+            assert!(
+                penalty.contribution < 0.0 && penalty.contribution >= -0.65,
+                "{scale:?}: {}",
+                penalty.contribution
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_mode_leaves_lexical_scores_unscaled_under_every_scale() {
+        // The pack's lexical stream and the benchmark's `lexical` strategy rank in Baseline mode.
+        let pool = || {
+            vec![
+                lexical_result("src/low.rs", 22.5),
+                lexical_result("src/high.rs", 45.0),
+            ]
+        };
+        let shape = |results: Vec<SearchResult>| {
+            results
+                .into_iter()
+                .map(|result| (result.path, result.score.to_bits(), result.score_breakdown))
+                .collect::<Vec<_>>()
+        };
+        let expected = shape(rerank_baseline(pool()));
+        assert_eq!(
+            expected
+                .iter()
+                .map(|(_, bits, _)| *bits)
+                .collect::<Vec<_>>(),
+            vec![45.0f32.to_bits(), 22.5f32.to_bits()]
+        );
+        for scale in [
+            TextRelevanceScale::Raw,
+            TextRelevanceScale::PoolMax,
+            TextRelevanceScale::Rank { k: 10 },
+        ] {
+            let results = rerank_with_options(
+                pool(),
+                &RankingOptions {
+                    mode: RankingMode::Baseline,
+                    text_relevance_scale: scale,
+                    ..RankingOptions::default()
+                },
+            );
+            assert_eq!(shape(results), expected, "{scale:?}");
+        }
+    }
+
+    #[test]
+    fn candidates_outside_the_lexical_pool_take_no_scaled_text_relevance() {
+        // A git co-change candidate carries no lexical component, and a semantic hit on a test
+        // path is not semantic-only, because the path earns validation proximity. Scaled
+        // against a lexical pool it never joined, the co-change candidate would take rank 101
+        // and, with its history signal, outrank the weakest lexical hits under Rank.
+        const CO_CHANGE: &str = "src/history_neighbour.rs";
+        const SEMANTIC_TEST: &str = "tests/semantic_neighbour.rs";
+        let mut co_change = make_result(CO_CHANGE, 0.2);
+        co_change.match_reason = "historical git co-change candidate".into();
+        co_change.score_breakdown = vec![ScoreComponent::single(
+            "similar_change_overlap",
+            0.18,
+            vec!["history:1".into()],
+            "candidate added from bounded historical similar-change evidence",
+        )];
+        let mut semantic_test = make_result(SEMANTIC_TEST, 0.99);
+        semantic_test.match_reason = "semantic vector match".into();
+        semantic_test.score_breakdown = vec![ScoreComponent::single(
+            "semantic_similarity",
+            0.99,
+            vec!["semantic".into()],
+            "semantic hit on a test path",
+        )];
+        for scale in SCALED {
+            let mut pool = (0..100)
+                .map(|index| {
+                    lexical_result(
+                        &format!("src/lexical_{index:03}.rs"),
+                        30.0 - index as f32 * 0.05,
+                    )
+                })
+                .collect::<Vec<_>>();
+            pool.push(co_change.clone());
+            pool.push(semantic_test.clone());
+            let results = rerank_with_options(pool, &scaled_options(scale));
+            for path in [CO_CHANGE, SEMANTIC_TEST] {
+                let result = result_at(&results, path);
+                assert!(
+                    component(result, "text_relevance").is_none(),
+                    "{scale:?} {path}: scaled against a lexical pool it never joined"
+                );
+                let excluded = component(result, "text_relevance_excluded")
+                    .expect("the exclusion is recorded");
+                assert_eq!(excluded.contribution, 0.0, "{scale:?} {path}");
+            }
+            assert!(
+                component(result_at(&results, SEMANTIC_TEST), "validation_proximity").is_some(),
+                "{scale:?}: the semantic fixture must not be semantic-only"
+            );
+            let position = |wanted: &str| {
+                results
+                    .iter()
+                    .position(|result| result.path == Path::new(wanted))
+                    .expect("path is ranked")
+            };
+            let weakest_lexical = results
+                .iter()
+                .rposition(|result| result.path.to_string_lossy().starts_with("src/lexical_"))
+                .expect("lexical hits are ranked");
+            assert!(
+                position(CO_CHANGE) > weakest_lexical,
+                "{scale:?}: the co-change candidate outranked a lexical hit on a borrowed rank"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_candidate_pool_scales_its_text_relevance_to_one() {
+        for scale in SCALED {
+            let results = rerank_with_options(
+                vec![lexical_result("src/only.rs", 17.25)],
+                &scaled_options(scale),
+            );
+            assert_eq!(
+                component(&results[0], "text_relevance").map(|c| c.raw_value),
+                Some(1.0),
+                "{scale:?}"
+            );
+            assert!(results[0].score.is_finite(), "{scale:?}");
+        }
+    }
+
+    #[test]
+    fn a_pool_whose_top_lexical_score_is_zero_stays_unscaled_and_finite() {
+        for scale in SCALED {
+            let results = rerank_with_options(
+                vec![
+                    lexical_result("src/b.rs", 0.0),
+                    lexical_result("src/a.rs", 0.0),
+                ],
+                &scaled_options(scale),
+            );
+            assert_eq!(
+                ranked_paths(&results),
+                vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")],
+                "{scale:?}"
+            );
+            for result in &results {
+                assert!(result.score.is_finite(), "{scale:?}: {}", result.score);
+                assert!(
+                    result
+                        .score_breakdown
+                        .iter()
+                        .all(|c| c.raw_value.is_finite()
+                            && c.normalized_value.is_finite()
+                            && c.contribution.is_finite()),
+                    "{scale:?}: {:?}",
+                    result.score_breakdown
+                );
+                assert!(
+                    component(result, "text_relevance").is_none(),
+                    "{scale:?}: a zero lexical score contributes no text relevance"
+                );
+                let unscaled = component(result, "text_relevance_unscaled")
+                    .expect("why the pool was left unscaled is visible even at score 0");
+                assert_eq!(unscaled.contribution, 0.0, "{scale:?}");
+                assert!(
+                    unscaled.rationale.contains("positive lexical score"),
+                    "{scale:?}: {}",
+                    unscaled.rationale
+                );
+            }
+        }
     }
 }
