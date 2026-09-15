@@ -27,7 +27,7 @@ ok --json contract-bench benchmarks/contract-fixture \
 
 ## Case Format
 
-Each case declares one Epic #53 contract rule family:
+Each case declares one contract rule family (issue #53):
 
 ```json
 {

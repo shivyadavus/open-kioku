@@ -58,7 +58,7 @@ quadratic attention, and embedding whole-symbol chunks at 8k tokens asked the ru
 
 The checked-in retrieval benchmark compares the deterministic hash baseline with local neural profiles over the repository retrieval fixture and reports Recall@5, Recall@10, MRR, build time, mean/p95 query latency, vector bytes, model-cache size, peak process RSS where the platform exposes it, and host profile. For memory and cache comparisons, run one provider per process with `OK_CC5_BENCH_ONLY` so peak RSS is not inherited from a previously loaded model.
 
-On the isolated 25-case Linux benchmark used for CC5 (4 vCPU AMD EPYC runner):
+On the isolated 25-case Linux benchmark used for the embedding-provider evaluation (4 vCPU AMD EPYC runner):
 
 - `local-hash-384`: Recall@5 ≈ 0.787, Recall@10 = 0.94, MRR ≈ 0.891, p95 query latency ≈ 0.012 ms, peak RSS ≈ 68.6 MB.
 - Qwen3 0.6B at 768 dimensions: Recall@5 = 0.90, Recall@10 = 1.0, MRR ≈ 0.913, p95 query latency ≈ 796 ms, local model cache ≈ 1.20 GB, peak RSS ≈ 3.61 GB.

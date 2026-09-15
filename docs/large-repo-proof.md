@@ -4,10 +4,9 @@ This audit records local Open Kioku 2.1.0 runs against fixed revisions of
 public repositories under permissive open-source licenses. It checks whether
 commands merely execute and whether their results match the indexed source.
 
-Third-party project names and revision identifiers are intentionally omitted
-from this public summary. The document focuses only on Open Kioku behavior
-across repository and language profiles, so it is an audit record rather than a
-standalone reproduction recipe.
+Repositories are described by language, domain, and license rather than by
+name. The record covers Open Kioku's behavior, so it is an audit record rather
+than a reproduction recipe.
 
 ## Environment
 
@@ -122,14 +121,11 @@ exact-reference index is available.
 
 ## Interpretation
 
-The strongest current public proof combines:
+What the audit checked:
 
-- a current, active AI infrastructure codebase
-- a standard permissive open-source license
-- healthy indexing with visible progress
-- source-checked Python definitions and search results
-- a concrete planning task that found implementation and focused tests
-- explicit disclosure of where no-SCIP test selection remains noisy
-
-The cross-repository audit also sets a clear boundary: TypeScript definition and
-reference lookup works, while C++ coverage is not yet strong enough to claim.
+- indexing completed with visible progress on all three repositories
+- Python definitions and search results were checked against the source
+- a concrete Python planning task found the implementation and focused tests
+- no-SCIP test selection was recorded where it remains noisy
+- TypeScript definition and reference lookup works
+- C++ coverage is not yet strong enough to claim

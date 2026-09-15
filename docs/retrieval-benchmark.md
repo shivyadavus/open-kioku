@@ -37,7 +37,7 @@ The initial benchmark records two deterministic baselines over the same candidat
 - **lexical** — existing baseline reranking;
 - **fusion** — Open Kioku's current Fusion ranking mode.
 
-These are baselines, not a declaration that the current Fusion implementation is the final hybrid retrieval architecture. Context Compiler V2 work adds independent evidence streams and more principled fusion incrementally, with each change measured against this harness.
+These are baselines, not a declaration that the current Fusion implementation is the final hybrid retrieval architecture. Later retrieval work adds independent evidence streams and more principled fusion incrementally, with each change measured against this harness.
 
 ## Metrics
 
@@ -113,7 +113,7 @@ The *signal derivation* is shared between the benchmark and the runtime
 (`open_kioku_core::abstention`). The *application* of the calibrated policy is not: the
 two gated strategies never build a `ContextPack` at all, and the routed strategy builds
 one without attaching the policy. Calibration is measured; the deployed decision is not
-measured anywhere, so the two can drift. Closing that gap is tracked under CC6.
+measured anywhere, so the two can drift. That gap is still open.
 
 Anything invalid, unready, or missing deactivates the feature; exact evidence and
 deterministic routing blockers always take precedence.
