@@ -37,7 +37,7 @@ fn search(
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    search_with_ranking_mode(repo, store, query, limit, RankingMode::Fusion)
+    ranked_search_results(repo.as_ref(), store, query, SearchMode::Code, limit)
 }
 
 /// `ok search --regex` answers with the caveats attached, not alongside them.
@@ -80,314 +80,93 @@ fn regex_search(
     Ok(report)
 }
 
-fn graph_search(
-    repo: impl AsRef<Path>,
-    query: &str,
-    limit: usize,
-) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let index_dir = default_index_dir(repo);
-    if !TantivySearchIndex::exists(&index_dir) {
-        anyhow::bail!("graph search index is missing; run `ok index .` first");
-    }
-    Ok(TantivySearchIndex::open_or_create(index_dir)?.search_graph(query, limit)?)
+/// `ok search` answers with its caveats attached, not alongside them, in every ranked mode.
+/// `search_code` reports a filled candidate window as `truncated` with a warning; a bare array
+/// under `--json` could not carry that, and the two surfaces would then disagree about how
+/// complete the same answer is.
+#[derive(serde::Serialize)]
+struct RankedSearchReport {
+    results: Vec<open_kioku_core::SearchResult>,
+    truncated: bool,
+    warnings: Vec<String>,
+    caveats: Vec<String>,
 }
 
-fn semantic_search(
-    repo: impl AsRef<Path>,
+/// One page of the shared ranked search at offset 0, with the report `search_code` returns for
+/// the same state (#448). The `[ranking]` weights come from `ok.toml` on every call; the MCP
+/// server reads them once, when it starts.
+fn ranked_search_report(
+    repo: &Path,
     store: &dyn MetadataStore,
     query: &str,
+    mode: SearchMode,
     limit: usize,
-) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let repo = repo.as_ref();
-    let mut config = OkConfig::load_from_repo(repo)?;
-    config.semantic.enabled = true;
-    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
-    let mut results = manager.search(query, limit)?;
-    let mut options = ranking_options_for_repo(repo)?;
-    options.query = Some(query.into());
-    Ok(top_unique_paths(
-        rerank_with_options(results.split_off(0), &options),
-        limit,
-    ))
+) -> anyhow::Result<RankedSearchReport> {
+    let page = ranked_search_page(repo, store, query, mode, limit)?;
+    let warnings = page.truncation_warning().into_iter().collect::<Vec<_>>();
+    Ok(RankedSearchReport {
+        results: page.results,
+        truncated: !warnings.is_empty(),
+        warnings,
+        caveats: Vec::new(),
+    })
 }
 
-fn hybrid_search(
-    repo: impl AsRef<Path>,
+fn ranked_search_results(
+    repo: &Path,
     store: &dyn MetadataStore,
     query: &str,
+    mode: SearchMode,
     limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let repo = repo.as_ref();
-    let candidate_limit = ranking_candidate_limit(limit);
-    let mut raw = search_raw(repo, store, query, candidate_limit)?;
-    annotate_candidates_with_git_history(store, &mut raw)?;
-
-    let mut config = OkConfig::load_from_repo(repo)?;
-    config.semantic.enabled = true;
-    let manager = SemanticIndexManager::new(repo, store, &config.semantic);
-    if manager.status().ready {
-        raw.extend(manager.search(query, candidate_limit)?);
-    }
-
-    let mut options = ranking_options_for_repo(repo)?;
-    options.query = Some(query.into());
-    Ok(top_unique_paths_merging(
-        rerank_with_options(raw, &options),
-        limit,
-    ))
+    Ok(ranked_search_page(repo, store, query, mode, limit)?.results)
 }
 
-fn search_with_ranking_mode(
-    repo: impl AsRef<Path>,
+fn ranked_search_page(
+    repo: &Path,
     store: &dyn MetadataStore,
     query: &str,
+    mode: SearchMode,
     limit: usize,
-    mode: RankingMode,
-) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let repo = repo.as_ref();
-    let candidate_limit = ranking_candidate_limit(limit);
-    let mut raw = search_raw(repo, store, query, candidate_limit)?;
-    annotate_candidates_with_git_history(store, &mut raw)?;
-    let mut options = ranking_options_for_repo(repo)?;
-    options.mode = mode;
-    options.query = Some(query.into());
-    Ok(top_unique_paths(rerank_with_options(raw, &options), limit))
-}
-
-fn annotate_candidates_with_git_history(
-    store: &dyn MetadataStore,
-    results: &mut Vec<open_kioku_core::SearchResult>,
-) -> anyhow::Result<()> {
-    if results.is_empty() {
-        return Ok(());
-    }
-    let facts = store.analysis_facts(Some(EvidenceSourceType::GitHistory), 10_000)?;
-    if facts.is_empty() {
-        return Ok(());
-    }
-    let files = store.list_files(usize::MAX, 0)?;
-    let files_by_path = files
-        .into_iter()
-        .map(|file| (normalize_path_fragment(&file.path.to_string_lossy()), file))
-        .collect::<std::collections::HashMap<_, _>>();
-    // Group facts by file once; the per-result path used to rescan the full fact list.
-    let mut facts_by_file: std::collections::HashMap<
-        &open_kioku_core::FileId,
-        Vec<&open_kioku_core::AnalysisFact>,
-    > = std::collections::HashMap::new();
-    for fact in &facts {
-        let entry = facts_by_file.entry(&fact.file_id).or_default();
-        if entry.len() < 32 {
-            entry.push(fact);
-        }
-    }
-    let mut existing_paths = results
-        .iter()
-        .map(|result| normalize_path_fragment(&result.path.to_string_lossy()))
-        .collect::<std::collections::HashSet<_>>();
-    let mut additions = Vec::new();
-    for result in &mut *results {
-        let Some(file) =
-            files_by_path.get(&normalize_path_fragment(&result.path.to_string_lossy()))
-        else {
-            continue;
+) -> anyhow::Result<open_kioku_context::search::RankedSearchPage> {
+    let config = OkConfig::load_from_repo(repo)?;
+    let request = RankedSearchRequest {
+        query,
+        mode,
+        // `--limit 0` has always printed every unique path in the candidate pool.
+        limit: (limit > 0).then_some(limit),
+        offset: 0,
+    };
+    let page = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        let mut semantic_config = config.semantic.clone();
+        semantic_config.enabled = true;
+        let manager = SemanticIndexManager::new(repo, store, &semantic_config);
+        let search = |query: &str, depth: usize| manager.search(query, depth);
+        let semantic = SemanticCandidates {
+            ready: manager.status().ready,
+            search: &search,
         };
-        let matched = facts_by_file.get(&file.id).cloned().unwrap_or_default();
-        if matched.is_empty() {
-            continue;
-        }
-        let displayed = matched.iter().copied().take(3).collect::<Vec<_>>();
-        let evidence_ids = displayed
-            .iter()
-            .map(|fact| fact.id.clone())
-            .collect::<Vec<_>>();
-        let labels = displayed
-            .iter()
-            .map(|fact| fact.target.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        for fact in &displayed {
-            let evidence = format!(
-                "git co-change from local history: `{}` ({})",
-                fact.target, fact.message
-            );
-            if !result.evidence.contains(&evidence) {
-                result.evidence.push(evidence);
-            }
-        }
-        for id in &evidence_ids {
-            if !result.evidence_refs.contains(id) {
-                result.evidence_refs.push(id.clone());
-            }
-        }
-        result.score_breakdown.push(ScoreComponent::adjustment(
-            "similar_change_overlap",
-            (0.12 * matched.len() as f32).min(0.18),
-            evidence_ids,
-            format!("bounded local git history says this result co-changed with: {labels}"),
-        ));
-        for fact in matched {
-            let target_path = normalize_path_fragment(&fact.target);
-            if !existing_paths.insert(target_path.clone()) {
-                continue;
-            }
-            let Some(target_file) = files_by_path.get(&target_path) else {
-                continue;
-            };
-            let snippet = store
-                .chunks_for_file(&target_file.id)?
-                .first()
-                .map(|chunk| chunk.text.clone())
-                .unwrap_or_else(|| target_file.path.display().to_string());
-            additions.push(open_kioku_core::SearchResult {
-                path: target_file.path.clone(),
-                line_range: None,
-                snippet,
-                symbol: None,
-                score: 0.18 + (fact.confidence.score() * 0.05).min(0.05),
-                match_reason: "historical git co-change candidate".into(),
-                evidence: vec![format!(
-                    "git co-change from local history: `{}` ({})",
-                    fact.target, fact.message
-                )],
-                evidence_refs: vec![fact.id.clone()],
-                confidence: fact.confidence.score(),
-                score_breakdown: vec![ScoreComponent::single(
-                    "similar_change_overlap",
-                    0.18,
-                    vec![fact.id.clone()],
-                    "candidate added from bounded historical similar-change evidence",
-                )],
-                exact_reference_provenance: None,
-            });
-        }
-    }
-    results.extend(additions);
-    Ok(())
+        ranked_search(repo, store, &request, Some(&semantic), &config.ranking)?
+    } else {
+        ranked_search(repo, store, &request, None, &config.ranking)?
+    };
+    Ok(page)
 }
 
-fn without_git_history_candidates(
-    results: Vec<open_kioku_core::SearchResult>,
-) -> Vec<open_kioku_core::SearchResult> {
-    results
-        .into_iter()
-        .filter(|result| result.match_reason != "historical git co-change candidate")
-        .collect()
-}
-
-fn top_unique_paths(
-    results: Vec<open_kioku_core::SearchResult>,
-    limit: usize,
-) -> Vec<open_kioku_core::SearchResult> {
-    let mut seen = std::collections::HashSet::new();
-    let mut unique = Vec::with_capacity(limit);
-    for result in results {
-        let path = normalize_path_fragment(&result.path.to_string_lossy());
-        if !seen.insert(path) {
-            continue;
-        }
-        unique.push(result);
-        if unique.len() == limit {
-            break;
-        }
-    }
-    unique
-}
-
-fn top_unique_paths_merging(
-    results: Vec<open_kioku_core::SearchResult>,
-    limit: usize,
-) -> Vec<open_kioku_core::SearchResult> {
-    let mut indexes = std::collections::HashMap::<String, usize>::new();
-    let mut unique = Vec::<open_kioku_core::SearchResult>::with_capacity(limit);
-    for result in results {
-        let path = normalize_path_fragment(&result.path.to_string_lossy());
-        if let Some(index) = indexes.get(&path).copied() {
-            if !has_semantic_signal(&result) {
-                continue;
-            }
-            let existing = &mut unique[index];
-            for evidence in result.evidence {
-                if !existing.evidence.contains(&evidence) {
-                    existing.evidence.push(evidence);
-                }
-            }
-            for evidence_ref in result.evidence_refs {
-                if !existing.evidence_refs.contains(&evidence_ref) {
-                    existing.evidence_refs.push(evidence_ref);
-                }
-            }
-            for component in result.score_breakdown {
-                if !existing
-                    .score_breakdown
-                    .iter()
-                    .any(|existing| existing.signal == component.signal)
-                {
-                    existing.score_breakdown.push(component);
-                }
-            }
-            existing.reconcile_score_breakdown();
-            continue;
-        }
-        if unique.len() == limit {
-            continue;
-        }
-        indexes.insert(path, unique.len());
-        unique.push(result);
-    }
-    unique
-}
-
-fn has_semantic_signal(result: &open_kioku_core::SearchResult) -> bool {
-    result
-        .score_breakdown
-        .iter()
-        .any(|component| component.signal == "semantic_similarity")
-}
-
+/// Lexical candidates before ranking, for the benchmarks that rank one pool several ways.
 fn search_raw(
     repo: impl AsRef<Path>,
     store: &dyn MetadataStore,
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<open_kioku_core::SearchResult>> {
-    let index_dir = default_index_dir(repo);
-    if TantivySearchIndex::exists(&index_dir) {
-        return Ok(TantivySearchIndex::open_or_create(index_dir)?.search(query, limit)?);
-    }
-    let files = store.list_files(usize::MAX, 0)?;
-    let chunks = store.all_chunks()?;
-    let symbols = store.list_symbols(None, usize::MAX, 0)?;
-    Ok(search_chunks(&chunks, &files, &symbols, query, limit)?)
-}
-
-fn ranking_candidate_limit(limit: usize) -> usize {
-    limit.clamp(1, 100).saturating_mul(4).clamp(100, 200)
+    Ok(lexical_candidates(repo.as_ref(), store, query, limit)?)
 }
 
 fn ranking_options_for_repo(repo: &Path) -> anyhow::Result<RankingOptions> {
-    let config = OkConfig::load_from_repo(repo)?;
-    Ok(RankingOptions {
-        weights: ranking_weights_from_config(&config.ranking),
-        mode: RankingMode::Fusion,
-        query: None,
-        text_relevance_scale: TextRelevanceScale::Raw,
-    })
-}
-
-fn ranking_weights_from_config(config: &RankingConfig) -> RankingWeights {
-    RankingWeights {
-        text_relevance: config.text_relevance,
-        exact_reference: config.exact_reference,
-        graph_proximity: config.graph_proximity,
-        boundary_fit: config.boundary_fit,
-        runtime_corroboration: config.runtime_corroboration,
-        git_cochange: config.git_cochange,
-        validation_proximity: config.validation_proximity,
-        memory_signal: config.memory_signal,
-        path_quality: config.path_quality,
-        semantic_similarity: config.semantic_similarity,
-    }
+    Ok(open_kioku_context::search::ranking_options(
+        &OkConfig::load_from_repo(repo)?.ranking,
+    ))
 }
 
 fn print_semantic_status(status: &open_kioku_semantic::SemanticStatus) {

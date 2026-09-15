@@ -366,6 +366,297 @@ fn preflight_has_cli_mcp_parity() {
     assert_eq!(mcp["task"], cli["task"]);
 }
 
+/// `ok search` and MCP `search_code` answer through one ranking (#448). The repository's
+/// `[ranking]` weights reorder the lexical order here, so a surface that skipped the rerank, or
+/// read other weights, returns a different list.
+#[test]
+fn search_has_cli_mcp_parity_in_order_and_pages() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("tests")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"search-parity-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    // Source files mention the term more often than the test files, so lexical relevance lists
+    // them first; a high `validation_proximity` weight lists the test files first once ranked.
+    for (path, name, mentions) in [
+        ("src/alpha.rs", "alpha", 9),
+        ("src/gamma.rs", "gamma", 6),
+        ("src/delta.rs", "delta", 3),
+        ("src/zeta.rs", "zeta", 1),
+        ("tests/beta.rs", "beta", 1),
+        ("tests/epsilon.rs", "epsilon", 2),
+    ] {
+        fs::write(
+            repo.join(path),
+            format!(
+                "pub fn run_{name}() -> &'static str {{\n    \"{}\"\n}}\n",
+                "reconcile ".repeat(mentions).trim_end()
+            ),
+        )
+        .unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    let mut rewritten = 0;
+    let config = fs::read_to_string(repo.join("ok.toml"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("text_relevance =") {
+                rewritten += 1;
+                "text_relevance = 0.01".to_string()
+            } else if line.starts_with("validation_proximity =") {
+                rewritten += 1;
+                "validation_proximity = 100.0".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rewritten, 2,
+        "ok.toml should carry both [ranking] weights:\n{config}"
+    );
+    fs::write(repo.join("ok.toml"), config + "\n").unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    fn ranked_identity(results: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+        results
+            .as_array()
+            .expect("results should be an array")
+            .iter()
+            .map(|result| {
+                (
+                    result["path"].as_str().expect("path").to_string(),
+                    result["line_range"].clone(),
+                )
+            })
+            .collect()
+    }
+
+    let modes = [("code", None), ("hybrid", Some("--hybrid"))];
+    let mut requests = String::new();
+    for (mode, _) in modes {
+        for (id, limit, offset) in [("all", 6, 0), ("p0", 2, 0), ("p1", 2, 2), ("p2", 2, 4)] {
+            requests.push_str(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("{mode}-{id}"),
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_code",
+                        "arguments": {"query": "reconcile", "mode": mode, "limit": limit, "offset": offset}
+                    }
+                })
+                .to_string(),
+            );
+            requests.push('\n');
+        }
+    }
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        &requests,
+    );
+    let responses = mcp
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let response: serde_json::Value = serde_json::from_str(line).unwrap();
+            (
+                response["id"].as_str().expect("response id").to_string(),
+                response["result"]["structuredContent"].clone(),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for (mode, flag) in modes {
+        let cli = run({
+            let mut command = ok();
+            command.arg("--repo").arg(repo).arg("--json").arg("search");
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            command.arg("reconcile").arg("--limit").arg("6");
+            command
+        });
+        let cli: serde_json::Value = serde_json::from_str(&cli).unwrap();
+        let cli_order = ranked_identity(&cli["results"]);
+        assert_eq!(
+            cli_order.len(),
+            6,
+            "{mode}: every fixture file should match: {cli}"
+        );
+        // Without this the test could not tell a reranked list from the index's own order.
+        let lexical = cli["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| {
+                result["score_breakdown"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|component| component["signal"] == "text_relevance")
+                    .and_then(|component| component["raw_value"].as_f64())
+                    .expect("every result should carry text_relevance")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            lexical.windows(2).any(|pair| pair[0] < pair[1]),
+            "{mode}: the fixture must rank against lexical order: {lexical:?}"
+        );
+
+        let all = &responses[&format!("{mode}-all")];
+        assert_eq!(
+            ranked_identity(&all["results"]),
+            cli_order,
+            "{mode}: search_code must return ok search's order: {all}"
+        );
+        assert_eq!(all["has_more"], false, "{mode}: {all}");
+
+        let mut paged = Vec::new();
+        for (page, has_more) in [("p0", true), ("p1", true), ("p2", false)] {
+            let response = &responses[&format!("{mode}-{page}")];
+            assert_eq!(response["has_more"], has_more, "{mode} {page}: {response}");
+            paged.extend(ranked_identity(&response["results"]));
+        }
+        assert_eq!(
+            paged, cli_order,
+            "{mode}: pages must be slices of one ranking"
+        );
+    }
+    assert!(responses["hybrid-all"]["semantic_status"].is_object());
+}
+
+/// A deep `search_code` page is served, and it is the matching slice of `ok search`'s list: the
+/// candidate pool grows with `offset + limit` up to the 500 candidates `search_code` could page
+/// through before the two surfaces shared one ranking (#448).
+#[test]
+fn deep_search_pages_have_cli_mcp_parity() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"deep-search-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    for index in 0..520 {
+        fs::write(
+            repo.join(format!("src/unit_{index:03}.rs")),
+            format!("pub fn unit_{index:03}() -> &'static str {{\n    \"ledgerline\"\n}}\n"),
+        )
+        .unwrap();
+    }
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    let cli = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("ledgerline")
+            .arg("--limit")
+            .arg("170");
+        command
+    });
+    let cli: serde_json::Value = serde_json::from_str(&cli).unwrap();
+    let cli = cli["results"]
+        .as_array()
+        .expect("ok search prints its results")
+        .clone();
+    assert_eq!(cli.len(), 170, "every fixture file matches the query");
+
+    let mcp = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        concat!(
+            r#"{"jsonrpc":"2.0","id":"deep","method":"tools/call","params":{"name":"search_code","arguments":{"query":"ledgerline","limit":20,"offset":150}}}"#,
+            "\n"
+        ),
+    );
+    let response: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap();
+    let page = &response["result"]["structuredContent"];
+    let results = page["results"].as_array().expect("results");
+    assert_eq!(results.len(), 20, "{page}");
+    assert_eq!(page["has_more"], true, "{page}");
+    assert_eq!(page["truncated"], false, "{page}");
+
+    let identity =
+        |result: &serde_json::Value| (result["path"].clone(), result["line_range"].clone());
+    assert_eq!(
+        results.iter().map(identity).collect::<Vec<_>>(),
+        cli[150..170].iter().map(identity).collect::<Vec<_>>(),
+        "search_code offset 150 must be ok search's results 150..170"
+    );
+
+    // Past the 500-candidate window both surfaces rank, each must say so in the same words:
+    // a page that ends the ranking from a filled window is short of the index.
+    let cli_capped = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("ledgerline")
+            .arg("--limit")
+            .arg("520");
+        command
+    });
+    let cli_capped: serde_json::Value = serde_json::from_str(&cli_capped).unwrap();
+    assert_eq!(cli_capped["truncated"], true, "{cli_capped}");
+    let cli_warning = cli_capped["warnings"][0]
+        .as_str()
+        .expect("ok search reports the filled window")
+        .to_string();
+
+    let mcp_capped = run_with_stdin(
+        {
+            let mut command = ok();
+            command.arg("mcp").arg("serve").arg("--repo").arg(repo);
+            command
+        },
+        concat!(
+            r#"{"jsonrpc":"2.0","id":"capped","method":"tools/call","params":{"name":"search_code","arguments":{"query":"ledgerline","limit":100,"offset":450}}}"#,
+            "\n"
+        ),
+    );
+    let mcp_capped: serde_json::Value = serde_json::from_str(mcp_capped.trim()).unwrap();
+    let mcp_capped = &mcp_capped["result"]["structuredContent"];
+    assert_eq!(mcp_capped["truncated"], true, "{mcp_capped}");
+    assert_eq!(
+        mcp_capped["warnings"][0].as_str(),
+        Some(cli_warning.as_str()),
+        "both surfaces must report a filled candidate window in the same words: {mcp_capped}"
+    );
+}
+
 #[test]
 fn history_bench_covers_public_api_families() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -4437,6 +4728,17 @@ fn caller_argument_errors_exit_2_and_return_invalid_params() {
             mcp_error("search_code", serde_json::json!({"query": query})),
             blank
         );
+    }
+
+    // A query the caller never sent is a different mistake from one sent empty. `ok search`
+    // takes the query as a positional argument, so clap reports the missing one; `search_code`
+    // reports it the way every other tool reports a forgotten argument.
+    let missing = "invalid input: missing required string argument `query`";
+    let stderr = cli(&["search"]);
+    assert!(stderr.contains("QUERY"), "{stderr}");
+    assert!(!stderr.contains(&blank), "{stderr}");
+    for arguments in [serde_json::json!({}), serde_json::json!({"query": 7})] {
+        assert_eq!(mcp_error("search_code", arguments), missing);
     }
 
     let stderr = cli(&["retrieve-context", "bogus"]);

@@ -19,6 +19,7 @@ pub mod candidates;
 mod lattice;
 mod region;
 pub mod routing;
+pub mod search;
 
 fn is_trusted_context_dependency_edge(edge: &GraphEdge) -> bool {
     match &edge.edge_type {

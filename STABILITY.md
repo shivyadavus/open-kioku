@@ -29,6 +29,10 @@ version bump.
 | `ok bench` | Run benchmarks |
 | `ok eval` | Run evaluation suites |
 
+`ok search --json` changed shape: the ranked modes return `{results, truncated, warnings,
+caveats}`, the shape `ok search --regex --json` already returned, not a bare array of results.
+Read `.results`. See the Unreleased entry in `CHANGELOG.md`.
+
 ## Stable MCP Tools
 
 The following MCP tools have stable JSON-RPC interfaces. Their input schemas,

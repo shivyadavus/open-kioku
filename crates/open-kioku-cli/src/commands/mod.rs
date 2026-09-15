@@ -638,18 +638,19 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 })?;
                 return Ok(());
             }
-            let results = if matches!(kind, SearchKind::Graph) {
+            let mode = if matches!(kind, SearchKind::Graph) {
                 require_current_analysis_semantics(&store)?;
-                graph_search(&repo, &query, limit)?
+                SearchMode::Graph
             } else if semantic {
-                semantic_search(&repo, &store, &query, limit)?
+                SearchMode::Semantic
             } else if hybrid {
-                hybrid_search(&repo, &store, &query, limit)?
+                SearchMode::Hybrid
             } else {
-                search(&repo, &store, &query, limit)?
+                SearchMode::Code
             };
-            output(cli.json, &results, || {
-                for result in &results {
+            let report = ranked_search_report(&repo, &store, &query, mode, limit)?;
+            output(cli.json, &report, || {
+                for result in &report.results {
                     println!(
                         "{}:{}  {:.2}  {}",
                         result.path.display(),
@@ -665,6 +666,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                             println!("  ranking: {}", signals.join(", "));
                         }
                     }
+                }
+                // The same sentence `search_code` returns when its candidate window filled.
+                for warning in &report.warnings {
+                    println!("warning: {warning}");
                 }
             })?;
         }
