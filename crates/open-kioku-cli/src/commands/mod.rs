@@ -822,7 +822,20 @@ pub async fn run_cli() -> anyhow::Result<()> {
             if let Some(since) = args.since.as_deref() {
                 let changed = changed_ranges_since(&repo, since)?;
                 let mut reports = Vec::new();
-                for file in changed.iter().filter_map(|change| change.new_path.as_ref()) {
+                let mut files = Vec::new();
+                for change in &changed {
+                    files.extend(change.new_path.iter());
+                    // A rename removes its previous path, which the index still describes.
+                    if change.status == GitChangeKind::Renamed {
+                        files.extend(
+                            change
+                                .old_path
+                                .iter()
+                                .filter(|old| change.new_path.as_ref() != Some(*old)),
+                        );
+                    }
+                }
+                for file in files {
                     let mut report = engine.for_file(file)?;
                     report.architecture_policy = architecture_policy.clone();
                     reports.push(report);

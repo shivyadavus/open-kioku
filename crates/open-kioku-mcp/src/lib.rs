@@ -2095,12 +2095,16 @@ fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Res
 }
 
 fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
-    let path = change
-        .new_path
-        .as_ref()
-        .or(change.old_path.as_ref())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unknown>".into());
+    let path = match (&change.old_path, &change.new_path) {
+        (Some(old), Some(new)) if old != new => {
+            format!("{} (from {})", new.display(), old.display())
+        }
+        (old, new) => new
+            .as_ref()
+            .or(old.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into()),
+    };
     let ranges = change
         .hunks
         .iter()
@@ -2123,8 +2127,9 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
 fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
     // `since` is caller input on a read-only server. Without the terminator a value such as
     // `--output=<path>` is an option to git, which exits 0 and writes the diff there.
-    // Rename detection is requested rather than left to `diff.renames`, so the report pairs
-    // both sides of a rename whatever the local git config says.
+    // Rename detection and the `a/`/`b/` path prefixes are requested rather than left to
+    // `diff.renames`, `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix`, so the report
+    // pairs both sides of a rename, and only a real rename, whatever the local git config says.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -2133,6 +2138,8 @@ fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
             "--unified=0",
             "--no-ext-diff",
             "--find-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--relative",
             "--end-of-options",
         ])
@@ -2160,6 +2167,8 @@ struct VerificationExplanationOutput {
     contract_id: String,
     decision: String,
     changed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previous_paths: Vec<String>,
     boundary_failures: Vec<String>,
     warnings: Vec<String>,
     dependency_deltas: Vec<String>,
@@ -2350,6 +2359,22 @@ fn explain_verification_report(
             .changed_files
             .iter()
             .map(|path| path.display().to_string())
+            .collect(),
+        previous_paths: report
+            .change_report
+            .previous_paths
+            .iter()
+            .map(|previous| {
+                let relation = match previous.kind {
+                    open_kioku_patch::PreviousPathKind::Rename => "renamed from",
+                    open_kioku_patch::PreviousPathKind::Copy => "copied from",
+                };
+                format!(
+                    "{} {relation} {}",
+                    previous.path.display(),
+                    previous.previous_path.display()
+                )
+            })
             .collect(),
         boundary_failures: verification_finding_summaries(
             &report.change_report.boundary_violations,
@@ -2661,6 +2686,13 @@ fn render_verification_explanation_markdown(explanation: &VerificationExplanatio
         explanation.contract_id, explanation.decision
     ));
     push_markdown_list(&mut out, "Changed Files", &explanation.changed_files);
+    if !explanation.previous_paths.is_empty() {
+        push_markdown_list(
+            &mut out,
+            "Renamed and Copied Files",
+            &explanation.previous_paths,
+        );
+    }
     push_markdown_list(
         &mut out,
         "Boundary Failures",
@@ -2696,6 +2728,9 @@ fn render_verification_explanation_toon(explanation: &VerificationExplanationOut
         explanation.contract_id, explanation.decision
     );
     push_toon_list(&mut out, "changed_files", &explanation.changed_files);
+    if !explanation.previous_paths.is_empty() {
+        push_toon_list(&mut out, "previous_paths", &explanation.previous_paths);
+    }
     push_toon_list(
         &mut out,
         "boundary_failures",
@@ -4506,6 +4541,45 @@ mod tests {
 
         let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();
         assert!(diff.contains("+two"), "{diff}");
+    }
+
+    /// Local path-prefix settings would make one path read as two, which the verifier would
+    /// take for a rename; the diff pins `a/` and `b/`.
+    #[test]
+    fn git_diff_since_pins_path_prefixes_over_local_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "one"]);
+        git(&["config", "diff.mnemonicPrefix", "true"]);
+        git(&["config", "diff.srcPrefix", "old/"]);
+        git(&["config", "diff.dstPrefix", "new/"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();
+
+        assert!(
+            diff.contains("--- a/a.txt") && diff.contains("+++ b/a.txt"),
+            "{diff}"
+        );
+        assert_eq!(
+            open_kioku_patch::changed_files_from_unified_diff(&diff),
+            vec![PathBuf::from("a.txt")]
+        );
     }
 
     #[tokio::test]

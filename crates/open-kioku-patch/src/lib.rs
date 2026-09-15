@@ -302,8 +302,13 @@ impl<'a> ChangeVerifier<'a> {
                 "verify requires at least one changed file or a non-empty unified diff".into(),
             ));
         }
-        let changed_regions = changed_regions_from_input(&input);
-        let previous_paths = previous_paths_from_input(&input);
+        let diff_pairs = diff_pairs_from_input(&input);
+        let previous_paths = diff_pairs
+            .iter()
+            .map(|pair| pair.previous.clone())
+            .collect::<Vec<_>>();
+        let changed_regions = changed_regions_from_input(&input, &previous_paths);
+        let scoped_paths = diff_scoped_paths(&diff_pairs);
 
         let mut boundary_violations =
             boundary_violations(plan, &changed_files, &previous_paths, &input.evidence_refs);
@@ -319,7 +324,7 @@ impl<'a> ChangeVerifier<'a> {
             symbols: changed_symbols,
             regions_without_symbol: changed_regions_without_symbol,
             granularity_warnings,
-        } = changed_symbols(self.store, &changed_files, &changed_regions)?;
+        } = changed_symbols(self.store, &changed_files, &changed_regions, &scoped_paths)?;
         let recommended_tests = recommended_tests(self.store, &changed_files)?;
         let missing_tests = missing_tests(plan, &recommended_tests);
         let changed_impact = changed_impact(self.store, self.search_index, plan, &changed_files)?;
@@ -481,6 +486,7 @@ impl<'a> ContractVerifier<'a> {
                 repo,
                 contract,
                 &change_report.changed_files,
+                &change_report.previous_paths,
             )?)
         } else {
             None
@@ -1219,6 +1225,7 @@ fn diff_public_api_surface(
     repo: &Path,
     contract: &ChangeContractV1,
     changed_files: &[PathBuf],
+    previous_paths: &[PreviousPath],
 ) -> Result<ApiSurfaceDeltaReport> {
     let before = fingerprint_public_api(
         store,
@@ -1241,15 +1248,56 @@ fn diff_public_api_surface(
         .map(|fingerprint| (api_fingerprint_key(fingerprint), fingerprint))
         .collect::<BTreeMap<_, _>>();
 
+    // A public item a rename carries to the new path is paired with its old-path fingerprint,
+    // so an unchanged item reads as a move and only a real removal or signature change fails.
+    let renamed_to = previous_paths
+        .iter()
+        .filter(|previous| previous.kind == PreviousPathKind::Rename)
+        .map(|previous| {
+            (
+                normalize_path(&previous.previous_path),
+                normalize_path(&previous.path),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut paired_after = BTreeSet::new();
     let mut findings = Vec::new();
     for (key, before_fingerprint) in &before_by_key {
         match after_by_key.get(key) {
-            None => findings.push(api_surface_delta_finding(
-                contract,
-                ApiSurfaceChangeKind::Removed,
-                Some(before_fingerprint),
-                None,
-            )),
+            None => {
+                let moved = renamed_to
+                    .get(&normalize_path(Path::new(&before_fingerprint.path.0)))
+                    .map(|new_path| (new_path.clone(), key.1.clone(), key.2.clone()))
+                    .filter(|moved_key| !before_by_key.contains_key(moved_key))
+                    .and_then(|moved_key| after_by_key.get_key_value(&moved_key));
+                match moved {
+                    Some((moved_key, after_fingerprint))
+                        if before_fingerprint.signature == after_fingerprint.signature =>
+                    {
+                        paired_after.insert(moved_key.clone());
+                        findings.push(api_surface_moved_finding(
+                            contract,
+                            before_fingerprint,
+                            after_fingerprint,
+                        ));
+                    }
+                    Some((moved_key, after_fingerprint)) => {
+                        paired_after.insert(moved_key.clone());
+                        findings.push(api_surface_delta_finding(
+                            contract,
+                            ApiSurfaceChangeKind::SignatureChanged,
+                            Some(before_fingerprint),
+                            Some(after_fingerprint),
+                        ));
+                    }
+                    None => findings.push(api_surface_delta_finding(
+                        contract,
+                        ApiSurfaceChangeKind::Removed,
+                        Some(before_fingerprint),
+                        None,
+                    )),
+                }
+            }
             Some(after_fingerprint) if before_fingerprint.digest != after_fingerprint.digest => {
                 findings.push(api_surface_delta_finding(
                     contract,
@@ -1262,7 +1310,7 @@ fn diff_public_api_surface(
         }
     }
     for (key, after_fingerprint) in &after_by_key {
-        if !before_by_key.contains_key(key) {
+        if !before_by_key.contains_key(key) && !paired_after.contains(key) {
             findings.push(api_surface_delta_finding(
                 contract,
                 ApiSurfaceChangeKind::Added,
@@ -1359,7 +1407,9 @@ fn apply_delta_reports(
             report.api_surface_deltas.push(finding.clone());
             match finding.kind.as_str() {
                 "api_surface_violation" => report.boundary_violations.push(finding.clone()),
-                "api_surface_review_required" => report.warnings.push(finding.clone()),
+                "api_surface_review_required" | "api_surface_moved" => {
+                    report.warnings.push(finding.clone())
+                }
                 _ => {}
             }
         }
@@ -1652,6 +1702,57 @@ fn api_fingerprint_key(fingerprint: &PublicApiFingerprint) -> (String, String, S
         fingerprint.kind.clone(),
         fingerprint.symbol.clone(),
     )
+}
+
+/// A public item a rename carried to its new path with kind, name and signature unchanged. The
+/// item still exists, so the move warns. Its import path changes, though, so a contract whose
+/// `api_surface_constraints` forbid removals in the previous path's scope fails it: the explicit
+/// contract outranks the pairing.
+fn api_surface_moved_finding(
+    contract: &ChangeContractV1,
+    before: &PublicApiFingerprint,
+    after: &PublicApiFingerprint,
+) -> VerificationFinding {
+    let mut evidence_refs = evidence_ref_strings(&before.evidence_refs);
+    evidence_refs.extend(evidence_ref_strings(&after.evidence_refs));
+    let matching_constraints = contract
+        .api_surface_constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, constraint)| constraint_matches_scope(&constraint.scope, &before.path.0))
+        .collect::<Vec<_>>();
+    let removal_allowed = matching_constraints.iter().any(|(_, constraint)| {
+        constraint
+            .allowed_changes
+            .contains(&ApiSurfaceChangeKind::Removed)
+    });
+    let forbidding_constraint = matching_constraints
+        .iter()
+        .find(|(_, constraint)| constraint.severity == ConstraintSeverity::Forbidden)
+        .filter(|_| !removal_allowed);
+    match forbidding_constraint {
+        Some((index, constraint)) => {
+            evidence_refs.extend(evidence_ref_strings(&constraint.evidence_refs));
+            VerificationFinding {
+                path: Some(PathBuf::from(&before.path.0)),
+                kind: "api_surface_violation".into(),
+                reason: format!(
+                    "public {} `{}` moved with the rename from `{}` to `{}`, which removes it from a scope where api_surface_constraints[{index}] forbids removals: {}",
+                    after.kind, after.symbol, before.path.0, after.path.0, constraint.reason
+                ),
+                evidence_refs,
+            }
+        }
+        None => VerificationFinding {
+            path: Some(PathBuf::from(&after.path.0)),
+            kind: "api_surface_moved".into(),
+            reason: format!(
+                "public {} `{}` moved with the rename from `{}` to `{}`, signature unchanged (`{}`); review callers that refer to it by path",
+                after.kind, after.symbol, before.path.0, after.path.0, after.signature
+            ),
+            evidence_refs,
+        },
+    }
 }
 
 fn api_surface_delta_finding(
@@ -2264,11 +2365,25 @@ impl DependencyDeltaClassificationKey for DependencyDeltaClassification {
 pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
     let mut pending_old: Option<String> = None;
+    let mut in_git_entry = false;
+    let mut in_git_hunks = false;
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_git_entry = true;
+            in_git_hunks = false;
+            pending_old = None;
             if let (_, Some(path)) = git_header_paths(rest) {
                 paths.insert(PathBuf::from(path));
             }
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            in_git_hunks = in_git_entry;
+            continue;
+        }
+        // After a `diff --git` entry's first hunk header every line is content: a removed
+        // `-- x` or an added `++ y` reads as `--- x` or `+++ y` and is not a path.
+        if in_git_hunks {
             continue;
         }
         if let Some(path) = line.strip_prefix("--- ") {
@@ -2302,11 +2417,19 @@ struct GitEntryHeader {
     to: Option<String>,
     kind: Option<PreviousPathKind>,
     added_or_deleted: bool,
+    binary: bool,
     in_hunks: bool,
 }
 
+/// A rename or copy pair from a diff. Git reports a binary pair without hunks even when its
+/// content changed, so only a text pair's hunks state every changed line.
+struct DiffPair {
+    previous: PreviousPath,
+    binary: bool,
+}
+
 impl GitEntryHeader {
-    fn previous_path(self) -> Option<PreviousPath> {
+    fn diff_pair(self) -> Option<DiffPair> {
         if self.added_or_deleted {
             return None;
         }
@@ -2325,23 +2448,34 @@ impl GitEntryHeader {
         }
         // Git writes `rename`/`copy` lines for every entry whose paths differ. An entry
         // without them is still checked as a rename rather than trusted to leave `old` alone.
-        Some(PreviousPath {
-            path: PathBuf::from(new),
-            previous_path: PathBuf::from(old),
-            kind: self.kind.unwrap_or(PreviousPathKind::Rename),
+        Some(DiffPair {
+            previous: PreviousPath {
+                path: PathBuf::from(new),
+                previous_path: PathBuf::from(old),
+                kind: self.kind.unwrap_or(PreviousPathKind::Rename),
+            },
+            binary: self.binary,
         })
     }
 }
 
-/// Renames and copies declared by the `diff --git` entries of a diff, in diff order. Only each
-/// entry's header is read, never its hunks, so an added or removed line that begins with
-/// `--- ` or `+++ ` cannot be taken for a path.
+/// Renames and copies declared by the `diff --git` entries of a diff, in diff order.
 fn previous_paths_from_unified_diff(diff: &str) -> Vec<PreviousPath> {
-    let mut previous_paths = Vec::new();
+    diff_pairs_from_unified_diff(diff)
+        .into_iter()
+        .map(|pair| pair.previous)
+        .collect()
+}
+
+/// The rename and copy pairs of a diff's `diff --git` entries, in diff order. Only each entry's
+/// header is read, never its hunks, so an added or removed line that begins with `--- ` or
+/// `+++ ` cannot be taken for a path.
+fn diff_pairs_from_unified_diff(diff: &str) -> Vec<DiffPair> {
+    let mut pairs = Vec::new();
     let mut entry: Option<GitEntryHeader> = None;
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            previous_paths.extend(entry.take().and_then(GitEntryHeader::previous_path));
+            pairs.extend(entry.take().and_then(GitEntryHeader::diff_pair));
             let (header_old, header_new) = git_header_paths(rest);
             entry = Some(GitEntryHeader {
                 header_old,
@@ -2369,32 +2503,52 @@ fn previous_paths_from_unified_diff(diff: &str) -> Vec<PreviousPath> {
             header.kind = Some(PreviousPathKind::Copy);
         } else if line.starts_with("new file mode ") || line.starts_with("deleted file mode ") {
             header.added_or_deleted = true;
+        } else if line.starts_with("Binary files ") || line == "GIT binary patch" {
+            header.binary = true;
         } else if let Some(value) = line.strip_prefix("--- ") {
             header.marker_old = Some(diff_path(value));
         } else if let Some(value) = line.strip_prefix("+++ ") {
             header.marker_new = Some(diff_path(value));
         }
     }
-    previous_paths.extend(entry.and_then(GitEntryHeader::previous_path));
-    previous_paths
+    pairs.extend(entry.and_then(GitEntryHeader::diff_pair));
+    pairs
 }
 
-fn previous_paths_from_input(input: &VerifyChangeInput) -> Vec<PreviousPath> {
+fn diff_pairs_from_input(input: &VerifyChangeInput) -> Vec<DiffPair> {
     let Some(diff) = &input.unified_diff else {
         return Vec::new();
     };
-    let mut previous_paths = Vec::new();
-    for previous in previous_paths_from_unified_diff(diff) {
+    let mut pairs: Vec<DiffPair> = Vec::new();
+    for pair in diff_pairs_from_unified_diff(diff) {
         let previous = PreviousPath {
-            path: PathBuf::from(normalize_path(&previous.path)),
-            previous_path: PathBuf::from(normalize_path(&previous.previous_path)),
-            kind: previous.kind,
+            path: PathBuf::from(normalize_path(&pair.previous.path)),
+            previous_path: PathBuf::from(normalize_path(&pair.previous.previous_path)),
+            kind: pair.previous.kind,
         };
-        if !previous_paths.contains(&previous) {
-            previous_paths.push(previous);
+        match pairs.iter_mut().find(|known| known.previous == previous) {
+            // The same pair from two joined diffs is binary if either one says so.
+            Some(known) => known.binary |= pair.binary,
+            None => pairs.push(DiffPair {
+                previous,
+                binary: pair.binary,
+            }),
         }
     }
-    previous_paths
+    pairs
+}
+
+/// Paths whose changed lines a diff states hunk by hunk: both sides of a text rename and the
+/// destination of a text copy. Such a path with no hunk changed no lines.
+fn diff_scoped_paths(pairs: &[DiffPair]) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for pair in pairs.iter().filter(|pair| !pair.binary) {
+        paths.insert(pair.previous.path.clone());
+        if pair.previous.kind == PreviousPathKind::Rename {
+            paths.insert(pair.previous.previous_path.clone());
+        }
+    }
+    paths
 }
 
 /// The `a/` and `b/` paths of a `diff --git a/<old> b/<new>` line. An unquoted path may hold
@@ -2512,22 +2666,30 @@ pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<Hunk
     let mut hunks = BTreeMap::<PathBuf, Vec<HunkRanges>>::new();
     let mut current: Option<PathBuf> = None;
     let mut pending_old: Option<String> = None;
+    let mut in_git_entry = false;
+    let mut in_git_hunks = false;
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_git_entry = true;
+            in_git_hunks = false;
+            pending_old = None;
             current = git_header_paths(rest).1.map(PathBuf::from);
             continue;
         }
-        if let Some(path) = line.strip_prefix("--- ") {
-            pending_old = diff_path(path);
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("+++ ") {
-            if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
-                current = Some(PathBuf::from(path));
+        if !in_git_hunks {
+            if let Some(path) = line.strip_prefix("--- ") {
+                pending_old = diff_path(path);
+                continue;
             }
-            continue;
+            if let Some(path) = line.strip_prefix("+++ ") {
+                if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
+                    current = Some(PathBuf::from(path));
+                }
+                continue;
+            }
         }
         if let Some(header) = line.strip_prefix("@@ ") {
+            in_git_hunks = in_git_entry;
             let (Some(path), Some((old, new))) = (current.as_ref(), parse_hunk_header(header))
             else {
                 continue;
@@ -2583,7 +2745,10 @@ fn changed_files_from_input(input: &VerifyChangeInput) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
 
-fn changed_regions_from_input(input: &VerifyChangeInput) -> BTreeMap<PathBuf, Vec<ChangedRegion>> {
+fn changed_regions_from_input(
+    input: &VerifyChangeInput,
+    previous_paths: &[PreviousPath],
+) -> BTreeMap<PathBuf, Vec<ChangedRegion>> {
     let mut regions = BTreeMap::<PathBuf, Vec<ChangedRegion>>::new();
     for (path, ranges) in &input.changed_ranges {
         regions
@@ -2596,14 +2761,38 @@ fn changed_regions_from_input(input: &VerifyChangeInput) -> BTreeMap<PathBuf, Ve
     }
     if let Some(diff) = &input.unified_diff {
         for (path, hunks) in changed_hunks_from_unified_diff(diff) {
-            regions
-                .entry(PathBuf::from(normalize_path(&path)))
-                .or_default()
-                .extend(
-                    hunks
-                        .into_iter()
-                        .map(|(old, new)| ChangedRegion { new, old }),
-                );
+            let path = PathBuf::from(normalize_path(&path));
+            let pair = previous_paths.iter().find(|previous| previous.path == path);
+            for (old, new) in hunks {
+                let Some(pair) = pair else {
+                    regions
+                        .entry(path.clone())
+                        .or_default()
+                        .push(ChangedRegion { new, old });
+                    continue;
+                };
+                // A hunk's pre-edit lines are lines of the path the content came from, which the
+                // index describes; its post-edit lines are lines of the new path. A copy's source
+                // did not change, so its pre-edit side is dropped.
+                if let Some(new) = new {
+                    regions
+                        .entry(path.clone())
+                        .or_default()
+                        .push(ChangedRegion {
+                            new: Some(new),
+                            old: None,
+                        });
+                }
+                if let (Some(old), PreviousPathKind::Rename) = (old, pair.kind) {
+                    regions
+                        .entry(pair.previous_path.clone())
+                        .or_default()
+                        .push(ChangedRegion {
+                            new: None,
+                            old: Some(old),
+                        });
+                }
+            }
         }
     }
     regions
@@ -3069,6 +3258,7 @@ fn changed_symbols(
     store: &dyn MetadataStore,
     changed_files: &[PathBuf],
     changed_regions: &BTreeMap<PathBuf, Vec<ChangedRegion>>,
+    scoped_paths: &BTreeSet<PathBuf>,
 ) -> Result<ChangedSymbols> {
     let mut symbols = BTreeSet::new();
     let mut regions_without_symbol = Vec::new();
@@ -3078,6 +3268,11 @@ fn changed_symbols(
             .get(path)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        // The diff states every changed line of this path and names none: a side of a rename
+        // that the edit did not touch. Listing the whole file would claim a change it lacks.
+        if regions.is_empty() && scoped_paths.contains(path) {
+            continue;
+        }
         let file_symbols = match store.get_file_by_path(path)? {
             Some(file) => store.symbols_for_file(&file.id)?,
             None => Vec::new(),
@@ -4013,6 +4208,257 @@ rename to src/menu.rs
             "{}",
             violation.reason
         );
+    }
+
+    #[test]
+    fn hunk_lines_that_look_like_file_headers_name_no_path_in_a_git_entry() {
+        let modified = "diff --git a/db/schema.sql b/db/schema.sql\n--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -3 +3 @@\n--- legacy index\n+++ replacement index\n";
+        assert_eq!(
+            changed_files_from_unified_diff(modified),
+            vec![PathBuf::from("db/schema.sql")]
+        );
+        assert!(previous_paths_from_unified_diff(modified).is_empty());
+        assert_eq!(
+            changed_hunks_from_unified_diff(modified)
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![Path::new("db/schema.sql")]
+        );
+
+        let renamed = "diff --git a/db/old.sql b/db/new.sql\nsimilarity index 91%\nrename from db/old.sql\nrename to db/new.sql\n--- a/db/old.sql\n+++ b/db/new.sql\n@@ -1 +1 @@\n--- dropped view\n+++ kept view\n";
+        assert_eq!(
+            changed_files_from_unified_diff(renamed),
+            vec![PathBuf::from("db/new.sql"), PathBuf::from("db/old.sql")]
+        );
+        assert_eq!(
+            previous_paths_from_unified_diff(renamed),
+            vec![PreviousPath {
+                path: PathBuf::from("db/new.sql"),
+                previous_path: PathBuf::from("db/old.sql"),
+                kind: PreviousPathKind::Rename,
+            }]
+        );
+        assert_eq!(
+            changed_hunks_from_unified_diff(renamed)
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![Path::new("db/new.sql")]
+        );
+    }
+
+    #[test]
+    fn a_rename_with_edits_scopes_changed_symbols_to_each_side_of_its_hunks() {
+        let store = store_with_handler_symbols();
+        let plan = plan_forbidding_secrets(&["src/handler.rs", "src/checkout.rs"]);
+        let report = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan,
+                VerifyChangeInput {
+                    unified_diff: Some(
+                        "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 95%\nrename from src/handler.rs\nrename to src/checkout.rs\n--- a/src/handler.rs\n+++ b/src/checkout.rs\n@@ -6 +6 @@\n-    old();\n+    new();\n".into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Pre-edit line 6 is read against the previous path, which the index holds; post-edit
+        // line 6 belongs to the new path, which it does not.
+        assert_eq!(
+            report.changed_symbols,
+            vec!["handler::checkout".to_string()]
+        );
+        assert_eq!(
+            report.changed_regions_without_symbol,
+            vec!["src/checkout.rs:6-6".to_string()]
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == SYMBOL_GRANULARITY_WARNING),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_pure_rename_lists_no_changed_symbols_and_no_granularity_warning() {
+        let store = store_with_handler_symbols();
+        let plan = plan_forbidding_secrets(&["src/handler.rs", "src/checkout.rs"]);
+        let report = ChangeVerifier::new(&store)
+            .verify(
+                Path::new("."),
+                &plan,
+                VerifyChangeInput {
+                    unified_diff: Some(
+                        "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 100%\nrename from src/handler.rs\nrename to src/checkout.rs\n".into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(
+            report.changed_symbols.is_empty(),
+            "{:?}",
+            report.changed_symbols
+        );
+        assert!(report.changed_regions_without_symbol.is_empty());
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.kind == SYMBOL_GRANULARITY_WARNING),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    fn verify_api_surface_of_rename(
+        indexed: &str,
+        renamed: &str,
+        diff: &str,
+        constraints: Vec<ApiSurfaceConstraint>,
+    ) -> ContractVerificationReport {
+        let repo = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("src")).unwrap();
+        fs::write(repo.path().join("src/checkout.rs"), renamed).unwrap();
+        let store = RuntimeStore::new()
+            .without_runtime()
+            .with_file_text("src/handler.rs", indexed);
+        let mut contract = ContractBuilder::from_plan(&plan_forbidding_secrets(&[
+            "src/handler.rs",
+            "src/checkout.rs",
+        ]))
+        .unwrap();
+        contract.api_surface_constraints = constraints
+            .into_iter()
+            .map(|mut constraint| {
+                constraint.evidence_refs = contract.evidence_refs.clone();
+                constraint
+            })
+            .collect();
+        ContractVerifier::new(&store)
+            .verify(
+                repo.path(),
+                &contract,
+                VerifyChangeInput {
+                    unified_diff: Some(diff.into()),
+                    check_api_surface: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rename_that_keeps_its_public_api_warns_as_moved() {
+        let report = verify_api_surface_of_rename(
+            "pub fn handle() {}\n",
+            "pub fn handle() {}\n",
+            "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 100%\nrename from src/handler.rs\nrename to src/checkout.rs\n",
+            Vec::new(),
+        );
+
+        assert_ne!(report.decision, VerificationDecision::Fail);
+        assert!(
+            !report
+                .change_report
+                .boundary_violations
+                .iter()
+                .any(|finding| finding.kind.starts_with("api_surface")),
+            "{:?}",
+            report.change_report.boundary_violations
+        );
+        let moved = report
+            .change_report
+            .warnings
+            .iter()
+            .find(|finding| finding.kind == "api_surface_moved")
+            .expect("the unchanged public fn is reported as moved");
+        assert!(
+            moved.reason.contains("`handle`")
+                && moved.reason.contains("`src/handler.rs`")
+                && moved.reason.contains("`src/checkout.rs`"),
+            "{}",
+            moved.reason
+        );
+        assert!(!report
+            .change_report
+            .api_surface_deltas
+            .iter()
+            .any(|finding| finding.kind == "api_surface_review_required"));
+    }
+
+    #[test]
+    fn a_rename_out_of_a_scope_that_forbids_api_removals_fails() {
+        let report = verify_api_surface_of_rename(
+            "pub fn handle() {}\n",
+            "pub fn handle() {}\n",
+            "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 100%\nrename from src/handler.rs\nrename to src/checkout.rs\n",
+            vec![ApiSurfaceConstraint {
+                scope: "src/handler.rs".into(),
+                allowed_changes: Vec::new(),
+                severity: ConstraintSeverity::Forbidden,
+                reason: "the handler API is frozen".into(),
+                evidence_refs: Vec::new(),
+            }],
+        );
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        let violation = report
+            .change_report
+            .boundary_violations
+            .iter()
+            .find(|finding| finding.kind == "api_surface_violation")
+            .expect("a move out of a scope that forbids removals fails");
+        assert_eq!(violation.path.as_deref(), Some(Path::new("src/handler.rs")));
+        assert!(
+            violation.reason.contains("`handle`")
+                && violation.reason.contains("`src/handler.rs`")
+                && violation.reason.contains("`src/checkout.rs`")
+                && violation.reason.contains("api_surface_constraints[0]")
+                && violation.reason.contains("the handler API is frozen"),
+            "{}",
+            violation.reason
+        );
+        assert!(!report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "api_surface_moved"));
+    }
+
+    #[test]
+    fn a_rename_that_drops_a_public_fn_fails_for_that_fn_only() {
+        let report = verify_api_surface_of_rename(
+            "pub fn handle() {}\npub fn legacy() {}\n",
+            "pub fn handle() {}\n",
+            "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 60%\nrename from src/handler.rs\nrename to src/checkout.rs\n--- a/src/handler.rs\n+++ b/src/checkout.rs\n@@ -2 +1,0 @@\n-pub fn legacy() {}\n",
+            Vec::new(),
+        );
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        let violations = report
+            .change_report
+            .boundary_violations
+            .iter()
+            .filter(|finding| finding.kind == "api_surface_violation")
+            .collect::<Vec<_>>();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].reason.contains("Removed") && violations[0].reason.contains("`legacy`"),
+            "{}",
+            violations[0].reason
+        );
+        assert!(report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "api_surface_moved"
+                && finding.reason.contains("`handle`")));
     }
 
     #[test]

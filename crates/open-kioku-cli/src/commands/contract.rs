@@ -630,6 +630,8 @@ fn verify_diff_input(
                 "--unified=0",
                 "--no-ext-diff",
                 "--find-renames",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
                 "--relative",
                 "HEAD",
             ])
@@ -668,6 +670,8 @@ fn verify_diff_since(
             "--unified=0",
             "--no-ext-diff",
             "--find-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--relative",
             "--end-of-options",
         ])
@@ -713,12 +717,16 @@ fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Res
 }
 
 fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
-    let path = change
-        .new_path
-        .as_ref()
-        .or(change.old_path.as_ref())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unknown>".into());
+    let path = match (&change.old_path, &change.new_path) {
+        (Some(old), Some(new)) if old != new => {
+            format!("{} (from {})", new.display(), old.display())
+        }
+        (old, new) => new
+            .as_ref()
+            .or(old.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into()),
+    };
     let ranges = change
         .hunks
         .iter()
