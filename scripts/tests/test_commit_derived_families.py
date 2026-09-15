@@ -845,5 +845,142 @@ class ReducerKeepsMembership(unittest.TestCase):
         self.assertTrue(any("by_task_family entry" in n for n in notes), notes)
 
 
+BENCH_STEPS = ("Set up job", "Run actions/checkout@v7", "Check the corpus secrets and dispatch inputs",
+               "Run dtolnay/rust-toolchain@stable", "Run Swatinem/rust-cache@v2", "Build ok",
+               "Derive the corpus and its cases at the base commit", "Index the corpus",
+               "Score the production context path", baselines.COMPARE_STEP,
+               "Record coverage next to accuracy in the job summary", "Reduce the reports to aggregates",
+               "Upload reports", "Post Run actions/checkout@v7", "Complete job")
+
+
+def run_jobs(run_id=12345, failed=None, compare_failed=("java-a",)):
+    """The jobs API pages for a run: `failed` maps a corpus code to a non-compare step that failed."""
+    failed = failed or {}
+
+    def step(name, conclusion="success"):
+        return {"name": name, "status": "completed", "conclusion": conclusion, "number": 1}
+
+    jobs = [{"run_id": run_id, "name": "select corpora", "status": "completed", "conclusion": "success",
+             "steps": [step("Set up job"), step("Select the corpora to run"), step("Complete job")]}]
+    for code in baselines.CORPORA:
+        steps = []
+        for name in BENCH_STEPS:
+            if name == baselines.COMPARE_STEP and code in compare_failed:
+                steps.append(step(name, "failure"))
+            elif failed.get(code) == name:
+                steps.append(step(name, "failure"))
+            else:
+                steps.append(step(name))
+        bad = code in compare_failed or code in failed
+        jobs.append({"run_id": run_id, "name": f"bench ({code})", "status": "completed",
+                     "conclusion": "failure" if bad else "success", "steps": steps})
+    return [{"total_count": len(jobs), "jobs": jobs[:3]}, {"total_count": len(jobs), "jobs": jobs[3:]}]
+
+
+class AcceptedRegressionFreeze(unittest.TestCase):
+    REASON = "accept the py-a documentation drop from routing calibration, reviewed in #388"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target, self.download = freeze_fixture(Path(self.tmp.name), synthetic_report())
+        self.before = {p.name: p.read_bytes() for p in sorted(self.target.iterdir())}
+        self.failed_run = successful_run(conclusion="failure")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def unchanged(self):
+        return {p.name: p.read_bytes() for p in sorted(self.target.iterdir())} == self.before
+
+    def cli(self, run, jobs, *extra):
+        run_json, jobs_json = Path(self.tmp.name) / "run.json", Path(self.tmp.name) / "jobs.json"
+        run_json.write_text(json.dumps(run))
+        jobs_json.write_text(json.dumps(jobs))
+        return subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "freeze",
+                               "--run-json", str(run_json), "--jobs-json", str(jobs_json),
+                               "--download", str(self.download), "--dir", str(self.target), *extra],
+                              capture_output=True, text=True)
+
+    def test_compare_step_name_is_the_workflows(self):
+        text = (REPO / ".github/workflows/commit-derived-bench.yml").read_text()
+        self.assertIn(f"      - name: {baselines.COMPARE_STEP}\n", text)
+        for name in ("Build ok", "Index the corpus", "Score the production context path",
+                     "Reduce the reports to aggregates", "Upload reports"):
+            self.assertIn(f"      - name: {name}\n", text)
+
+    def test_accepted_regression_freeze_succeeds_and_records_the_reason_and_run(self):
+        result = self.cli(self.failed_run, run_jobs(compare_failed=("java-a", "py-a")),
+                          "--accept-regression", self.REASON)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("accepted regression", result.stdout)
+        files = sorted(self.target.glob("*.json"))
+        self.assertEqual(len(files), 8)
+        for path in files:
+            frozen = json.loads(path.read_text())
+            self.assertEqual(baseline_problems(frozen), [], path.name)
+            self.assertEqual(frozen["provenance"]["accepted_regression"],
+                             {"reason": self.REASON, "source_run": 12345}, path.name)
+            self.assertIn("run 12345 ", frozen["provenance"]["frozen_from"])
+
+    def test_a_failed_non_compare_step_is_refused_even_with_the_flag(self):
+        for code, step in (("go-a", "Score the production context path"), ("ts-a", "Upload reports"),
+                           ("py-a", "Reduce the reports to aggregates"), ("java-a", "Build ok")):
+            result = self.cli(self.failed_run, run_jobs(failed={code: step}), "--accept-regression", self.REASON)
+            self.assertEqual(result.returncode, 1, (code, step))
+            self.assertIn("only the baseline comparison may fail", result.stderr)
+            self.assertIn(step, result.stderr)
+            self.assertTrue(self.unchanged(), (code, step))
+        skipped = run_jobs()
+        skipped[1]["jobs"][0]["steps"][-3]["conclusion"] = "skipped"
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.check_jobs(12345, skipped)
+
+    def test_empty_reason_is_refused(self):
+        for reason in ("", "   "):
+            result = self.cli(self.failed_run, run_jobs(), "--accept-regression", reason)
+            self.assertEqual(result.returncode, 1, repr(reason))
+            self.assertIn("reason is empty", result.stderr)
+            self.assertTrue(self.unchanged())
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15",
+                                  run_jobs(), "two\nlines")
+
+    def test_the_flag_needs_jobs_a_failed_comparison_and_every_bench_job(self):
+        cases = (
+            (self.failed_run, None, "needs --jobs-json"),
+            (successful_run(), run_jobs(), "conclusion is failure"),
+            (self.failed_run, run_jobs(compare_failed=()), "no baseline comparison failed"),
+            (self.failed_run, [{"jobs": run_jobs()[0]["jobs"]}], "no bench job for"),
+            (self.failed_run, run_jobs(run_id=999), "another run"),
+        )
+        for run, jobs, expected in cases:
+            with self.assertRaises(baselines.FreezeRefused, msg=expected) as refused:
+                baselines.plan_freeze(run, self.download, self.target, "2026-09-15", jobs, self.REASON)
+            self.assertIn(expected, str(refused.exception))
+        self.assertTrue(self.unchanged())
+
+    def test_without_the_flag_a_failed_run_is_still_refused_and_a_later_freeze_clears_the_record(self):
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15", run_jobs())
+        baselines.write_all(baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15",
+                                                  run_jobs(), self.REASON))
+        baselines.write_all(baselines.plan_freeze(successful_run(databaseId=777), self.download, self.target,
+                                                  "2026-09-16"))
+        for path in self.target.glob("*.json"):
+            self.assertNotIn("accepted_regression", json.loads(path.read_text())["provenance"])
+
+    def test_validator_checks_the_recorded_acceptance(self):
+        base = BaselineValidator().valid()
+        base["provenance"].update(frozen_from="commit-derived-bench run 5 (ubuntu-latest)",
+                                  accepted_regression={"reason": self.REASON, "source_run": 5})
+        self.assertEqual(baseline_problems(base), [])
+        for accepted, expected in (({"reason": "", "source_run": 5}, "reason is empty"),
+                                   ({"reason": self.REASON, "source_run": 6}, "differs from the run"),
+                                   ({"reason": self.REASON}, "not a run id")):
+            broken = json.loads(json.dumps(base))
+            broken["provenance"]["accepted_regression"] = accepted
+            self.assertTrue(any(expected in p for p in baseline_problems(broken)), (expected, baseline_problems(broken)))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -339,7 +339,34 @@ rm -rf "$DL"
 
 `scripts/commit-derived-baselines.py freeze` refuses, and writes nothing, unless the run is a
 completed `commit-derived-bench` run whose conclusion is `success` and whose head commit is a
-full 40-hex Open Kioku commit. A run whose baseline comparison failed is therefore not frozen.
+full 40-hex Open Kioku commit. A run whose baseline comparison failed is not frozen without the
+override below.
+
+3. Accepted regression. When a reviewed change is meant to lower a baseline, the run's baseline
+   comparison fails and the run's conclusion is `failure`. Freeze it only with an explicit
+   reason, and replace the `freeze` line above with:
+
+```sh
+gh api --paginate --slurp "repos/{owner}/{repo}/actions/runs/$RUN/jobs?per_page=100" > "$DL/jobs.json"
+python3 scripts/commit-derived-baselines.py freeze --run-json "$DL/run.json" --download "$DL" \
+    --jobs-json "$DL/jobs.json" --accept-regression "<reason, naming the reviewed change>"
+```
+
+With `--accept-regression`, the decision is made from each job's step conclusions, never from
+the run's overall conclusion. The freeze refuses, and writes nothing, unless all of the
+following hold:
+
+- The run is a completed `commit-derived-bench` run whose conclusion is `failure`.
+- The reason is one non-empty trimmed line of at most 500 characters.
+- Every job of the run has completed, and there is one `bench (<code>)` job per corpus.
+- Every step of every job succeeded except `Compare against the frozen baseline`, and at least
+  one of those failed.
+
+A failed or skipped build, index, score, reduction, or upload step is therefore refused however
+the reason is worded. A run with no failed comparison is refused too: freeze it without the flag.
+Each baseline records `provenance.accepted_regression` with the `reason` and the `source_run`
+id. The reason is committed in a public file, so it must describe the change and must not name
+the corpus. A later freeze without the flag removes the record.
 It copies an explicit allow-list of report fields into each baseline (`cases` from
 `cases_scored`, `label`, `median_secs`, `metrics`, `ci`, `yield_budgets`, `by_task_family`,
 floats rounded to four decimals). That allow-list is the rule, and it must never become
@@ -362,9 +389,12 @@ when:
   or its `insufficient` flag disagrees with its case count.
 - A baseline with the section lacks `provenance.frozen_from`, `frozen_on`, or a full 40-hex
   `source_commit`.
+- `provenance.accepted_regression` has an empty or multi-line reason, or a `source_run` that is
+  not the run named in `frozen_from`.
 
-The unit tests also run the freeze against synthetic reports, including a failed run, a missing
-report, and a rename that fails partway. Update the frozen-baseline table and freeze date above
+The unit tests also run the freeze against synthetic reports and job listings, including a failed
+run, a missing report, a rename that fails partway, an accepted regression, a failed non-compare
+step under the flag, and an empty reason. Update the frozen-baseline table and freeze date above
 in the same change.
 
 ## Gold yield at a token budget

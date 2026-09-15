@@ -3,7 +3,7 @@
 
     scripts/commit-derived-baselines.py check [--dir benchmarks/commit-derived]
     scripts/commit-derived-baselines.py freeze --run-json RUN.json --download DIR \
-        [--dir benchmarks/commit-derived]
+        [--jobs-json JOBS.json --accept-regression REASON] [--dir benchmarks/commit-derived]
 
 `check` validates every split baseline in the directory and exits 1 naming each problem.
 
@@ -11,6 +11,13 @@
 - `RUN.json` is `gh run view <run> --json databaseId,workflowName,status,conclusion,headSha`.
   The freeze refuses unless the run is a completed, successful `commit-derived-bench` run with a
   full source commit.
+- `--accept-regression REASON` freezes a completed run whose conclusion is `failure` only when
+  its baseline comparison failed and nothing else did. `JOBS.json` is
+  `gh api --paginate --slurp repos/{owner}/{repo}/actions/runs/<run>/jobs`. Every job of the run
+  must have completed, one `bench (<code>)` job must exist per corpus, and every step must have
+  succeeded except `Compare against the frozen baseline`, at least one of which failed. The
+  non-empty, single-line reason and the run id are written to each baseline's
+  `provenance.accepted_regression`; a freeze without the flag removes that record.
 - `DIR/<code>/<split>.json` are that run's artifacts, already reduced to aggregates by
   `scripts/reduce-benchmark-report.py`.
 Only an explicit allow-list of report fields is copied into each baseline (never
@@ -60,6 +67,9 @@ FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 FAMILY_ENTRY_KEYS = {"cases", "insufficient", "metrics", "ci", "case_coverage", "membership_fingerprint"}
 FAMILY_COUNTS = ("min_cases", "scored_cases", "unassigned_cases")
+# The one step of `.github/workflows/commit-derived-bench.yml` an accepted regression may have failed.
+COMPARE_STEP = "Compare against the frozen baseline"
+REASON_LIMIT = 500
 
 
 class FreezeRefused(Exception):
@@ -139,6 +149,33 @@ def baseline_problems(baseline):
             problems.append(f"provenance.{key} missing")
     if not FULL_COMMIT.fullmatch(str(provenance.get("source_commit", ""))):
         problems.append("provenance.source_commit is not a full Open Kioku commit")
+    if "accepted_regression" in provenance:
+        problems += accepted_regression_problems(provenance)
+    return problems
+
+
+def reason_problem(reason):
+    """Why an accepted-regression reason is unusable, or None."""
+    if not isinstance(reason, str) or not reason.strip():
+        return "the accepted-regression reason is empty"
+    if reason != reason.strip() or len(reason) > REASON_LIMIT or any(ord(c) < 32 for c in reason):
+        return f"the accepted-regression reason must be one trimmed line of at most {REASON_LIMIT} characters"
+    return None
+
+
+def accepted_regression_problems(provenance):
+    accepted = provenance["accepted_regression"]
+    if not isinstance(accepted, dict):
+        return ["provenance.accepted_regression is not an object"]
+    problems = []
+    problem = reason_problem(accepted.get("reason"))
+    if problem:
+        problems.append(f"provenance.accepted_regression: {problem}")
+    run_id = accepted.get("source_run")
+    if not is_count(run_id) or run_id <= 0:
+        problems.append("provenance.accepted_regression.source_run is not a run id")
+    elif f"run {run_id} " not in f"{provenance.get('frozen_from', '')} ":
+        problems.append("provenance.accepted_regression.source_run differs from the run in frozen_from")
     return problems
 
 
@@ -150,15 +187,24 @@ def baseline_files(directory):
             yield path, data
 
 
-def check_run(run):
-    """(run id, source commit) of a completed, successful commit-derived-bench run; else refuse."""
+def check_run(run, accept_regression=None):
+    """(run id, source commit) of a completed commit-derived-bench run that may be frozen; else refuse.
+
+    Without `accept_regression` the run must have succeeded. With it the run must have failed;
+    `check_jobs` then decides whether the baseline comparison was the only failure.
+    """
     if not isinstance(run, dict):
         raise FreezeRefused("the run description is not a JSON object")
     if run.get("workflowName") != WORKFLOW:
         raise FreezeRefused(f"the run is not a {WORKFLOW} run")
-    if run.get("status") != "completed" or run.get("conclusion") != "success":
-        raise FreezeRefused(f"the run did not succeed (status {run.get('status')!r}, "
-                            f"conclusion {run.get('conclusion')!r}); only a successful run can be frozen")
+    expected = "success" if accept_regression is None else "failure"
+    if run.get("status") != "completed" or run.get("conclusion") != expected:
+        if accept_regression is None:
+            raise FreezeRefused(f"the run did not succeed (status {run.get('status')!r}, "
+                                f"conclusion {run.get('conclusion')!r}); only a successful run can be frozen "
+                                "without --accept-regression")
+        raise FreezeRefused(f"--accept-regression needs a completed run whose conclusion is failure (status "
+                            f"{run.get('status')!r}, conclusion {run.get('conclusion')!r})")
     run_id = run.get("databaseId")
     if not is_count(run_id) or run_id <= 0:
         raise FreezeRefused("the run description has no run id")
@@ -166,6 +212,69 @@ def check_run(run):
     if not isinstance(source_commit, str) or not FULL_COMMIT.fullmatch(source_commit):
         raise FreezeRefused("the run description has no full Open Kioku source commit")
     return run_id, source_commit
+
+
+def job_list(jobs):
+    """Jobs from the jobs API: a `--slurp` list of pages, one page, or a plain list of jobs."""
+    if isinstance(jobs, dict):
+        jobs = [jobs]
+    if not isinstance(jobs, list):
+        raise FreezeRefused("the jobs description is not a JSON list or object")
+    out = []
+    for item in jobs:
+        if isinstance(item, dict) and isinstance(item.get("jobs"), list):
+            out += item["jobs"]
+        elif isinstance(item, dict) and "steps" in item:
+            out.append(item)
+        else:
+            raise FreezeRefused("the jobs description holds something other than jobs")
+    return out
+
+
+def check_jobs(run_id, jobs):
+    """Refuse unless every step of the run succeeded except baseline comparisons, one of which failed.
+
+    Reads step conclusions, never the run's overall conclusion: a failed build, index, score,
+    reduction, or upload step must not be frozen however the flag is worded.
+    """
+    jobs = job_list(jobs)
+    if not jobs:
+        raise FreezeRefused("the run has no jobs")
+    names = []
+    compare_failures = 0
+    for job in jobs:
+        name = job.get("name")
+        if job.get("run_id") != run_id:
+            raise FreezeRefused(f"job {name!r} belongs to another run")
+        if job.get("status") != "completed":
+            raise FreezeRefused(f"job {name!r} has not completed")
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise FreezeRefused(f"job {name!r} lists no steps")
+        names.append(name)
+        is_bench = isinstance(name, str) and name.startswith("bench (")
+        compared = False
+        for step in steps:
+            if not isinstance(step, dict):
+                raise FreezeRefused(f"job {name!r} lists a step that is not an object")
+            if step.get("status") != "completed":
+                raise FreezeRefused(f"job {name!r} step {step.get('name')!r} has not completed")
+            conclusion = step.get("conclusion")
+            if is_bench and step.get("name") == COMPARE_STEP:
+                compared = True
+                if conclusion == "failure":
+                    compare_failures += 1
+                    continue
+            if conclusion != "success":
+                raise FreezeRefused(f"job {name!r} step {step.get('name')!r} concluded {conclusion!r}; only the "
+                                    "baseline comparison may fail under --accept-regression")
+        if is_bench and not compared:
+            raise FreezeRefused(f"job {name!r} has no {COMPARE_STEP!r} step")
+    missing = [code for code in CORPORA if f"bench ({code})" not in names]
+    if missing:
+        raise FreezeRefused(f"the run has no bench job for {', '.join(missing)}")
+    if not compare_failures:
+        raise FreezeRefused("no baseline comparison failed; freeze without --accept-regression")
 
 
 def r4(value):
@@ -178,7 +287,7 @@ def r4(value):
     return value
 
 
-def frozen_baseline(baseline, report, run_id, source_commit, today):
+def frozen_baseline(baseline, report, run_id, source_commit, today, accept_regression=None):
     """The baseline rewritten from one reduced report through an explicit allow-list."""
     baseline = json.loads(json.dumps(baseline))
     # An explicit allow-list. Never baseline.update(report).
@@ -196,12 +305,27 @@ def frozen_baseline(baseline, report, run_id, source_commit, today):
     provenance["source_commit"] = source_commit
     provenance["frozen_on"] = today
     provenance.pop("yield_note", None)
+    # A record from an earlier accepted regression never carries over to a later freeze.
+    provenance.pop("accepted_regression", None)
+    if accept_regression is not None:
+        provenance["accepted_regression"] = {"reason": accept_regression, "source_run": run_id}
     return baseline
 
 
-def plan_freeze(run, download, directory, today=None):
-    """[(path, old text, new text)] for every split baseline, validated; refuses on any problem."""
-    run_id, source_commit = check_run(run)
+def plan_freeze(run, download, directory, today=None, jobs=None, accept_regression=None):
+    """[(path, old text, new text)] for every split baseline, validated; refuses on any problem.
+
+    `accept_regression` is the reason a failed comparison is accepted; it requires `jobs`.
+    """
+    if accept_regression is not None:
+        problem = reason_problem(accept_regression)
+        if problem:
+            raise FreezeRefused(problem)
+        if jobs is None:
+            raise FreezeRefused("--accept-regression needs --jobs-json, the run's jobs and step conclusions")
+    run_id, source_commit = check_run(run, accept_regression)
+    if accept_regression is not None:
+        check_jobs(run_id, jobs)
     today = today or datetime.date.today().isoformat()
     plan = []
     for code in CORPORA:
@@ -211,7 +335,7 @@ def plan_freeze(run, download, directory, today=None):
             try:
                 old = path.read_text()
                 report = json.loads(source.read_text())
-                new = frozen_baseline(json.loads(old), report, run_id, source_commit, today)
+                new = frozen_baseline(json.loads(old), report, run_id, source_commit, today, accept_regression)
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
                 raise FreezeRefused(f"{code} {split}: cannot build the baseline ({type(err).__name__})") from None
             problems = baseline_problems(new)
@@ -271,13 +395,18 @@ def check(directory):
     return 1 if failures else 0
 
 
-def freeze(run_json, download, directory):
+def read_json(path, what):
     try:
-        try:
-            run = json.loads(Path(run_json).read_text())
-        except (OSError, ValueError) as err:
-            raise FreezeRefused(f"cannot read the run description ({type(err).__name__})") from None
-        plan = plan_freeze(run, download, directory)
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError) as err:
+        raise FreezeRefused(f"cannot read the {what} ({type(err).__name__})") from None
+
+
+def freeze(run_json, download, directory, jobs_json=None, accept_regression=None):
+    try:
+        run = read_json(run_json, "run description")
+        jobs = None if jobs_json is None else read_json(jobs_json, "jobs description")
+        plan = plan_freeze(run, download, directory, jobs=jobs, accept_regression=accept_regression)
     except FreezeRefused as refused:
         print(f"freeze refused; no baseline written: {refused}", file=sys.stderr)
         return 1
@@ -287,7 +416,7 @@ def freeze(run_json, download, directory):
         print(f"freeze failed and was rolled back; no baseline changed ({type(err).__name__})", file=sys.stderr)
         return 1
     for path, _old, _new in plan:
-        print(f"froze {path}")
+        print(f"froze {path}" + (" (accepted regression)" if accept_regression is not None else ""))
     return 0
 
 
@@ -299,11 +428,15 @@ def main(argv=None):
     freeze_cmd = sub.add_parser("freeze", help="rewrite every split baseline from one successful run")
     freeze_cmd.add_argument("--run-json", required=True, type=Path)
     freeze_cmd.add_argument("--download", required=True, type=Path)
+    freeze_cmd.add_argument("--jobs-json", type=Path, default=None,
+                            help="the run's jobs: gh api --paginate --slurp repos/{owner}/{repo}/actions/runs/<run>/jobs")
+    freeze_cmd.add_argument("--accept-regression", metavar="REASON", default=None,
+                            help="freeze a run whose baseline comparison was its only failure, recording REASON")
     freeze_cmd.add_argument("--dir", default="benchmarks/commit-derived", type=Path)
     args = ap.parse_args(argv)
     if args.command == "check":
         return check(args.dir)
-    return freeze(args.run_json, args.download, args.dir)
+    return freeze(args.run_json, args.download, args.dir, args.jobs_json, args.accept_regression)
 
 
 if __name__ == "__main__":
