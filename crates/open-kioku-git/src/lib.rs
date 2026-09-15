@@ -287,6 +287,10 @@ fn run_diff_unified_zero(root: impl AsRef<Path>, revision: Option<&str>) -> Resu
             "--no-ext-diff",
             "--no-textconv",
             "--find-renames",
+            // Pinned so `diff.noprefix`, `diff.mnemonicPrefix` or `diff.srcPrefix` cannot make
+            // one path read as two, which the parser would take for a rename.
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
         ])
         .args(revision_args(revision))
         .output()
@@ -627,9 +631,17 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
 
     let mut files = Vec::new();
     let mut pending = PendingDiff::default();
+    let mut in_hunks = false;
     for line in patch.lines() {
         if line.starts_with("diff --git ") {
             finish(&mut files, &mut pending);
+            in_hunks = false;
+        } else if line.starts_with("@@ ") {
+            pending.hunks.push(parse_diff_hunk(line)?);
+            in_hunks = true;
+        } else if in_hunks {
+            // Every line after an entry's first hunk header is content: a removed `-- x` or an
+            // added `++ y` reads as `--- x` or `+++ y` and names no path.
         } else if line.starts_with("new file mode ") {
             pending.status = Some(GitChangeKind::Added);
         } else if line.starts_with("deleted file mode ") {
@@ -649,15 +661,14 @@ fn parse_unified_zero_diff(patch: &str) -> Result<Vec<DiffFile>> {
             pending.new_path = Some(parse_patch_path(value, None)?);
             pending.status = Some(GitChangeKind::Copied);
         } else if let Some(value) = line.strip_prefix("--- ") {
-            if value != "/dev/null" {
+            // `rename from`/`copy from` already name the pre-edit path exactly.
+            if value != "/dev/null" && pending.old_path.is_none() {
                 pending.old_path = Some(parse_patch_path(value, Some("a/"))?);
             }
         } else if let Some(value) = line.strip_prefix("+++ ") {
-            if value != "/dev/null" {
+            if value != "/dev/null" && pending.new_path.is_none() {
                 pending.new_path = Some(parse_patch_path(value, Some("b/"))?);
             }
-        } else if line.starts_with("@@ ") {
-            pending.hunks.push(parse_diff_hunk(line)?);
         }
     }
     finish(&mut files, &mut pending);
@@ -1137,6 +1148,70 @@ mod tests {
                 (GitChangeKind::Deleted, paths(&["src/gone.rs"])),
                 (GitChangeKind::Modified, paths(&["src/lib.rs"])),
             ]
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_hunk_lines_that_look_like_file_headers_name_no_path() {
+        let files = parse_unified_zero_diff(
+            "diff --git a/db/schema.sql b/db/schema.sql\n\
+             --- a/db/schema.sql\n\
+             +++ b/db/schema.sql\n\
+             @@ -3 +3 @@\n\
+             --- legacy index\n\
+             +++ replacement index\n\
+             diff --git a/db/old.sql b/db/new.sql\n\
+             similarity index 91%\n\
+             rename from db/old.sql\n\
+             rename to db/new.sql\n\
+             --- a/db/old.sql\n\
+             +++ b/db/new.sql\n\
+             @@ -1 +1 @@\n\
+             --- dropped view\n\
+             +++ kept view\n",
+        )
+        .unwrap();
+
+        let changed = files
+            .iter()
+            .map(|file| (file.status, file.changed_paths(), file.hunks.len()))
+            .collect::<Vec<_>>();
+        let paths = |paths: &[&str]| {
+            paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            changed,
+            vec![
+                (GitChangeKind::Modified, paths(&["db/schema.sql"]), 1),
+                (
+                    GitChangeKind::Renamed,
+                    paths(&["db/new.sql", "db/old.sql"]),
+                    1
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_zero_diff_paths_ignore_local_prefix_config() {
+        let dir = initialized_repo();
+        write(dir.path(), "src/lib.rs", "fn one() {}\n");
+        commit_all(dir.path(), "one");
+        run(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+        run(dir.path(), &["config", "diff.srcPrefix", "old/"]);
+        run(dir.path(), &["config", "diff.dstPrefix", "new/"]);
+        write(dir.path(), "src/lib.rs", "fn one() {}\nfn two() {}\n");
+
+        let changed = diff_unified_zero_since(dir.path(), "HEAD").unwrap();
+
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert_eq!(changed[0].status, GitChangeKind::Modified, "{changed:?}");
+        assert_eq!(
+            changed[0].changed_paths(),
+            vec![std::path::PathBuf::from("src/lib.rs")]
         );
     }
 

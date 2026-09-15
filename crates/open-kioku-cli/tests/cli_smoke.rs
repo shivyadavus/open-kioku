@@ -1075,17 +1075,18 @@ fn verify_git_checks_both_sides_of_a_rename() {
         "pub fn load_config() -> u32 {\n    1\n}\n",
     )
     .unwrap();
-    fs::write(
-        repo.join("src/secrets/keys.rs"),
-        "pub fn signing_key() -> &'static str {\n    \"fixture\"\n}\n",
-    )
-    .unwrap();
+    let keys = "pub fn signing_key() -> &'static str {\n    \"fixture\"\n}\n\npub fn verifying_key() -> &'static str {\n    \"fixture-public\"\n}\n\npub fn key_id() -> u32 {\n    7\n}\n";
+    fs::write(repo.join("src/secrets/keys.rs"), keys).unwrap();
     git(&repo, &["init", "--quiet"]);
     git(&repo, &["config", "user.email", "cli@example.com"]);
     git(&repo, &["config", "user.name", "CLI Test"]);
     git(&repo, &["config", "commit.gpgsign", "false"]);
-    // Verification must pair both sides of the rename without relying on this setting.
+    // Verification must pair both sides of the rename without relying on this setting, and
+    // without local path prefixes turning one side into two paths.
     git(&repo, &["config", "diff.renames", "false"]);
+    git(&repo, &["config", "diff.mnemonicPrefix", "true"]);
+    git(&repo, &["config", "diff.srcPrefix", "old/"]);
+    git(&repo, &["config", "diff.dstPrefix", "new/"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "--quiet", "-m", "initial"]);
     run({
@@ -1118,6 +1119,8 @@ fn verify_git_checks_both_sides_of_a_rename() {
     fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
 
     git(&repo, &["mv", "src/secrets/keys.rs", "src/keys.rs"]);
+    // An edit alongside the move makes git write `---`/`+++` lines, which carry the prefixes.
+    fs::write(repo.join("src/keys.rs"), keys.replace("    7\n", "    8\n")).unwrap();
 
     let assert_both_sides_checked = |report: &serde_json::Value| {
         assert_eq!(report["verdict"], "fail", "{report}");
@@ -1130,10 +1133,9 @@ fn verify_git_checks_both_sides_of_a_rename() {
             }]),
             "{report}"
         );
-        let changed = report["changed_files"].as_array().unwrap();
-        assert!(
-            changed.contains(&serde_json::json!("src/keys.rs"))
-                && changed.contains(&serde_json::json!("src/secrets/keys.rs")),
+        assert_eq!(
+            report["changed_files"],
+            serde_json::json!(["src/keys.rs", "src/secrets/keys.rs"]),
             "{report}"
         );
         let violation = report["boundary_violations"]
@@ -1190,6 +1192,32 @@ fn verify_git_checks_both_sides_of_a_rename() {
     );
     let response: serde_json::Value = serde_json::from_str(mcp_verify.trim()).unwrap();
     assert_both_sides_checked(&response["result"]["structuredContent"]);
+
+    let impact = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("--json")
+            .arg("impact")
+            .arg("--since")
+            .arg("HEAD");
+        command
+    });
+    let impact: serde_json::Value = serde_json::from_str(&impact).unwrap();
+    assert_eq!(
+        impact["changed_files"][0]["old_path"], "src/secrets/keys.rs",
+        "{impact}"
+    );
+    assert_eq!(
+        impact["changed_files"][0]["new_path"], "src/keys.rs",
+        "{impact}"
+    );
+    assert_eq!(
+        impact["impact_reports"].as_array().unwrap().len(),
+        2,
+        "a rename is analysed at its new and its previous path: {impact}"
+    );
 }
 
 #[test]
