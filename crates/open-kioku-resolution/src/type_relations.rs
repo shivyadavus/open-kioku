@@ -23,11 +23,14 @@ pub(crate) struct ParentTypeCandidate {
     pub bindings: BTreeSet<ParentBindingKind>,
 }
 
+/// `scopes` narrows import bindings to those visible from the child's defining scope; an inheritance
+/// site has no scope of its own. Without it every import of the name in the file is considered.
 pub(crate) fn collect_parent_type_candidates(
     child: &Symbol,
     parent_name: &str,
     symbols: &SymbolIndex,
     repository: &SemanticRepository,
+    scopes: Option<&ScopeIndex>,
 ) -> Vec<ParentTypeCandidate> {
     let mut candidates = BTreeMap::<String, ParentTypeCandidate>::new();
     let mut add = |target: SymbolId, binding: ParentBindingKind| {
@@ -52,25 +55,44 @@ pub(crate) fn collect_parent_type_candidates(
         }
     }
 
-    for binding in repository.imports.lookup(&child.file_id, None, parent_name) {
-        if let Some(target) = &binding.target_symbol {
-            if symbols
-                .get(target)
-                .map(|symbol| is_type_symbol(&symbol.kind))
-                .unwrap_or(false)
-            {
-                add(target.clone(), ParentBindingKind::Import);
+    // An unresolved import of this name may be the real parent, so it leaves the import route
+    // without candidates rather than letting a resolved sibling answer alone.
+    let visible_imports = crate::context::visible_import_bindings(
+        repository,
+        scopes,
+        &child.file_id,
+        child.scope_id.as_ref(),
+        parent_name,
+    )
+    .into_iter()
+    .filter(|binding| !binding.is_glob)
+    .collect::<Vec<_>>();
+    if visible_imports
+        .iter()
+        .all(|binding| binding.target_symbol.is_some() || binding.target_file.is_some())
+    {
+        for binding in visible_imports {
+            if let Some(target) = &binding.target_symbol {
+                if symbols
+                    .get(target)
+                    .map(|symbol| is_type_symbol(&symbol.kind))
+                    .unwrap_or(false)
+                {
+                    add(target.clone(), ParentBindingKind::Import);
+                }
             }
-        }
-        if let Some(target_file) = &binding.target_file {
-            if let Some(file_symbols) = symbols.by_file.get(target_file) {
-                for id in file_symbols {
-                    if symbols
-                        .get(id)
-                        .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == parent_name)
-                        .unwrap_or(false)
-                    {
-                        add(id.clone(), ParentBindingKind::Import);
+            if let Some(target_file) = &binding.target_file {
+                if let Some(file_symbols) = symbols.by_file.get(target_file) {
+                    for id in file_symbols {
+                        if symbols
+                            .get(id)
+                            .map(|symbol| {
+                                is_type_symbol(&symbol.kind) && symbol.name == parent_name
+                            })
+                            .unwrap_or(false)
+                        {
+                            add(id.clone(), ParentBindingKind::Import);
+                        }
                     }
                 }
             }
@@ -103,8 +125,13 @@ pub fn resolve_inheritance_relationship_outcome(
             evaluate_candidates(&edge_type, Vec::new()),
         );
     };
-    let parent_candidates =
-        collect_parent_type_candidates(child, &site.parent_name, ctx.symbols, ctx.repository);
+    let parent_candidates = collect_parent_type_candidates(
+        child,
+        &site.parent_name,
+        ctx.symbols,
+        ctx.repository,
+        Some(ctx.scopes),
+    );
     let target_ids = parent_candidates
         .iter()
         .map(|candidate| candidate.target.clone())
@@ -199,13 +226,18 @@ pub fn resolve_declared_type_use_outcome(
         return None;
     }
     let source = scope_owner_symbol(&binding.scope_id, ctx.scopes)?;
-    let targets = crate::typed_calls::collect_type_candidates(ctx, &binding.scope_id, type_name);
+    let origins =
+        crate::typed_calls::collect_type_candidate_origins(ctx, &binding.scope_id, type_name);
+    let targets = origins
+        .iter()
+        .map(|(target, _)| target.clone())
+        .collect::<Vec<_>>();
     let candidate_count = targets.len();
     let ambiguity = ambiguity_strings(&targets);
     let source_range = syntax_file_range(ctx, &binding.range);
-    let candidates = targets
+    let candidates = origins
         .into_iter()
-        .map(|target| {
+        .map(|(target, via_import)| {
             let mut candidate = ResolutionCandidate::new(target.clone(), Confidence::Exact);
             candidate.evidence.push(ResolutionEvidence {
                 kind: ResolutionEvidenceKind::TypedBinding,
@@ -223,6 +255,19 @@ pub fn resolve_declared_type_use_outcome(
                 candidate_count,
                 &ambiguity,
             ));
+            // Keeps the import route visible on the edge; the exact reference alone decides its
+            // authority.
+            if via_import {
+                candidate.proofs.push(proof(
+                    RelationshipProofKind::ImportBinding,
+                    "import_bound_declared_type",
+                    source_range.clone(),
+                    &source,
+                    &target,
+                    candidate_count,
+                    &ambiguity,
+                ));
+            }
             candidate
         })
         .collect();
@@ -347,8 +392,8 @@ mod tests {
         let forward = SymbolIndex::build(vec![child.clone(), first.clone(), second.clone()]);
         let reversed = SymbolIndex::build(vec![second, first, child.clone()]);
         let repo = SemanticRepository::new();
-        let left = collect_parent_type_candidates(&child, "Parent", &forward, &repo);
-        let right = collect_parent_type_candidates(&child, "Parent", &reversed, &repo);
+        let left = collect_parent_type_candidates(&child, "Parent", &forward, &repo, None);
+        let right = collect_parent_type_candidates(&child, "Parent", &reversed, &repo, None);
         assert_eq!(left, right);
         assert_eq!(left.len(), 2);
         assert_eq!(left[0].target.0, "symbol:a");

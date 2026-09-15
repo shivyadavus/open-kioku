@@ -435,7 +435,25 @@ pub(crate) fn collect_type_candidates(
     scope_id: &ScopeId,
     type_name: &str,
 ) -> Vec<SymbolId> {
-    let mut candidates = BTreeMap::<String, SymbolId>::new();
+    collect_type_candidate_origins(ctx, scope_id, type_name)
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect()
+}
+
+/// Type candidates for `type_name` at `scope_id`, each with whether an import binding reached it.
+pub(crate) fn collect_type_candidate_origins(
+    ctx: &ResolutionContext<'_>,
+    scope_id: &ScopeId,
+    type_name: &str,
+) -> Vec<(SymbolId, bool)> {
+    let mut candidates = BTreeMap::<String, (SymbolId, bool)>::new();
+    let mut add = |target: &SymbolId, via_import: bool| {
+        candidates
+            .entry(target.0.clone())
+            .or_insert_with(|| (target.clone(), false))
+            .1 |= via_import;
+    };
 
     if let Some(file_symbols) = ctx.symbols.by_file.get(ctx.file_id) {
         for id in file_symbols {
@@ -445,36 +463,44 @@ pub(crate) fn collect_type_candidates(
                 .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
                 .unwrap_or(false)
             {
-                candidates.insert(id.0.clone(), id.clone());
+                add(id, false);
             }
         }
     }
 
-    for binding in ctx
-        .repository
-        .imports
-        .lookup(ctx.file_id, Some(scope_id), type_name)
+    // As for bare calls: only imports in scope count, and an unresolved one of this name may be
+    // the real type, so it leaves the import route without candidates.
+    let visible_imports = ctx
+        .visible_import_bindings(scope_id, type_name)
+        .into_iter()
+        .filter(|binding| !binding.is_glob)
+        .collect::<Vec<_>>();
+    if visible_imports
+        .iter()
+        .all(|binding| binding.target_symbol.is_some() || binding.target_file.is_some())
     {
-        if let Some(target) = &binding.target_symbol {
-            if ctx
-                .symbols
-                .get(target)
-                .map(|symbol| is_type_symbol(&symbol.kind))
-                .unwrap_or(false)
-            {
-                candidates.insert(target.0.clone(), target.clone());
+        for binding in visible_imports {
+            if let Some(target) = &binding.target_symbol {
+                if ctx
+                    .symbols
+                    .get(target)
+                    .map(|symbol| is_type_symbol(&symbol.kind))
+                    .unwrap_or(false)
+                {
+                    add(target, true);
+                }
             }
-        }
-        if let Some(target_file) = &binding.target_file {
-            if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
-                for id in file_symbols {
-                    if ctx
-                        .symbols
-                        .get(id)
-                        .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
-                        .unwrap_or(false)
-                    {
-                        candidates.insert(id.0.clone(), id.clone());
+            if let Some(target_file) = &binding.target_file {
+                if let Some(file_symbols) = ctx.symbols.by_file.get(target_file) {
+                    for id in file_symbols {
+                        if ctx
+                            .symbols
+                            .get(id)
+                            .map(|symbol| is_type_symbol(&symbol.kind) && symbol.name == type_name)
+                            .unwrap_or(false)
+                        {
+                            add(id, true);
+                        }
                     }
                 }
             }
@@ -489,7 +515,7 @@ pub(crate) fn collect_type_candidates(
                 .map(|symbol| is_type_symbol(&symbol.kind))
                 .unwrap_or(false)
             {
-                candidates.insert(id.0.clone(), id.clone());
+                add(id, false);
             }
         }
     }
