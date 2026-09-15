@@ -276,6 +276,7 @@ impl TantivySearchIndex {
                     evidence_refs: evidence_ids.clone(),
                     confidence,
                     score_breakdown,
+                    exact_reference_provenance: None,
                 });
             }
         }

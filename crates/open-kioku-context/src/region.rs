@@ -524,6 +524,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.9,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 

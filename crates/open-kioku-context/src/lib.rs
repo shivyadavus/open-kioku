@@ -1628,7 +1628,7 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
             scope: negative_evidence_scope::EXACT_REFERENCES.into(),
             inspected_sources: vec![
                 "retrieval_trace.authority".into(),
-                "impact.match_reason".into(),
+                "impact.exact_reference_provenance".into(),
                 "evidence.source_type".into(),
             ],
             reason: "no explicit exact symbol reference or SCIP evidence was found".into(),
@@ -1752,10 +1752,11 @@ fn confidence_summary(breakdown: &ConfidenceBreakdown) -> String {
 }
 
 /// Selections backed by exact provenance. Every source is typed: the retrieval trace's
-/// authority, the impact engine's own reference predicate, or the evidence record's source
-/// type. Result prose is never consulted; a substring test for "scip" used to fire on a
-/// lexical hit whose query variant named the target file's `scip_setup_report`, and the pack
-/// reported `Exact` beside `exact_evidence_count: 0`.
+/// authority, a result's `exact_reference_provenance`, or an evidence record whose source type
+/// is an exact reference source (SCIP, tree-sitter, LSP). Result prose is never consulted; a
+/// substring test for "scip" used to fire on a lexical hit whose query variant named the
+/// target file's `scip_setup_report`, and the pack reported `Exact` beside
+/// `exact_evidence_count: 0`.
 fn exact_reference_count(
     diagnostics: &RetrievalDiagnostics,
     primary_files: &[SearchResult],
@@ -1765,11 +1766,11 @@ fn exact_reference_count(
     exact_authority_units(diagnostics, primary_files).len()
         + supporting_files
             .iter()
-            .filter(|result| open_kioku_impact::is_exact_reference_result(result))
+            .filter(|result| result.is_exact_reference())
             .count()
         + evidence
             .iter()
-            .filter(|item| item.source_type == EvidenceSourceType::Scip)
+            .filter(|item| item.source_type.is_exact_reference_source())
             .count()
 }
 
@@ -1932,6 +1933,7 @@ fn runtime_seed_result(
             vec![fact.id.clone()],
             "local runtime trace/log/incident artifact matched the task",
         )],
+        exact_reference_provenance: None,
     }))
 }
 
@@ -3337,6 +3339,7 @@ fn derived_sibling_result(
         evidence_refs: vec![format!("derived:{}", sibling.edge_id)],
         confidence: origin.confidence * if sibling.authoritative { 0.9 } else { 0.7 },
         score_breakdown: Vec::new(),
+        exact_reference_provenance: None,
     }
 }
 
@@ -3433,6 +3436,7 @@ fn append_scope_entry_points(
             evidence_refs: vec![format!("scope:entry-point:{path}")],
             confidence: 0.6,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         });
     }
 }
@@ -3892,6 +3896,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
 
         let records = annotate_result_with_history_signals(&SignalHistoryStore, &mut result)
@@ -3947,6 +3952,7 @@ mod tests {
             ],
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let impact = Evidence {
             id: EvidenceId::new("impact:src/rates.rs"),
@@ -4007,6 +4013,7 @@ mod tests {
             ],
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let ids = primary_result_evidence(&result)
             .into_iter()
@@ -4033,6 +4040,7 @@ mod tests {
             evidence_refs,
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         // Both results cite `region:adjacent-unit:3-6`; `src/lib.rs` has one ref per line, the
         // shape that used to publish the region ref as a `src/lib.rs` record.
@@ -4224,6 +4232,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let heuristic = SearchResult {
             path: "src/HeuristicTarget.rs".into(),
@@ -4236,6 +4245,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -4274,6 +4284,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let reference = SearchResult {
             path: "src/EnterpriseRateValidator.java".into(),
@@ -4286,6 +4297,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -4329,6 +4341,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let code = SearchResult {
             path: "src/ContributorEngine.rs".into(),
@@ -4341,6 +4354,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -4404,6 +4418,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let generated: std::collections::BTreeSet<String> =
             ["src/models/alpha/impl_alpha.py".to_string()]
@@ -4466,6 +4481,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let ranked = rerank_fused_for_task(
             vec![
@@ -4610,6 +4626,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.8,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -4962,6 +4979,7 @@ mod tests {
                     evidence_refs: Vec::new(),
                     confidence: 0.5,
                     score_breakdown: Vec::new(),
+                    exact_reference_provenance: None,
                 },
                 "tsvkit/tsvkit.ts",
                 &intent
@@ -4983,6 +5001,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let code = SearchResult {
             path: "src/engine.rs".into(),
@@ -4995,6 +5014,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -5034,6 +5054,7 @@ mod tests {
             evidence_refs: vec!["visible:evidence".into()],
             confidence: 0.9,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let hidden = SearchResult {
             path: "src/hidden.rs".into(),
@@ -5046,6 +5067,7 @@ mod tests {
             evidence_refs: vec!["hidden:evidence".into()],
             confidence: 0.8,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let bounded = bounded_primary_results(vec![visible.clone(), hidden], 1);
         assert_eq!(bounded.len(), 1);
@@ -5070,6 +5092,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }];
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![open_kioku_core::RetrievalTrace {
@@ -5279,6 +5302,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }];
         let mut diagnostics = RetrievalDiagnostics::default();
         let confidence = ConfidenceBreakdown::default();
@@ -5335,6 +5359,7 @@ mod tests {
             evidence_refs: vec!["doc:section:one".into()],
             confidence: 0.6,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let exact = SearchResult {
             path: "docs/guide.md".into(),
@@ -5347,6 +5372,7 @@ mod tests {
             evidence_refs: vec!["symbol:exact-other-section".into()],
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let heuristic_key = RetrievalUnitKey::from_result(&heuristic);
         let exact_key = RetrievalUnitKey::from_result(&exact);
@@ -5427,6 +5453,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -5627,6 +5654,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -5803,6 +5831,7 @@ mod tests {
             evidence_refs: vec!["symbol:exact".into()],
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![RetrievalTrace {
@@ -5857,6 +5886,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.8,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![RetrievalTrace {
@@ -5907,6 +5937,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics::default();
         let budget = ContextBudget {
@@ -5938,6 +5969,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![
@@ -5996,6 +6028,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let compact = SearchResult {
             path: "src/compact.rs".into(),
@@ -6008,6 +6041,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics::default();
         let budget = ContextBudget {
@@ -6040,6 +6074,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let exact = SearchResult {
             path: "src/exact.rs".into(),
@@ -6052,6 +6087,7 @@ mod tests {
             evidence_refs: vec!["symbol:exact".into()],
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics {
             traces: vec![open_kioku_core::RetrievalTrace {
@@ -6092,6 +6128,7 @@ mod tests {
             evidence_refs: vec!["symbol:exact-target".into()],
             confidence: 1.0,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut ranked = (0..8)
             .map(|index| SearchResult {
@@ -6105,6 +6142,7 @@ mod tests {
                 evidence_refs: Vec::new(),
                 confidence: 0.5,
                 score_breakdown: Vec::new(),
+                exact_reference_provenance: None,
             })
             .collect::<Vec<_>>();
         ranked.push(exact.clone());
@@ -6144,6 +6182,7 @@ mod tests {
             evidence_refs: vec!["document:guide:section".into()],
             confidence: 0.7,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let duplicate = SearchResult {
             path: "docs/copy.md".into(),
@@ -6156,6 +6195,7 @@ mod tests {
             evidence_refs: vec!["document:copy:section".into()],
             confidence: 0.6,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics::default();
         let budget = ContextBudget {
@@ -6206,6 +6246,7 @@ mod tests {
             evidence_refs: vec!["doc:first".into()],
             confidence: 0.7,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let second = SearchResult {
             path: "docs/guide.md".into(),
@@ -6218,6 +6259,7 @@ mod tests {
             evidence_refs: vec!["doc:second".into()],
             confidence: 0.6,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         };
         let mut diagnostics = RetrievalDiagnostics::default();
         let budget = ContextBudget {
@@ -6577,6 +6619,7 @@ mod tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -6690,6 +6733,7 @@ mod tests {
             evidence_refs: vec![format!("evidence:{path}")],
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 
@@ -6816,6 +6860,59 @@ mod tests {
             .suggested_next_probe
             .as_deref()
             .is_some_and(|probe| !probe.contains("does not exist")));
+    }
+
+    #[test]
+    fn exact_reference_count_reads_typed_provenance_and_not_match_reason() {
+        let diagnostics = RetrievalDiagnostics::default();
+        let prose_only = lexical_hit(
+            "src/caller.rs",
+            "exact symbol reference via SCIP",
+            "exact reference to `issue_token` from `SCIP` occurrence data",
+        );
+        assert_eq!(
+            exact_reference_count(&diagnostics, &[], &[prose_only], &[]),
+            0
+        );
+
+        // Impact deduplication hands a reference's prose to a higher-scoring lexical duplicate
+        // on the same range and keeps the reference's provenance.
+        let mut outscored = lexical_hit(
+            "src/caller.rs",
+            "tantivy hybrid lexical match",
+            "query variant `issue_token` matched local index",
+        );
+        outscored.exact_reference_provenance =
+            Some(open_kioku_core::EvidenceSourceType::TreeSitter);
+        assert_eq!(
+            exact_reference_count(&diagnostics, &[], &[outscored], &[]),
+            1
+        );
+
+        let record = |source_type| open_kioku_core::Evidence {
+            id: open_kioku_core::EvidenceId::new("impact:src/auth.rs"),
+            source_type,
+            ..Default::default()
+        };
+        for source_type in [
+            open_kioku_core::EvidenceSourceType::Scip,
+            open_kioku_core::EvidenceSourceType::TreeSitter,
+            open_kioku_core::EvidenceSourceType::Lsp,
+        ] {
+            assert_eq!(
+                exact_reference_count(&diagnostics, &[], &[], &[record(source_type)]),
+                1
+            );
+        }
+        assert_eq!(
+            exact_reference_count(
+                &diagnostics,
+                &[],
+                &[],
+                &[record(open_kioku_core::EvidenceSourceType::Lexical)]
+            ),
+            0
+        );
     }
 
     #[test]
@@ -6949,6 +7046,7 @@ mod selection_ledger_tests {
             evidence_refs: Vec::new(),
             confidence: 0.5,
             score_breakdown: Vec::new(),
+            exact_reference_provenance: None,
         }
     }
 

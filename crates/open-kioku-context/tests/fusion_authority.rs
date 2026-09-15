@@ -17,6 +17,7 @@ fn result(path: &str, score: f32) -> SearchResult {
         evidence_refs: vec![format!("evidence:{path}")],
         confidence: 0.5,
         score_breakdown: Vec::new(),
+        exact_reference_provenance: None,
     }
 }
 

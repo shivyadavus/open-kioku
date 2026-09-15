@@ -258,6 +258,7 @@ fn annotate_candidates_with_git_history(
                     vec![fact.id.clone()],
                     "candidate added from bounded historical similar-change evidence",
                 )],
+                exact_reference_provenance: None,
             });
         }
     }
