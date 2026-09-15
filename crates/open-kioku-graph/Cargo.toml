@@ -21,6 +21,7 @@ sha2.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
+open-kioku-storage-sqlite = { version = "4.0.0", path = "../open-kioku-storage-sqlite" }
 schemars.workspace = true
 
 
