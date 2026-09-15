@@ -932,6 +932,7 @@ mod tests {
                 reason: "handler behavior is covered by unit tests".into(),
                 evidence_refs: vec!["test:unit-handler".into()],
                 score_breakdown: vec![],
+                origin: Default::default(),
             }],
             risk: RiskReport {
                 score: 0.5,

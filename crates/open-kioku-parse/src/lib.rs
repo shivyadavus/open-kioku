@@ -3,6 +3,7 @@ use open_kioku_core::{
     GraphNodeType, Import, Language, LineRange, ScoreComponent, Symbol, SymbolId, SymbolKind,
     TestTarget,
 };
+use open_kioku_tree_sitter::TestRegistrationCall;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -1152,31 +1153,16 @@ pub fn extract_tests(
     symbols: &[Symbol],
     build_hint: Option<&str>,
 ) -> Vec<TestTarget> {
-    // A leading separator lets a repository-root `tests/` or `test/` match like a nested one.
-    let path = format!(
-        "/{}",
-        file.path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase()
-    );
-    let is_test_file = path.contains("/test/")
-        || path.contains("/tests/")
-        || path.ends_with("_test.rs")
-        || path.ends_with("_test.go")
-        || path.ends_with("test.java")
-        || path.ends_with(".spec.ts")
-        || path.ends_with(".test.ts")
-        || path.ends_with("_test.py");
-
+    let is_test_file = open_kioku_core::is_test_code_path(&file.path.to_string_lossy());
     let lines = content.lines().collect::<Vec<_>>();
-    symbols
+    let mut targets = symbols
         .iter()
         .filter(|symbol| {
-            is_test_file
-                || (is_test_symbol_kind(&symbol.kind)
-                    && (symbol.name.starts_with("test")
-                        || has_adjacent_test_annotation(&lines, symbol)))
+            // Variables, constants, classes and modules are never targets, in a test file or not.
+            is_test_symbol_kind(&symbol.kind)
+                && (is_test_file
+                    || has_test_name_prefix(&symbol.name)
+                    || has_adjacent_test_annotation(&lines, symbol))
         })
         .map(|symbol| TestTarget {
             selection_tier: open_kioku_core::TestSelectionTier::default(),
@@ -1211,8 +1197,148 @@ pub fn extract_tests(
                 ))],
                 "test-like path, annotation, or naming convention",
             )],
+            // A symbol in a test file is a test by provenance; one matched outside a test file
+            // is a test by annotation or name, and the surfaces that filter say so differently.
+            origin: if is_test_file {
+                open_kioku_core::TestTargetOrigin::TestFileSymbol
+            } else {
+                open_kioku_core::TestTargetOrigin::Symbol
+            },
+        })
+        .collect::<Vec<_>>();
+    // Most JavaScript and TypeScript tests are calls, not declarations, so they have no symbol.
+    if is_test_file && matches!(file.language, Language::TypeScript | Language::JavaScript) {
+        targets.extend(
+            test_registration_calls(file, content)
+                .into_iter()
+                .map(|call| registration_target(file, call, build_hint)),
+        );
+    }
+    targets
+}
+
+const REGISTRATION_REASON: &str = "test registration call in a test-path file";
+const DISABLED_REGISTRATION_REASON: &str = "disabled test registration call in a test-path file";
+
+/// The tree-sitter reading of the file's registration calls, or the single-line pattern reading
+/// when the file does not parse cleanly, the fallback symbol extraction takes as well.
+fn test_registration_calls(file: &File, content: &str) -> Vec<TestRegistrationCall> {
+    open_kioku_tree_sitter::test_registration_calls(file, content)
+        .unwrap_or_else(|_| test_registration_calls_by_pattern(content))
+}
+
+/// `test("name", ...)`, `it.skip('name', ...)` or `Suite.test(`name`, () => ...)` opening on one
+/// line. A namespaced callee needs a callback on that line, so `pattern.test("abc")` is not a test.
+fn test_registration_calls_by_pattern(content: &str) -> Vec<TestRegistrationCall> {
+    let Ok(pattern) = Regex::new(
+        r#"^\s*(?:(?P<namespace>[A-Za-z_$][A-Za-z0-9_$]*)\.)?(?:test|it)(?P<modifiers>(?:\.(?:only|skip|todo|concurrent|failing|fails|sequential))*)\s*\(\s*(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)'|`(?P<template>[^`]*)`)(?P<rest>.*)$"#,
+    ) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let captures = pattern.captures(line)?;
+            let rest = captures.name("rest").map_or("", |rest| rest.as_str());
+            if captures.name("namespace").is_some()
+                && !(rest.contains("=>") || rest.contains("function"))
+            {
+                return None;
+            }
+            let (raw, interpolated) = match (
+                captures.name("double"),
+                captures.name("single"),
+                captures.name("template"),
+            ) {
+                (Some(text), _, _) | (_, Some(text), _) => (text.as_str(), false),
+                (_, _, Some(text)) => (text.as_str(), text.as_str().contains("${")),
+                _ => return None,
+            };
+            let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+            let line_number = u32::try_from(index + 1).ok()?;
+            let modifiers = captures
+                .name("modifiers")
+                .map_or("", |value| value.as_str());
+            let disabled = ["skip", "todo", "failing", "fails"]
+                .iter()
+                .any(|modifier| modifiers.contains(modifier));
+            (!name.is_empty()).then_some(TestRegistrationCall {
+                name,
+                range: LineRange {
+                    start: line_number,
+                    end: line_number,
+                },
+                interpolated,
+                disabled,
+            })
         })
         .collect()
+}
+
+/// A registered test's target is named by its literal text. The id carries the line, because two
+/// suites in one file often register tests with the same name; ids therefore churn when the calls
+/// move, and a saved plan's `test:` evidence refs stop resolving after such a re-index.
+fn registration_target(
+    file: &File,
+    call: TestRegistrationCall,
+    build_hint: Option<&str>,
+) -> TestTarget {
+    let id = stable_id(&format!(
+        "test:{}:{}:{}",
+        file.path.display(),
+        call.name,
+        call.range.start
+    ));
+    // A disabled test is written but never run, so it is the weakest evidence there is. A
+    // `${...}` substitution makes the registered name known only at runtime.
+    let confidence = if call.disabled {
+        Confidence::Low
+    } else if call.interpolated {
+        Confidence::Medium
+    } else {
+        Confidence::High
+    };
+    let reason = if call.disabled {
+        DISABLED_REGISTRATION_REASON
+    } else {
+        REGISTRATION_REASON
+    };
+    let origin = if call.disabled {
+        open_kioku_core::TestTargetOrigin::DisabledRegistrationCall
+    } else {
+        open_kioku_core::TestTargetOrigin::RegistrationCall
+    };
+    TestTarget {
+        selection_tier: open_kioku_core::TestSelectionTier::default(),
+        tier_justification: Vec::new(),
+        id: id.clone(),
+        name: call.name,
+        file_id: file.id.clone(),
+        range: Some(call.range),
+        command: recommended_command(&file.language, &file.path.to_string_lossy(), build_hint),
+        confidence,
+        reason: reason.into(),
+        evidence_refs: vec![id.clone()],
+        score_breakdown: vec![ScoreComponent::single(
+            "indexed_test_confidence",
+            confidence.score(),
+            vec![id],
+            reason,
+        )],
+        origin,
+    }
+}
+
+/// `test`, `test_rounds`, `testRounds` or `test2`, but not `testable` or `testimony`: the prefix
+/// has to end at a word boundary.
+fn has_test_name_prefix(name: &str) -> bool {
+    name.strip_prefix("test").is_some_and(|rest| {
+        matches!(
+            rest.chars().next(),
+            None | Some('_' | 'A'..='Z' | '0'..='9')
+        )
+    })
 }
 
 /// Upper bound on the attribute, annotation and doc-comment lines walked above a symbol, so a
@@ -1897,21 +2023,306 @@ endpoint = "https://orders.example.com/v1/orders"
     }
 
     #[test]
-    fn test_file_path_causes_all_symbols_to_be_tests() {
-        let file = File {
-            id: FileId::new("test-file"),
+    fn every_callable_in_a_test_path_file_is_a_target_and_nothing_else_is() {
+        let file = file_at("src/worker_test.rs", Language::Rust);
+        let src = "pub const RETRY_LIMIT: u32 = 3;\npub struct Probe;\npub fn some_helper() {}\n";
+        assert_eq!(target_names(&file, src), vec!["some_helper"]);
+    }
+
+    fn file_at(path: &str, language: Language) -> File {
+        File {
+            id: FileId::new(format!("file-{path}")),
             repository_id: RepositoryId::new("repo"),
-            path: "src/worker_test.rs".into(),
-            language: Language::Rust,
+            path: path.into(),
+            language,
             size_bytes: 0,
             content_hash: "hash".into(),
             is_generated: false,
             is_vendor: false,
-        };
-        let src = "pub fn some_helper() {}\n";
+        }
+    }
+
+    fn target_names(file: &File, src: &str) -> Vec<String> {
+        let symbols = extract_symbols(file, src);
+        let mut names = extract_tests(file, src, &symbols, None)
+            .into_iter()
+            .map(|test| test.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn javascript_and_typescript_test_layouts_make_every_callable_a_target() {
+        let src = "import { convert } from \"../rates\";\n\nconst SAMPLE_RATE = 1.25;\n\nfunction roundsHalfUp() {\n  expect(convert(2, SAMPLE_RATE)).toBe(2.5);\n}\n\nexport async function loadsRateTable() {\n  await loadTable();\n}\n";
+        for (path, language) in [
+            ("src/rates_test.ts", Language::TypeScript),
+            ("src/rates_test.js", Language::JavaScript),
+            ("src/rates.test.js", Language::JavaScript),
+            ("src/rates.spec.js", Language::JavaScript),
+            ("src/RateTable.test.tsx", Language::TypeScript),
+            ("src/__tests__/rates.ts", Language::TypeScript),
+            ("test/rates.ts", Language::TypeScript),
+        ] {
+            let file = file_at(path, language);
+            assert_eq!(
+                target_names(&file, src),
+                vec!["loadsRateTable", "roundsHalfUp"],
+                "{path}"
+            );
+            let symbols = extract_symbols(&file, src);
+            assert!(
+                extract_tests(&file, src, &symbols, None)
+                    .iter()
+                    .all(|test| matches!(test.confidence, Confidence::High)),
+                "{path}: a test-path target is high confidence"
+            );
+        }
+    }
+
+    #[test]
+    fn a_const_bound_function_in_a_test_file_is_a_target_only_when_extracted_as_callable() {
+        let file = file_at("src/rates.test.ts", Language::TypeScript);
+        let src = "const parsesRates = () => {};\nconst SAMPLE_TABLE = [1, 2];\n";
+        let callable = function_symbol("parsesRates", 1);
+        let mut variable = function_symbol("SAMPLE_TABLE", 2);
+        variable.kind = SymbolKind::Variable;
+        let names = extract_tests(&file, src, &[callable, variable], None)
+            .into_iter()
+            .map(|test| test.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["parsesRates"]);
+    }
+
+    #[test]
+    fn a_production_function_named_testable_is_not_a_test_target() {
+        let file = file_at("src/rates.ts", Language::TypeScript);
+        let src = "export function testable(rate: number): boolean {\n  return rate > 0;\n}\n\nexport function convert(amount: number, rate: number): number {\n  return amount * rate;\n}\n";
+        assert!(!extract_symbols(&file, src).is_empty());
+        assert!(target_names(&file, src).is_empty());
+        for name in ["test", "test_rounds", "testRounds", "test2"] {
+            assert!(super::has_test_name_prefix(name), "{name}");
+        }
+        for name in ["testable", "testimony", "Testable", "attest"] {
+            assert!(!super::has_test_name_prefix(name), "{name}");
+        }
+    }
+
+    /// Each registration form, a namespaced member form, a template name, a non-literal name, a
+    /// suite, and a namespaced `.test` call that is a regular expression check.
+    const REGISTRATIONS: &str = "describe(\"rate table\", () => {\n  test(\"converts at the posted rate\", () => {});\n  it('rounds half up', () => {});\n  test.only(\"reads   the header\", () => {});\n  it.skip(\"skips stale rows\", () => {});\n  test.each([[1, 2]])(\"adds %i to %i\", (left, right) => {});\n  Suite.test(\"parses rows\", async () => {});\n  it(`formats ${currency} totals`, () => {});\n  test(caseName, () => {});\n  expect(RowPattern.test(\"not a registration\")).toBe(true);\n});\n";
+
+    const REGISTERED_NAMES: [&str; 7] = [
+        "adds %i to %i",
+        "converts at the posted rate",
+        "formats ${currency} totals",
+        "parses rows",
+        "reads the header",
+        "rounds half up",
+        "skips stale rows",
+    ];
+
+    #[test]
+    fn registration_calls_in_test_files_are_targets_in_ts_tsx_and_js() {
+        for (path, language) in [
+            ("src/rates.test.ts", Language::TypeScript),
+            ("src/RateTable.test.tsx", Language::TypeScript),
+            ("src/rates.spec.js", Language::JavaScript),
+        ] {
+            let file = file_at(path, language);
+            assert_eq!(
+                target_names(&file, REGISTRATIONS),
+                REGISTERED_NAMES,
+                "{path}"
+            );
+            let symbols = extract_symbols(&file, REGISTRATIONS);
+            let targets = extract_tests(&file, REGISTRATIONS, &symbols, None);
+            let converts = targets
+                .iter()
+                .find(|test| test.name == "converts at the posted rate")
+                .expect("the plain registration is a target");
+            assert_eq!(
+                converts
+                    .range
+                    .as_ref()
+                    .map(|range| (range.start, range.end)),
+                Some((2, 2)),
+                "{path}"
+            );
+            assert!(matches!(converts.confidence, Confidence::High), "{path}");
+            let formats = targets
+                .iter()
+                .find(|test| test.name == "formats ${currency} totals")
+                .expect("the template registration is a target");
+            assert!(matches!(formats.confidence, Confidence::Medium), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_registration_call_is_low_confidence_and_not_validation_evidence() {
+        let src = "test.skip(\"skips the ledger\", () => {});\nit.skip(\"skips stale rows\", () => {});\ntest.todo(\"writes the receipt\");\ntest.failing(\"fails for now\", () => {});\nit.fails(\"fails as well\", () => {});\ntest.only(\"runs alone\", () => {});\n";
+        let file = file_at("src/ledger.test.ts", Language::TypeScript);
         let symbols = extract_symbols(&file, src);
-        let tests = extract_tests(&file, src, &symbols, None);
-        // All symbols in a test file become test targets.
-        assert_eq!(tests.len(), symbols.len());
+        let targets = extract_tests(&file, src, &symbols, None);
+        let named = |name: &str| {
+            targets
+                .iter()
+                .find(|target| target.name == name)
+                .unwrap_or_else(|| panic!("no target named {name}"))
+        };
+        for name in [
+            "skips the ledger",
+            "skips stale rows",
+            "writes the receipt",
+            "fails for now",
+            "fails as well",
+        ] {
+            let target = named(name);
+            assert!(matches!(target.confidence, Confidence::Low), "{name}");
+            assert!(!target.counts_as_validation_evidence(), "{name}");
+            assert!(target.is_registration_call(), "{name}");
+            assert_eq!(target.reason, super::DISABLED_REGISTRATION_REASON, "{name}");
+        }
+        let enabled = named("runs alone");
+        assert!(matches!(enabled.confidence, Confidence::High));
+        assert!(enabled.counts_as_validation_evidence());
+        assert!(enabled.is_registration_call());
+        assert_eq!(enabled.reason, super::REGISTRATION_REASON);
+    }
+
+    #[test]
+    fn the_pattern_fallback_also_marks_a_disabled_registration() {
+        let calls = super::test_registration_calls_by_pattern(
+            "it.skip('skips stale rows', () => {});\ntest('keeps totals', () => {});\n",
+        );
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].disabled, "it.skip is disabled");
+        assert!(!calls[1].disabled, "a plain test is not");
+    }
+
+    #[test]
+    fn a_registration_call_in_a_tsx_file_with_jsx_is_a_target() {
+        let src =
+            "it(\"renders the rate table\", () => {\n  render(<RateTable rows={rows} />);\n});\n";
+        assert_eq!(
+            target_names(
+                &file_at("src/RateTable.test.tsx", Language::TypeScript),
+                src
+            ),
+            vec!["renders the rate table"]
+        );
+    }
+
+    #[test]
+    fn registration_calls_in_a_production_file_are_not_targets() {
+        for (path, language) in [
+            ("src/rateTable.ts", Language::TypeScript),
+            ("src/rateTable.js", Language::JavaScript),
+        ] {
+            assert!(
+                target_names(&file_at(path, language), REGISTRATIONS).is_empty(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_test_file_with_a_syntax_error_falls_back_to_single_line_registrations() {
+        let src = "test(\"keeps totals\", () => {\n  const = ;\n});\nSuite.it('parses rows', function () {});\nRowPattern.test(\"abc\");\ntest(caseName, () => {});\n";
+        assert_eq!(
+            target_names(&file_at("src/rates.test.ts", Language::TypeScript), src),
+            vec!["keeps totals", "parses rows"]
+        );
+    }
+
+    /// A JUnit class declares its tests as methods named for behaviour, and a Python
+    /// `unittest.TestCase` does the same. Neither name contains "test", so the target carries the
+    /// fact that the file is tests instead of leaving later surfaces to guess from the name.
+    #[test]
+    fn junit_and_unittest_methods_are_targets_by_test_file_provenance() {
+        let java = file_at("src/test/java/com/acme/RatesTest.java", Language::Java);
+        let java_src = "package com.acme;\n\npublic class RatesTest {\n  @Test\n  void shouldRoundHalfUp() {\n    assertEquals(3, Rates.convert(2, 1.5));\n  }\n\n  @Test\n  void roundsTowardsEven() {\n    assertEquals(2, Rates.convert(2, 1.25));\n  }\n}\n";
+        let java_targets = extract_tests(&java, java_src, &extract_symbols(&java, java_src), None);
+        let java_names = java_targets
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(java_names.contains(&"shouldRoundHalfUp"), "{java_names:?}");
+        assert!(java_names.contains(&"roundsTowardsEven"), "{java_names:?}");
+        assert!(
+            !java_names.contains(&"RatesTest"),
+            "a test class is not a target"
+        );
+        for target in &java_targets {
+            assert!(target.has_test_provenance(), "{}", target.name);
+            assert!(target.counts_as_validation_evidence(), "{}", target.name);
+        }
+
+        let python = file_at("tests/test_rates.py", Language::Python);
+        let python_src = "import unittest\n\n\nclass RatesTest(unittest.TestCase):\n    def test_rounds_half_up(self):\n        self.assertEqual(convert(2, 1.5), 3)\n\n    def rounds_towards_even(self):\n        self.assertEqual(convert(2, 1.25), 2)\n";
+        let python_targets = extract_tests(
+            &python,
+            python_src,
+            &extract_symbols(&python, python_src),
+            None,
+        );
+        let python_names = python_targets
+            .iter()
+            .map(|test| test.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            python_names.contains(&"test_rounds_half_up"),
+            "{python_names:?}"
+        );
+        assert!(
+            python_names.contains(&"rounds_towards_even"),
+            "a helper in a test file is still a target: {python_names:?}"
+        );
+        assert!(
+            !python_names.contains(&"RatesTest"),
+            "a test class is not a target"
+        );
+        for target in &python_targets {
+            assert!(target.has_test_provenance(), "{}", target.name);
+        }
+    }
+
+    #[test]
+    fn a_symbol_matched_outside_a_test_file_keeps_plain_symbol_provenance() {
+        let file = file_at("src/rates.rs", Language::Rust);
+        let src = "#[test]\nfn rounds_half_up() {\n    assert_eq!(convert(2, 1.5), 3);\n}\n";
+        let targets = extract_tests(&file, src, &extract_symbols(&file, src), None);
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert!(!targets[0].has_test_provenance());
+        assert!(targets[0].counts_as_validation_evidence());
+    }
+
+    #[test]
+    fn data_only_directories_under_a_test_path_do_not_make_every_callable_a_target() {
+        let go = "package lexer\n\nfunc Scan() {}\n";
+        assert_eq!(
+            target_names(&file_at("internal/lexer/lexer_test.go", Language::Go), go),
+            vec!["Scan"]
+        );
+        for path in [
+            "internal/lexer/testdata/input.go",
+            "internal/lexer/testdata/input_test.go",
+        ] {
+            assert!(
+                target_names(&file_at(path, Language::Go), go).is_empty(),
+                "{path}"
+            );
+        }
+        let ts = "export function renderInvoice() {}\n";
+        for path in [
+            "tests/fixtures/invoice.ts",
+            "src/__fixtures__/invoice.ts",
+            "src/__snapshots__/invoice.test.ts",
+        ] {
+            assert!(
+                target_names(&file_at(path, Language::TypeScript), ts).is_empty(),
+                "{path}"
+            );
+        }
     }
 }

@@ -809,6 +809,11 @@ impl<'a> ContextPackBuilder<'a> {
         let mut tests_by_id = std::collections::BTreeMap::new();
         for result in validation_seed_results(&primary_files, &supporting_files, 5) {
             for test in selector.for_changed_path_with_evidence(&result.path, 5)? {
+                // A disabled test is not evidence, and admitting one here would let the pack
+                // carry a validation target while the diagnostics call validation unavailable.
+                if !test.counts_as_validation_evidence() {
+                    continue;
+                }
                 // Validation seeds are ordered by evidence strength. Keep the first observation
                 // of a test so runtime-corroborated selection is not overwritten by a weaker path.
                 tests_by_id.entry(test.id.clone()).or_insert(test);
@@ -1638,7 +1643,11 @@ fn negative_evidence_for_context(inputs: NegativeEvidenceInputs<'_>) -> Vec<Nega
             ),
         });
     }
-    if tests.is_empty() {
+    // A disabled test is written but never run, so a pack holding only those has no validation.
+    if !tests
+        .iter()
+        .any(|test| test.counts_as_validation_evidence())
+    {
         items.push(NegativeEvidence {
             query: task.into(),
             scope: negative_evidence_scope::VALIDATION.into(),
@@ -1725,8 +1734,14 @@ fn confidence_for_context(inputs: ContextConfidenceInputs<'_>) -> ConfidenceBrea
         primary_file_count: primary_files.len(),
         evidence_count,
         exact_reference_count,
-        validation_count: tests.len(),
-        validation_with_command_count: tests.iter().filter(|test| test.command.is_some()).count(),
+        validation_count: tests
+            .iter()
+            .filter(|test| test.counts_as_validation_evidence())
+            .count(),
+        validation_with_command_count: tests
+            .iter()
+            .filter(|test| test.counts_as_validation_evidence() && test.command.is_some())
+            .count(),
         negative_evidence_count: open_kioku_core::negative_evidence_signal_count(negative_evidence),
         allowed_file_count,
         runtime_signal_count: runtime_signal_count_value
@@ -4120,6 +4135,7 @@ mod tests {
             reason: "fixture".into(),
             evidence_refs: Vec::new(),
             score_breakdown: Vec::new(),
+            origin: Default::default(),
         }
     }
     use std::path::Path;

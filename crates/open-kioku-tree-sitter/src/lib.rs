@@ -145,6 +145,212 @@ pub fn parse_symbols(file: &File, content: &str) -> Result<Vec<Symbol>> {
     Ok(parse_file(file, content)?.symbols)
 }
 
+/// A test a JavaScript or TypeScript file registers by calling its runner: `test("parses rows",
+/// fn)`, `it.skip(...)`, `test.each(table)(...)` or `Suite.test(...)`. It becomes a test target
+/// only; it adds no symbol and no relationship.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRegistrationCall {
+    /// The first argument's literal text with whitespace runs collapsed to one space.
+    pub name: String,
+    /// The whole call expression.
+    pub range: LineRange,
+    /// The name is a template literal with a `${...}` substitution, so the registered name is
+    /// only known at runtime.
+    pub interpolated: bool,
+    /// A modifier the runner honours by not executing the test: `skip`, `todo`, `failing`,
+    /// `fails`. Such a test is written but never run, so it is not validation evidence.
+    pub disabled: bool,
+}
+
+/// Modifiers whose test the runner does not execute.
+const DISABLING_TEST_MODIFIERS: [&str; 4] = ["skip", "todo", "failing", "fails"];
+
+/// What a registration callee resolved to.
+#[derive(Debug, Clone, Copy)]
+struct RegistrationCallee {
+    /// `<identifier>.test` or `<identifier>.it`, which needs a callback argument to count.
+    namespaced: bool,
+    /// A disabling modifier appeared anywhere in the chain.
+    disabled: bool,
+}
+
+/// Modifiers runners chain onto `test` and `it`. Suites (`describe`, `suite`) are not
+/// registrations: a suite is not a runnable unit of its own, and its name repeats the vocabulary
+/// its tests already carry.
+const TEST_REGISTRATION_MODIFIERS: [&str; 8] = [
+    "only",
+    "skip",
+    "todo",
+    "concurrent",
+    "failing",
+    "fails",
+    "sequential",
+    "each",
+];
+
+/// Longest callee chain followed, so a pathological `test.only.only...` cannot recurse unbounded.
+const TEST_REGISTRATION_CALLEE_DEPTH: usize = 8;
+
+/// Every test registration call in a JavaScript or TypeScript file whose first argument is a
+/// string or template literal. A file with syntax errors is an error, as in [`parse_file`], so
+/// the caller can fall back to a pattern reading instead of trusting a partial tree.
+pub fn test_registration_calls(file: &File, content: &str) -> Result<Vec<TestRegistrationCall>> {
+    let grammar: TsLanguage = match file.language {
+        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript
+            if file
+                .path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx")) =>
+        {
+            tree_sitter_typescript::LANGUAGE_TSX.into()
+        }
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        _ => {
+            return Err(OkError::Unsupported(format!(
+                "test registration calls are not read for {:?}",
+                file.language
+            )))
+        }
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&grammar)
+        .map_err(|err| OkError::Parse {
+            path: file.path.clone(),
+            message: err.to_string(),
+        })?;
+    let tree = parser.parse(content, None).ok_or_else(|| OkError::Parse {
+        path: file.path.clone(),
+        message: "tree-sitter returned no parse tree".into(),
+    })?;
+    if tree.root_node().has_error() {
+        return Err(OkError::Parse {
+            path: file.path.clone(),
+            message: "tree-sitter parse contains syntax errors".into(),
+        });
+    }
+    let source = content.as_bytes();
+    let mut calls = Vec::new();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call_expression" {
+            calls.extend(registration_call(node, source));
+        }
+        pending.extend((0..node.named_child_count()).filter_map(|index| node.named_child(index)));
+    }
+    calls.sort_by(|left, right| {
+        (left.range.start, left.range.end, &left.name).cmp(&(
+            right.range.start,
+            right.range.end,
+            &right.name,
+        ))
+    });
+    Ok(calls)
+}
+
+fn registration_call(node: Node<'_>, source: &[u8]) -> Option<TestRegistrationCall> {
+    let callee = registration_callee(node.child_by_field_name("function")?, source, 0)?;
+    let arguments = node.child_by_field_name("arguments")?;
+    // `test.each`table`` passes a template, not an argument list; the call it returns registers.
+    if arguments.kind() != "arguments" {
+        return None;
+    }
+    let values = (0..arguments.named_child_count())
+        .filter_map(|index| arguments.named_child(index))
+        .filter(|value| value.kind() != "comment")
+        .collect::<Vec<_>>();
+    let (first, rest) = values.split_first()?;
+    let text = first.utf8_text(source).ok()?;
+    let inner = text.get(1..text.len().checked_sub(1)?)?;
+    let interpolated = match first.kind() {
+        "string" => false,
+        "template_string" => (0..first.named_child_count())
+            .filter_map(|index| first.named_child(index))
+            .any(|child| child.kind() == "template_substitution"),
+        _ => return None,
+    };
+    // `pattern.test("abc")` is a regular expression check, not a registration.
+    if callee.namespaced
+        && !rest.iter().any(|value| {
+            matches!(
+                value.kind(),
+                "arrow_function" | "function_expression" | "function"
+            )
+        })
+    {
+        return None;
+    }
+    let name = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return None;
+    }
+    Some(TestRegistrationCall {
+        name,
+        range: LineRange {
+            start: u32::try_from(node.start_position().row + 1).ok()?,
+            end: u32::try_from(node.end_position().row + 1).ok()?,
+        },
+        interpolated,
+        disabled: callee.disabled,
+    })
+}
+
+/// `Some(false)` for `test`, `it` and their modifier chains, `Some(true)` for
+/// `<identifier>.test`, `<identifier>.it` and theirs. A `test.each(table)` call in callee
+/// position counts as the chain it was called on.
+fn registration_callee(
+    callee: Node<'_>,
+    source: &[u8],
+    depth: usize,
+) -> Option<RegistrationCallee> {
+    if depth > TEST_REGISTRATION_CALLEE_DEPTH {
+        return None;
+    }
+    match callee.kind() {
+        "identifier" => {
+            matches!(callee.utf8_text(source).ok()?, "test" | "it").then_some(RegistrationCallee {
+                namespaced: false,
+                disabled: false,
+            })
+        }
+        "member_expression" => {
+            let object = callee.child_by_field_name("object")?;
+            let property = callee
+                .child_by_field_name("property")?
+                .utf8_text(source)
+                .ok()?;
+            if matches!(property, "test" | "it") && object.kind() == "identifier" {
+                return Some(RegistrationCallee {
+                    namespaced: true,
+                    disabled: false,
+                });
+            }
+            if TEST_REGISTRATION_MODIFIERS.contains(&property) {
+                let mut inner = registration_callee(object, source, depth + 1)?;
+                inner.disabled |= DISABLING_TEST_MODIFIERS.contains(&property);
+                return Some(inner);
+            }
+            None
+        }
+        "call_expression" => {
+            let table = callee.child_by_field_name("function")?;
+            let is_each = table.kind() == "member_expression"
+                && table
+                    .child_by_field_name("property")?
+                    .utf8_text(source)
+                    .ok()?
+                    == "each";
+            if is_each {
+                registration_callee(table, source, depth + 1)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn tree_sitter_language(language: &Language) -> Result<TsLanguage> {
     match language {
         Language::Rust => Ok(tree_sitter_rust::LANGUAGE.into()),

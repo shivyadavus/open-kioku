@@ -16,7 +16,11 @@ pub const LANGUAGE_ADAPTER_SEMANTICS_VERSION: &str = "ri3-language-semantics-v1"
 /// targets and must be rebuilt rather than partially refreshed.
 /// v3: a Rust `use` declaration emits one import site per imported path, and `mod` items are
 /// recorded as module declarations; v2 indexes lack both.
-pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v3";
+/// v4: a test file is one `is_test_path` recognises outside data-only directories, so JS/TS
+/// `_test`, `.test.js`, `.spec.js`, `.test.tsx` and `__tests__/` files gain targets; only
+/// callables are targets anywhere, and a JS/TS registration call such as `test("name", fn)` is
+/// one too; a v3 index holds none of that and must be rebuilt.
+pub const PARSER_SEMANTICS_VERSION: &str = "tier1-parser-semantics-v4";
 
 const TIER1_LANGUAGES: [&str; 6] = ["go", "java", "javascript", "python", "rust", "typescript"];
 

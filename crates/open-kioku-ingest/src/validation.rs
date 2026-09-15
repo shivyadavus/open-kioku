@@ -733,6 +733,7 @@ mod tests {
             reason: "test fixture".into(),
             evidence_refs: vec![format!("test:{name}")],
             score_breakdown: Vec::new(),
+            origin: Default::default(),
         }
     }
 

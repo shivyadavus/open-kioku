@@ -583,6 +583,37 @@ pub fn is_test_path(path: &str) -> bool {
     dirs.iter().any(|dir| is_test_dir_segment(dir)) || is_test_file_name(file)
 }
 
+/// Directories inside a test path that hold what tests read rather than tests: Go's toolchain
+/// skips `testdata/`, and fixture and snapshot directories hold inputs and expected outputs.
+const DATA_ONLY_TEST_DIRS: [&str; 6] = [
+    "testdata",
+    "test_data",
+    "test-data",
+    "fixtures",
+    "__fixtures__",
+    "__snapshots__",
+];
+
+/// Whether a path is test code rather than test data: an [`is_test_path`] path that is not under
+/// a data-only directory. Test-target extraction and validation availability judge files by it;
+/// ranking keeps `is_test_path`, so a fixture still ranks as test material.
+pub fn is_test_code_path(path: &str) -> bool {
+    if !is_test_path(path) {
+        return false;
+    }
+    let normalized = path.replace('\\', "/");
+    let mut segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    segments.pop();
+    !segments.iter().any(|segment| {
+        DATA_ONLY_TEST_DIRS
+            .iter()
+            .any(|dir| segment.eq_ignore_ascii_case(dir))
+    })
+}
+
 fn is_test_dir_segment(segment: &str) -> bool {
     let lower = segment.to_ascii_lowercase();
     matches!(
@@ -2207,6 +2238,28 @@ pub struct TestTarget {
     /// The authority-grade or policy-accepted evidence behind a non-optional tier.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tier_justification: Vec<String>,
+    /// Where the target came from. Stored targets written before this field read as
+    /// [`TestTargetOrigin::Symbol`].
+    #[serde(default)]
+    pub origin: TestTargetOrigin,
+}
+
+/// Where a [`TestTarget`] came from. Provenance is carried on the target because the surfaces
+/// that filter validation candidates cannot recover it from a name: a registered test is named
+/// by a sentence, and a disabled one reads like any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TestTargetOrigin {
+    /// A declared symbol outside a test file, matched by a test annotation or naming convention.
+    #[default]
+    Symbol,
+    /// A declared symbol in a file the shared test-path rule recognises. The file is tests, so
+    /// the symbol is one whatever it is called: `shouldRoundHalfUp`, `roundsHalfUp`, `testRounds`.
+    TestFileSymbol,
+    /// A JavaScript or TypeScript runner call such as `test("name", fn)`.
+    RegistrationCall,
+    /// A registration call the runner will not execute: `test.skip`, `it.todo`, `test.failing`.
+    DisabledRegistrationCall,
 }
 
 /// Selection strength for a validation candidate.
@@ -2241,6 +2294,33 @@ pub enum TestSelectionTier {
 }
 
 impl TestTarget {
+    /// Whether this target can stand as validation evidence. A disabled registration is a test
+    /// the runner skips, so counting it would let a file of `test.skip` calls satisfy a
+    /// task family that requires validation evidence.
+    pub fn counts_as_validation_evidence(&self) -> bool {
+        !matches!(self.origin, TestTargetOrigin::DisabledRegistrationCall)
+    }
+
+    /// Whether provenance alone establishes that this is a test: the index extracted it from a
+    /// test file, or a runner call registered it. Only targets matched outside a test file, by
+    /// annotation or naming convention, need a name heuristic to judge them.
+    pub fn has_test_provenance(&self) -> bool {
+        matches!(
+            self.origin,
+            TestTargetOrigin::TestFileSymbol
+                | TestTargetOrigin::RegistrationCall
+                | TestTargetOrigin::DisabledRegistrationCall
+        )
+    }
+
+    /// Whether a runner call registered this target rather than a declared symbol.
+    pub fn is_registration_call(&self) -> bool {
+        matches!(
+            self.origin,
+            TestTargetOrigin::RegistrationCall | TestTargetOrigin::DisabledRegistrationCall
+        )
+    }
+
     pub fn reconcile_score_breakdown(&mut self) {
         if self.evidence_refs.is_empty() {
             self.evidence_refs.push(format!("test:{}", self.id));
@@ -6385,7 +6465,29 @@ mod index_coverage_tests {
 
 #[cfg(test)]
 mod test_path_tests {
-    use super::{is_test_path, query_wants_tests};
+    use super::{is_test_code_path, is_test_path, query_wants_tests};
+
+    #[test]
+    fn test_code_paths_exclude_data_only_directories() {
+        for path in [
+            "src/rates_test.ts",
+            "src/__tests__/rates.ts",
+            "test/rates.js",
+            "pkg/store/store_test.go",
+        ] {
+            assert!(is_test_code_path(path), "{path} should be test code");
+        }
+        for path in [
+            "pkg/store/testdata/input_test.go",
+            "tests/fixtures/invoice.ts",
+            "src/__snapshots__/invoice.test.ts",
+            "tests/Test_Data/sample.py",
+            "src/rates.ts",
+        ] {
+            assert!(!is_test_code_path(path), "{path} should not be test code");
+        }
+        assert!(is_test_path("tests/fixtures/invoice.ts"));
+    }
 
     #[test]
     fn gradle_source_sets_and_java_suffixes_are_tests() {

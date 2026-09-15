@@ -59,11 +59,7 @@ struct TrustUiStep {
     evidence: Vec<String>,
 }
 
-fn handle_architecture_trust_command(
-    json: bool,
-    repo: &Path,
-    kind: &str,
-) -> anyhow::Result<()> {
+fn handle_architecture_trust_command(json: bool, repo: &Path, kind: &str) -> anyhow::Result<()> {
     let report = build_architecture_trust_report(repo, kind)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -80,7 +76,7 @@ fn build_architecture_trust_report(
     let store = open_store(repo)?;
     let files = store.list_files(usize::MAX, 0)?;
     let symbols = store.list_symbols(None, usize::MAX, 0)?;
-    let tests = store.tests().unwrap_or_default();
+    let indexed_tests = store.tests();
     let policy = load_architecture_policy(repo)?;
     let (summary, policy_report) = if let Some(policy) = policy.as_ref() {
         let resolver = PolicyResolver::new(policy)?;
@@ -94,8 +90,22 @@ fn build_architecture_trust_report(
     let graph_counts = store.graph_counts().unwrap_or_default();
     let edge_stats = store.edge_type_stats().unwrap_or_default();
     let mut caveats = Vec::new();
+    // An unreadable tests table is not the same fact as a repository without tests: inferring
+    // missing tests from it would report every source file as untested.
+    let (tests, tests_readable) = match indexed_tests {
+        Ok(tests) => (tests, true),
+        Err(err) => {
+            caveats.push(format!(
+                "indexed test targets could not be read ({err}); the missing-test list is omitted rather than inferred from absent evidence, and the high-risk files and validation requirements below are ranked without test-coverage evidence"
+            ));
+            (Vec::new(), false)
+        }
+    };
     if graph_counts.edges == 0 {
-        caveats.push("no persisted graph edges were available; run `ok index .` for dependency evidence".into());
+        caveats.push(
+            "no persisted graph edges were available; run `ok index .` for dependency evidence"
+                .into(),
+        );
     }
     if policy_report.is_none() {
         caveats.push("no architecture policy configured; report uses heuristic components".into());
@@ -128,7 +138,11 @@ fn build_architecture_trust_report(
         .take(50)
         .collect::<Vec<_>>();
 
-    let missing_tests = missing_test_files(&files, &tests);
+    let missing_tests = if tests_readable {
+        missing_test_files(&files, &tests)
+    } else {
+        Vec::new()
+    };
     let high_change_files = high_change_hotspots(&store, &files, &mut caveats);
     let high_risk_files = risk_hotspots(&files, &symbols, &missing_tests, &high_change_files);
     let runtime_risk_hotspots = runtime_hotspots(&files);
@@ -155,7 +169,10 @@ fn build_architecture_trust_report(
     let validation_requirements = validation_requirements_for_architecture(
         &high_risk_files,
         &missing_tests,
-        policy_report.as_ref().map(|report| report.violation_count).unwrap_or(0),
+        policy_report
+            .as_ref()
+            .map(|report| report.violation_count)
+            .unwrap_or(0),
     );
     let evidence_ids = architecture_evidence_ids(&dependencies, &policy_report);
     let reproduce = vec![
@@ -267,7 +284,10 @@ fn push_arch_components(out: &mut String, components: &[ArchitectureComponentSum
             component.id, component.file_count
         ));
         if !component.sample_paths.is_empty() {
-            out.push_str(&format!("; samples `{}`", component.sample_paths.join("`, `")));
+            out.push_str(&format!(
+                "; samples `{}`",
+                component.sample_paths.join("`, `")
+            ));
         }
         out.push('\n');
     }
@@ -280,7 +300,10 @@ fn push_arch_dependencies(out: &mut String, dependencies: &[ArchitectureDependen
         out.push_str("- No dependency edge stats were available.\n\n");
         return;
     }
-    for dependency in dependencies.iter().filter(|dependency| dependency.count > 0) {
+    for dependency in dependencies
+        .iter()
+        .filter(|dependency| dependency.count > 0)
+    {
         out.push_str(&format!(
             "- `{}`: {} edge(s), evidence_available `{}`\n",
             dependency.edge_type, dependency.count, dependency.evidence_available
@@ -303,7 +326,10 @@ fn push_hotspots(out: &mut String, title: &str, hotspots: &[ArchitectureHotspot]
             hotspot.reasons.join("; ")
         ));
         if !hotspot.evidence_ids.is_empty() {
-            out.push_str(&format!("  - evidence: `{}`\n", hotspot.evidence_ids.join("`, `")));
+            out.push_str(&format!(
+                "  - evidence: `{}`\n",
+                hotspot.evidence_ids.join("`, `")
+            ));
         }
     }
     out.push('\n');
@@ -359,7 +385,10 @@ fn high_change_hotspots(
 ) -> Vec<ArchitectureHotspot> {
     let mut unavailable = false;
     let mut hotspots = Vec::new();
-    for file in files.iter().filter(|file| !file.is_generated && !file.is_vendor) {
+    for file in files
+        .iter()
+        .filter(|file| !file.is_generated && !file.is_vendor)
+    {
         match store.churn_for_file(&file.path) {
             Ok(churn) if churn.stats.touch_count > 0 => hotspots.push(ArchitectureHotspot {
                 path: normalize_path_string(&file.path),
@@ -410,7 +439,10 @@ fn risk_hotspots(
         .map(|hotspot| (hotspot.path.clone(), hotspot.score))
         .collect::<BTreeMap<_, _>>();
     let mut hotspots = Vec::new();
-    for file in files.iter().filter(|file| !file.is_generated && !file.is_vendor) {
+    for file in files
+        .iter()
+        .filter(|file| !file.is_generated && !file.is_vendor)
+    {
         let path = normalize_path_string(&file.path);
         let mut score = (file.size_bytes as f32 / 20_000.0).min(0.3);
         let mut reasons = Vec::new();
@@ -488,10 +520,12 @@ fn validation_requirements_for_architecture(
         requirements.push("High-risk files require targeted tests before acceptance.".into());
     }
     if !missing_tests.is_empty() {
-        requirements.push("Files without indexed tests require manual validation or new tests.".into());
+        requirements
+            .push("Files without indexed tests require manual validation or new tests.".into());
     }
     if policy_violation_count > 0 {
-        requirements.push("Architecture policy violations must be resolved or explicitly exempted.".into());
+        requirements
+            .push("Architecture policy violations must be resolved or explicitly exempted.".into());
     }
     requirements
 }
@@ -556,7 +590,10 @@ fn build_trust_ui_report(repo: &Path, task: String) -> anyhow::Result<TrustUiRep
             },
             TrustUiStep {
                 label: "Affected files".into(),
-                status: format!("{} hotspot candidate(s)", architecture.high_risk_files.len()),
+                status: format!(
+                    "{} hotspot candidate(s)",
+                    architecture.high_risk_files.len()
+                ),
                 evidence: vec!["architecture:hotspot-ranking".into()],
             },
             TrustUiStep {
@@ -566,7 +603,10 @@ fn build_trust_ui_report(repo: &Path, task: String) -> anyhow::Result<TrustUiRep
             },
             TrustUiStep {
                 label: "Tests".into(),
-                status: format!("{} missing-test candidate(s)", architecture.missing_tests.len()),
+                status: format!(
+                    "{} missing-test candidate(s)",
+                    architecture.missing_tests.len()
+                ),
                 evidence: vec!["architecture:missing-tests".into()],
             },
             TrustUiStep {
@@ -752,16 +792,24 @@ fn render_proof_html(report: &ProofReport) -> String {
     if report.retrieval_quality.available {
         out.push_str("<table><tbody>");
         if let Some(value) = report.retrieval_quality.recall_at_10 {
-            out.push_str(&format!("<tr><th>Fusion holdout Recall@10</th><td>{value:.3}</td></tr>"));
+            out.push_str(&format!(
+                "<tr><th>Fusion holdout Recall@10</th><td>{value:.3}</td></tr>"
+            ));
         }
         if let Some(value) = report.retrieval_quality.mean_reciprocal_rank {
-            out.push_str(&format!("<tr><th>Fusion holdout MRR</th><td>{value:.3}</td></tr>"));
+            out.push_str(&format!(
+                "<tr><th>Fusion holdout MRR</th><td>{value:.3}</td></tr>"
+            ));
         }
         if let Some(value) = report.retrieval_quality.file_f1_at_10 {
-            out.push_str(&format!("<tr><th>Fusion holdout file F1@10</th><td>{value:.3}</td></tr>"));
+            out.push_str(&format!(
+                "<tr><th>Fusion holdout file F1@10</th><td>{value:.3}</td></tr>"
+            ));
         }
         if let Some(value) = report.retrieval_quality.no_gold_false_positive_rate {
-            out.push_str(&format!("<tr><th>Fusion holdout no-gold FP rate</th><td>{value:.3}</td></tr>"));
+            out.push_str(&format!(
+                "<tr><th>Fusion holdout no-gold FP rate</th><td>{value:.3}</td></tr>"
+            ));
         }
         out.push_str("</tbody></table>");
     } else {
@@ -776,7 +824,11 @@ fn render_proof_html(report: &ProofReport) -> String {
     }
     out.push_str("</section>");
     html_list_section(&mut out, "Reproduce", &report.reproduce);
-    let notes = report.notes.iter().map(|note| (*note).to_string()).collect::<Vec<_>>();
+    let notes = report
+        .notes
+        .iter()
+        .map(|note| (*note).to_string())
+        .collect::<Vec<_>>();
     html_list_section(&mut out, "Caveats", &notes);
     out.push_str("<section class=\"panel\"><h2>Safety</h2><p>HTML proof reports include metrics, path shapes, evidence handles, caveats, validation status, and reproduction commands. They do not include source snippets unless a future explicit source-reveal mode is added.</p></section>");
     html_document_end(&mut out);
@@ -835,7 +887,10 @@ fn html_string_section(out: &mut String, title: &str, values: &[String]) {
 }
 
 fn html_finding_section(out: &mut String, title: &str, findings: &[VerificationFinding]) {
-    out.push_str(&format!("<section class=\"panel\"><h2>{}</h2>", escape_html(title)));
+    out.push_str(&format!(
+        "<section class=\"panel\"><h2>{}</h2>",
+        escape_html(title)
+    ));
     if findings.is_empty() {
         out.push_str("<p>None.</p></section>");
         return;
@@ -846,19 +901,17 @@ fn html_finding_section(out: &mut String, title: &str, findings: &[VerificationF
             "<li><code>{}</code>: {}<br><small>evidence: {}</small></li>",
             escape_html(&finding.kind),
             escape_html(&finding.reason),
-            escape_html(
-                &finding
-                    .evidence_refs
-                    .to_vec()
-                    .join(", ")
-            )
+            escape_html(&finding.evidence_refs.to_vec().join(", "))
         ));
     }
     out.push_str("</ul></section>");
 }
 
 fn html_test_section(out: &mut String, title: &str, tests: &[TestTarget]) {
-    out.push_str(&format!("<section class=\"panel\"><h2>{}</h2>", escape_html(title)));
+    out.push_str(&format!(
+        "<section class=\"panel\"><h2>{}</h2>",
+        escape_html(title)
+    ));
     if tests.is_empty() {
         out.push_str("<p>None.</p></section>");
         return;
@@ -876,7 +929,10 @@ fn html_test_section(out: &mut String, title: &str, tests: &[TestTarget]) {
 }
 
 fn html_list_section(out: &mut String, title: &str, values: &[String]) {
-    out.push_str(&format!("<section class=\"panel\"><h2>{}</h2>", escape_html(title)));
+    out.push_str(&format!(
+        "<section class=\"panel\"><h2>{}</h2>",
+        escape_html(title)
+    ));
     if values.is_empty() {
         out.push_str("<p>None.</p></section>");
         return;
