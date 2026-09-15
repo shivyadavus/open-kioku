@@ -628,7 +628,7 @@ impl<'a> ContextPackBuilder<'a> {
         // Generated files go to the back of every stream before the cap is applied: they are
         // indexed so an agent can read them, but a `modeling_*.py` regenerated from its modular
         // twin matches the same vocabulary and, competing for the lexical stream's slots, pushed
-        // the real module out of the pool before fusion ever ranked it (the Python ML library
+        // the real module out of the pool before fusion ever ranked it (the Python corpus
         // holdout read MRR 0.565 -> 0.552 with generated files admitted to the streams unranked).
         let generated: std::collections::BTreeSet<String> = files
             .iter()
@@ -2407,12 +2407,12 @@ struct TaskSearchIntent {
     reference_anchors: Vec<String>,
     ticket_anchors: Vec<String>,
     path_anchors: Vec<String>,
-    /// Tokens of a commit-style scope prefix — `docs(fs): …`, `pkg/render: …`, `[Scheduler] …` —
+    /// Tokens of a commit-style scope prefix — `docs(cache): …`, `pkg/layout: …`, `[Planner] …` —
     /// which name the package or directory the change lives in.
     scope_anchors: Vec<String>,
     lexical_anchors: Vec<String>,
     /// Repository identifiers the task's identifiers reach through the identifier lattice
-    /// (`CollectionsUtils` → `CollectionUtils`). Heuristic links to exact names: they rank and
+    /// (`ChannelsUtils` → `ChannelUtils`). Heuristic links to exact names: they rank and
     /// tier like a primary anchor but never seed the exact-symbol stream.
     lattice_anchors: Vec<lattice::LatticeTerm>,
 
@@ -2680,7 +2680,7 @@ fn path_names_primary_anchor(path: &std::path::Path, intent: &TaskSearchIntent) 
 
 /// `generated_paths`: files the index flagged as generated (a "do not edit" banner). They are
 /// indexed so an agent can read them and so derived-file links can be built, but they rank at
-/// the lowest quality tier: on a Python ML library where every implementation module is generated
+/// the lowest quality tier: on the Python corpus (~4k files), where every implementation module is generated
 /// from a specification module, letting them compete as source cost 0.015 R@5 because they share the
 /// modular file's vocabulary and displaced it.
 fn rerank_fused_for_task_with_files(
@@ -2856,14 +2856,14 @@ const SOURCE_QUALITY_TIER: u8 = 2;
 /// Post-fusion quality tier: 2 for source, 1 for docs and (unless the task asks for them) tests,
 /// 0 for generated or vendored code. Tests are demoted rather than dropped: on a large Java
 /// repository they outnumber source files and match the same vocabulary, so without this tier
-/// an ordinary "geoip processor" task returns twenty test files and no processor.
+/// an ordinary "quota enforcer" task returns twenty test files and no enforcer.
 fn context_quality_tier(
     path: &std::path::Path,
     options: &RankingOptions,
     wants_tests: bool,
     wants_docs: bool,
 ) -> u8 {
-    // Test detection needs the original case: `internalClusterTest` and `GeoIpDownloaderIT`
+    // Test detection needs the original case: `internalClusterTest` and `QuotaReloaderIT`
     // are recognised at a CamelCase boundary that lowercasing erases.
     let original = normalize_path(path);
     let normalized = original.to_ascii_lowercase();
@@ -2987,9 +2987,9 @@ fn task_relevance_tier(
     }
 }
 
-/// Tokens of the scope a commit-style subject carries: `docs(fs): …` and `feat(path/posix): …`
-/// (conventional commits), `pkg/render: …` and `commands: …` (Go style, where the prefix is
-/// the package), and `[Scheduler] …` (bracketed area). The scope names where the change lives,
+/// Tokens of the scope a commit-style subject carries: `docs(cache): …` and `feat(codec/base): …`
+/// (conventional commits), `pkg/layout: …` and `commands: …` (Go style, where the prefix is
+/// the package), and `[Planner] …` (bracketed area). The scope names where the change lives,
 /// which the subject body usually does not repeat. Empty when the subject has no such prefix.
 fn commit_scope_tokens(task: &str) -> Vec<String> {
     const TYPES: &[&str] = &[
@@ -3041,8 +3041,8 @@ const MODULE_ENTRY_FILE_NAMES: &[&str] = &[
 ];
 
 /// When a commit scope names a directory, that directory's entry file is a candidate even if
-/// it shares no vocabulary with the task: `feat(async): stabilize RetryGate` edits `async/mod.ts`,
-/// which does not mention RetryGate until the commit lands. Injected at a low score so a file
+/// it shares no vocabulary with the task: `feat(queue): stabilize PoolLease` edits `queue/mod.ts`,
+/// which does not mention PoolLease until the commit lands. Injected at a low score so a file
 /// that actually matches the task still outranks it inside the scope tier.
 /// The quality tier the pack ordering gives a result: a file the task names is source whatever
 /// kind of file it is; otherwise the path decides.
@@ -3371,12 +3371,12 @@ fn append_scope_entry_points(
         .map(|result| normalize_path(&result.path))
         .collect();
     // Where the entry point sits among the files the scope already matched depends on whether
-    // any of them matched the task's own words. `feat(async): stabilize RetryGate` matches
-    // async/ files on "async" alone — nothing in the directory knows "RetryGate" yet — so the
-    // barrel is the best guess and goes just below the group's best. `[Scheduler] Fix speculative
-    // prefetch` matches real modules on "speculative" and "prefetch", so the barrel goes last:
+    // any of them matched the task's own words. `feat(queue): stabilize PoolLease` matches
+    // queue/ files on "queue" alone — nothing in the directory knows "PoolLease" yet — so the
+    // barrel is the best guess and goes just below the group's best. `[Planner] Fix eager
+    // preload` matches real modules on "eager" and "preload", so the barrel goes last:
     // as runner-up it pushed rank-2 modules to rank 3 on a Python monorepo (MRR -0.011), and
-    // at the floor it never surfaced on the TypeScript standard library at all (gain 0.000).
+    // at the floor it never surfaced on the TypeScript corpus at all (gain 0.000).
     let scope_group: Vec<&SearchResult> = results
         .iter()
         .filter(|result| path_matches_scope(&normalize_path(&result.path), &intent.scope_anchors))
@@ -3576,8 +3576,8 @@ fn identifiers(value: &str) -> Vec<String> {
 /// A capital first letter is not enough: "Enable", "Fix", "Assert" open almost every
 /// commit-style task, and treating them as the primary edit anchor boosted every file that
 /// merely contained "enable" or "fix" (as in `prefix`) by +0.65 above the real lexical hits.
-/// An identifier shows a case change *inside* the token (`SystemIndexDescriptor`, `getFoo`),
-/// a separator (`random_score`, `max-age`), or digits next to capitals (`ES819`).
+/// An identifier shows a case change *inside* the token (`LedgerSnapshotWriter`, `getFoo`),
+/// a separator (`jitter_window`, `max-age`), or digits next to capitals (`QX512`).
 fn is_named_identifier(value: &str) -> bool {
     if value.len() < 3 || is_ticket_id(value) {
         return false;
@@ -3588,7 +3588,7 @@ fn is_named_identifier(value: &str) -> bool {
     has_inner_case_change(value) || has_separator || (has_digit && has_upper)
 }
 
-/// `getFoo`, `SystemIndexDescriptor`, `ES819x`: an upper-case letter after a lower-case letter
+/// `getFoo`, `LedgerSnapshotWriter`, `QX512x`: an upper-case letter after a lower-case letter
 /// or digit. `Enable`, `HTTP`, and `index` have none.
 pub(crate) fn has_inner_case_change(value: &str) -> bool {
     value
@@ -4370,23 +4370,23 @@ mod tests {
     #[test]
     fn commit_scope_prefixes_yield_path_tokens() {
         assert_eq!(
-            commit_scope_tokens("docs(fs): fix walk examples"),
-            vec!["fs"]
+            commit_scope_tokens("docs(cache): fix eviction examples"),
+            vec!["cache"]
         );
         assert_eq!(
-            commit_scope_tokens("feat(path/posix)!: add join"),
-            vec!["path", "posix"]
+            commit_scope_tokens("feat(codec/base)!: add join"),
+            vec!["codec", "base"]
         );
         assert_eq!(
-            commit_scope_tokens("pkg/render: Fix template lookup"),
-            vec!["pkg", "render"]
+            commit_scope_tokens("pkg/layout: Fix template lookup"),
+            vec!["pkg", "layout"]
         );
         assert_eq!(
-            commit_scope_tokens("[Scheduler] fix retry config"),
-            vec!["scheduler"]
+            commit_scope_tokens("[Planner] fix retry config"),
+            vec!["planner"]
         );
         assert!(commit_scope_tokens("docs: fix typo").is_empty());
-        assert!(commit_scope_tokens("Fix geoip processor timeout").is_empty());
+        assert!(commit_scope_tokens("Fix quota enforcer timeout").is_empty());
         assert!(commit_scope_tokens("Note: this is prose with a colon").is_empty());
     }
 
@@ -4469,9 +4469,9 @@ mod tests {
         };
         let ranked = rerank_fused_for_task(
             vec![
-                result("server/src/main/java/com/acme/shutdown/ShutdownAction.java", 0.9),
+                result("core/src/main/java/com/acme/shutdown/ShutdownAction.java", 0.9),
                 result(
-                    "modules/netpool/src/internalClusterTest/java/com/acme/netpool/ConnectionPoolMetricsIT.java",
+                    "extensions/netpool/src/internalClusterTest/java/com/acme/netpool/ConnectionPoolMetricsIT.java",
                     0.8,
                 ),
             ],
@@ -4491,11 +4491,11 @@ mod tests {
         let ranked = rerank_fused_for_task(
             vec![
                 result(
-                    "modules/netpool/src/main/java/com/acme/netpool/Pooler.java",
+                    "extensions/netpool/src/main/java/com/acme/netpool/Pooler.java",
                     0.5,
                 ),
                 result(
-                    "modules/netpool/src/test/java/com/acme/netpool/PoolerTests.java",
+                    "extensions/netpool/src/test/java/com/acme/netpool/PoolerTests.java",
                     0.9,
                 ),
             ],
@@ -4507,7 +4507,7 @@ mod tests {
 
     #[test]
     fn scope_entry_points_are_injected_once_and_only_for_matching_directories() {
-        let intent = TaskSearchIntent::parse("feat(async): stabilize RetryGate");
+        let intent = TaskSearchIntent::parse("feat(queue): stabilize PoolLease");
         let file = |path: &str, id: &str| File {
             id: FileId::new(id),
             repository_id: RepositoryId::new("repo"),
@@ -4519,14 +4519,14 @@ mod tests {
             is_vendor: false,
         };
         let files = vec![
-            file("async/mod.ts", "f1"),
-            file("async/tee.ts", "f2"),
-            file("streams/mod.ts", "f3"),
+            file("queue/mod.ts", "f1"),
+            file("queue/fanout.ts", "f2"),
+            file("pipes/mod.ts", "f3"),
         ];
         let mut results = Vec::new();
         append_scope_entry_points(&mut results, &files, &[], &intent);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].path, std::path::PathBuf::from("async/mod.ts"));
+        assert_eq!(results[0].path, std::path::PathBuf::from("queue/mod.ts"));
         assert!(results[0].evidence_refs[0].starts_with("scope:entry-point:"));
         append_scope_entry_points(&mut results, &files, &[], &intent);
         assert_eq!(
@@ -4938,21 +4938,21 @@ mod tests {
 
     #[test]
     fn scope_tokens_match_path_segments_and_stems() {
-        let fs = vec!["fs".to_string()];
-        assert!(path_matches_scope("fs/walk.ts", &fs));
-        assert!(path_matches_scope("src/fs.rs", &fs));
-        assert!(!path_matches_scope("fsync/mod.ts", &fs));
-        let posix = vec!["path".to_string(), "posix".to_string()];
-        assert!(path_matches_scope("path/posix/join.ts", &posix));
-        assert!(!path_matches_scope("path/windows/join.ts", &posix));
+        let cache = vec!["cache".to_string()];
+        assert!(path_matches_scope("cache/evict.ts", &cache));
+        assert!(path_matches_scope("src/cache.rs", &cache));
+        assert!(!path_matches_scope("cachectl/mod.ts", &cache));
+        let base = vec!["codec".to_string(), "base".to_string()];
+        assert!(path_matches_scope("codec/base/encode.ts", &base));
+        assert!(!path_matches_scope("codec/hex/encode.ts", &base));
         assert!(!path_matches_scope("anything", &[]));
-        let intent = TaskSearchIntent::parse("docs(yaml): correct minor typo");
-        assert_eq!(intent.scope_anchors, vec!["yaml"]);
+        let intent = TaskSearchIntent::parse("docs(tsvkit): correct minor typo");
+        assert_eq!(intent.scope_anchors, vec!["tsvkit"]);
         assert_eq!(
             task_relevance_tier(
-                std::path::Path::new("yaml/yaml.ts"),
+                std::path::Path::new("tsvkit/tsvkit.ts"),
                 &SearchResult {
-                    path: "yaml/yaml.ts".into(),
+                    path: "tsvkit/tsvkit.ts".into(),
                     line_range: None,
                     snippet: String::new(),
                     symbol: None,
@@ -4963,7 +4963,7 @@ mod tests {
                     confidence: 0.5,
                     score_breakdown: Vec::new(),
                 },
-                "yaml/yaml.ts",
+                "tsvkit/tsvkit.ts",
                 &intent
             ),
             3
@@ -5619,7 +5619,7 @@ mod tests {
         SearchResult {
             path: path.into(),
             line_range: Some(LineRange { start: 1, end: 10 }),
-            snippet: "class GeoIpProcessor implements Processor".into(),
+            snippet: "class QuotaEnforcer implements Enforcer".into(),
             symbol: None,
             score,
             match_reason: "probe".into(),
@@ -5632,29 +5632,29 @@ mod tests {
 
     #[test]
     fn sentence_initial_capitals_are_not_edit_anchors() {
-        let intent = TaskSearchIntent::parse("Enable the index refresh block");
+        let intent = TaskSearchIntent::parse("Enable the cache warmup window");
         assert!(
             intent.primary_anchors.is_empty(),
             "{:?}",
             intent.primary_anchors
         );
-        let intent = TaskSearchIntent::parse("Fix append writes test for backing indices");
+        let intent = TaskSearchIntent::parse("Fix batch flush test for shadow queues");
         assert!(
             intent.primary_anchors.is_empty(),
             "{:?}",
             intent.primary_anchors
         );
-        let intent = TaskSearchIntent::parse("Assert SystemIndexDescriptor is not used");
+        let intent = TaskSearchIntent::parse("Assert LedgerSnapshotWriter is not used");
         assert_eq!(
             intent.primary_anchors,
-            vec!["SystemIndexDescriptor".to_string()]
+            vec!["LedgerSnapshotWriter".to_string()]
         );
         for token in [
-            "random_score",
+            "jitter_window",
             "getFoo",
-            "ES819",
+            "QX512",
             "max-age",
-            "IpPrefixAutomatonUtil",
+            "CidrRangeMatcherUtil",
         ] {
             assert!(is_named_identifier(token), "{token}");
         }
@@ -5665,10 +5665,10 @@ mod tests {
 
     #[test]
     fn source_outranks_equally_authoritative_tests_unless_the_task_wants_tests() {
-        let source = "modules/ip-location/src/main/java/org/es/GeoIpProcessor.java";
-        let unit_test = "modules/ip-location/src/test/java/org/es/GeoIpProcessorTests.java";
+        let source = "extensions/admission/src/main/java/org/acme/QuotaEnforcer.java";
+        let unit_test = "extensions/admission/src/test/java/org/acme/QuotaEnforcerTests.java";
         let cluster_test =
-            "modules/ip-location/src/internalClusterTest/java/org/es/GeoIpDownloaderIT.java";
+            "extensions/admission/src/internalClusterTest/java/org/acme/QuotaReloaderIT.java";
         // The tests carry the higher fused score: on a real repository they were voted for by
         // both the lexical and the validation stream while the processor had one vote.
         let candidates = || {
@@ -5681,7 +5681,7 @@ mod tests {
 
         let ordered = rerank_fused_for_task(
             candidates(),
-            &TaskSearchIntent::parse("geoip processor"),
+            &TaskSearchIntent::parse("quota enforcer"),
             &RetrievalDiagnostics::default(),
         );
         assert_eq!(
@@ -5698,7 +5698,7 @@ mod tests {
 
         let ordered = rerank_fused_for_task(
             candidates(),
-            &TaskSearchIntent::parse("tests for the geoip processor"),
+            &TaskSearchIntent::parse("tests for the quota enforcer"),
             &RetrievalDiagnostics::default(),
         );
         assert_eq!(
@@ -5723,9 +5723,7 @@ mod tests {
         );
         assert_eq!(
             context_quality_tier(
-                Path::new(
-                    "modules/ip-location/src/internalClusterTest/java/GeoIpDownloaderIT.java"
-                ),
+                Path::new("extensions/admission/src/internalClusterTest/java/QuotaReloaderIT.java"),
                 &options,
                 false,
                 false
@@ -6451,31 +6449,31 @@ mod tests {
         let files = vec![
             file(
                 "utils",
-                "server/src/main/java/org/example/util/CollectionUtils.java",
+                "core/src/main/java/org/example/util/ChannelUtils.java",
             ),
             file(
                 "utils-tests",
-                "server/src/test/java/org/example/util/CollectionUtilsTests.java",
+                "core/src/test/java/org/example/util/ChannelUtilsTests.java",
             ),
             file(
                 "other",
-                "server/src/test/java/org/example/other/SomeOtherTests.java",
+                "core/src/test/java/org/example/other/SomeOtherTests.java",
             ),
         ];
         let symbols = vec![
-            symbol("utils", "CollectionUtils"),
-            symbol("utils-tests", "CollectionUtilsTests"),
+            symbol("utils", "ChannelUtils"),
+            symbol("utils-tests", "ChannelUtilsTests"),
             symbol("other", "SomeOtherTests"),
             symbol("utils-sort", "sortArray"),
         ];
         let chunks = vec![
             chunk(
                 "utils",
-                "public class CollectionUtils { static int[] sort(int[] a) {} }",
+                "public class ChannelUtils { static int[] sort(int[] a) {} }",
             ),
             chunk(
                 "utils-tests",
-                "public class CollectionUtilsTests { public void testSort() {} }",
+                "public class ChannelUtilsTests { public void testSort() {} }",
             ),
             chunk(
                 "other",
@@ -6488,10 +6486,10 @@ mod tests {
     #[test]
     fn misinflected_task_identifier_reaches_the_file_that_names_it() {
         let (chunks, files, symbols) = lattice_fixture();
-        let task = "CollectionsUtils Tests";
+        let task = "ChannelsUtils Tests";
         let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(&files, &symbols);
         assert_eq!(intent.lattice_anchors.len(), 1);
-        assert_eq!(intent.lattice_anchors[0].term, "CollectionUtils");
+        assert_eq!(intent.lattice_anchors[0].term, "ChannelUtils");
         let results = rerank_for_task(
             search_candidates(&chunks, &files, &symbols, task, 10, &intent).unwrap(),
             &intent,
@@ -6502,12 +6500,11 @@ mod tests {
             .map(|result| result.path.display().to_string())
             .collect::<Vec<_>>();
         assert!(
-            paths[0].ends_with("CollectionUtilsTests.java")
-                || paths[0].ends_with("CollectionUtils.java"),
+            paths[0].ends_with("ChannelUtilsTests.java") || paths[0].ends_with("ChannelUtils.java"),
             "the reached identifier's files must lead: {paths:?}"
         );
         assert!(
-            paths.iter().take(2).all(|path| path.contains("CollectionUtils")),
+            paths.iter().take(2).all(|path| path.contains("ChannelUtils")),
             "both files naming the reached identifier outrank the file that merely says tests: {paths:?}"
         );
         let first = &results[0];
@@ -6516,8 +6513,8 @@ mod tests {
                 .evidence
                 .iter()
                 .any(|line| line.starts_with("identifier lattice:")
-                    && line.contains("`CollectionsUtils`")
-                    && line.contains("`CollectionUtils`")),
+                    && line.contains("`ChannelsUtils`")
+                    && line.contains("`ChannelUtils`")),
             "a lattice hop must be visible in evidence: {:?}",
             first.evidence
         );
@@ -6538,16 +6535,16 @@ mod tests {
     #[test]
     fn lattice_hops_feed_lexical_terms_but_not_exact_symbol_terms() {
         let (_, files, symbols) = lattice_fixture();
-        let task = "CollectionsUtils Tests";
+        let task = "ChannelsUtils Tests";
         let intent = TaskSearchIntent::parse(task).with_repository_vocabulary(&files, &symbols);
         let shared = intent.search_terms(task);
         let lexical = intent.lexical_search_terms(task);
         assert!(
-            !shared.iter().any(|term| term == "CollectionUtils"),
+            !shared.iter().any(|term| term == "ChannelUtils"),
             "shared terms seed exact-symbol anchors and must not carry lattice hops: {shared:?}"
         );
         assert!(
-            lexical.iter().any(|term| term == "CollectionUtils"),
+            lexical.iter().any(|term| term == "ChannelUtils"),
             "lexical terms carry the hop: {lexical:?}"
         );
         assert!(intent.vocabulary_caveats().is_empty());
@@ -6636,9 +6633,9 @@ mod tests {
 
     #[test]
     fn an_ambiguous_hop_gets_neither_the_boost_nor_anchor_relevance() {
-        let intent = TaskSearchIntent::parse("Warn when NumFrames exceeds the total")
-            .with_lattice_terms(vec![lattice_hop("num_frames", "NumFrames", true, true)]);
-        let result = plain_result("src/video/num_frames_reader.py", 0.5);
+        let intent = TaskSearchIntent::parse("Warn when NumSlots exceeds the total")
+            .with_lattice_terms(vec![lattice_hop("num_slots", "NumSlots", true, true)]);
+        let result = plain_result("src/pool/num_slots_reader.py", 0.5);
         assert_eq!(tier_of(&intent, &result), 0);
         let ranked = rerank_fused_for_task(vec![result], &intent, &RetrievalDiagnostics::default());
         assert!(

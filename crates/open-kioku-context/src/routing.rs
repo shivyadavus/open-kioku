@@ -292,8 +292,8 @@ fn policy_for(family: TaskFamily, query_shape: QueryShape) -> RetrievalPolicy {
     use RetrievalSourceKind as S;
     let mut policy = match family {
         // Lexical stays on: in many repositories the documentation *is* doc comments inside
-        // source files (`docs(yaml): fix typo on parse example` in a TypeScript standard
-        // library targets `yaml/yaml.ts`), and a documentation task that can only see Markdown sections
+        // source files (`docs(tsvkit): fix typo in the usage example` in a TypeScript standard
+        // library targets `tsvkit/tsvkit.ts`), and a documentation task that can only see Markdown sections
         // returned one release-notes file for 14 of 76 holdout misses on that corpus.
         TaskFamily::Documentation => RetrievalPolicy {
             enabled_sources: vec![S::Document, S::ExactSemantic, S::Lexical],
