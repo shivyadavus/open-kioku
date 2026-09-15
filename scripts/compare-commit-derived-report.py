@@ -8,16 +8,17 @@ more than `slack` (absolute) below the baseline; the 95% bootstrap interval is p
 a reader can tell a real regression from sampling noise. Missing baseline: prints the
 report and exits 0, so the first run of a new corpus freezes rather than fails.
 
-Per routed task family (`by_task_family`), the same watched metrics follow the same rule and
-the same exit status: a family's metric may not fall more than `slack` below that family's
-baseline, and such a regression exits 1 exactly as an aggregate one does. A family is gated
-only when the report and the baseline both carry it with at least the report's `min_cases`
-scored cases. Every family is printed with its gate status and 95% interval. Families are the
-router's labels: a per-family number measures the retrieval policy on the cases routed to it,
-not whether routing chose the right family. Case counts are printed for both sides, but equal
-counts do not mean equal membership: a routing change can swap cases between families at the
-same count, so per-family numbers are not comparable across builds whose routing changed.
-`summary_table` renders the same statuses for the nightly job summary.
+Per routed task family (`by_task_family`), the same watched metrics follow the same exit
+status with a per-family tolerance: a family's metric may not fall more than
+`max(slack, 2/n)` below that family's baseline, where `n` is the baseline family's case count,
+and such a regression exits 1 exactly as an aggregate one does. A family is gated only when the
+report and the baseline both carry it with at least the report's `min_cases` scored cases and
+the two carry the same `membership_fingerprint`; a fingerprint that differs is printed as
+`membership changed` and not gated, because a routing change can swap cases between families at
+the same count. Every gated metric is printed with the baseline's 95% interval, the delta, the
+tolerance, and pass or REGRESSION. Families are the router's labels: a per-family number
+measures the retrieval policy on the cases routed to it, not whether routing chose the right
+family. `summary_table` renders the same statuses and gated rows for the nightly job summary.
 
 Gold yield at a token budget (`gold_file_yield@B`, `gold_line_yield@B`, median
 `tokens_to_first_gold`) is printed when the report carries it, informationally: it is not
@@ -46,7 +47,25 @@ FAMILY_CAVEAT = (
     "routing chose the right family"
 )
 
-SUMMARY_METRICS = ("R@5", "R@20", "MRR")
+SUMMARY_METRICS = WATCHED
+
+# Frozen baselines store metrics rounded to four decimals (`round(value, 4)` in the freeze), so
+# a baseline value can sit up to half a unit of the fourth decimal above the unrounded number.
+# The family gate allows that much, which is far below the 1/n one case moves a metric by.
+FREEZE_ROUNDING = 0.00005
+
+
+def family_tolerance(n, slack=SLACK):
+    """How far a family's metric may fall below a baseline family of `n` cases: max(slack, 2/n).
+
+    One case changing outcome moves R@k, MRR, or gold_recall@20 by at most 1/n, so a gated drop
+    needs at least three cases to move.
+    """
+    return max(slack, 2 / n) if n > 0 else float("inf")
+
+
+def family_regressed(now, base, tolerance):
+    return now < base - tolerance - FREEZE_ROUNDING
 
 
 def print_yield(report, baseline=None):
@@ -80,7 +99,8 @@ def family_status(family, section, base_section):
     """(gated, label) for one family of a report section against a baseline section or None.
 
     Gated only when the report and the baseline both carry the family with at least the
-    report's `min_cases` cases. Every other status says why the family is not gated.
+    report's `min_cases` cases and the same membership fingerprint. Every other status says why
+    the family is not gated.
     """
     min_cases = section["min_cases"]
     now = section["families"].get(family)
@@ -95,6 +115,12 @@ def family_status(family, section, base_section):
         return False, "informational: no family baseline frozen; not gated"
     if base is None:
         return False, "informational: absent from the baseline; not gated"
+    unfingerprinted = [side for side, entry in (("report", now), ("baseline", base))
+                       if not entry.get("membership_fingerprint")]
+    if unfingerprinted:
+        return False, f"membership unverified: no membership fingerprint on the {' and '.join(unfingerprinted)}; not gated"
+    if now["membership_fingerprint"] != base["membership_fingerprint"]:
+        return False, "membership changed: the family's cases differ from the baseline's; not gated"
     return True, "gated"
 
 
@@ -106,6 +132,14 @@ def bounds(entry, k):
 def interval(entry, k):
     span = bounds(entry, k)
     return "95% CI not computed" if span is None else f"95% CI [{span[0]:.4f}, {span[1]:.4f}]"
+
+
+def family_checks(now, base, slack=SLACK):
+    """(metric, baseline, report, delta, tolerance, regressed) for each watched metric."""
+    tolerance = family_tolerance(base["cases"], slack)
+    for k in WATCHED:
+        b, n = base["metrics"][k], now["metrics"][k]
+        yield k, b, n, n - b, tolerance, family_regressed(n, b, tolerance)
 
 
 def compare_families(report, baseline, slack=SLACK):
@@ -130,20 +164,19 @@ def compare_families(report, baseline, slack=SLACK):
             continue
         counts = f"cases {base['cases']} -> {now['cases']}" if base else f"{now['cases']} cases"
         print(f"  {family:20} {counts} [{label}]")
-        for k in WATCHED:
-            n = now["metrics"][k]
-            if base is None:
-                print(f"    {k:16} {n:.4f}   {interval(now, k)}")
-                continue
-            b = base["metrics"][k]
-            marker = ""
-            if n < b - slack:
-                if gated:
-                    marker = "  <-- REGRESSION"
+        if base is None:
+            for k in WATCHED:
+                print(f"    {k:16} {now['metrics'][k]:.4f}   {interval(now, k)}")
+            continue
+        for k, b, n, delta, tolerance, regressed in family_checks(now, base, slack):
+            if gated:
+                result = "REGRESSION" if regressed else "pass"
+                if regressed:
                     failed.append(f"{family}:{k}")
-                else:
-                    marker = "  <-- below slack (not gated)"
-            print(f"    {k:16} baseline {b:.4f} -> {n:.4f} ({n - b:+.4f})   {interval(now, k)}{marker}")
+            else:
+                result = "below tolerance (not gated)" if regressed else "not gated"
+            print(f"    {k:16} baseline {b:.4f} {interval(base, k)} -> {n:.4f} {interval(now, k)} "
+                  f"delta {delta:+.4f} tolerance {tolerance:.4f}  {result}")
     return failed
 
 
@@ -151,7 +184,7 @@ def summary_rows(split, report, baseline):
     """Markdown rows for one split: each family's cases, metrics with intervals, and gate status."""
     section = family_section(report)
     if section is None:
-        return [f"| {split} | (no by_task_family section) | | | | | |"]
+        return [f"| {split} | (no by_task_family section) | | | | | | |"]
     base_section = family_section(baseline)
     families = section["families"]
     base_families = (base_section or {}).get("families", {})
@@ -160,7 +193,7 @@ def summary_rows(split, report, baseline):
         _, label = family_status(family, section, base_section)
         now, base = families.get(family), base_families.get(family)
         if now is None:
-            rows.append(f"| {split} | {family} | {base['cases']} -> absent | | | | {label} |")
+            rows.append(f"| {split} | {family} | {base['cases']} -> absent | | | | | {label} |")
             continue
         cases = f"{base['cases']} -> {now['cases']}" if base else f"{now['cases']}"
         cells = []
@@ -172,16 +205,45 @@ def summary_rows(split, report, baseline):
     return rows
 
 
+def gated_rows(split, report, baseline, slack=SLACK):
+    """Markdown rows for every watched metric of every gated family in one split."""
+    section, base_section = family_section(report), family_section(baseline)
+    if section is None or base_section is None:
+        return []
+    rows = []
+    for family, now in section["families"].items():
+        gated, _ = family_status(family, section, base_section)
+        if not gated:
+            continue
+        base = base_section["families"][family]
+        for k, b, n, delta, tolerance, regressed in family_checks(now, base, slack):
+            span = bounds(base, k)
+            ci = "[not computed]" if span is None else f"[{span[0]:.4f}, {span[1]:.4f}]"
+            rows.append(f"| {split} | {family} | {k} | {b:.4f} {ci} | {n:.4f} | {delta:+.4f} | "
+                        f"{tolerance:.4f} | {'REGRESSION' if regressed else 'pass'} |")
+    return rows
+
+
 def summary_table(splits):
     """The job summary's per-family table; `splits` maps split name to (report, baseline or None)."""
     lines = [
         f"Per routed task family: {FAMILY_CAVEAT}. See docs/retrieval-benchmark.md, \"Per-task-family breakdown\".",
         "",
-        "| split | routed task family | cases (baseline -> report) | R@5 [95% CI] | R@20 [95% CI] | MRR [95% CI] | gate |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| split | routed task family | cases (baseline -> report) | R@5 [95% CI] | R@20 [95% CI] | MRR [95% CI] | gold_recall@20 [95% CI] | gate |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for split, (report, baseline) in splits.items():
         lines += summary_rows(split, report, baseline)
+    gated = [row for split, (report, baseline) in splits.items() for row in gated_rows(split, report, baseline)]
+    lines += ["", "Gated families: the tolerance is max(0.03, 2/n) for a baseline family of n cases; "
+              "a family is gated only when its membership fingerprint matches the baseline's.", ""]
+    if gated:
+        lines += [
+            "| split | routed task family | metric | baseline [95% CI] | report | delta | tolerance | result |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ] + gated
+    else:
+        lines.append("No family is gated in this run.")
     return lines
 
 
@@ -215,9 +277,10 @@ def main():
         print(f"  {k:16} baseline {base:.4f} -> {now:.4f} ({now - base:+.4f}){marker}")
     failed += compare_families(report, baseline, slack)
     if failed:
-        print(f"regression beyond {slack} on: {', '.join(failed)}", file=sys.stderr)
+        print(f"regression beyond tolerance (aggregate slack {slack}; family max({slack}, 2/n)) on: "
+              f"{', '.join(failed)}", file=sys.stderr)
         return 1
-    print("within slack of the frozen baseline")
+    print("within tolerance of the frozen baseline")
     return 0
 
 
