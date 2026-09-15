@@ -1516,8 +1516,9 @@ fn excluded_path(file: &File) -> bool {
         || path.contains("/target/")
         || path.ends_with("lock")
         || path.ends_with(".lock")
-        || path.contains(".env")
-        || path.contains("secret")
+        // The discovery rule, so the semantic corpus and the lexical index agree: a file named
+        // for a secret is embedded from its redacted chunks, key material never.
+        || open_kioku_core::is_secret_like_path(&file.path)
 }
 
 fn source_index_fingerprint(store: &dyn MetadataStore) -> Result<String> {

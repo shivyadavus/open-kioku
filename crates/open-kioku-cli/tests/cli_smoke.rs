@@ -5996,7 +5996,33 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
         "{indexed}"
     );
 
-    // SQLite and its WAL store text uncompressed, so their bytes are checked directly.
+    // Semantic target text and embeddings are built from the same redacted chunks, here with
+    // the local hashing provider, which downloads nothing.
+    run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("semantic").arg("index");
+        command
+    });
+    let semantic_targets = fs::read_to_string(repo.join(".ok/vectors/current/ids.json")).unwrap();
+    assert!(
+        semantic_targets.contains(config_path),
+        "the config file is in the semantic corpus"
+    );
+    let semantic_search = run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("search")
+            .arg("--semantic")
+            .arg("access_key_id");
+        command
+    });
+    assert_secrets_absent("ok search --semantic", &semantic_search, &secrets);
+
+    // SQLite, its WAL, and the vector store's target and embedding files hold text
+    // uncompressed, so their bytes are checked directly.
     for entry in walkdir::WalkDir::new(repo.join(".ok")) {
         let entry = entry.unwrap();
         if entry.file_type().is_file() {
@@ -6105,6 +6131,7 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
             r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"search_code","arguments":{{"query":"{token}"}}}}}}"#
         ),
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"access_key_id","mode":"hybrid"}}}"#.to_string(),
     ];
     let mcp = run_with_stdin(
         {
@@ -6127,9 +6154,121 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
             .unwrap_or_else(|| panic!("no MCP response {id}: {mcp}"))
     };
     assert!(by_id(1).to_string().contains(config_path), "{mcp}");
+    assert!(by_id(5).to_string().contains(config_path), "{mcp}");
     assert_eq!(
         by_id(4)["result"]["structuredContent"]["quality"]["redacted_files"],
         1,
         "{mcp}"
     );
+}
+
+/// An index written before secret-value redaction held config values as read. Replacing its
+/// rows leaves those bytes in SQLite free pages, so the first index run over it compacts the
+/// database after publishing (#379).
+#[test]
+fn indexing_over_an_index_written_before_redaction_drops_its_unredacted_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    let value = striding_token(
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        32,
+        17,
+        5,
+    );
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn load() {}\n").unwrap();
+    fs::write(
+        repo.join("config/app.yaml"),
+        format!("service:\n  api_token: {value}\n"),
+    )
+    .unwrap();
+    run({
+        let mut command = ok();
+        command.arg("init").arg(repo);
+        command
+    });
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    // Rewind the database to what an earlier release left: the value as read, in more rows
+    // than the index that replaces them, under a manifest with no redaction count.
+    let database = open_kioku_storage::generations::resolve_index_location(repo).sqlite_path();
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let file_id: String = conn
+            .query_row(
+                "SELECT id FROM files WHERE path LIKE '%app.yaml'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stale = format!("  api_token: {value}\n").repeat(400);
+        conn.execute(
+            "INSERT INTO chunks(id, file_id, start_line, end_line, text, json) \
+             VALUES('pre-redaction', ?1, 1, 400, ?2, ?3)",
+            rusqlite::params![
+                file_id,
+                stale,
+                serde_json::json!({ "text": stale }).to_string()
+            ],
+        )
+        .unwrap();
+        let manifest: String = conn
+            .query_row("SELECT json FROM manifests WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        manifest["quality"]
+            .as_object_mut()
+            .unwrap()
+            .remove("redacted_files");
+        conn.execute(
+            "UPDATE manifests SET json = ?1 WHERE id = 1",
+            [manifest.to_string()],
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+    }
+    let holds_value = |path: &std::path::Path| {
+        fs::read(path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).contains(value.as_str()))
+            .unwrap_or(false)
+    };
+    let wal = database.with_file_name(format!(
+        "{}-wal",
+        database.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        holds_value(&database),
+        "the fixture holds the value as an earlier release stored it"
+    );
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert!(status["quality"]["redacted_files"].is_null(), "{status}");
+
+    run({
+        let mut command = ok();
+        command.arg("index").arg(repo);
+        command
+    });
+
+    assert!(!holds_value(&database), "free pages still hold the value");
+    assert!(!holds_value(&wal), "the WAL still holds the value");
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(status["quality"]["redacted_files"], 1, "{status}");
 }

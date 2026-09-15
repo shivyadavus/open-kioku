@@ -336,11 +336,13 @@ impl Indexer {
         // symbol, fact or test derived from the text, and nothing stored or searched from
         // those, can carry a secret-like value (#379). Programming-language source is indexed
         // as written.
-        let (content, redacted) = if file.language.is_programming() {
-            (content, false)
-        } else {
-            let redacted = redaction::redact_secret_values(&content);
-            (redacted.text, redacted.redactions > 0)
+        let (content, redacted) = match redaction::ContentKind::for_file(&file.path, &file.language)
+        {
+            None => (content, false),
+            Some(kind) => {
+                let redacted = redaction::redact_secret_values(&content, kind);
+                (redacted.text, redacted.redactions > 0)
+            }
         };
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.parse_with_hint(file, &content, build_hint)
@@ -1318,7 +1320,7 @@ impl Indexer {
                 source_like_files += 1;
             }
             ledger.discovered(&language);
-            let secret_policy = is_secret_like_path(&rel);
+            let secret_policy = open_kioku_core::is_secret_like_path(&rel);
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
                 let reason = if secret_policy {
@@ -1493,7 +1495,8 @@ impl Indexer {
                     ledger.indexed(&language, false);
                     // Documents are prose, redacted like every other non-source file before
                     // anything is derived from them (see `Indexer::parse_file`).
-                    let redacted = redaction::redact_secret_values(&content);
+                    let redacted =
+                        redaction::redact_secret_values(&content, redaction::ContentKind::Prose);
                     redacted_files += usize::from(redacted.redactions > 0);
                     document_sections.extend(build_document_sections(
                         &rel,
@@ -2978,30 +2981,6 @@ fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-/// Paths that hold key material or environment secrets are never read, whatever their
-/// language. A file merely named for a secret is indexed: a class named
-/// `CredentialsProviderTest` or a module named `secrets.go` is code (a name rule silently
-/// dropped 25 Java files from one repository), and a `secrets.yaml`, `credentials.json`, or
-/// `SECRETS.md` is indexed with its secret-like values replaced before anything is derived
-/// from its text (`redaction`, #379). A key hard-coded inside a source file is indexed as
-/// written.
-fn is_secret_like_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        value == ".env"
-            || value.starts_with(".env.")
-            || matches!(value.as_str(), ".aws" | ".ssh")
-            || value.starts_with("id_rsa")
-            || value.starts_with("id_ed25519")
-            || value.ends_with(".pem")
-            || value.ends_with(".key")
-            || value.ends_with(".p12")
-            || value.ends_with(".pfx")
-            || value.ends_with(".jks")
-            || value.ends_with(".keystore")
-    })
-}
-
 fn compile_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -3179,10 +3158,7 @@ fn collect_architecture_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        attach_resolution_quality, derive_occurrences, is_secret_like_path, map_symbol_touches,
-        Indexer,
-    };
+    use super::{attach_resolution_quality, derive_occurrences, map_symbol_touches, Indexer};
     use chrono::{TimeZone, Utc};
     use open_kioku_config::OkConfig;
     use open_kioku_core::{
@@ -3525,35 +3501,6 @@ class Util {
             .iter()
             .any(|note| note.kind == QualityNoteKind::IndexMode
                 && note.message.contains("source parsing skipped")));
-    }
-
-    #[test]
-    fn secret_path_rule_blocks_key_material_and_environment_entries_only() {
-        fn p(v: &str) -> &std::path::Path {
-            std::path::Path::new(v)
-        }
-        // Key material and environment entries, whatever the file's language.
-        assert!(is_secret_like_path(p(".env")));
-        assert!(is_secret_like_path(p(".env.local")));
-        assert!(is_secret_like_path(p(".aws/credentials.json")));
-        assert!(is_secret_like_path(p(".ssh/id_rsa.pub")));
-        assert!(is_secret_like_path(p("deploy/id_ed25519")));
-        assert!(is_secret_like_path(p("config/server.key")));
-        assert!(is_secret_like_path(p("certs/tls.PEM")));
-        assert!(is_secret_like_path(p("certs/client.p12")));
-        assert!(is_secret_like_path(p("certs/client.pfx")));
-        assert!(is_secret_like_path(p("android/release.jks")));
-        assert!(is_secret_like_path(p("android/release.keystore")));
-        // Named for a secret but not key material: indexed, source as written and data,
-        // config, and prose with secret-like values redacted.
-        assert!(!is_secret_like_path(p("src/CredentialsProvider.java")));
-        assert!(!is_secret_like_path(p("internal/secrets.go")));
-        assert!(!is_secret_like_path(p("config/credentials.yaml")));
-        assert!(!is_secret_like_path(p("credentials.json")));
-        assert!(!is_secret_like_path(p("secret_key.txt")));
-        assert!(!is_secret_like_path(p("docs/SECRETS.md")));
-        assert!(!is_secret_like_path(p("config/server.yaml")));
-        assert!(!is_secret_like_path(p("config/.environment.yaml")));
     }
 
     #[test]

@@ -60,6 +60,14 @@ fn index_repo_with_config(
         ),
     );
     let store = open_store_for_write(repo)?;
+    // An index written before secret-value redaction stored data and config values as read;
+    // replacing its rows leaves those bytes in SQLite free pages, so it is compacted once the
+    // new manifest is published. Read before staging, which removes the previous manifest.
+    let compact_after_publish = store
+        .manifest()
+        .ok()
+        .flatten()
+        .is_some_and(|previous| previous.predates_secret_redaction());
     // The manifest is the publication marker, written last (below) so a concurrent reader
     // never opens one whose graph or search index is still being written.
     store.stage_index_with_documents(
@@ -133,6 +141,27 @@ fn index_repo_with_config(
         &nodes,
     )?;
     store.put_manifest(&snapshot.manifest)?;
+    if compact_after_publish {
+        report_index_stage(
+            &reporter,
+            "compact",
+            "compacting the database once to drop rows stored before secret-value redaction"
+                .to_string(),
+        );
+        // The manifest is already published and the index is correct either way. A probe or
+        // another reader holding the database can make `VACUUM` or its checkpoint return
+        // busy; that is reported and retried by the next run, never a failed index.
+        if let Err(err) = store.vacuum() {
+            report_index_stage(
+                &reporter,
+                "compact",
+                format!(
+                    "compacting the database failed ({err}); rows stored before secret-value \
+                     redaction stay in free pages until the next `ok index`"
+                ),
+            );
+        }
+    }
     report_index_stage(&reporter, "complete", "index ready".to_string());
     Ok(snapshot)
 }

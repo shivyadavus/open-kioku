@@ -8,13 +8,13 @@
 6. Skip binary, vendor, unsupported, ignored, denied, and over-limit files; index generated source files and flag them `is_generated` (they rank last unless the task names them).
 7. Fingerprint indexed files with SHA-256.
 8. Detect language from extension.
-9. Replace secret-like values in data, config, and prose files (YAML, JSON, TOML, Markdown, plain text, and document-corpus files) with `[REDACTED]`, within their lines, so nothing below ever sees the value; programming-language source is not changed. Rules and limits: `docs/security-model.md`, "Secret-value redaction". The count of files with a replaced value is `IndexQuality.redacted_files`.
+9. Replace secret-like values in data, config, and prose files (YAML, JSON, TOML, Markdown, plain text, and document-corpus files) with `[REDACTED]`, within their lines, so nothing below ever sees the value; unlabelled high-entropy tokens are replaced only in config and data formats, not in prose, and programming-language source is not changed. Rules and limits: `docs/security-model.md`, "Secret-value redaction". The count of files with a replaced value is `IndexQuality.redacted_files`.
 10. Extract imports, symbols, chunks, test candidates, and symbol occurrences. Supported code languages use tree-sitter grammars first and regex heuristics only as fallback. A file that cannot be read (removed or permission-denied between discovery and parsing) or that crashes a grammar is dropped from the index, recorded as a `SkipReason::Error` entry in `skip_counts` / `skipped_paths` with source `filesystem` or `parser`, and surfaced as a phase warning. No single file aborts the index.
 11. Import configured SCIP indexes when present, merging SCIP symbols and occurrences with extracted facts.
 12. Store files, symbols, chunks, tests, imports, and occurrences in SQLite, in one transaction that also removes the previous index manifest.
 13. Build and persist graph nodes and edges in SQLite.
 14. Rebuild the Tantivy BM25 index from indexed chunks and symbols. Identifiers are indexed whole and as their CamelCase/snake_case parts (`SlotPlanner` -> `slotplanner`, `slot`, `planner`); parts live in a separate field queried at half weight so a whole-word match always outranks a part match. Indexes built before this keep working until the next `ok index`.
-15. Publish the index manifest. Until then no manifest is published, and readers report `indexing in progress` while the writer holds `.ok/index.lock`; see `docs/storage-model.md`, "Publication order".
+15. Publish the index manifest. When the manifest it replaces predates secret-value redaction, `VACUUM` the database once afterwards so free pages holding values stored as read are dropped (`docs/security-model.md`, "Secret-value redaction"). Until then no manifest is published, and readers report `indexing in progress` while the writer holds `.ok/index.lock`; see `docs/storage-model.md`, "Publication order".
 16. Build search results from Tantivy, falling back to SQLite-backed in-memory lexical search if the Tantivy index is missing.
 17. Produce context, impact, test, and architecture answers from indexed facts.
 

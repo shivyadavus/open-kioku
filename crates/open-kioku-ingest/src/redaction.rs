@@ -20,10 +20,16 @@
 //!    value indented deeper than the key is replaced, keeping nested keys; an INI or TOML
 //!    section whose header names a secret has every value replaced until the next header.
 //! 3. The password in a URL's user information: `scheme://user:[REDACTED]@host`.
-//! 4. Any remaining token that looks machine-generated (see [`is_high_entropy_token`]).
+//! 4. In config and data files only ([`ContentKind::Config`]), any remaining token that looks
+//!    machine-generated (see [`is_high_entropy_token`]). Prose keeps rules 1-3 but not this
+//!    one, so commit hashes and digests cited in Markdown stay searchable.
 //!
-//! `null`, booleans, and a bare variable reference (`${DB_PASSWORD}`, `$DB_PASSWORD`) are not
-//! values and stay, so the place a secret is injected remains searchable.
+//! `null`, booleans, unquoted numbers, and a bare variable reference (`${DB_PASSWORD}`,
+//! `$DB_PASSWORD`) are not values and stay, so `max_tokens: 4096` and the place a secret is
+//! injected remain searchable.
+
+use open_kioku_core::Language;
+use std::path::Path;
 
 /// What replaces a redacted value; the same marker `runtime::redact_secrets` writes.
 pub const REDACTION_MARKER: &str = "[REDACTED]";
@@ -71,6 +77,42 @@ const DIGEST_LENGTHS: &[(&str, usize, usize)] = &[
     ("sha512", 128, 86),
 ];
 
+/// Which rules apply to a file's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    /// YAML, JSON, TOML, Terraform and HCL, Dockerfiles: every rule, the entropy rule included.
+    /// A config file has no reason to hold an unlabelled random token.
+    Config,
+    /// Markdown, plain text, and every document-corpus file: every rule except the entropy
+    /// rule, because prose cites commit hashes and digests that must stay searchable.
+    Prose,
+}
+
+impl ContentKind {
+    /// `None` for programming-language source, which is indexed as written. INI, `.env`,
+    /// `.properties`, and XML files are not indexed at all (their language is not recognised),
+    /// so no rule is chosen for them.
+    pub fn for_file(path: &Path, language: &Language) -> Option<Self> {
+        if language.is_programming() {
+            return None;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let config = matches!(language, Language::Yaml | Language::Json | Language::Toml)
+            || matches!(extension.as_str(), "tf" | "tfvars" | "hcl")
+            || name == "Dockerfile"
+            || name.starts_with("Dockerfile.");
+        Some(if config { Self::Config } else { Self::Prose })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedText {
     pub text: String,
@@ -79,8 +121,12 @@ pub struct RedactedText {
 }
 
 /// Replaces secret-like values in the content of a data, config or prose file.
-pub fn redact_secret_values(content: &str) -> RedactedText {
-    let mut redactor = Redactor::default();
+pub fn redact_secret_values(content: &str, kind: ContentKind) -> RedactedText {
+    let mut redactor = Redactor {
+        redactions: 0,
+        block: Block::None,
+        kind,
+    };
     let mut text = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
@@ -93,10 +139,10 @@ pub fn redact_secret_values(content: &str) -> RedactedText {
     }
 }
 
-#[derive(Default)]
 struct Redactor {
     redactions: usize,
     block: Block,
+    kind: ContentKind,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +204,10 @@ impl Redactor {
     fn redact_values(&mut self, line: &str, force: bool) -> String {
         let keyed = self.redact_keyed_values(line, force);
         let urls = self.redact_url_passwords(&keyed);
-        self.redact_high_entropy_tokens(&urls)
+        match self.kind {
+            ContentKind::Config => self.redact_high_entropy_tokens(&urls),
+            ContentKind::Prose => urls,
+        }
     }
 
     fn replace_line(&mut self, line: &str) -> String {
@@ -224,7 +273,9 @@ impl Redactor {
                     }
                     at = (close + 1).min(bytes.len());
                 }
-                _ if is_non_secret_literal(value_core) => at = bytes.len(),
+                _ if is_non_secret_literal(value_core) || is_plain_number(value_core) => {
+                    at = bytes.len();
+                }
                 Some(b'|' | b'>') if is_block_scalar_indicator(rest) => {
                     self.open_indented_block(line, force);
                     at = bytes.len();
@@ -301,6 +352,7 @@ impl Redactor {
                 .bytes()
                 .all(|byte| matches!(byte, b'{' | b'}' | b'[' | b']' | b','))
             || is_non_secret_literal(core)
+            || (item == core && is_plain_number(core))
         {
             return line.to_string();
         }
@@ -587,6 +639,29 @@ fn is_non_secret_literal(value: &str) -> bool {
         || is_variable_reference(value)
 }
 
+/// An unquoted integer or float (`4096`, `-3.5`, `1e6`, `1_000`): a typed number such as a
+/// limit or a port, not a credential string. A quoted string of digits is still a value.
+fn is_plain_number(value: &str) -> bool {
+    let digits = |part: &str| {
+        part.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'_')
+    };
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let mantissa_is_number = match mantissa.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(mantissa),
+    };
+    mantissa_is_number
+        && exponent
+            .is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)))
+}
+
 fn is_variable_reference(value: &str) -> bool {
     let name = value
         .strip_prefix("${")
@@ -668,7 +743,7 @@ mod tests {
     }
 
     fn redacted(text: &str) -> String {
-        redact_secret_values(text).text
+        redact_secret_values(text, ContentKind::Config).text
     }
 
     #[test]
@@ -687,7 +762,7 @@ mod tests {
             format!("\"authorization\" => \"Bearer {value}\",\n"),
         ];
         for case in cases {
-            let result = redact_secret_values(&case);
+            let result = redact_secret_values(&case, ContentKind::Config);
             assert!(!result.text.contains(&value), "{case} -> {}", result.text);
             assert!(result.text.contains(REDACTION_MARKER), "{}", result.text);
             assert_eq!(result.redactions, 1, "{case} -> {}", result.text);
@@ -794,7 +869,7 @@ mod tests {
             for seed in 0..50u64 {
                 let token = pseudo_random(alphabet, 40, seed * 31 + index as u64);
                 let text = format!("callback_nonce: {token}\n");
-                let result = redact_secret_values(&text);
+                let result = redact_secret_values(&text, ContentKind::Config);
                 assert_eq!(
                     result.text, "callback_nonce: [REDACTED]\n",
                     "missed {token}"
@@ -829,7 +904,7 @@ mod tests {
              max_tokenizer_threads: 4\n\
              password: [REDACTED]\n"
         );
-        let result = redact_secret_values(&text);
+        let result = redact_secret_values(&text, ContentKind::Config);
         assert_eq!(result.text, text);
         assert_eq!(result.redactions, 0);
     }
@@ -841,6 +916,70 @@ mod tests {
             redacted(&format!("base_commit: {hex40}\n")),
             "base_commit: [REDACTED]\n"
         );
+    }
+
+    #[test]
+    fn prose_keeps_cited_hashes_but_not_labelled_secrets() {
+        let commit = striding(b"0123456789abcdef", 40, 7, 1);
+        let digest = format!("{}=", striding(ALNUM, 43, 7, 5));
+        let changelog = format!("- Measured at commit `{commit}`; artifact digest {digest}.\n");
+        let result = redact_secret_values(&changelog, ContentKind::Prose);
+        assert_eq!(result.text, changelog);
+        assert_eq!(result.redactions, 0);
+        // In a config file nothing labels either value, so both are redacted.
+        assert_ne!(redacted(&changelog), changelog);
+
+        let value = striding(ALNUM, 12, 7, 3);
+        assert_eq!(
+            redact_secret_values(&format!("api_key: {value}\n"), ContentKind::Prose).text,
+            "api_key: [REDACTED]\n"
+        );
+        let password = striding(ALNUM, 9, 5, 4);
+        assert_eq!(
+            redact_secret_values(
+                &format!("Connect with postgres://app:{password}@db.internal/orders\n"),
+                ContentKind::Prose
+            )
+            .text,
+            "Connect with postgres://app:[REDACTED]@db.internal/orders\n"
+        );
+    }
+
+    #[test]
+    fn numbers_under_secret_named_keys_are_not_values() {
+        let text = "max_tokens: 4096\ntoken_limit: 12\ntoken_ttl_seconds: 3.5\n\"token_budget\": 1e6,\ncredentials:\n  port: 5432\n  - 8080\n";
+        let result = redact_secret_values(text, ContentKind::Config);
+        assert_eq!(result.text, text);
+        assert_eq!(result.redactions, 0);
+        // A quoted string of digits is a string, and stays a value.
+        assert_eq!(
+            redacted("password: \"123456\"\n"),
+            "password: \"[REDACTED]\"\n"
+        );
+    }
+
+    #[test]
+    fn content_kind_follows_the_file_format() {
+        let kind =
+            |path: &str, language: Language| ContentKind::for_file(Path::new(path), &language);
+        assert_eq!(
+            kind("config/app.yaml", Language::Yaml),
+            Some(ContentKind::Config)
+        );
+        assert_eq!(
+            kind("infra/main.tf", Language::Text),
+            Some(ContentKind::Config)
+        );
+        assert_eq!(
+            kind("Dockerfile", Language::Text),
+            Some(ContentKind::Config)
+        );
+        assert_eq!(
+            kind("CHANGELOG.md", Language::Markdown),
+            Some(ContentKind::Prose)
+        );
+        assert_eq!(kind("notes.txt", Language::Text), Some(ContentKind::Prose));
+        assert_eq!(kind("src/lib.rs", Language::Rust), None);
     }
 
     #[test]

@@ -325,6 +325,17 @@ pub fn reindex_repo_after_changes<'a>(
             )),
         });
     }
+    // A partial update is refused over an index written before secret-value redaction, so it
+    // was replaced in full above; its unredacted rows linger in free pages until compacted.
+    if !partial
+        && previous_manifest
+            .as_ref()
+            .is_some_and(|previous| previous.predates_secret_redaction())
+    {
+        if let Err(err) = store.vacuum() {
+            eprintln!("watch: compacting the database failed ({err}); rows stored before secret-value redaction stay in free pages until the next index run");
+        }
+    }
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {
@@ -347,6 +358,11 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     let store = SqliteStore::open(
         open_kioku_storage::generations::resolve_index_location(root).sqlite_path(),
     )?;
+    let compact_after_publish = store
+        .manifest()
+        .ok()
+        .flatten()
+        .is_some_and(|previous| previous.predates_secret_redaction());
     persist_full_snapshot(&store, &snapshot)?;
     store.put_history_snapshot(&history)?;
     let graph = graph_from_snapshot(&snapshot);
@@ -361,6 +377,14 @@ fn reindex_repo_full(root: impl AsRef<Path>) -> Result<WatchIndexStatus> {
     )?;
     // Published last: every component the manifest describes is in place by now.
     store.put_manifest(&snapshot.manifest)?;
+    // Rows written before secret-value redaction linger in free pages until compacted. The
+    // manifest is published either way, so a reader holding the database delays this to the
+    // next run rather than failing one.
+    if compact_after_publish {
+        if let Err(err) = store.vacuum() {
+            eprintln!("watch: compacting the database failed ({err}); rows stored before secret-value redaction stay in free pages until the next index run");
+        }
+    }
     maintain_semantic_index(root, &store, &config);
 
     Ok(WatchIndexStatus {

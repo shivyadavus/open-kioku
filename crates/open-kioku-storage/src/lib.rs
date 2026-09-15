@@ -361,7 +361,11 @@ pub fn analysis_semantics_compatibility(
 
 pub fn partial_index_supported(previous: Option<&IndexManifest>, next: &IndexManifest) -> bool {
     previous.is_some_and(|previous| {
-        previous.schema_version == next.schema_version
+        // An index written before secret-value redaction holds data and config files as read;
+        // updating only the changed files would keep the rest unredacted under a manifest
+        // that counts redactions.
+        !previous.predates_secret_redaction()
+            && previous.schema_version == next.schema_version
             && previous.index_mode == next.index_mode
             && analysis_semantics_compatibility(Some(previous), next)
                 .status
@@ -508,6 +512,16 @@ mod tests {
     }
 
     #[test]
+    fn partial_updates_are_refused_over_an_index_written_before_redaction() {
+        let next = manifest(1);
+        assert!(partial_index_supported(Some(&manifest(1)), &next));
+        let mut previous = manifest(1);
+        previous.quality.redacted_files = None;
+        assert!(previous.predates_secret_redaction());
+        assert!(!partial_index_supported(Some(&previous), &next));
+    }
+
+    #[test]
     fn schema_version_is_independent_from_analysis_semantics() {
         let first = manifest(1);
         let second = manifest(2);
@@ -553,7 +567,13 @@ mod tests {
             schema_version,
             index_mode: Default::default(),
             phase_reports: Vec::new(),
-            quality: IndexQuality::default(),
+            // Written by a release that redacts, so partial updates are judged on the other
+            // rules; `partial_updates_are_refused_over_an_index_written_before_redaction`
+            // covers the absent count.
+            quality: IndexQuality {
+                redacted_files: Some(0),
+                ..IndexQuality::default()
+            },
         }
     }
 

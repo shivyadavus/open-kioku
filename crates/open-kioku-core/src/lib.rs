@@ -3091,6 +3091,72 @@ pub struct SkippedPath {
     pub safe_to_show: bool,
 }
 
+/// Paths that hold key material or environment secrets, which are never read, whatever the
+/// file's language: `.env`, `.env.*`, `.aws`, `.ssh`, `id_rsa*`, `id_ed25519*`, `*.pem`,
+/// `*.key`, `*.p12`, `*.pfx`, `*.jks`, and `*.keystore`. Discovery skips them as
+/// `secret_policy` and the semantic corpus excludes them: one rule for both. A file merely
+/// named for a secret is not matched. A class named `CredentialsProviderTest` or a module
+/// named `secrets.go` is code (a name rule silently dropped 25 Java files from one
+/// repository), and a `secrets.yaml`, `credentials.json`, or `SECRETS.md` is indexed with its
+/// secret-like values replaced before anything is derived from its text
+/// (`open-kioku-ingest::redaction`, #379).
+pub fn is_secret_like_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        value == ".env"
+            || value.starts_with(".env.")
+            || matches!(value.as_str(), ".aws" | ".ssh")
+            || value.starts_with("id_rsa")
+            || value.starts_with("id_ed25519")
+            || value.ends_with(".pem")
+            || value.ends_with(".key")
+            || value.ends_with(".p12")
+            || value.ends_with(".pfx")
+            || value.ends_with(".jks")
+            || value.ends_with(".keystore")
+    })
+}
+
+#[cfg(test)]
+mod secret_path_tests {
+    use super::is_secret_like_path;
+    use std::path::Path;
+
+    #[test]
+    fn secret_path_rule_blocks_key_material_and_environment_entries_only() {
+        // Key material and environment entries, whatever the file's language.
+        for blocked in [
+            ".env",
+            ".env.local",
+            ".aws/credentials.json",
+            ".ssh/id_rsa.pub",
+            "deploy/id_ed25519",
+            "config/server.key",
+            "certs/tls.PEM",
+            "certs/client.p12",
+            "certs/client.pfx",
+            "android/release.jks",
+            "android/release.keystore",
+        ] {
+            assert!(is_secret_like_path(Path::new(blocked)), "{blocked}");
+        }
+        // Named for a secret but not key material: indexed, source as written and data,
+        // config, and prose with secret-like values redacted.
+        for indexed in [
+            "src/CredentialsProvider.java",
+            "internal/secrets.go",
+            "config/credentials.yaml",
+            "credentials.json",
+            "secret_key.txt",
+            "docs/SECRETS.md",
+            "config/server.yaml",
+            "config/.environment.yaml",
+        ] {
+            assert!(!is_secret_like_path(Path::new(indexed)), "{indexed}");
+        }
+    }
+}
+
 impl SkipReason {
     /// Human-readable label for summaries (`secret-policy`, `too-large`).
     pub fn label(self) -> &'static str {
@@ -3878,6 +3944,12 @@ impl IndexManifest {
     /// and `quality.skipped_paths` replaced by their summaries unless `Full` is asked
     /// for. Both `ok --json status` and MCP `repo_status` start from this so the two
     /// cannot drift; the manifest itself keeps the full lists.
+    /// Written before secret-value redaction existed: such an index stored data, config, and
+    /// prose files as read, so replacing it must also drop those bytes from the database.
+    pub fn predates_secret_redaction(&self) -> bool {
+        self.quality.redacted_files.is_none()
+    }
+
     pub fn status_value(&self, detail: StatusDetail) -> serde_json::Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
         if detail == StatusDetail::Full {
