@@ -733,11 +733,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 // unredacted text on disk under a manifest that claims completion (#379).
                 let _lock = IndexWriteLock::acquire(&repo, IndexWriteLock::DEFAULT_WAIT)?;
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
-                let report = if allow_model_download {
-                    manager.index_with_model_download()?
-                } else {
-                    manager.index()?
-                };
+                let mut progress = SemanticProgressReporter::new("index");
+                let report = manager.index_with_progress(allow_model_download, &mut |update| {
+                    progress.observe(update)
+                })?;
                 output(cli.json, &report, || {
                     println!(
                         "Semantic index ready: {} vectors, {} reused, {} embedded",
@@ -762,11 +761,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 // clearing of a vector store built before redaction (#379).
                 let _lock = IndexWriteLock::acquire(&repo, IndexWriteLock::DEFAULT_WAIT)?;
                 let manager = SemanticIndexManager::new(&repo, &store, &config.semantic);
-                let report = if allow_model_download {
-                    manager.rebuild_with_model_download()?
-                } else {
-                    manager.rebuild()?
-                };
+                let mut progress = SemanticProgressReporter::new("rebuild");
+                let report = manager
+                    .rebuild_with_progress(allow_model_download, &mut |update| {
+                        progress.observe(update)
+                    })?;
                 output(cli.json, &report, || {
                     println!(
                         "Semantic index rebuilt: {} vectors, {} embedded",

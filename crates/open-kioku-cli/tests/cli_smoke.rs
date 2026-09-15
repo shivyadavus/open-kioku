@@ -2701,6 +2701,210 @@ fn patch_and_mcp_help_expose_only_supported_source_workflow() {
     assert!(!mcp_serve_help.contains("--allow-write"));
 }
 
+fn semantic_json_report(stdout: &str) -> serde_json::Value {
+    serde_json::from_str(stdout.trim()).expect("semantic --json stdout should be one JSON document")
+}
+
+/// The semantic vector store, resolved the way the product resolves it. Hardcoding
+/// `.ok/vectors` passes until an `ok index` publishes a generation and moves the store under
+/// `.ok/generations/<id>/`, which is exactly what this test does between semantic runs.
+fn semantic_current_dir(repo: &std::path::Path) -> PathBuf {
+    open_kioku_storage::generations::resolve_index_location(repo)
+        .vectors_root()
+        .join("current")
+}
+
+fn semantic_target_keys(repo: &std::path::Path) -> Vec<(String, String, String)> {
+    let path = semantic_current_dir(repo).join("ids.json");
+    let ids = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("reading {} failed: {err}", path.display()));
+    let targets: Vec<serde_json::Value> = serde_json::from_str(&ids).unwrap();
+    targets
+        .iter()
+        .map(|target| {
+            (
+                target["stable_id"].as_str().unwrap().to_string(),
+                target["content_hash"].as_str().unwrap().to_string(),
+                target["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `ok --json semantic <subcommand>`, returning (stdout, stderr).
+fn run_semantic(repo: &std::path::Path, subcommand: &str) -> (String, String) {
+    run_ok_with_stderr({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(repo)
+            .arg("--json")
+            .arg("semantic")
+            .arg(subcommand);
+        command
+    })
+}
+
+#[test]
+fn semantic_index_reports_progress_on_stderr_and_reembeds_only_changed_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+    let semantic = |subcommand: &str| run_semantic(&repo, subcommand);
+
+    let (stdout, stderr) = semantic("index");
+    let first = semantic_json_report(&stdout);
+    let indexed = first["indexed_count"].as_u64().unwrap();
+    assert!(indexed > 0);
+    assert_eq!(first["embedded_count"].as_u64(), Some(indexed));
+    assert_eq!(first["reused_embeddings"].as_u64(), Some(0));
+    // Captured stderr is not a terminal: whole lines, never an in-place redraw.
+    assert!(!stderr.contains('\r'), "{stderr}");
+    let progress = stderr
+        .lines()
+        .filter(|line| line.starts_with("semantic[index] "))
+        .collect::<Vec<_>>();
+    assert!(!progress.is_empty(), "{stderr}");
+    assert!(
+        progress.iter().all(|line| line.contains("elapsed=")),
+        "{stderr}"
+    );
+    assert!(
+        progress
+            .last()
+            .unwrap()
+            .contains(&format!("{indexed}/{indexed} targets embedded")),
+        "{stderr}"
+    );
+
+    let before = semantic_target_keys(&repo);
+    let (stdout, stderr) = semantic("index");
+    let unchanged = semantic_json_report(&stdout);
+    assert_eq!(unchanged["embedded_count"].as_u64(), Some(0));
+    assert_eq!(unchanged["reused_embeddings"].as_u64(), Some(indexed));
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("semantic[index] nothing to embed")),
+        "{stderr}"
+    );
+
+    let lib = repo.join("src/lib.rs");
+    let mut source = fs::read_to_string(&lib).unwrap();
+    source.push_str(
+        "\npub fn handle_logout(user_id: &str) -> String {\n    format!(\"logout:{user_id}\")\n}\n",
+    );
+    fs::write(&lib, source).unwrap();
+    run({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+
+    let (stdout, _) = semantic("index");
+    let changed = semantic_json_report(&stdout);
+    let after = semantic_target_keys(&repo);
+    let known = before
+        .iter()
+        .map(|(stable_id, content_hash, _)| (stable_id.clone(), content_hash.clone()))
+        .collect::<std::collections::HashSet<_>>();
+    let fresh = after
+        .iter()
+        .filter(|(stable_id, content_hash, _)| {
+            !known.contains(&(stable_id.clone(), content_hash.clone()))
+        })
+        .collect::<Vec<_>>();
+    assert!(!fresh.is_empty());
+    assert!(
+        fresh.iter().all(|(_, _, path)| path == "src/lib.rs"),
+        "only the edited file's targets should need embedding: {fresh:?}"
+    );
+    assert_eq!(changed["embedded_count"].as_u64(), Some(fresh.len() as u64));
+    assert_eq!(
+        changed["reused_embeddings"].as_u64(),
+        Some((after.len() - fresh.len()) as u64)
+    );
+
+    // `rebuild` clears the build directory but not `current/embeddings.cache`, so this run
+    // reuses every vector. Pinning the exact line asserts that reuse survives a rebuild,
+    // rather than passing on any line that happens to start with the phase.
+    let (stdout, stderr) = semantic("rebuild");
+    let rebuilt = semantic_json_report(&stdout);
+    assert_eq!(rebuilt["indexed_count"].as_u64(), Some(after.len() as u64));
+    assert_eq!(rebuilt["embedded_count"].as_u64(), Some(0));
+    assert_eq!(
+        rebuilt["reused_embeddings"].as_u64(),
+        Some(after.len() as u64)
+    );
+    assert!(!stderr.contains('\r'), "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("semantic[rebuild] nothing to embed")),
+        "{stderr}"
+    );
+}
+
+/// The rebuild arm's batch progress, in its own test so that neutralising it fails *here* rather
+/// than being caught first by an assertion in the index test. A rebuild only does real work
+/// once the embedding cache is gone, so the clean is the setup this test depends on.
+#[test]
+fn semantic_rebuild_reports_batch_progress_once_the_cache_is_cleared() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("demo");
+    run({
+        let mut command = ok();
+        command.arg("demo").arg("--path").arg(&repo);
+        command
+    });
+
+    let (stdout, _) = run_semantic(&repo, "index");
+    let built = semantic_json_report(&stdout);
+    let indexed = built["indexed_count"].as_u64().unwrap();
+    assert!(indexed > 0);
+
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .arg("semantic")
+            .arg("clean")
+            .arg("--include-cache");
+        command
+    });
+    // `clean` ignores removal errors, so prove the cache is gone before relying on it: a clean
+    // that silently no-opped would leave the rebuild below warm and its assertions vacuous
+    // again, and this assertion blames the clean rather than the rebuild.
+    assert!(
+        !semantic_current_dir(&repo)
+            .join("embeddings.cache")
+            .exists(),
+        "clean --include-cache left the embedding cache behind"
+    );
+
+    let (stdout, stderr) = run_semantic(&repo, "rebuild");
+    let cold = semantic_json_report(&stdout);
+    let cold_indexed = cold["indexed_count"].as_u64().unwrap();
+    assert!(cold_indexed > 0);
+    assert_eq!(cold["reused_embeddings"].as_u64(), Some(0));
+    assert_eq!(cold["embedded_count"].as_u64(), Some(cold_indexed));
+    assert!(!stderr.contains('\r'), "{stderr}");
+    // The completion count comes only from the per-batch callback, so a rebuild that reported
+    // no batch progress would leave `0/N` here and fail.
+    assert!(
+        stderr.lines().any(|line| {
+            line.starts_with("semantic[rebuild] ")
+                && line.contains(&format!("{cold_indexed}/{cold_indexed} targets embedded"))
+        }),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn demo_creates_indexed_sample_repo() {
     let temp = tempfile::tempdir().unwrap();
