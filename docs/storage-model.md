@@ -101,9 +101,18 @@ The manifest is the publication marker, written as the last step of an index run
   unindexed rather than a manifest over a missing search index. The manifest of the database
   being replaced is withdrawn before that database is moved aside, so a session that holds it
   (an MCP server) probes again and switches to the imported index instead of answering from
-  the replaced file. If the imported database cannot be moved into place or opened, the
-  previous database is moved back and its manifest restored; if restoring the manifest also
-  fails, the error says so and the repository reads as unindexed until `ok index` runs.
+  the replaced file. A replaced file is imported over without a withdrawal only when it is not
+  a readable index — SQLite reports it is not a database, or it has no `manifests` table; any
+  other failure to read or withdraw its manifest fails the import with the index left in
+  place. If the imported database cannot be moved into place or opened, the previous database
+  is moved back over it and its manifest restored; the manifest is written only into a
+  database that is back at the index path. If moving it back fails, the error names the
+  backup file, `.ok/.index.sqlite.<pid>.<time>.backup`, that still holds the previous
+  database without its manifest; if restoring the manifest fails, the error says so. Either
+  way the repository reads as unindexed until `ok index` runs. An import killed while the
+  previous database is moved aside leaves it at that backup path too, and the
+  `repository is not indexed` message on every read surface (`ok status`, `ok doctor`, MCP
+  `repo_status`) then names the file.
 
 SQLite components are therefore consistent per transaction; the search index is not
 versioned with them.

@@ -112,12 +112,42 @@ fn generation_dir(repo: &Path, generation_id: &str) -> PathBuf {
 /// see the same next step. It is deliberately distinct from the message for an index that
 /// exists but awaits `ok index` after a format change; the store raises that one and names
 /// the format, and merging the two would hide which of the two situations the user is in.
+///
+/// When an `ok snapshot import` was interrupted after moving the previous index database aside,
+/// the sentence names the file it left, so that database is never orphaned without a word.
 pub fn not_indexed_message(repo: &Path) -> String {
-    let repo = repo.display();
-    format!(
-        "repository is not indexed: {repo} has no local index; run `ok index {repo}` \
-         (or `ok setup agent <claude|cursor> --repo {repo} --apply`) to build it"
-    )
+    let display = repo.display();
+    let message = format!(
+        "repository is not indexed: {display} has no local index; run `ok index {display}` \
+         (or `ok setup agent <claude|cursor> --repo {display} --apply`) to build it"
+    );
+    match interrupted_import_backup(repo) {
+        None => message,
+        Some(backup) => format!(
+            "{message}; an interrupted `ok snapshot import` left the previous index database, \
+             without its manifest, at {}; it is not read and can be deleted once the index is \
+             rebuilt",
+            backup.display()
+        ),
+    }
+}
+
+/// The file `ok snapshot import` moves the database it replaces to while the import runs:
+/// `.ok/.index.sqlite.<pid>.<timestamp>.backup`. The import removes it once the imported
+/// database opens, or moves it back when the import fails, so one still present on a
+/// repository with no published index was left by an import that was killed or whose rollback
+/// failed. The lexically last is named when there are several.
+fn interrupted_import_backup(repo: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(repo.join(".ok")).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".index.sqlite.") && name.ends_with(".backup"))
+        })
+        .max()
 }
 
 /// The file an index writer holds for the duration of a run. Always directly under `.ok/`,
@@ -586,6 +616,37 @@ mod tests {
         assert!(!index_write_in_progress(repo));
         let again = IndexWriteLock::acquire(repo, std::time::Duration::from_millis(10));
         assert!(again.is_ok(), "a released lock is free: {again:?}");
+    }
+
+    #[test]
+    fn not_indexed_message_names_the_database_an_interrupted_import_left() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        assert!(!not_indexed_message(repo).contains("interrupted"));
+
+        std::fs::create_dir_all(repo.join(".ok")).unwrap();
+        std::fs::write(repo.join(".ok/index.sqlite-wal"), b"").unwrap();
+        std::fs::write(repo.join(".ok/index.lock"), b"").unwrap();
+        assert!(
+            !not_indexed_message(repo).contains("interrupted"),
+            "only an import backup is named"
+        );
+
+        let backup = repo.join(".ok/.index.sqlite.4242.1757900000000000000.backup");
+        std::fs::write(&backup, b"").unwrap();
+        let message = not_indexed_message(repo);
+        assert!(
+            message.starts_with("repository is not indexed"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "an interrupted `ok snapshot import` left the previous index database, without \
+                 its manifest, at {}",
+                backup.display()
+            )),
+            "{message}"
+        );
     }
 
     #[test]

@@ -4385,10 +4385,6 @@ fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
         stderr.contains("the imported index was not published"),
         "{stderr}"
     );
-    assert!(
-        !open_kioku_storage::generations::index_write_in_progress(&repo),
-        "a failed import releases the writer lock"
-    );
 
     let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
     {
@@ -4423,8 +4419,25 @@ fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
         "{response}"
     );
 
-    // Repaired, the next import publishes.
+    // Repaired, the next writer takes the lock without waiting for a retry, and the next
+    // import publishes over the index it builds.
     fs::remove_file(&search_dir).unwrap();
+    let (_stdout, index_stderr) = run_ok_with_stderr({
+        let mut command = ok();
+        command.arg("index").arg(&repo);
+        command
+    });
+    let lock_wait = index_stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("index[lock] acquired index writer lock, elapsed="))
+        .and_then(|rest| rest.strip_suffix('s'))
+        .and_then(|seconds| seconds.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("`ok index` did not report taking the lock: {index_stderr}"));
+    assert!(
+        lock_wait < 0.25,
+        "`ok index` after the failed import must take the lock on its first attempt (a retry \
+         waits 250 ms): {index_stderr}"
+    );
     let imported: serde_json::Value = serde_json::from_str(&run(import(&repo))).unwrap();
     assert_eq!(imported["imported"], true, "{imported}");
     let status = run({
@@ -4443,6 +4456,85 @@ fn snapshot_import_that_fails_at_the_search_stage_publishes_no_manifest() {
         command
     });
     assert!(search.contains("src/lib.rs"), "{search}");
+}
+
+/// A replaced index whose manifest cannot be read for a reason other than not being an index
+/// (here a damaged schema entry for `manifests`) aborts the import before the file is moved:
+/// the previous index and its manifest stay where they are.
+#[test]
+fn snapshot_import_aborts_when_the_replaced_index_cannot_be_read() {
+    let (_temp, repo) = init_and_index_worker_repo();
+    run({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "export", "--quality", "fast"]);
+        command
+    });
+    let db = open_kioku_storage::generations::resolve_index_location(&repo).sqlite_path();
+    let original_schema: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manifests'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // `writable_schema` also lets this connection load the schema while the entry is damaged,
+    // which is how the entry is put back below.
+    let set_manifests_schema = |sql: &str| {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+        conn.execute(
+            "UPDATE sqlite_master SET sql = ?1 WHERE type = 'table' AND name = 'manifests'",
+            [sql],
+        )
+        .unwrap();
+    };
+    set_manifests_schema("CREATE TABLE manifests(");
+
+    let (_stdout, stderr) = run_failure({
+        let mut command = ok();
+        command
+            .arg("--repo")
+            .arg(&repo)
+            .args(["snapshot", "import"]);
+        command
+    });
+    assert!(
+        stderr.contains("before replacing it; it was left in place"),
+        "{stderr}"
+    );
+    assert!(db.is_file(), "the previous index stays at its path");
+    let leftovers = |dir: std::path::PathBuf, prefix: &str| -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(prefix))
+            .collect()
+    };
+    assert!(
+        leftovers(repo.join(".ok"), ".index.sqlite.").is_empty(),
+        "the previous index was not moved aside"
+    );
+    assert!(
+        leftovers(repo.join(".ok/artifacts"), ".index.snapshot.import.").is_empty(),
+        "the decompressed import is removed"
+    );
+
+    set_manifests_schema(&original_schema);
+    let status = run({
+        let mut command = ok();
+        command.arg("--repo").arg(&repo).arg("--json").arg("status");
+        command
+    });
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(
+        status["indexed"], true,
+        "the previous manifest is still published: {status}"
+    );
 }
 
 /// Export reads the index like every other read surface: an index a live writer has not
