@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests for the per-task-family section of score-context-cases.py and its gate in
-compare-commit-derived-report.py. Stdlib only; run with
+"""Unit tests for the per-task-family section of score-context-cases.py, its gate in
+compare-commit-derived-report.py, and the baseline validator and freeze in
+commit-derived-baselines.py. Stdlib only; run with
 `python3 -m unittest scripts.tests.test_commit_derived_families`.
 """
 
@@ -33,6 +34,8 @@ def load(name):
 score = load("score-context-cases")
 compare = load("compare-commit-derived-report")
 reduce_report = load("reduce-benchmark-report")
+baselines = load("commit-derived-baselines")
+baseline_problems = baselines.baseline_problems
 
 # Top-level report keys and per-row keys written before the per-family section existed.
 LEGACY_REPORT_KEYS = {"label", "metrics", "ci", "median_secs", "yield_budgets", "coverage",
@@ -61,10 +64,16 @@ def row(family, rank, units=True, measurable=False):
     return out
 
 
-def entry(cases, **values):
+SAME_MEMBERS = "sha256:" + "a" * 64
+
+
+def entry(cases, fingerprint=SAME_MEMBERS, **values):
     metrics = {"R@5": 0.6, "R@20": 0.8, "MRR": 0.5, "gold_recall@20": 0.7}
     metrics.update(values)
-    return {"cases": cases, "insufficient": cases < score.MIN_FAMILY_CASES, "metrics": metrics, "ci": {}}
+    out = {"cases": cases, "insufficient": cases < score.MIN_FAMILY_CASES, "metrics": metrics, "ci": {}}
+    if fingerprint is not None:
+        out["membership_fingerprint"] = fingerprint
+    return out
 
 
 def report_with(families, min_cases=score.MIN_FAMILY_CASES):
@@ -80,72 +89,17 @@ def quiet(fn, *args):
     return result, buffer.getvalue()
 
 
-CASE_DATA_KEYS = {"rows", "query", "top", "sha"}
-FULL_HASH = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
-FAMILY_ENTRY_KEYS = {"cases", "insufficient", "metrics", "ci", "case_coverage"}
+CASE_DATA_KEYS = baselines.CASE_DATA_KEYS
+FULL_HASH = baselines.FULL_HASH
 
 
-def leaves(value, path=()):
-    """(path, key-or-leaf) pairs: every dict key and every scalar, with its path."""
-    if isinstance(value, dict):
-        for k, v in value.items():
-            yield path + (k,), k
-            yield from leaves(v, path + (k,))
-    elif isinstance(value, list):
-        for i, v in enumerate(value):
-            yield from leaves(v, path + (i,))
-    else:
-        yield path, value
-
-
-def baseline_problems(baseline):
-    """What is wrong with a frozen baseline file; empty when it is well formed.
-
-    Holds before and after a per-family freeze: a baseline without `by_task_family` only has to
-    carry no case data; one with the section must also carry its fields and provenance.
-    """
-    problems = []
-    for path, value in leaves(baseline):
-        if path and path[-1] == value and value in CASE_DATA_KEYS:
-            problems.append(f"case data key at {path}")
-        if isinstance(value, str) and FULL_HASH.search(value) and path != ("provenance", "source_commit"):
-            problems.append(f"full commit hash at {path}")
-    if "by_task_family" not in baseline:
-        return problems
-    section = compare.family_section(baseline)
-    if section is None:
-        return problems + ["by_task_family has no families object"]
-    if section.get("assignment") != score.FAMILY_ASSIGNMENT:
-        problems.append(f"assignment {section.get('assignment')!r}")
-    for key in ("min_cases", "scored_cases", "unassigned_cases"):
-        if not isinstance(section.get(key), int):
-            problems.append(f"by_task_family.{key} is not an integer")
-    if section.get("scored_cases") != baseline.get("cases"):
-        problems.append("by_task_family.scored_cases differs from the baseline's cases")
-    for family, entry in section["families"].items():
-        missing = FAMILY_ENTRY_KEYS - set(entry)
-        if missing:
-            problems.append(f"{family} lacks {sorted(missing)}")
-            continue
-        if set(compare.WATCHED) - set(entry["metrics"]):
-            problems.append(f"{family} lacks watched metrics")
-        if entry["insufficient"] != (entry["cases"] < section.get("min_cases", 0)):
-            problems.append(f"{family} insufficient flag disagrees with its case count")
-    provenance = baseline.get("provenance") or {}
-    for key in ("frozen_from", "frozen_on", "source_commit"):
-        if not provenance.get(key):
-            problems.append(f"provenance.{key} missing")
-    if not re.fullmatch(r"[0-9a-f]{40}", str(provenance.get("source_commit", ""))):
-        problems.append("provenance.source_commit is not a full Open Kioku commit")
-    return problems
+def leaves(value):
+    return baselines.leaves(value)
 
 
 def baseline_files():
     """Every frozen split baseline under benchmarks/commit-derived/, recognised by its content."""
-    for path in sorted((REPO / "benchmarks/commit-derived").glob("*.json")):
-        data = json.loads(path.read_text())
-        if isinstance(data, dict) and {"split", "metrics"} <= set(data):
-            yield path, data
+    return baselines.baseline_files(REPO / "benchmarks/commit-derived")
 
 
 class FamilyAssignment(unittest.TestCase):
@@ -241,16 +195,18 @@ class InsufficientSample(unittest.TestCase):
         self.assertIn("R@5", section["families"]["general"]["metrics"])
         self.assertIn("insufficient", "\n".join(score.family_lines(section)))
 
-    def test_sufficient_family_regression_beyond_slack_fails(self):
+    def test_sufficient_family_regression_beyond_tolerance_fails(self):
+        # 40 cases: tolerance max(0.03, 2/40) = 0.05, and 0.60 -> 0.54 falls 0.06.
         failed, out = quiet(compare.compare_families,
-                            report_with({"issue_to_code": entry(40, **{"R@5": 0.56})}),
+                            report_with({"issue_to_code": entry(40, **{"R@5": 0.54})}),
                             report_with({"issue_to_code": entry(40)}))
         self.assertEqual(failed, ["issue_to_code:R@5"])
         self.assertIn("REGRESSION", out)
 
-    def test_drop_within_slack_and_improvement_pass(self):
+    def test_drop_within_tolerance_and_improvement_pass(self):
+        # 0.60 -> 0.555 falls 0.045: beyond the aggregate's 0.03 but within 2/40.
         failed, _ = quiet(compare.compare_families,
-                          report_with({"issue_to_code": entry(40, **{"R@5": 0.575, "MRR": 0.9})}),
+                          report_with({"issue_to_code": entry(40, **{"R@5": 0.555, "MRR": 0.9})}),
                           report_with({"issue_to_code": entry(40)}))
         self.assertEqual(failed, [])
 
@@ -261,7 +217,7 @@ class InsufficientSample(unittest.TestCase):
                                 report_with({"documentation": entry(base_cases)}))
             self.assertEqual(failed, [], (now_cases, base_cases))
             self.assertIn("not gated", out)
-            self.assertIn("below slack", out)
+            self.assertIn("below tolerance", out)
 
     def test_family_missing_on_one_side_is_not_gated(self):
         failed, out = quiet(compare.compare_families,
@@ -464,28 +420,19 @@ class ReportSchemaBackwardCompatibility(unittest.TestCase):
             mutate(broken)
             self.assertTrue(any(expected in p for p in baseline_problems(broken)), (expected, baseline_problems(broken)))
 
-    def test_documented_freeze_writes_valid_baselines_without_case_data(self):
+    def test_documented_freeze_runs_the_freeze_script_on_a_checked_run(self):
         doc = (REPO / "docs/retrieval-benchmark.md").read_text()
-        snippet = re.search(r'python3 - "\$DL" "\$RUN" "\$SOURCE_COMMIT" <<\'PY\'\n(.*?)\nPY\n', doc, re.S).group(1)
+        block = doc.split("**Freezing per-family baselines.**", 1)[1].split("```sh\n", 1)[1].split("\n```", 1)[0]
+        self.assertIn("gh run view \"$RUN\" --json databaseId,workflowName,status,conclusion,headSha", block)
+        self.assertIn("scripts/commit-derived-baselines.py freeze --run-json", block)
+        self.assertNotIn("baseline.update(report)", block)
         with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp) / "repo"
-            target = repo / "benchmarks/commit-derived"
-            target.mkdir(parents=True)
-            download = Path(tmp) / "download"
-            for path, baseline in baseline_files():
-                shutil.copy(path, target / path.name)
-                # The artifact as the workflow uploads it: reduced to aggregates, at the artifact root.
-                out = download / path.name.rsplit("-", 1)[0] / f"{baseline['split']}.json"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                notes = []
-                uploaded = reduce_report.reduce_report(json.loads(json.dumps(dict(self.report, label=baseline["split"]))), notes)
-                self.assertNotIn("rows", uploaded)
-                out.write_text(json.dumps(uploaded))
-            bad = subprocess.run([sys.executable, "-", str(download), "12345", "main"], input=snippet,
-                                 cwd=repo, capture_output=True, text=True)
-            self.assertNotEqual(bad.returncode, 0)
-            frozen_run = subprocess.run([sys.executable, "-", str(download), "12345", "ab" * 20], input=snippet,
-                                        cwd=repo, capture_output=True, text=True)
+            target, download = freeze_fixture(Path(tmp), self.report)
+            run_json = Path(tmp) / "run.json"
+            run_json.write_text(json.dumps(successful_run()))
+            frozen_run = subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "freeze",
+                                         "--run-json", str(run_json), "--download", str(download), "--dir", str(target)],
+                                        capture_output=True, text=True)
             self.assertEqual(frozen_run.returncode, 0, frozen_run.stderr)
             frozen_files = sorted(target.glob("*.json"))
             self.assertEqual(len(frozen_files), len(list(baseline_files())))
@@ -495,6 +442,9 @@ class ReportSchemaBackwardCompatibility(unittest.TestCase):
                 self.assertEqual(frozen["provenance"]["source_commit"], "ab" * 20)
                 self.assertEqual(frozen["by_task_family"]["scored_cases"], 47)
                 self.assertEqual(quiet(compare.compare_families, self.report, frozen)[0], [], path.name)
+            checked = subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "check",
+                                      "--dir", str(target)], capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_job_summary_prints_the_caveat_intervals_and_the_gate_status_the_compare_applies(self):
         text = (REPO / ".github/workflows/commit-derived-bench.yml").read_text()
@@ -527,7 +477,8 @@ class ReportSchemaBackwardCompatibility(unittest.TestCase):
     def test_family_regression_fails_the_run_while_the_aggregate_holds(self):
         baseline = {k: v for k, v in self.report.items() if k != "rows"}
         baseline = json.loads(json.dumps(baseline))
-        baseline["by_task_family"]["families"]["issue_to_code"]["metrics"]["R@20"] += 0.04
+        # 40 cases: the family tolerance is 2/40 = 0.05, so the drop must exceed it.
+        baseline["by_task_family"]["families"]["issue_to_code"]["metrics"]["R@20"] += 0.06
         result = self.compare_exit(baseline)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("issue_to_code:R@20", result.stderr)
@@ -542,6 +493,493 @@ class ReportSchemaBackwardCompatibility(unittest.TestCase):
     def test_report_without_the_section_is_not_gated_per_family(self):
         old_report = {k: v for k, v in self.report.items() if k != "by_task_family"}
         self.assertEqual(quiet(compare.compare_families, old_report, self.report)[0], [])
+
+
+def successful_run(**overrides):
+    run = {"databaseId": 12345, "workflowName": "commit-derived-bench", "status": "completed",
+           "conclusion": "success", "headSha": "ab" * 20}
+    run.update(overrides)
+    return run
+
+
+def freeze_fixture(tmp, report):
+    """Copies of the checked-in baselines and reduced artifacts built from `report`."""
+    target = tmp / "repo/benchmarks/commit-derived"
+    target.mkdir(parents=True)
+    download = tmp / "download"
+    for path, baseline in baseline_files():
+        shutil.copy(path, target / path.name)
+        # The artifact as the workflow uploads it: reduced to aggregates, at the artifact root.
+        out = download / path.name.rsplit("-", 1)[0] / f"{baseline['split']}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        uploaded = reduce_report.reduce_report(json.loads(json.dumps(dict(report, label=baseline["split"]))), [])
+        out.write_text(json.dumps(uploaded))
+    return target, download
+
+
+def synthetic_report(families=(("issue_to_code", 40), ("documentation", 5)), unassigned=2):
+    """A scored report (rows included) built by the scorer's own functions."""
+    rows = []
+    for family, cases in families:
+        rows += [row(family, 1 + i % 7 if i % 4 else None) for i in range(cases)]
+    rows += [row(None, 1)] * unassigned
+    return {"label": "holdout", "metrics": score.metrics(rows), "ci": score.bootstrap_ci(rows, random.Random(7)),
+            "median_secs": 1.0, "yield_budgets": list(score.BUDGETS), "coverage": None,
+            "coverage_line": "not recorded", "coverage_error": None, "rows": rows,
+            "by_task_family": score.family_breakdown(rows)}
+
+
+class MembershipFingerprint(unittest.TestCase):
+    """A family's fingerprint names the split-file positions of its cases and nothing else."""
+
+    def test_stable_and_well_formed(self):
+        first = score.membership_fingerprint([3, 1, 2], 10)
+        self.assertEqual(first, score.membership_fingerprint([3, 1, 2], 10))
+        self.assertRegex(first, r"^sha256:[0-9a-f]{64}$")
+        # Pinned: a change to what is hashed must be a deliberate, versioned change.
+        import hashlib
+        expected = hashlib.sha256(b"open-kioku task-family membership v1\nsplit_cases 10\n1\n2\n3\n").hexdigest()
+        self.assertEqual(first, "sha256:" + expected)
+
+    def test_order_independent(self):
+        positions = list(range(0, 90, 3))
+        shuffled = positions[:]
+        random.Random(1).shuffle(shuffled)
+        self.assertNotEqual(positions, shuffled)
+        self.assertEqual(score.membership_fingerprint(positions, 90), score.membership_fingerprint(shuffled, 90))
+
+    def test_a_swap_at_equal_count_or_another_split_size_changes_it(self):
+        base = score.membership_fingerprint([0, 1, 2, 3], 10)
+        self.assertNotEqual(base, score.membership_fingerprint([0, 1, 2, 4], 10))
+        self.assertNotEqual(base, score.membership_fingerprint([0, 1, 2, 3], 11))
+
+    def test_breakdown_fingerprints_each_family_by_split_file_position(self):
+        rows = [row("general", 1), row("issue_to_code", 1), row("general", None), row(None, 1)]
+        # The row at split-file position 2 errored, so the scored rows sit at 0, 1, 3, 4.
+        section = score.family_breakdown(rows, positions=[0, 1, 3, 4], split_cases=5)
+        self.assertEqual(section["families"]["general"]["membership_fingerprint"],
+                         score.membership_fingerprint([0, 3], 5))
+        self.assertEqual(section["families"]["issue_to_code"]["membership_fingerprint"],
+                         score.membership_fingerprint([1], 5))
+        with self.assertRaises(ValueError):
+            score.family_breakdown(rows, positions=[0, 1])
+
+    def test_fingerprint_hashes_no_case_identity(self):
+        rows = [dict(row("general", 1), sha=f"{i:040x}", query=f"subject {i}") for i in range(3)]
+        renamed = [dict(r, sha="f" * 40, query="another subject") for r in rows]
+        self.assertEqual(score.family_breakdown(rows)["families"]["general"]["membership_fingerprint"],
+                         score.family_breakdown(renamed)["families"]["general"]["membership_fingerprint"])
+
+    def test_scorer_run_fingerprints_positions_in_the_split_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ok = tmp / "ok"
+            ok.write_text(FAKE_OK.format(python=sys.executable))
+            ok.chmod(ok.stat().st_mode | stat.S_IEXEC)
+            packs = {f"q{i}": fake_pack("general" if i % 2 else "documentation", [f"src/g{i}.py"]) for i in range(6)}
+            (tmp / "packs.json").write_text(json.dumps(packs))
+            (tmp / "cases.tsv").write_text("".join(f"{i:040x}\t2026-01-01\tq{i}\tsrc/g{i}.py\n" for i in range(6)))
+            out = tmp / "r.json"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "score-context-cases.py"), "--ok", str(ok), "--repo", str(tmp),
+                 "--cases", str(tmp / "cases.tsv"), "--workers", "3", "--out", str(out)],
+                capture_output=True, text=True, env={**os.environ, "FAKE_OK_PACKS": str(tmp / "packs.json")})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            families = json.loads(out.read_text())["by_task_family"]["families"]
+        self.assertEqual(families["general"]["membership_fingerprint"], score.membership_fingerprint([1, 3, 5], 6))
+        self.assertEqual(families["documentation"]["membership_fingerprint"], score.membership_fingerprint([0, 2, 4], 6))
+
+
+class MembershipGate(unittest.TestCase):
+    def test_membership_changed_is_printed_and_not_gated(self):
+        other = "sha256:" + "b" * 64
+        failed, out = quiet(compare.compare_families,
+                            report_with({"issue_to_code": entry(40, fingerprint=other, **{"R@5": 0.1})}),
+                            report_with({"issue_to_code": entry(40)}))
+        self.assertEqual(failed, [])
+        self.assertIn("membership changed", out)
+        self.assertIn("below tolerance (not gated)", out)
+        rows = compare.summary_rows("dev", report_with({"issue_to_code": entry(40, fingerprint=other)}),
+                                    report_with({"issue_to_code": entry(40)}))
+        self.assertIn("membership changed", rows[0])
+        self.assertEqual(compare.gated_rows("dev", report_with({"issue_to_code": entry(40, fingerprint=other)}),
+                                            report_with({"issue_to_code": entry(40)})), [])
+
+    def test_a_side_without_a_fingerprint_is_not_gated(self):
+        for now_fp, base_fp, side in ((None, SAME_MEMBERS, "report"), (SAME_MEMBERS, None, "baseline")):
+            failed, out = quiet(compare.compare_families,
+                                report_with({"general": entry(40, fingerprint=now_fp, **{"R@5": 0.0})}),
+                                report_with({"general": entry(40, fingerprint=base_fp)}))
+            self.assertEqual(failed, [], side)
+            self.assertIn(f"membership unverified: no membership fingerprint on the {side}", out)
+
+    def test_matching_fingerprint_is_gated(self):
+        failed, _ = quiet(compare.compare_families,
+                          report_with({"general": entry(40, **{"R@5": 0.0})}),
+                          report_with({"general": entry(40)}))
+        self.assertEqual(failed, ["general:R@5"])
+
+
+class FamilyTolerance(unittest.TestCase):
+    def test_tolerance_is_max_of_slack_and_two_over_n(self):
+        self.assertAlmostEqual(compare.family_tolerance(34), 2 / 34)
+        self.assertAlmostEqual(compare.family_tolerance(40), 0.05)
+        self.assertAlmostEqual(compare.family_tolerance(66), 2 / 66)
+        self.assertEqual(compare.family_tolerance(67), 0.03)
+        self.assertEqual(compare.family_tolerance(500), 0.03)
+        self.assertEqual(compare.family_tolerance(40, slack=0.1), 0.1)
+
+    def gate(self, n, base_hits, now_hits, metric="R@5"):
+        """Compare n-case families whose `metric` is hits/n; the baseline is rounded as the freeze rounds it."""
+        base = report_with({"general": entry(n, **{metric: round(base_hits / n, 4)})})
+        now = report_with({"general": entry(n, **{metric: now_hits / n})})
+        return quiet(compare.compare_families, now, base)
+
+    def test_small_family_two_cases_pass_three_fail(self):
+        # n=34: one case moves 1/34, the tolerance is 2/34; rounding the baseline must not flip it.
+        for base_hits in range(3, 35):
+            self.assertEqual(self.gate(34, base_hits, base_hits - 2)[0], [], base_hits)
+            self.assertEqual(self.gate(34, base_hits, base_hits - 3)[0], ["general:R@5"], base_hits)
+
+    def test_large_family_uses_the_aggregate_slack(self):
+        # n=200: 2/200 = 0.01 < 0.03, so the tolerance is 0.03 = 6 cases.
+        self.assertEqual(self.gate(200, 120, 114)[0], [])
+        self.assertEqual(self.gate(200, 120, 113)[0], ["general:R@5"])
+
+    def test_output_prints_baseline_interval_delta_tolerance_and_result_for_every_watched_metric(self):
+        base = entry(40)
+        base["ci"] = {k: [0.4, 0.9] for k in compare.WATCHED}
+        now = entry(40, **{"gold_recall@20": 0.6})
+        failed, out = quiet(compare.compare_families, report_with({"general": now}), report_with({"general": base}))
+        self.assertEqual(failed, ["general:gold_recall@20"])
+        for k in compare.WATCHED:
+            line = next(l for l in out.splitlines() if l.strip().startswith(k))
+            self.assertIn("baseline", line)
+            self.assertIn("95% CI [0.4000, 0.9000]", line)
+            self.assertIn("delta", line)
+            self.assertIn("tolerance 0.0500", line)
+        self.assertTrue(next(l for l in out.splitlines() if "gold_recall@20" in l).endswith("REGRESSION"))
+        self.assertTrue(next(l for l in out.splitlines() if l.strip().startswith("R@5")).endswith("pass"))
+
+    def test_summary_lists_gated_metrics_with_baseline_interval_delta_and_result(self):
+        base = entry(40)
+        base["ci"] = {"gold_recall@20": [0.6, 0.8]}
+        lines = compare.summary_table({"dev": (report_with({"general": entry(40, **{"gold_recall@20": 0.6})}),
+                                               report_with({"general": base}))})
+        row_ = next(l for l in lines if l.startswith("| dev | general | gold_recall@20 |"))
+        self.assertEqual(row_, "| dev | general | gold_recall@20 | 0.7000 [0.6000, 0.8000] | 0.6000 | -0.1000 | 0.0500 | REGRESSION |")
+        self.assertTrue(any(l.startswith("| dev | general | R@5 |") and l.endswith("| pass |") for l in lines))
+        self.assertIn("gold_recall@20 [95% CI]", lines[2])
+        ungated = compare.summary_table({"dev": (report_with({"general": entry(40)}), None)})
+        self.assertIn("No family is gated in this run.", ungated)
+
+
+class BaselineValidator(unittest.TestCase):
+    def valid(self):
+        report = synthetic_report()
+        base = {k: v for k, v in report.items() if k != "rows"}
+        base = json.loads(json.dumps(base))
+        base.update({"split": "holdout", "cases": 47,
+                     "provenance": {"frozen_from": "run 1", "frozen_on": "2026-01-01", "source_commit": "ab" * 20}})
+        return base
+
+    def test_valid_baseline_has_no_problems(self):
+        self.assertEqual(baseline_problems(self.valid()), [])
+
+    def assert_rejected(self, mutate, expected):
+        broken = self.valid()
+        mutate(broken)
+        problems = baseline_problems(broken)
+        self.assertTrue(any(expected in p for p in problems), (expected, problems))
+
+    def test_rejects_family_counts_that_do_not_add_up_to_scored_cases(self):
+        def more_unassigned(b):
+            b["by_task_family"]["unassigned_cases"] += 1
+        def fewer_family_cases(b):
+            fam = b["by_task_family"]["families"]["issue_to_code"]
+            fam["cases"] -= 1
+        for mutate in (more_unassigned, fewer_family_cases):
+            self.assert_rejected(mutate, "plus unassigned_cases")
+
+    def test_requires_source_commit(self):
+        self.assert_rejected(lambda b: b["provenance"].pop("source_commit"), "provenance.source_commit missing")
+        self.assert_rejected(lambda b: b["provenance"].update(source_commit="abc123"), "not a full Open Kioku commit")
+        self.assert_rejected(lambda b: b.pop("provenance"), "provenance.source_commit missing")
+
+    def test_requires_a_well_formed_membership_fingerprint(self):
+        self.assert_rejected(lambda b: b["by_task_family"]["families"]["issue_to_code"].pop("membership_fingerprint"),
+                             "membership_fingerprint")
+        self.assert_rejected(
+            lambda b: b["by_task_family"]["families"]["issue_to_code"].update(membership_fingerprint="ab" * 32),
+            "membership_fingerprint is not")
+
+    def test_check_command_fails_on_an_invalid_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = self.valid()
+            broken["by_task_family"]["unassigned_cases"] = 9
+            (Path(tmp) / "x-holdout.json").write_text(json.dumps(broken))
+            result = subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "check",
+                                     "--dir", tmp], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("plus unassigned_cases", result.stderr)
+
+
+class AtomicFreeze(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target, self.download = freeze_fixture(Path(self.tmp.name), synthetic_report())
+        self.before = self.snapshot()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def snapshot(self):
+        return {p.name: p.read_bytes() for p in sorted(self.target.iterdir())}
+
+    def test_refuses_a_run_that_did_not_succeed(self):
+        for run in (successful_run(conclusion="failure"), successful_run(status="in_progress", conclusion=""),
+                    successful_run(conclusion="cancelled"), successful_run(workflowName="ci"),
+                    successful_run(headSha="main"), successful_run(databaseId=None), []):
+            with self.assertRaises(baselines.FreezeRefused, msg=run):
+                baselines.plan_freeze(run, self.download, self.target, "2026-09-15")
+        run_json = Path(self.tmp.name) / "run.json"
+        run_json.write_text(json.dumps(successful_run(conclusion="failure")))
+        result = subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "freeze", "--run-json",
+                                 str(run_json), "--download", str(self.download), "--dir", str(self.target)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not succeed", result.stderr)
+        self.assertEqual(self.snapshot(), self.before)
+
+    def test_refuses_before_writing_when_any_report_is_missing_or_invalid(self):
+        (self.download / "py-a" / "dev.json").unlink()
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.plan_freeze(successful_run(), self.download, self.target, "2026-09-15")
+        self.assertEqual(self.snapshot(), self.before)
+        report = json.loads((self.download / "go-a" / "holdout.json").read_text())
+        report["by_task_family"]["unassigned_cases"] += 3
+        (self.download / "go-a" / "holdout.json").write_text(json.dumps(report))
+        (self.download / "py-a" / "dev.json").write_text(json.dumps(report))
+        with self.assertRaises(baselines.FreezeRefused) as refused:
+            baselines.plan_freeze(successful_run(), self.download, self.target, "2026-09-15")
+        self.assertIn("plus unassigned_cases", str(refused.exception))
+        self.assertEqual(self.snapshot(), self.before)
+
+    def test_a_failed_rename_restores_every_baseline(self):
+        plan = baselines.plan_freeze(successful_run(), self.download, self.target, "2026-09-15")
+        self.assertEqual(len(plan), 8)
+        real_replace = os.replace
+        calls = []
+
+        def failing_replace(src, dst):
+            calls.append(dst)
+            # Three baselines are replaced, the fourth rename fails; the rollback's own renames succeed.
+            if len(calls) == 4:
+                raise OSError("simulated rename failure")
+            return real_replace(src, dst)
+
+        baselines.os.replace = failing_replace
+        try:
+            with self.assertRaises(OSError):
+                baselines.write_all(plan)
+        finally:
+            baselines.os.replace = real_replace
+        self.assertEqual(self.snapshot(), self.before)
+        self.assertGreater(len(calls), 4, "the rollback restored the replaced baselines")
+
+    def test_a_failed_temporary_write_changes_nothing(self):
+        plan = baselines.plan_freeze(successful_run(), self.download, self.target, "2026-09-15")
+        real_write = baselines._write_temp
+        written = []
+
+        def failing_write(path, text):
+            if len(written) == 5:
+                raise OSError("simulated disk full")
+            written.append(path)
+            return real_write(path, text)
+
+        baselines._write_temp = failing_write
+        try:
+            with self.assertRaises(OSError):
+                baselines.write_all(plan)
+        finally:
+            baselines._write_temp = real_write
+        self.assertEqual(self.snapshot(), self.before)
+
+    def test_success_replaces_every_baseline_with_a_valid_one(self):
+        baselines.write_all(baselines.plan_freeze(successful_run(), self.download, self.target, "2026-09-15"))
+        after = self.snapshot()
+        self.assertEqual(set(after), set(self.before))
+        for name, content in after.items():
+            frozen = json.loads(content)
+            self.assertEqual(baseline_problems(frozen), [], name)
+            self.assertEqual(frozen["provenance"]["frozen_from"], "commit-derived-bench run 12345 (ubuntu-latest)")
+            self.assertEqual(frozen["provenance"]["frozen_on"], "2026-09-15")
+            self.assertNotIn("yield_note", frozen["provenance"])
+
+
+
+class ReducerKeepsMembership(unittest.TestCase):
+    def test_fingerprint_is_kept_and_no_case_level_data_is(self):
+        report = synthetic_report()
+        notes = []
+        reduced = reduce_report.reduce_report(json.loads(json.dumps(report)), notes)
+        for family, entry_ in report["by_task_family"]["families"].items():
+            self.assertEqual(reduced["by_task_family"]["families"][family]["membership_fingerprint"],
+                             entry_["membership_fingerprint"])
+        self.assertNotIn("rows", reduced)
+        for path, value in leaves(reduced):
+            self.assertNotIn(value, CASE_DATA_KEYS, path)
+            if isinstance(value, str):
+                self.assertIsNone(FULL_HASH.search(value), path)
+                self.assertNotIn("src/", value, path)
+        self.assertEqual(reduced["cases_scored"], 47)
+
+    def test_a_malformed_fingerprint_drops_the_family_entry(self):
+        report = synthetic_report()
+        report["by_task_family"]["families"]["issue_to_code"]["membership_fingerprint"] = "0123abc" * 6
+        notes = []
+        reduced = reduce_report.reduce_report(report, notes)
+        self.assertNotIn("issue_to_code", reduced["by_task_family"]["families"])
+        self.assertIn("documentation", reduced["by_task_family"]["families"])
+        self.assertTrue(any("by_task_family entry" in n for n in notes), notes)
+
+
+BENCH_STEPS = ("Set up job", "Run actions/checkout@v7", "Check the corpus secrets and dispatch inputs",
+               "Run dtolnay/rust-toolchain@stable", "Run Swatinem/rust-cache@v2", "Build ok",
+               "Derive the corpus and its cases at the base commit", "Index the corpus",
+               "Score the production context path", baselines.COMPARE_STEP,
+               "Record coverage next to accuracy in the job summary", "Reduce the reports to aggregates",
+               "Upload reports", "Post Run actions/checkout@v7", "Complete job")
+
+
+def run_jobs(run_id=12345, failed=None, compare_failed=("java-a",)):
+    """The jobs API pages for a run: `failed` maps a corpus code to a non-compare step that failed."""
+    failed = failed or {}
+
+    def step(name, conclusion="success"):
+        return {"name": name, "status": "completed", "conclusion": conclusion, "number": 1}
+
+    jobs = [{"run_id": run_id, "name": "select corpora", "status": "completed", "conclusion": "success",
+             "steps": [step("Set up job"), step("Select the corpora to run"), step("Complete job")]}]
+    for code in baselines.CORPORA:
+        steps = []
+        for name in BENCH_STEPS:
+            if name == baselines.COMPARE_STEP and code in compare_failed:
+                steps.append(step(name, "failure"))
+            elif failed.get(code) == name:
+                steps.append(step(name, "failure"))
+            else:
+                steps.append(step(name))
+        bad = code in compare_failed or code in failed
+        jobs.append({"run_id": run_id, "name": f"bench ({code})", "status": "completed",
+                     "conclusion": "failure" if bad else "success", "steps": steps})
+    return [{"total_count": len(jobs), "jobs": jobs[:3]}, {"total_count": len(jobs), "jobs": jobs[3:]}]
+
+
+class AcceptedRegressionFreeze(unittest.TestCase):
+    REASON = "accept the py-a documentation drop from routing calibration, reviewed in #388"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.target, self.download = freeze_fixture(Path(self.tmp.name), synthetic_report())
+        self.before = {p.name: p.read_bytes() for p in sorted(self.target.iterdir())}
+        self.failed_run = successful_run(conclusion="failure")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def unchanged(self):
+        return {p.name: p.read_bytes() for p in sorted(self.target.iterdir())} == self.before
+
+    def cli(self, run, jobs, *extra):
+        run_json, jobs_json = Path(self.tmp.name) / "run.json", Path(self.tmp.name) / "jobs.json"
+        run_json.write_text(json.dumps(run))
+        jobs_json.write_text(json.dumps(jobs))
+        return subprocess.run([sys.executable, str(SCRIPTS / "commit-derived-baselines.py"), "freeze",
+                               "--run-json", str(run_json), "--jobs-json", str(jobs_json),
+                               "--download", str(self.download), "--dir", str(self.target), *extra],
+                              capture_output=True, text=True)
+
+    def test_compare_step_name_is_the_workflows(self):
+        text = (REPO / ".github/workflows/commit-derived-bench.yml").read_text()
+        self.assertIn(f"      - name: {baselines.COMPARE_STEP}\n", text)
+        for name in ("Build ok", "Index the corpus", "Score the production context path",
+                     "Reduce the reports to aggregates", "Upload reports"):
+            self.assertIn(f"      - name: {name}\n", text)
+
+    def test_accepted_regression_freeze_succeeds_and_records_the_reason_and_run(self):
+        result = self.cli(self.failed_run, run_jobs(compare_failed=("java-a", "py-a")),
+                          "--accept-regression", self.REASON)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("accepted regression", result.stdout)
+        files = sorted(self.target.glob("*.json"))
+        self.assertEqual(len(files), 8)
+        for path in files:
+            frozen = json.loads(path.read_text())
+            self.assertEqual(baseline_problems(frozen), [], path.name)
+            self.assertEqual(frozen["provenance"]["accepted_regression"],
+                             {"reason": self.REASON, "source_run": 12345}, path.name)
+            self.assertIn("run 12345 ", frozen["provenance"]["frozen_from"])
+
+    def test_a_failed_non_compare_step_is_refused_even_with_the_flag(self):
+        for code, step in (("go-a", "Score the production context path"), ("ts-a", "Upload reports"),
+                           ("py-a", "Reduce the reports to aggregates"), ("java-a", "Build ok")):
+            result = self.cli(self.failed_run, run_jobs(failed={code: step}), "--accept-regression", self.REASON)
+            self.assertEqual(result.returncode, 1, (code, step))
+            self.assertIn("only the baseline comparison may fail", result.stderr)
+            self.assertIn(step, result.stderr)
+            self.assertTrue(self.unchanged(), (code, step))
+        skipped = run_jobs()
+        skipped[1]["jobs"][0]["steps"][-3]["conclusion"] = "skipped"
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.check_jobs(12345, skipped)
+
+    def test_empty_reason_is_refused(self):
+        for reason in ("", "   "):
+            result = self.cli(self.failed_run, run_jobs(), "--accept-regression", reason)
+            self.assertEqual(result.returncode, 1, repr(reason))
+            self.assertIn("reason is empty", result.stderr)
+            self.assertTrue(self.unchanged())
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15",
+                                  run_jobs(), "two\nlines")
+
+    def test_the_flag_needs_jobs_a_failed_comparison_and_every_bench_job(self):
+        cases = (
+            (self.failed_run, None, "needs --jobs-json"),
+            (successful_run(), run_jobs(), "conclusion is failure"),
+            (self.failed_run, run_jobs(compare_failed=()), "no baseline comparison failed"),
+            (self.failed_run, [{"jobs": run_jobs()[0]["jobs"]}], "no bench job for"),
+            (self.failed_run, run_jobs(run_id=999), "another run"),
+        )
+        for run, jobs, expected in cases:
+            with self.assertRaises(baselines.FreezeRefused, msg=expected) as refused:
+                baselines.plan_freeze(run, self.download, self.target, "2026-09-15", jobs, self.REASON)
+            self.assertIn(expected, str(refused.exception))
+        self.assertTrue(self.unchanged())
+
+    def test_without_the_flag_a_failed_run_is_still_refused_and_a_later_freeze_clears_the_record(self):
+        with self.assertRaises(baselines.FreezeRefused):
+            baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15", run_jobs())
+        baselines.write_all(baselines.plan_freeze(self.failed_run, self.download, self.target, "2026-09-15",
+                                                  run_jobs(), self.REASON))
+        baselines.write_all(baselines.plan_freeze(successful_run(databaseId=777), self.download, self.target,
+                                                  "2026-09-16"))
+        for path in self.target.glob("*.json"):
+            self.assertNotIn("accepted_regression", json.loads(path.read_text())["provenance"])
+
+    def test_validator_checks_the_recorded_acceptance(self):
+        base = BaselineValidator().valid()
+        base["provenance"].update(frozen_from="commit-derived-bench run 5 (ubuntu-latest)",
+                                  accepted_regression={"reason": self.REASON, "source_run": 5})
+        self.assertEqual(baseline_problems(base), [])
+        for accepted, expected in (({"reason": "", "source_run": 5}, "reason is empty"),
+                                   ({"reason": self.REASON, "source_run": 6}, "differs from the run"),
+                                   ({"reason": self.REASON}, "not a run id")):
+            broken = json.loads(json.dumps(base))
+            broken["provenance"]["accepted_regression"] = accepted
+            self.assertTrue(any(expected in p for p in baseline_problems(broken)), (expected, baseline_problems(broken)))
 
 
 if __name__ == "__main__":

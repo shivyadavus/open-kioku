@@ -13,7 +13,9 @@ Both the fields and the shape of each value are allowlisted. A kept value must b
 - a number;
 - a map of metric or reason names to numbers;
 - a map of metric names to confidence-interval pairs;
-- the per-family section, built from those maps.
+- the per-family section, built from those maps, plus each family's `membership_fingerprint`
+  (`sha256:` and 64 hex digits, hashed over case positions in the split file, never over
+  commit hashes, paths, or subjects).
 Map keys must be short names, not paths or commit hashes. A field that is not listed, or whose
 value has another shape (a list of cases under a listed key, say), is dropped and named. Only
 `label`, `coverage_line`, and `coverage_error` are text, as `score-context-cases.py` builds them.
@@ -39,6 +41,9 @@ COVERAGE_COUNTS = ("discovered", "indexed", "generated", "pruned_dirs", "walk_er
 COVERAGE_MAPS = ("skipped", "policy_excluded_by_source")
 LANGUAGE_COUNTS = ("discovered", "indexed", "generated")
 FAMILY_COUNTS = ("min_cases", "scored_cases", "unassigned_cases")
+# The only hex value a reduced report keeps: a SHA-256 over case positions, which cannot be
+# mistaken for a commit because it is prefixed and 64 digits long.
+FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 def is_number(value):
@@ -47,6 +52,10 @@ def is_number(value):
 
 def is_name(value):
     return isinstance(value, str) and bool(NAME.fullmatch(value)) and not HASH_LIKE.search(value)
+
+
+def is_fingerprint(value):
+    return isinstance(value, str) and bool(FINGERPRINT.fullmatch(value))
 
 
 def is_text(value):
@@ -94,12 +103,15 @@ def reduce_family_section(section, notes):
             is_name(family) and isinstance(entry, dict) and is_number(entry.get("cases"))
             and isinstance(entry.get("insufficient"), bool) and is_number_map(entry.get("metrics"))
             and is_interval_map(entry.get("ci")) and is_number_map(entry.get("case_coverage", {}))
+            and ("membership_fingerprint" not in entry or is_fingerprint(entry["membership_fingerprint"]))
         )
         if not well_formed:
             notes.append("dropped a by_task_family entry of unexpected shape")
             continue
         families[family] = {k: entry[k] for k in ("cases", "insufficient", "metrics", "ci")}
         families[family]["case_coverage"] = entry.get("case_coverage", {})
+        if "membership_fingerprint" in entry:
+            families[family]["membership_fingerprint"] = entry["membership_fingerprint"]
     reduced["families"] = families
     return reduced
 

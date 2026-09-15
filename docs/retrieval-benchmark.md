@@ -214,9 +214,24 @@ numbers:
 - Membership belongs to a build. A change to `classify_task` moves cases between families, and
   it can swap cases in and out of a family while the family's case count stays the same. The
   case counts the compare script prints on both sides therefore do not detect a membership
-  change. Until reports carry a per-family membership fingerprint (see "Before the first
-  per-family freeze" below), per-family numbers are not comparable across builds whose routing
-  changed: a per-family delta across such a change is not a retrieval measurement.
+  change. Each family therefore carries a membership fingerprint (below), and the compare gates
+  a family only when its fingerprint matches the baseline's. A family whose membership changed
+  is printed and not gated: a per-family delta across such a change is not a retrieval
+  measurement.
+
+**Membership fingerprint.** Each family's `membership_fingerprint` is `sha256:` followed by the
+full SHA-256 of a versioned header, the split file's case count, and the sorted 0-based
+positions of the family's scored cases among the split file's cases, one per line
+(`membership_fingerprint` in `scripts/score-context-cases.py`). It hashes positions only, never
+commit hashes, paths, or subjects, so it names nothing about the corpus and survives
+`scripts/reduce-benchmark-report.py`, whose allow-list accepts exactly that format and drops a
+family entry that carries anything else. Sorting makes it independent of the order cases were
+scored in. Hashing the split's case count means a position in a longer or shorter split file
+does not match. A case whose query failed has no family and is in no fingerprint, so a run with
+a different set of failed queries reads as a membership change for the families involved. The
+fingerprint says whether the same case positions were routed to a family. It does not detect a
+split file whose cases changed while their count stayed the same; the corpus derivation in the
+nightly job is fixed by its base commit and commit window.
 
 A pack without the field (a binary that predates it) leaves the case unassigned: it stays in
 every aggregate and in no family, and `unassigned_cases` counts it. A failed query returns no
@@ -227,9 +242,18 @@ the scored cases and how many of its cases selected units and carry line ranges.
 **Insufficient samples.** A family with fewer than 34 scored cases (`MIN_FAMILY_CASES` in
 `scripts/score-context-cases.py`) is reported with `"insufficient": true` and never gated.
 One case changing outcome moves Recall@k, MRR, or `gold_recall@20` by at most 1/n: at 33
-cases that is 0.0303, above the 0.03 slack, so a single case could fail the gate on its own;
-at 34 it is 0.0294. The bound concerns one case only. A 34-case family's bootstrap interval is
-still far wider than 0.03, and the report prints it beside the metric.
+cases that is 0.0303, above the aggregate's 0.03 slack; at 34 it is 0.0294. The bound concerns
+one case only. A 34-case family's bootstrap interval is still far wider than 0.03, and the
+report prints it beside the metric.
+
+**Tolerance.** A gated family's metric may fall at most `max(0.03, 2/n)` below the baseline,
+where `n` is the baseline family's case count (`family_tolerance` in
+`scripts/compare-commit-derived-report.py`). Because one case moves a metric by at most 1/n, a
+gated drop needs at least three cases to change outcome. At the 34-case minimum the tolerance is
+0.0588; at 40 cases it is 0.05; from 67 cases on it is the aggregate's 0.03. Baselines store
+metrics rounded to four decimals, so the comparison also allows 0.00005, half a unit of the
+fourth decimal. That allowance is smaller than one case's 1/n at any family size in these
+corpora. The aggregate rule is unchanged: 0.03 below the baseline.
 
 **Schema.** The section is additive; every existing report key keeps its name and value, and
 the aggregate intervals are drawn from the same seeded sequence as before. Each row gains
@@ -247,7 +271,8 @@ the aggregate intervals are drawn from the same seeded sequence as before. Each 
       "insufficient": true,
       "metrics": { "R@1": 0.0, "R@5": 0.0, "...": 0.0 },
       "ci": { "R@5": [0.0, 0.0], "...": [0.0, 0.0] },
-      "case_coverage": { "share_of_scored": 0.0, "with_selected_units": 0, "with_line_ranges": 0 }
+      "case_coverage": { "share_of_scored": 0.0, "with_selected_units": 0, "with_line_ranges": 0 },
+      "membership_fingerprint": "sha256:<64 hex digits>"
     }
   }
 }
@@ -256,112 +281,121 @@ the aggregate intervals are drawn from the same seeded sequence as before. Each 
 Every value above is a placeholder except `min_cases`, which is the scorer's constant. Families are listed in `TaskFamily` declaration order; a
 name the router emits that is not in that enum is listed after them.
 
-**Gate.** `scripts/compare-commit-derived-report.py` applies the aggregate rule to each family:
-R@5, R@20, MRR, and `gold_recall@20` may not fall more than 0.03 below that family's baseline,
-and a regression exits 1 and fails the matrix entry, exactly as an aggregate regression does.
-A family is gated only when both the report and the baseline carry it with at least the
-report's `min_cases`. Every family is printed with its status: `gated`; `insufficient` (below
-the minimum on the report, the baseline, or both); `informational` (no family baseline is
-frozen, or the family is absent from the baseline); or absent from the report. A drop beyond
-the slack on a family that is not gated is marked `below slack (not gated)` and does not change
-the exit status. Per-family yields are not gated, as for the aggregate.
+**Gate.** `scripts/compare-commit-derived-report.py` gates each family on R@5, R@20, MRR, and
+`gold_recall@20` with the tolerance above. A regression exits 1 and fails the matrix entry,
+exactly as an aggregate regression does. A family is gated only when the report and the
+baseline both carry it with at least the report's `min_cases` and the same
+`membership_fingerprint`. Every family is printed with its status:
+- `gated`;
+- `insufficient`: below the minimum on the report, the baseline, or both;
+- `informational`: no family baseline is frozen, or the family is absent from the baseline;
+- `membership changed`: the fingerprints differ;
+- `membership unverified`: a side carries no fingerprint;
+- absent from the report.
 
-The scorer output, the compare output, and the job summary print each family's metrics with
-their 95% intervals and state that families are the router's labels. The job summary's
-per-family table (cases, R@5, R@20, and MRR per split) takes its gate column from the compare
-script, so it shows the status the gate applies. A 34-case family's interval is several times
-wider than the 0.03 slack; read it before reading a delta.
+A drop beyond the tolerance on a family that is not gated is marked `below tolerance (not
+gated)` and does not change the exit status. Per-family yields are not gated, as for the
+aggregate.
+
+For every family the baseline carries, the compare prints each watched metric with the
+baseline value and its 95% interval, the report value and its interval, the delta, the
+tolerance, and `pass` or `REGRESSION` (or `not gated`). The scorer output, the compare output,
+and the job summary print each family's metrics with their 95% intervals and state that
+families are the router's labels. The job summary's per-family table (cases, R@5, R@20, MRR,
+and `gold_recall@20` per split) takes its gate column from the compare script, so it shows the
+status the gate applies. A second table lists every watched metric of every gated family with
+the baseline interval, delta, tolerance, and result. A 34-case family's interval is several
+times wider than its tolerance; read it before reading a delta.
 
 **No per-family baseline is frozen yet.** The baselines under `benchmarks/commit-derived/`
 were frozen from reports scored before the section existed and store no rows, so per-family
 numbers cannot be derived from them. Until a baseline carries `by_task_family`, every family
 is `informational` and only the aggregate gates.
 
-**Before the first per-family freeze.** Two changes must land first:
+**Freezing per-family baselines.** A baseline's aggregate and per-family numbers must come from
+the same run, so the section is frozen together with a re-freeze of the aggregate:
 
-- Membership. Each report records a per-family membership fingerprint, computed over the
-  cases' positions in the split file rather than their commit hashes, and the compare gates a
-  family only when its fingerprint matches the baseline's. Without it a routing change can
-  swap a family's cases at an equal count and pass or fail the gate with no retrieval change.
-- Repeatability and tolerance. The matrix is run twice on the same source commit and every
-  per-family number must be identical across the two runs. The per-family tolerance becomes
-  `max(0.03, 2/n)` for a baseline family of `n` cases, and the compare prints the baseline's
-  interval beside each gated change.
-
-**Freezing per-family baselines.** Do not freeze until both changes above have landed. A
-baseline's aggregate and per-family numbers must come from the same run, so the section is
-frozen together with a re-freeze of the aggregate. Run the matrix on the build being frozen
-(`gh workflow run commit-derived-bench.yml --ref main`), wait for all four entries to finish,
-and run the following from the repository root. Each artifact holds its reports at its root,
-already reduced to aggregates by `scripts/reduce-benchmark-report.py`: per-case `rows` are
-replaced by `cases_scored` and `cases_errored`, and `cases.tsv` is not uploaded. The reports
-are still downloaded to a temporary directory outside the repository, and only the allow-list
-below is copied in.
+1. Repeatability. Run the matrix twice on the build being frozen
+   (`gh workflow run commit-derived-bench.yml --ref main`, twice, on the same source commit) and
+   confirm that every per-family number, fingerprint included, is identical across the two
+   runs' artifacts. Do not freeze a family whose numbers differ between runs.
+2. Freeze from one of those runs once all four entries have finished. Each artifact holds its
+   reports at its root, already reduced to aggregates by `scripts/reduce-benchmark-report.py`:
+   per-case `rows` are replaced by `cases_scored` and `cases_errored`, and `cases.tsv` is not
+   uploaded. The reports are still downloaded to a temporary directory outside the repository.
 
 ```sh
 RUN=<run-id>
-SOURCE_COMMIT="$(gh run view "$RUN" --json headSha --jq .headSha)"
 DL="$(mktemp -d)"
+gh run view "$RUN" --json databaseId,workflowName,status,conclusion,headSha > "$DL/run.json"
 for code in java-a go-a ts-a py-a; do
   gh run download "$RUN" -n "commit-derived-$code" -D "$DL/$code"
 done
-python3 - "$DL" "$RUN" "$SOURCE_COMMIT" <<'PY'
-import datetime, json, re, sys
-from pathlib import Path
-
-download, run, source_commit = sys.argv[1:4]
-if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
-    sys.exit(f"expected the run's full Open Kioku source commit, got {source_commit!r}")
-
-
-def r4(value):
-    if isinstance(value, float):
-        return round(value, 4)
-    if isinstance(value, dict):
-        return {k: r4(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [r4(v) for v in value]
-    return value
-
-
-for code in ("java-a", "go-a", "ts-a", "py-a"):
-    for split in ("holdout", "dev"):
-        report = json.loads((Path(download) / code / f"{split}.json").read_text())
-        path = Path("benchmarks/commit-derived") / f"{code}-{split}.json"
-        baseline = json.loads(path.read_text())
-        # An explicit allow-list. Never baseline.update(report).
-        baseline.update({
-            "cases": report["cases_scored"],
-            "label": report["label"],
-            "median_secs": report["median_secs"],
-            "metrics": r4(report["metrics"]),
-            "ci": r4(report["ci"]),
-            "yield_budgets": report["yield_budgets"],
-            "by_task_family": r4(report["by_task_family"]),
-        })
-        provenance = baseline["provenance"]
-        provenance["frozen_from"] = f"commit-derived-bench run {run} (ubuntu-latest)"
-        provenance["source_commit"] = source_commit
-        provenance["frozen_on"] = datetime.date.today().isoformat()
-        provenance.pop("yield_note", None)
-        path.write_text(json.dumps(baseline, indent=2) + "\n")
-        print(f"froze {path}")
-PY
+python3 scripts/commit-derived-baselines.py freeze --run-json "$DL/run.json" --download "$DL"
+python3 scripts/commit-derived-baselines.py check
 python3 -m unittest scripts.tests.test_commit_derived_families
 rm -rf "$DL"
 ```
 
-The snippet copies an explicit allow-list of report fields into each baseline; that allow-list
-is the rule, and it must never become `baseline.update(report)`. `provenance.source_commit`
-records the Open Kioku commit the run built. The unit test run above checks every baseline under
-`benchmarks/commit-derived/`:
+`scripts/commit-derived-baselines.py freeze` refuses, and writes nothing, unless the run is a
+completed `commit-derived-bench` run whose conclusion is `success` and whose head commit is a
+full 40-hex Open Kioku commit. A run whose baseline comparison failed is not frozen without the
+override below.
 
-- A `by_task_family` section carries its required fields and matches the baseline's case count.
-- `provenance` names the run, the date, and `source_commit`.
-- No baseline holds rows, queries, ranked paths, or a full commit hash other than `source_commit`.
+3. Accepted regression. When a reviewed change is meant to lower a baseline, the run's baseline
+   comparison fails and the run's conclusion is `failure`. Freeze it only with an explicit
+   reason, and replace the `freeze` line above with:
 
-The same test module also runs this snippet against synthetic reports. Update the
-frozen-baseline table and freeze date above in the same change.
+```sh
+gh api --paginate --slurp "repos/{owner}/{repo}/actions/runs/$RUN/jobs?per_page=100" > "$DL/jobs.json"
+python3 scripts/commit-derived-baselines.py freeze --run-json "$DL/run.json" --download "$DL" \
+    --jobs-json "$DL/jobs.json" --accept-regression "<reason, naming the reviewed change>"
+```
+
+With `--accept-regression`, the decision is made from each job's step conclusions, never from
+the run's overall conclusion. The freeze refuses, and writes nothing, unless all of the
+following hold:
+
+- The run is a completed `commit-derived-bench` run whose conclusion is `failure`.
+- The reason is one non-empty trimmed line of at most 500 characters.
+- Every job of the run has completed, and there is one `bench (<code>)` job per corpus.
+- Every step of every job succeeded except `Compare against the frozen baseline`, and at least
+  one of those failed.
+
+A failed or skipped build, index, score, reduction, or upload step is therefore refused however
+the reason is worded. A run with no failed comparison is refused too: freeze it without the flag.
+Each baseline records `provenance.accepted_regression` with the `reason` and the `source_run`
+id. The reason is committed in a public file, so it must describe the change and must not name
+the corpus. A later freeze without the flag removes the record.
+It copies an explicit allow-list of report fields into each baseline (`cases` from
+`cases_scored`, `label`, `median_secs`, `metrics`, `ci`, `yield_budgets`, `by_task_family`,
+floats rounded to four decimals). That allow-list is the rule, and it must never become
+`baseline.update(report)`. It records `provenance.frozen_from` (the run), `frozen_on`, and
+`source_commit` (the Open Kioku commit the run built). The freeze builds and validates all
+eight baselines before it writes any. It writes each to a temporary file beside the baseline
+and renames it into place. If a write or rename fails, it restores every baseline already
+replaced, so `benchmarks/commit-derived/` holds either all new baselines or all old ones.
+
+The validator (`baseline_problems` in the same script, run by `check`, by the freeze on every
+baseline it builds, and by the unit tests on every checked-in baseline) rejects a baseline
+when:
+
+- It holds rows, queries, ranked paths, or a full commit hash other than
+  `provenance.source_commit`.
+- Its `by_task_family` section lacks a required field, or its `scored_cases` differs from the
+  baseline's `cases`.
+- Its family case counts plus `unassigned_cases` differ from `scored_cases`.
+- A family lacks a required field, a watched metric, or a well-formed `membership_fingerprint`,
+  or its `insufficient` flag disagrees with its case count.
+- A baseline with the section lacks `provenance.frozen_from`, `frozen_on`, or a full 40-hex
+  `source_commit`.
+- `provenance.accepted_regression` has an empty or multi-line reason, or a `source_run` that is
+  not the run named in `frozen_from`.
+
+The unit tests also run the freeze against synthetic reports and job listings, including a failed
+run, a missing report, a rename that fails partway, an accepted regression, a failed non-compare
+step under the flag, and an empty reason. Update the frozen-baseline table and freeze date above
+in the same change.
 
 ## Gold yield at a token budget
 

@@ -32,10 +32,13 @@ Every aggregate metric is also reported per routed task family under `by_task_fa
 case's family is the one its pack reports in `retrieval_diagnostics.routing.task_family`,
 which the router derives from the query text alone, using the `TaskFamily` names from
 open-kioku-core. A family with fewer than MIN_FAMILY_CASES scored cases is reported and
-marked `insufficient`; the baseline comparison never gates on it. See
+marked `insufficient`; the baseline comparison never gates on it. Each family also records
+`membership_fingerprint`, a SHA-256 over the sorted positions of its cases in the split file, so
+the comparison can tell when a routing change moved cases between families. See
 docs/retrieval-benchmark.md, "Per-task-family breakdown".
 """
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -317,6 +320,22 @@ MIN_FAMILY_CASES = 34
 
 FAMILY_ASSIGNMENT = "retrieval_diagnostics.routing.task_family"
 
+# Versioned so a change to what the fingerprint covers can never collide with an older one.
+MEMBERSHIP_DOMAIN = "open-kioku task-family membership v1"
+
+
+def membership_fingerprint(positions, split_cases):
+    """`sha256:<64 hex>` over a family's case positions in the split file.
+
+    A position is a case's 0-based index among the split file's cases, so the fingerprint names
+    no commit hash, path, or subject and can travel in an aggregate-only artifact. Positions are
+    sorted first, so the order cases were scored in does not matter. The split file's case count
+    is hashed too: position 5 of a longer or shorter file is not the same case.
+    """
+    ordered = sorted(int(p) for p in positions)
+    text = "\n".join([MEMBERSHIP_DOMAIN, f"split_cases {int(split_cases)}", *map(str, ordered)]) + "\n"
+    return "sha256:" + hashlib.sha256(text.encode("ascii")).hexdigest()
+
 
 def task_family(pack):
     """The routed task family the pack reports, or None when the pack carries no routing.
@@ -345,22 +364,34 @@ def bootstrap_ci(sample, rng, rounds=1000):
     return ci
 
 
-def family_breakdown(scored, min_cases=MIN_FAMILY_CASES, seed=7):
+def family_breakdown(scored, min_cases=MIN_FAMILY_CASES, seed=7, positions=None, split_cases=None):
     """The `by_task_family` report section: every aggregate metric over each family's cases.
 
     `case_coverage` is how much of the scored corpus a family holds and how many of its cases
     could be scored for yield. Index coverage is a property of the whole index and is not
     divided by family. Failed queries return no pack and therefore no family; they are counted
     in the report's aggregate error total only.
+
+    `positions[i]` is the split-file position of `scored[i]` and `split_cases` the number of
+    cases the split file held; both default to the scored rows being the whole file, in order.
     """
+    if positions is None:
+        positions = range(len(scored))
+    positions = list(positions)
+    if len(positions) != len(scored):
+        raise ValueError("positions must name one split-file position per scored row")
+    if split_cases is None:
+        split_cases = len(scored)
     groups = {}
+    members = {}
     unassigned = 0
-    for row in scored:
+    for position, row in zip(positions, scored):
         family = row.get("task_family")
         if family is None:
             unassigned += 1
             continue
         groups.setdefault(family, []).append(row)
+        members.setdefault(family, []).append(position)
     order = [f for f in TASK_FAMILIES if f in groups] + sorted(f for f in groups if f not in TASK_FAMILIES)
     families = {}
     for family in order:
@@ -377,6 +408,7 @@ def family_breakdown(scored, min_cases=MIN_FAMILY_CASES, seed=7):
                 "with_selected_units": sum(1 for r in sample if r.get("gold_file_yield")),
                 "with_line_ranges": sum(1 for r in sample if r.get("line_yield_measurable")),
             },
+            "membership_fingerprint": membership_fingerprint(members[family], split_cases),
         }
     return {
         "assignment": FAMILY_ASSIGNMENT,
@@ -486,6 +518,8 @@ def main():
                 print(f"  {i}/{len(cases)}  {time.time() - t0:.0f}s", file=sys.stderr, flush=True)
 
     scored = [r for r in rows if "err" not in r]
+    # `pool.map` keeps case order, so a row's index in `rows` is its position in the split file.
+    scored_positions = [i for i, r in enumerate(rows) if "err" not in r]
     if not scored:
         print("no case scored; every query failed", file=sys.stderr)
         return 1
@@ -493,7 +527,7 @@ def main():
     # `random.Random(7)` draws the same sequence the module-level generator did after
     # `random.seed(7)`, so aggregate intervals match reports scored before this helper existed.
     ci = bootstrap_ci(scored, random.Random(7))
-    by_family = family_breakdown(scored)
+    by_family = family_breakdown(scored, positions=scored_positions, split_cases=len(rows))
     median_secs = statistics.median(r["secs"] for r in rows)
     coverage, coverage_error = index_coverage(args.ok, repo)
     print(f"\n== {args.label}: {len(scored)} cases scored ({len(rows) - len(scored)} errors), median {median_secs:.1f}s/query ==")
