@@ -4595,10 +4595,20 @@ pub struct RiskReport {
 pub struct BoundaryFileRule {
     pub path: PathBuf,
     pub reason: String,
+    /// Capped per rule so a plan does not repeat a long ref list for every file; see
+    /// `evidence_refs_omitted` for how many refs the cap left out.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    /// Refs this rule could have cited past the cap on `evidence_refs`. Counted, not listed,
+    /// and never folded into the ref list as text.
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub evidence_refs_omitted: usize,
     #[serde(default)]
     pub symbols: Vec<String>,
+}
+
+fn is_zero_count(count: &usize) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]

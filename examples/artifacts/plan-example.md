@@ -54,7 +54,7 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
 ## Negative Evidence
 
 - `exact_references`: no explicit exact symbol reference or SCIP evidence was found (`0.85`)
-  - query: `token`; inspected: `retrieval_trace.authority, impact.match_reason, evidence.source_type`
+  - query: `token`; inspected: `retrieval_trace.authority, impact.exact_reference_provenance, evidence.source_type`
   - next probe: `Run `ok scip setup .` and re-index with `ok index . --with-scip auto`.`
 - `history`: no churn, ownership, similar-change, reviewer, or historical validation evidence was available (`0.70`)
   - query: `token`; inspected: `plan.evidence, search_result.evidence`
@@ -67,11 +67,11 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
 
 ### Section References
 
-- `boundary`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+- `boundary`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 - `history`: `none`
-- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
+- `impact`: `230cfac07e26bff70c633f088134b95b1ae4eed87fb3d89dd62136178d180f71, 797c391f41bcb9d28cdff235a68958cc47fa0630d1f2a071dec90a7a9588bf3c, abf2fb2ec505b44f17b260d57342d783859ef3db9db48c9db7b699665c7d14a2, impact:src/auth.rs, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
 - `negative_evidence`: `negative:exact_references:token-no-explicit-exact-symbol-reference-or-scip, negative:history:token-no-churn-ownership-similar-change-reviewer-or, negative:runtime:token-no-runtime-trace-incident-or-error-artifact`
-- `primary_context`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+- `primary_context`: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 - `validation`: `314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 ### Evidence Items
@@ -129,10 +129,10 @@ Found 5 primary context item(s), 3 direct impact candidate(s), 2 validation cand
   - evidence: `search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1`
 - `tests/auth_flow.rs`:4-7: assert!(auth::validate_token(&token));
   - score: `5.362`; signals: `bm25_relevance` +5.312, `query_variant_boost` +0.050
-  - evidence: `search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1`
+  - evidence: `search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4`
 - `ok.toml`:81-147: [ranking]
   - score: `0.702`; signals: `bm25_relevance` +0.652, `query_variant_boost` +0.050
-  - evidence: `search:ok.toml:81-147:0, search:ok.toml:81-147:1`
+  - evidence: `search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4`
 
 ## Runtime Signals
 
@@ -158,7 +158,7 @@ Allowed files:
   - evidence: `region:adjacent-unit:1-80, search:ok.toml:81-147:0, search:ok.toml:81-147:1`
 - `src/auth.rs`
   - reason: primary context matched the requested edit intent
-  - evidence: `region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+  - evidence: `region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
   - symbols: `src::auth::validate_token`
 - `src/lib.rs`
   - reason: primary context matched the requested edit intent
@@ -212,14 +212,14 @@ Forbidden patterns:
 
 Boundary expansion:
 - Any edit outside allowed_files must cite concrete evidence from search, impact, references, tests, architecture, ownership, or history analysis.
-  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+  - required evidence refs: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 Signal hooks:
 - architecture: `ok architecture summary, ok architecture violations, ok architecture policy check`
 - ownership: `CODEOWNERS, git_history`
 - co-change: `similar_change_overlap, historical_prs`
 
-Boundary evidence: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
+Boundary evidence: `document:README.md:1-3, region:adjacent-unit:1-2, region:adjacent-unit:1-80, region:adjacent-unit:12-16, region:adjacent-unit:17-23, region:adjacent-unit:3-6, search:ok.toml:81-147:0, search:ok.toml:81-147:1, search:ok.toml:81-147:2, search:ok.toml:81-147:3, search:ok.toml:81-147:4, search:src/auth.rs:3-6:0, search:src/auth.rs:3-6:1, search:src/auth.rs:7-11:0, search:src/auth.rs:7-11:1, search:src/auth.rs:17-23:0, search:src/auth.rs:17-23:1, search:src/lib.rs:1-2:0, search:src/lib.rs:1-2:1, search:src/lib.rs:1-2:2, search:src/lib.rs:3-6:0, search:src/lib.rs:3-6:1, search:src/lib.rs:7-12:0, search:src/lib.rs:7-12:1, search:src/lib.rs:7-12:2, search:src/lib.rs:7-12:3, search:src/lib.rs:7-12:4, search:tests/auth_flow.rs:4-7:0, search:tests/auth_flow.rs:4-7:1, search:tests/auth_flow.rs:4-7:2, search:tests/auth_flow.rs:4-7:3, search:tests/auth_flow.rs:4-7:4, test:314d20ce2e07fafa14267b0cf2fc46952eefae3c809afb228c50c863f45a6e76, test:cdd809b815a1af2f7081c8aad676fc1c8ee04497063e945415dec9b4d1dd0a10`
 
 ## Recommended Next Steps
 
