@@ -8,12 +8,12 @@ Default posture:
 - no file writes
 - no hidden-file scanning
 - deny `.env` / `.env.*`, `.aws/**`, `.ssh/**`, `id_rsa*`, `id_ed25519*`, and key material
-  (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`) on every path; deny a
-  path component naming `secret`, `credential`, or `*_key` only for files that are
-  not in a programming language (data, config, prose). A source file such as
-  `secrets.go` is indexed (`is_secret_like_path` is gated on
-  `is_programming_language`); parser messages that would quote its content are
-  redacted
+  (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`) on every path, whatever the
+  file's language (`is_secret_like_path`). A file merely named for a secret is indexed:
+  `secrets.yaml`, `credentials.json`, or `SECRETS.md` with its secret-like values replaced
+  (see "Secret-value redaction" below), and `secrets.go` as written; parser messages that
+  would quote file content are redacted. `[paths] deny` excludes any other path, and the
+  default configuration denies `**/secrets/**`
 - redact-capable output boundary
 - source edits occur in the user's normal editor
 

@@ -68,7 +68,7 @@ fn config_and_prose_values_are_redacted_before_anything_is_derived_from_them() {
         "docs/setup.md",
         &format!("# Setup\n\nExport `STORAGE_TOKEN={token}` before running.\n"),
     );
-    // Still excluded by name until the path rule is narrowed to key material.
+    // Named for a secret but not key material: indexed like any other config file.
     write(
         root,
         "config/secrets.yaml",
@@ -128,13 +128,21 @@ fn config_and_prose_values_are_redacted_before_anything_is_derived_from_them() {
         guide.content
     );
 
+    let secrets = snapshot
+        .files
+        .iter()
+        .find(|file| file.path == Path::new("config/secrets.yaml"))
+        .expect("a config file named for a secret is indexed");
+    assert!(snapshot.chunks.iter().any(
+        |chunk| chunk.file_id == secrets.id && chunk.text.contains("access_key_id: [REDACTED]")
+    ));
+
     let quality = &snapshot.manifest.quality;
-    assert_eq!(quality.redacted_files, Some(2));
+    assert_eq!(quality.redacted_files, Some(3));
     let coverage = quality.coverage.as_ref().unwrap();
-    assert_eq!(
-        coverage.by_language["yaml"].skipped[&SkipReason::SecretPolicy],
-        1
-    );
+    assert!(!coverage.by_language["yaml"]
+        .skipped
+        .contains_key(&SkipReason::SecretPolicy));
 }
 
 /// The scope boundary: programming-language source is indexed exactly as written, and a

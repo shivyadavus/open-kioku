@@ -4135,13 +4135,13 @@ fn index_reports_coverage_in_summary_status_and_doctor() {
     let repo = temp.path();
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::create_dir_all(repo.join("vendor")).unwrap();
-    fs::create_dir_all(repo.join("config")).unwrap();
+    fs::create_dir_all(repo.join(".aws")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn live() {}\n").unwrap();
     // Excluded by the vendor detector and the secret-path rule respectively: policy
     // exclusions, reported beside the ratio. The binary file is the omission the ratio
     // is judged on.
     fs::write(repo.join("vendor/dep.rs"), "pub fn vendored() {}\n").unwrap();
-    fs::write(repo.join("config/secrets.json"), "{}\n").unwrap();
+    fs::write(repo.join(".aws/credentials.json"), "{}\n").unwrap();
     fs::write(repo.join("src/blob.rs"), b"pub fn blob() {}\0").unwrap();
 
     run({
@@ -5966,7 +5966,8 @@ fn config_secret_values_never_reach_the_index_search_snapshot_or_mcp() {
         5,
     );
     let secrets = [cloud_key.as_str(), token.as_str()];
-    let config_path = "config/settings.yaml";
+    // Named for a secret but not key material, so it is indexed with its values redacted.
+    let config_path = "config/secrets.yaml";
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::create_dir_all(repo.join("config")).unwrap();
     fs::write(repo.join("src/lib.rs"), "pub fn load_settings() {}\n").unwrap();

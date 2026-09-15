@@ -1318,7 +1318,7 @@ impl Indexer {
                 source_like_files += 1;
             }
             ledger.discovered(&language);
-            let secret_policy = is_secret_like_path(&rel, is_programming_language(&language));
+            let secret_policy = is_secret_like_path(&rel);
             if secret_policy || denied.is_match(&rel) {
                 let safe_to_show = !secret_policy || !config.security.redact_secrets;
                 let reason = if secret_policy {
@@ -2978,25 +2978,17 @@ fn is_hidden_path(path: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-/// Programming-language source, as opposed to data, config, and prose formats that the parser
-/// also understands (YAML, JSON, TOML, Markdown, text). A `credentials.json` is a credential
-/// store; a `CredentialsProvider.java` is code.
-fn is_programming_language(language: &Language) -> bool {
-    language.is_programming()
-}
-
-/// Paths that hold key material or environment secrets are never read. A *programming-language*
-/// source file is only blocked by the strict list (key-material extensions and the `.env`,
-/// `.aws`, `.ssh` entries) because a class named `CredentialsProviderTest` or a
-/// module named `secrets.go` is code, not a secret; the loose rule silently dropped 25 Java
-/// files from one repository. Data, config, and prose files (`credentials.json`,
-/// `secrets.yaml`, `SECRETS.md`) keep the loose name rule, because chunk contents are not
-/// redacted today (tracked as #379); a hard-coded key inside a source file is indexed exactly
-/// as it was before this change, when only the file's name decided.
-fn is_secret_like_path(path: &Path, is_source: bool) -> bool {
+/// Paths that hold key material or environment secrets are never read, whatever their
+/// language. A file merely named for a secret is indexed: a class named
+/// `CredentialsProviderTest` or a module named `secrets.go` is code (a name rule silently
+/// dropped 25 Java files from one repository), and a `secrets.yaml`, `credentials.json`, or
+/// `SECRETS.md` is indexed with its secret-like values replaced before anything is derived
+/// from its text (`redaction`, #379). A key hard-coded inside a source file is indexed as
+/// written.
+fn is_secret_like_path(path: &Path) -> bool {
     path.components().any(|component| {
         let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        let strict = value == ".env"
+        value == ".env"
             || value.starts_with(".env.")
             || matches!(value.as_str(), ".aws" | ".ssh")
             || value.starts_with("id_rsa")
@@ -3006,13 +2998,7 @@ fn is_secret_like_path(path: &Path, is_source: bool) -> bool {
             || value.ends_with(".p12")
             || value.ends_with(".pfx")
             || value.ends_with(".jks")
-            || value.ends_with(".keystore");
-        strict
-            || (!is_source
-                && (matches!(value.as_str(), "secrets" | "secret" | "credentials")
-                    || value.contains("secret")
-                    || value.contains("credential")
-                    || value.ends_with("_key")))
+            || value.ends_with(".keystore")
     })
 }
 
@@ -3542,23 +3528,32 @@ class Util {
     }
 
     #[test]
-    fn secret_path_rule_blocks_data_files_by_name_but_not_programming_source() {
+    fn secret_path_rule_blocks_key_material_and_environment_entries_only() {
         fn p(v: &str) -> &std::path::Path {
             std::path::Path::new(v)
         }
-        assert!(!is_secret_like_path(
-            p("src/CredentialsProvider.java"),
-            true
-        ));
-        assert!(!is_secret_like_path(p("internal/secrets.go"), true));
-        assert!(is_secret_like_path(p("config/server.key"), true));
-        assert!(is_secret_like_path(p(".ssh/id_rsa.pub"), true));
-        assert!(is_secret_like_path(p(".env.local"), true));
-        assert!(is_secret_like_path(p("config/credentials.yaml"), false));
-        assert!(is_secret_like_path(p("credentials.json"), false));
-        assert!(is_secret_like_path(p("secret_key.txt"), false));
-        assert!(is_secret_like_path(p("docs/SECRETS.md"), false));
-        assert!(!is_secret_like_path(p("config/server.yaml"), false));
+        // Key material and environment entries, whatever the file's language.
+        assert!(is_secret_like_path(p(".env")));
+        assert!(is_secret_like_path(p(".env.local")));
+        assert!(is_secret_like_path(p(".aws/credentials.json")));
+        assert!(is_secret_like_path(p(".ssh/id_rsa.pub")));
+        assert!(is_secret_like_path(p("deploy/id_ed25519")));
+        assert!(is_secret_like_path(p("config/server.key")));
+        assert!(is_secret_like_path(p("certs/tls.PEM")));
+        assert!(is_secret_like_path(p("certs/client.p12")));
+        assert!(is_secret_like_path(p("certs/client.pfx")));
+        assert!(is_secret_like_path(p("android/release.jks")));
+        assert!(is_secret_like_path(p("android/release.keystore")));
+        // Named for a secret but not key material: indexed, source as written and data,
+        // config, and prose with secret-like values redacted.
+        assert!(!is_secret_like_path(p("src/CredentialsProvider.java")));
+        assert!(!is_secret_like_path(p("internal/secrets.go")));
+        assert!(!is_secret_like_path(p("config/credentials.yaml")));
+        assert!(!is_secret_like_path(p("credentials.json")));
+        assert!(!is_secret_like_path(p("secret_key.txt")));
+        assert!(!is_secret_like_path(p("docs/SECRETS.md")));
+        assert!(!is_secret_like_path(p("config/server.yaml")));
+        assert!(!is_secret_like_path(p("config/.environment.yaml")));
     }
 
     #[test]

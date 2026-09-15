@@ -83,7 +83,7 @@ files sink the all-languages ratio on almost every repository, and a warning tha
 always fires stops being read.
 
 Where it surfaces: `ok index` ends with one line
-(`coverage: 9,982 of 9,987 programming-language files indexed (99.9%); 12,004 of 12,115 recognised files indexed (99.1%) overall; 25 excluded by policy (25 secret-policy; 25 under config/; `[paths] deny` or the built-in secret-path rule governs the largest share); skipped: 5 too-large`);
+(`coverage: 9,982 of 9,987 programming-language files indexed (99.9%); 12,004 of 12,115 recognised files indexed (99.1%) overall; 25 excluded by policy (25 secret-policy; `[paths] deny` or the built-in secret-path rule governs the largest share); skipped: 5 too-large`);
 `ok doctor` prints the per-language table for every language (with an `excluded`
 column for policy exclusions, and the ratio over the considered files), then an
 `Excluded by policy` block with the top directories and governing setting, and warns,
