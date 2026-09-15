@@ -8,7 +8,7 @@ Open Kioku treats authoritative repository relationships as structural truth, no
 
 More than 40% of cases are negative, ambiguous, fail-closed, or `MustNotEmit` probes. The corpus includes same-name collisions, unrelated receivers, alias/import ambiguity, lexical shadowing, test/production collisions, constructor/function and static/instance collisions, unknown receivers, dynamic dispatch, overload and inheritance collisions, local/import shadowing, multiple exact reference sites, unresolved external targets, generated/vendor skipped paths, malformed/partial source, and deterministic metamorphic variants.
 
-`benchmarks/relationship-ci-cases.json` is the compact subset used by normal CI: one case per cohort plus targeted regression cases. The Rust `CALLS` regressions (`ci-rust-calls-02` to `-15`) write multi-file packages, and the live producer fails a case if any of its `.rs` files was not indexed.
+`benchmarks/relationship-ci-cases.json` is the compact subset used by normal CI: one case per cohort plus targeted regression cases. The Rust `CALLS` regressions (`ci-rust-calls-02` to `-17`) write multi-file packages, and the live producer fails a case if any of its `.rs` files was not indexed.
 - **Must emit:** a call through a cross-module item import, and its grouped, aliased twin in the same metamorphic group; a call through `crate::` inside the importing workspace member, with a same-text module in the other member.
 - **Must not emit:**
   - imports that are not in scope at the call: a `mod tests` import from production code, a file-level import inside a `mod` block that globs another module (as a bare call and as a typed call), and a file-level import shadowed by an unresolved block import;

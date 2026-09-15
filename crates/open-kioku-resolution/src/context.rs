@@ -1,7 +1,9 @@
 use crate::evidence::ResolutionEvidence;
 use crate::index::{BindingIndex, ScopeIndex, SymbolIndex};
 use crate::inheritance::InheritanceIndex;
-use open_kioku_core::{Confidence, FileId, Language, ModuleId, ScopeId, ScopeKind, SymbolId};
+use open_kioku_core::{
+    Confidence, FileId, Language, ModuleId, Scope, ScopeId, ScopeKind, SymbolId,
+};
 use open_kioku_languages::semantics::LanguageSemantics;
 use open_kioku_semantic_model::{ImportBinding, SemanticRepository, GLOB_IMPORT_LOCAL_NAME};
 
@@ -68,8 +70,27 @@ pub(crate) fn scoped_import<'r>(
         if !here.is_empty() {
             return settle(here);
         }
-        if globs.iter().any(|binding| &binding.scope_id == id) {
-            return ScopedImport::Unresolved;
+        let globs_here = globs
+            .iter()
+            .filter(|binding| &binding.scope_id == id)
+            .collect::<Vec<_>>();
+        if !globs_here.is_empty() {
+            // `use super::*;` names the parent module's namespace, the parent's own imports
+            // included, so the lookup continues there. Any other glob may supply the name.
+            let parent = if *language == Language::Rust {
+                rust_super_glob_target(scopes, id, &globs_here)
+            } else {
+                None
+            };
+            let Some(parent) = parent else {
+                return ScopedImport::Unresolved;
+            };
+            steps += 1;
+            if steps > scopes.scopes.len() {
+                break;
+            }
+            current = Some(parent);
+            continue;
         }
         let scope = scopes.get(id);
         if *language == Language::Rust && scope.is_some_and(|scope| scope.kind == ScopeKind::Module)
@@ -98,6 +119,55 @@ pub(crate) fn scoped_import<'r>(
     } else {
         ScopedImport::NotImported
     }
+}
+
+/// The module scope that the globs at `scope_id` name, when every one of them is the same
+/// `super::*` or `super::super::*` path. `None` when another glob may supply a name, or when the
+/// path climbs past the file's own module, whose parent the scopes of one file cannot show.
+fn rust_super_glob_target<'s>(
+    scopes: &'s ScopeIndex,
+    scope_id: &ScopeId,
+    globs: &[&ImportBinding],
+) -> Option<&'s ScopeId> {
+    let depth = rust_super_glob_depth(&globs.first()?.source_module)?;
+    if globs
+        .iter()
+        .any(|glob| rust_super_glob_depth(&glob.source_module) != Some(depth))
+    {
+        return None;
+    }
+    let mut module = enclosing_module_scope(scopes, scope_id)?;
+    for _ in 0..depth {
+        if module.kind != ScopeKind::Module {
+            return None;
+        }
+        module = enclosing_module_scope(scopes, module.parent_id.as_ref()?)?;
+    }
+    Some(&module.id)
+}
+
+/// `super::*` is 1 and `super::super::*` is 2; any other path is `None`.
+fn rust_super_glob_depth(source: &str) -> Option<usize> {
+    let path = source.strip_suffix("::*")?;
+    let segments = path.split("::").collect::<Vec<_>>();
+    (!segments.is_empty() && segments.iter().all(|segment| *segment == "super"))
+        .then_some(segments.len())
+}
+
+/// The nearest module or file scope at or above `scope_id`.
+fn enclosing_module_scope<'s>(scopes: &'s ScopeIndex, scope_id: &ScopeId) -> Option<&'s Scope> {
+    let mut current = scopes.get(scope_id);
+    for _ in 0..=scopes.scopes.len() {
+        let scope = current?;
+        if matches!(scope.kind, ScopeKind::Module | ScopeKind::File) {
+            return Some(scope);
+        }
+        current = scope
+            .parent_id
+            .as_ref()
+            .and_then(|parent| scopes.get(parent));
+    }
+    None
 }
 
 fn file_imports<'r>(
