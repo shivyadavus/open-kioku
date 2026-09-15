@@ -40,39 +40,13 @@ fn snapshot_export(repo: &Path, quality: SnapshotQuality) -> anyhow::Result<Snap
     let artifact_dir = snapshot_artifact_dir(&repo);
     fs::create_dir_all(&artifact_dir)?;
     ensure_snapshot_gitattributes(&artifact_dir)?;
-    checkpoint_sqlite(&index_path);
 
     let temp_db = unique_temp_path(&artifact_dir, "index.snapshot", "sqlite.tmp");
-    match quality {
-        SnapshotQuality::Best => {
-            let conn = Connection::open_with_flags(&index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .with_context(|| format!("opening {} read-only", index_path.display()))?;
-            let temp_db_string = temp_db.to_string_lossy().to_string();
-            conn.execute("VACUUM INTO ?1", params![temp_db_string])
-                .with_context(|| {
-                    format!("compacting snapshot database to {}", temp_db.display())
-                })?;
-        }
-        SnapshotQuality::Fast => {
-            fs::copy(&index_path, &temp_db).with_context(|| {
-                format!(
-                    "copying index database from {} to {}",
-                    index_path.display(),
-                    temp_db.display()
-                )
-            })?;
-        }
-    }
-
-    integrity_check_sqlite(&temp_db)?;
-    ensure_required_snapshot_tables(&temp_db)?;
-
-    let manifest = match read_manifest_from_sqlite(&temp_db)? {
-        Some(manifest) => manifest,
-        None => {
+    let manifest = match copy_published_index(&repo, &index_path, &temp_db, quality) {
+        Ok(manifest) => manifest,
+        Err(err) => {
             let _ = fs::remove_file(&temp_db);
-            // A writer withdrew the manifest between the probe above and the copy.
-            anyhow::bail!("{}", unpublished_index_message(&repo));
+            return Err(err);
         }
     };
     let graph_counts = read_graph_counts_from_sqlite(&temp_db)?;
@@ -1025,6 +999,102 @@ fn ensure_snapshot_gitattributes(artifact_dir: &Path) -> anyhow::Result<()> {
     .with_context(|| format!("writing {}", path.display()))
 }
 
+/// Copy one committed state of the index into `dest` and return the manifest that state
+/// carries. Export is a reader: it takes no writer lock, and a writer may commit, withdraw the
+/// manifest or checkpoint while the copy runs. The manifest is read from the copy rather than
+/// the live file, so it and the rows beside it come from the same state; a state without one
+/// is a full run between staging and publication, or no index, and is refused as such.
+fn copy_published_index(
+    repo: &Path,
+    index_path: &Path,
+    dest: &Path,
+    quality: SnapshotQuality,
+) -> anyhow::Result<IndexManifest> {
+    copy_index_database(index_path, dest, quality)?;
+    integrity_check_sqlite(dest)?;
+    ensure_required_snapshot_tables(dest)?;
+    read_manifest_from_sqlite(dest)?
+        .ok_or_else(|| anyhow::anyhow!("{}", unpublished_index_message(repo)))
+}
+
+/// How long a copy keeps retrying a source that reports busy before the export fails.
+const SNAPSHOT_COPY_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Copy the database at `index_path` into `dest` from inside a single read transaction, so the
+/// copy is one committed state however writers interleave. The store runs in WAL mode, where
+/// a reader's snapshot includes committed WAL frames and is not disturbed by later commits or
+/// checkpoints; copying the file bytes instead can miss committed frames still in the WAL and
+/// capture a page a checkpoint is rewriting. Neither quality checkpoints the live index first:
+/// neither needs it, and export does not write to the index it reads.
+///
+/// `Best` rebuilds the database with `VACUUM INTO`. `Fast` copies its pages with the online
+/// backup API in one step, which holds one read transaction for the whole copy; a copy in
+/// several steps would restart whenever another connection commits, and could never finish
+/// against a writer that keeps committing.
+fn copy_index_database(
+    index_path: &Path,
+    dest: &Path,
+    quality: SnapshotQuality,
+) -> anyhow::Result<()> {
+    let source = Connection::open_with_flags(
+        index_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening {} read-only", index_path.display()))?;
+    source.busy_timeout(SNAPSHOT_COPY_BUSY_WAIT)?;
+    match quality {
+        SnapshotQuality::Best => {
+            let dest_string = dest.to_string_lossy().to_string();
+            source
+                .execute("VACUUM INTO ?1", params![dest_string])
+                .with_context(|| format!("compacting snapshot database to {}", dest.display()))?;
+        }
+        SnapshotQuality::Fast => {
+            let mut target = Connection::open(dest)
+                .with_context(|| format!("creating snapshot database {}", dest.display()))?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source, &mut target)
+                    .with_context(|| format!("starting backup to {}", dest.display()))?;
+                let started = std::time::Instant::now();
+                loop {
+                    // -1: every page in this step, under one read transaction.
+                    match backup.step(-1).with_context(|| {
+                        format!(
+                            "copying index database from {} to {}",
+                            index_path.display(),
+                            dest.display()
+                        )
+                    })? {
+                        rusqlite::backup::StepResult::Done => break,
+                        // Nothing was copied; the next step starts over from a new snapshot.
+                        _ if started.elapsed() < SNAPSHOT_COPY_BUSY_WAIT => {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        other => anyhow::bail!(
+                            "copying index database from {}: source stayed busy for {}s \
+                             ({other:?}); retry the export",
+                            index_path.display(),
+                            SNAPSHOT_COPY_BUSY_WAIT.as_secs()
+                        ),
+                    }
+                }
+            }
+            // The copied header still marks the file as WAL. The artifact is this one file,
+            // so switch it to a rollback journal: nothing it holds can live in a sidecar.
+            let mode: String = target
+                .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+                .with_context(|| format!("finalizing snapshot database {}", dest.display()))?;
+            if !mode.eq_ignore_ascii_case("delete") {
+                anyhow::bail!(
+                    "snapshot database {} stayed in journal mode {mode}",
+                    dest.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn checkpoint_sqlite(path: &Path) {
     if !path.exists() {
         return;
@@ -1667,4 +1737,188 @@ fn rebuild_search_from_store(repo: &Path, store: &SqliteStore) -> anyhow::Result
         &graph_nodes,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_export_copy_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const ROWS_PER_BATCH: i64 = 10;
+    /// Batches the writer keeps; older ones are deleted, so later commits reuse freed pages
+    /// and checkpoints rewrite pages already in the database file.
+    const KEPT_BATCHES: i64 = 400;
+
+    /// A ledger whose rows are written all-or-nothing per transaction, with a totals row
+    /// updated in the same transaction. A copy mixing two committed states breaks one of the
+    /// relations [`assert_one_committed_state`] checks.
+    fn create_ledger(db: &Path) {
+        Connection::open(db)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE ledger (
+                   batch INTEGER NOT NULL, slot INTEGER NOT NULL, payload BLOB NOT NULL,
+                   PRIMARY KEY (batch, slot));
+                 CREATE TABLE ledger_totals (
+                   id INTEGER PRIMARY KEY CHECK (id = 1),
+                   batches INTEGER NOT NULL, rows INTEGER NOT NULL);
+                 INSERT INTO ledger_totals VALUES (1, 0, 0);",
+            )
+            .unwrap();
+    }
+
+    fn spawn_ledger_writer(
+        db: PathBuf,
+        stop: Arc<AtomicBool>,
+        committed: Arc<AtomicU64>,
+    ) -> thread::JoinHandle<rusqlite::Result<()>> {
+        thread::spawn(move || {
+            let mut conn = Connection::open(&db)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            // Checkpoint after a few pages, so the database file is being rewritten while a
+            // copy reads it: the state a file-byte copy tears.
+            conn.execute_batch("PRAGMA synchronous = OFF; PRAGMA wal_autocheckpoint = 16;")?;
+            let mut batch = 0_i64;
+            while !stop.load(Ordering::SeqCst) {
+                let tx = conn.transaction()?;
+                for slot in 0..ROWS_PER_BATCH {
+                    tx.execute(
+                        "INSERT INTO ledger (batch, slot, payload) VALUES (?1, ?2, zeroblob(1024))",
+                        params![batch, slot],
+                    )?;
+                }
+                let deleted = tx.execute(
+                    "DELETE FROM ledger WHERE batch = ?1",
+                    params![batch - KEPT_BATCHES],
+                )? as i64;
+                tx.execute(
+                    "UPDATE ledger_totals SET batches = batches + 1 - ?1, rows = rows + ?2 - ?3",
+                    params![i64::from(deleted > 0), ROWS_PER_BATCH, deleted],
+                )?;
+                tx.commit()?;
+                committed.fetch_add(1, Ordering::SeqCst);
+                batch += 1;
+            }
+            Ok(())
+        })
+    }
+
+    fn assert_one_committed_state(db: &Path) {
+        integrity_check_sqlite(db).unwrap();
+        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let partial_batches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT batch FROM ledger GROUP BY batch \
+                 HAVING COUNT(*) <> ?1)",
+                params![ROWS_PER_BATCH],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(partial_batches, 0, "a batch was copied partway through");
+        let (batches, rows, span): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT batch), COUNT(*), \
+                 COALESCE(MAX(batch) - MIN(batch) + 1, 0) FROM ledger",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let totals: (i64, i64) = conn
+            .query_row("SELECT batches, rows FROM ledger_totals", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(totals, (batches, rows), "totals from another commit");
+        assert_eq!(span, batches, "the kept batches are not one window");
+    }
+
+    /// Both qualities read one committed state from inside a read transaction, so each copy
+    /// passes `integrity_check` and every relation the writer keeps per transaction holds,
+    /// however the copy interleaves with the writer's commits and checkpoints.
+    #[test]
+    fn a_copy_is_one_committed_state_while_a_writer_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("index.sqlite");
+        create_ledger(&db);
+        let stop = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicU64::new(0));
+        let writer = spawn_ledger_writer(db.clone(), Arc::clone(&stop), Arc::clone(&committed));
+        let waiting_since = std::time::Instant::now();
+        while committed.load(Ordering::SeqCst) < KEPT_BATCHES as u64 {
+            assert!(
+                !writer.is_finished(),
+                "the writer stopped before filling the ledger"
+            );
+            assert!(waiting_since.elapsed() < std::time::Duration::from_secs(60));
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // A commit must land during copies of each quality, or the test proves nothing.
+        let mut overlapped = [0_u32; 2];
+        let started = std::time::Instant::now();
+        let mut copies = 0_usize;
+        while copies < 8
+            || (overlapped.iter().any(|count| *count < 2)
+                && started.elapsed() < std::time::Duration::from_secs(30))
+        {
+            let quality = [SnapshotQuality::Fast, SnapshotQuality::Best][copies % 2];
+            let dest = temp.path().join(format!("copy-{copies}.sqlite"));
+            let before = committed.load(Ordering::SeqCst);
+            copy_index_database(&db, &dest, quality).unwrap();
+            if committed.load(Ordering::SeqCst) > before {
+                overlapped[copies % 2] += 1;
+            }
+            assert_one_committed_state(&dest);
+            if quality == SnapshotQuality::Fast {
+                let mode: String =
+                    Connection::open_with_flags(&dest, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                        .unwrap()
+                        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                        .unwrap();
+                assert_eq!(
+                    mode, "delete",
+                    "the artifact must not depend on a WAL sidecar"
+                );
+                assert!(!dest.with_extension("sqlite-wal").exists());
+            }
+            fs::remove_file(&dest).unwrap();
+            copies += 1;
+        }
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap().unwrap();
+        assert!(
+            overlapped.iter().all(|count| *count > 0),
+            "no commit landed during a copy of each quality: {overlapped:?}"
+        );
+    }
+
+    /// A copied state with no manifest is a full run between staging and publication, or a
+    /// database that never had one. Export says which, as every read surface does, and the
+    /// check runs on the copy, so a manifest withdrawn after the probe is caught too.
+    #[test]
+    fn a_copied_state_without_a_manifest_is_refused_with_the_repository_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let index_path = index_sqlite_path(repo);
+        drop(SqliteStore::open(&index_path).unwrap());
+        for quality in [SnapshotQuality::Fast, SnapshotQuality::Best] {
+            let dest = repo.join(format!("copy-{quality}.sqlite"));
+            let err = copy_published_index(repo, &index_path, &dest, quality).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                open_kioku_storage::generations::not_indexed_message(repo)
+            );
+            fs::remove_file(&dest).unwrap();
+
+            let lock = IndexWriteLock::acquire(repo, IndexWriteLock::DEFAULT_WAIT).unwrap();
+            let err = copy_published_index(repo, &index_path, &dest, quality).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                open_kioku_storage::generations::indexing_in_progress_message(repo)
+            );
+            drop(lock);
+            fs::remove_file(&dest).unwrap();
+        }
+    }
 }
