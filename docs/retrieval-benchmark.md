@@ -397,6 +397,227 @@ run, a missing report, a rename that fails partway, an accepted regression, a fa
 step under the flag, and an empty reason. Update the frozen-baseline table and freeze date above
 in the same change.
 
+### Benchmarking a repository against its own history
+
+`ok bench self` applies the same method to the repository it runs in, with no script and no
+frozen corpus:
+
+```sh
+ok bench self --commits 20
+ok --json bench self --commits 50 --min-cases 25 > bench-self.json
+ok bench self --commits 20 --rev 1a2b3c4d          # pin the base, to compare two builds
+ok bench self --commits 20 --reveal-paths
+```
+
+Run it at the repository root. A repository directory literally named `self` is passed as
+`./self`, because `ok bench self` is a subcommand of `ok bench`.
+
+**Cases.** It reads `git log --no-merges --no-renames --name-status <rev>` (`HEAD` unless `--rev`
+pins another commit), newest first, and keeps
+the first `N` commits that pass these rules, reimplemented in Rust in
+`crates/open-kioku-cli/src/bench/self_history.rs` (no Python script is called):
+
+- The commit has a parent.
+- It modifies (`M`; not added, deleted, or renamed) between one and five files in a programming
+  language: Rust, Java, TypeScript, JavaScript, Python, Go, or SQL, detected by extension. Those
+  files are the gold set; other modified files are ignored.
+- The subject names no modified path: no token contains `/`, no token equals a modified file's
+  name or stem, and no conventional-commit scope (`fix(search):`, `[search]`) matches a segment
+  of a modified path. The last rule matters because `path_matches_scope` in `open-kioku-context`
+  compares a scope token against a path segment's *stem* and rewards a match with an explicit
+  score adjustment, so `fix(search): …` touching `src/search.rs` would hand the ranker its own
+  answer. The token rules are deliberately broader than the ranker's tokenisation: a filter that
+  tracked it exactly would stop working, silently, the next time scope parsing changed.
+- The query is the subject with PR references (`#123`, `(#123)`) removed, backticks unwrapped,
+  whitespace collapsed, and ` .:-` trimmed from both ends, and it has at least three words.
+- A query equal to an already-selected one, ignoring digits and case, is skipped.
+
+Where this differs from `scripts/commit-derived-cases.py`:
+
+- The extractor indexes the repository once, at a fixed base commit, and draws cases from the
+  commits after it. `ok bench self` indexes each commit's own parent, so every case sees the
+  repository as it was immediately before the change.
+- Source files are chosen by language, not by `--ext` and `--path-prefix`, and a commit that also
+  modifies non-source files is kept.
+- A subject naming a modified file by its name or stem (`fix lib.rs parsing`), or scoping itself
+  to a modified path's segment, is skipped. The extractor keeps both unless the token contains
+  `/`. This drops cases the extractor keeps, which costs sample size and never inflates a score.
+- It walks every non-merge commit reachable from `HEAD`, not the first-parent chain. On a linear
+  or squash-merged history the two agree.
+- A repeated subject keeps its newest instance. The extractor, reading oldest first, keeps the oldest.
+- Rename detection is off, so a renamed file is never gold; the extractor's `--diff-filter=M`
+  excludes renames under git's default rename detection too.
+- The minimum of three query words and the maximum of five gold files are fixed (the extractor's
+  defaults), not flags.
+- A modified path that git quotes (a name containing a tab, newline, double quote, or backslash)
+  is never gold.
+
+**Per case.** For each selected commit, `ok bench self`:
+
+1. checks out the parent with `git worktree add --detach` into a new directory under the system
+   temporary directory (`TMPDIR`);
+2. indexes that checkout, whose index is written to the checkout's own `.ok/` inside the
+   temporary directory;
+3. builds the context pack for the query exactly as `ok context` does, with the same limit of 20
+   primary results, and ranks files in the order the pack presents them: those primary files,
+   then up to ten supporting files, duplicates collapsed. The limit bounds the primary results,
+   not the ranked list, which therefore reaches 30 files and so does the largest possible rank;
+4. records the rank of every gold file; the case's rank is its best gold rank;
+5. removes the checkout and its index (`git worktree remove --force`) before the next base.
+
+A case whose gold file is absent from the base's index (excluded by policy, or too large) is
+reported as `gold_not_indexed` and not scored, as the extractor drops a commit it cannot answer.
+A case whose checkout, index, or pack fails is reported as `error` and not scored. The checkout is
+removed in both cases. A checkout that cannot be removed stops the run with an error naming it.
+On SIGINT or SIGTERM the command removes the active checkout and the temporary directory and exits
+with 130.
+
+A checkout is removed with `git worktree remove --force`. If its directory is already gone, which
+that command refuses, only the one administrative entry under the repository's
+`.git/worktrees/` whose `gitdir` file points at the checkout is deleted. `git worktree prune` is
+never run, because it would also delete any other stale registration in the repository. SIGKILL
+cannot be handled; a checkout left by one is listed by `git worktree list` as prunable once its
+temporary directory is gone.
+
+**Isolation.** The repository's own `.ok/` is never opened. The repository path is used only for
+git and to read `ok.toml`; every index, search, and pack call receives the checkout. State kept
+under `.ok/`, such as an activated abstention policy or repository memory, therefore does not
+apply. `crates/open-kioku-cli/tests/bench_self.rs` checks that the contents and modification times
+of every entry under `.ok/` are unchanged by a run. The only change to the repository is the
+worktree registration under `.git/worktrees/`, which removing the checkout deletes.
+
+**Network.** The command needs no network and runs with it denied, whatever `ok.toml` says. Each
+base is indexed with `security.deny_network` forced to `true` and SCIP, semantic search, and the
+runtime integration disabled. git runs with `protocol.allow=never`, so a partial clone missing an
+object fails the case rather than fetching it. It also runs with `GIT_NO_LAZY_FETCH=1` and
+`GIT_LFS_SKIP_SMUDGE=1`, and with `core.hooksPath` set to an empty directory, so a checkout runs
+none of the repository's hooks.
+
+**A score cannot rise because coverage fell.** An unanswerable case leaves the sample rather than
+scoring zero, so an indexing change that stops indexing a file class would shrink the corpus to
+the cases that still rank well and print a higher number over fewer of them. Two things prevent
+that being published:
+
+- **A gate.** Metrics are withheld unless at least `--min-cases` cases scored (10 by default)
+  *and* at least half the selected commits scored. The absolute floor guards a small run; the
+  ratio guards a large one, where a fixed floor would let nine tenths of the corpus fall out.
+  `gate.metrics_suppressed` says which condition tripped, `metrics` is `null`, and the command
+  exits non-zero.
+- **A second metric set.** `metrics_coverage_adjusted` scores every case whose modified file was
+  absent from the base index as a miss, so a coverage regression reads as a quality regression
+  instead of a smaller sample. Errors are in neither set: a tool failure is not a retrieval miss,
+  and a run with errors is named in the caveats.
+
+**Running it from a feature branch measures that branch.** The walk starts at `HEAD` unless
+`--rev` pins it, so every qualifying commit on the working branch is a case — including the one
+you are about to open a pull request for. A commit that adds a benchmark, or any other plumbing,
+usually misses on its own subject, because the files it touched are not what its subject
+describes, so it enters the corpus as a scored miss and lowers every metric. The report records
+`selection.walked_repository_head` and carries a caveat when that happened. To measure the
+repository rather than the branch, pin the base:
+
+```sh
+ok bench self --commits 20 --rev origin/main
+```
+
+**If the corpus is too small.** A repository whose subjects are scoped throughout
+(`fix(context):`, `fix(plan):`, `fix(graph):`) loses a case every time the scope equals a modified
+file's stem, and with the gate above it can suppress metrics on a default run. Decide in this
+order, and decide it before seeing a number, not after:
+
+1. **Raise `--commits`.** More commits costs wall-clock and nothing else, and it touches neither
+   guard. This is the only lever that should be reached for routinely.
+2. **If that is impractical, score and exclude instead of skipping.** Keep the case, record
+   `commit_scope_boost_on_gold`, and exclude the leaked cases from the headline while disclosing
+   how many there were — the sample stays visible rather than silently smaller.
+3. **Do not narrow the subject filter, and do not lower the floor**, on the evidence of a run that
+   came back inconvenient. Either is choosing the number over the method, which is what the gate
+   and the filter exist to prevent.
+
+A repository that yields few usable cases at `--commits 20` is a finding about that corpus, to be
+reported with the counts above, not a defect to engineer around.
+
+**Report.** Text by default, JSON with `--json`:
+
+- `open_kioku_version`, `requested_commits`, `context_limit`, `max_ranked_files`, `network`
+  (`denied`), and `paths_redacted`.
+- `repository`: `digest` (over the root commits, so it names the repository without naming
+  anything), `head_digest`, and — only with `--reveal-paths` — `head` and `rev`.
+- `case_set_digest`: over the selected commit ids, so two reports can be told to cover the same
+  cases.
+- `configuration`: the effective `[ranking]` weights and `[history]` limits, plus `deny_network`,
+  `scip_enabled` and `semantic_enabled`. `ok.toml` is git-ignored, so without this the settings
+  behind a number are in neither the artifact nor version control.
+- `selection`: `scanned_commits`, `selected_commits`, and `skipped` counts per rule
+  (`root_commit`, `no_modified_source_file`, `too_many_source_files`, `path_in_subject`,
+  `scope_names_modified_path`, `short_subject`, `repeated_subject`). The two path rules are
+  counted apart: `path_in_subject` covers a path-like token or a token equal to a modified file's
+  name or stem, and `scope_names_modified_path` covers the conventional-commit scope rule, which
+  is checked first because a scope token is usually also the file's stem. On a repository whose
+  subjects are scoped throughout, that second count is the one that decides how much corpus
+  survives.
+- `cases_scored`, `cases_gold_not_indexed`, `cases_errored`, `cases_with_scope_boost_on_gold`.
+- `gate`: `min_cases`, `selected_commits`, `scored_cases`, `coverage_adjusted_cases`,
+  `metrics_suppressed`, `coverage_adjusted_suppressed`.
+- `metrics` and `metrics_coverage_adjusted`: `R@5`, `R@20`, `MRR` and `gold_recall@20`, each with
+  the `cases` they were computed over, as `scripts/score-context-cases.py` computes them. A case
+  counts toward Recall@k when its best gold rank is at most k; MRR averages 1/best rank; and
+  `gold_recall@20` averages the share of a case's modified files the pack returned, which is the
+  only one of the four that notices a commit touching five files whose pack found one. `null`
+  when the gate withheld them.
+- `by_task_family`: the same metrics per routed family, under the family names of
+  "Per-task-family breakdown" above, listed in `TaskFamily` declaration order. Each entry is
+  `{family, cases, insufficient, metrics}`; a family with no scored case is omitted, and fewer
+  than 34 cases is `insufficient`. An insufficient family's numbers are in the JSON but not in
+  the text output, which is the quotable surface. Membership fingerprints and bootstrap intervals
+  are not computed.
+- `cases`, newest first: `position`, `case_id`, `status` (`scored`, `gold_not_indexed`, `error`),
+  `task_family`, `rank`, `gold_recall`, `gold` (each modified file's `path` and `rank`),
+  `returned_files`, `commit_scope_boost_on_gold`, `error`, and `coverage` for that base
+  (`discovered`, `considered`, `indexed`, `excluded_by_policy`, `programming_considered`,
+  `programming_indexed`, and the one-line `headline`, which carries counts only).
+- `caveats`: the notes below, several of which depend on the run.
+
+**Comparing two reports.** Join on `case_id`, never on `position`. `case_id` is the commit id with
+`--reveal-paths` and a digest of it otherwise, so cases can be matched under redaction. Position
+is not an identity: building a second binary adds a commit, which shifts every position by one and
+evicts the oldest case, so joining on position reports every row as changed when almost none is.
+Pin both runs with `--rev` to score them on the same cases.
+
+Paths are redacted by default with the path shapes `ok prove` uses (`src/**/*.rs`), `commit`,
+`query`, `head` and `rev` are `null`, and an error keeps only the stage that failed.
+`--reveal-paths` includes commit ids, subjects, repository-relative paths, and error messages. The
+report holds no timings, so a rerun on one build over one pinned base produces byte-identical
+JSON; that is what the integration test pins, on a scripted fixture, and it is not a claim about
+every repository.
+
+**Precision.** The text output prints as many decimals as the sample resolves — two at 20 cases,
+where one case moves R@k by 0.05 — and states that resolution beside the numbers. The JSON carries
+full precision, because rounding belongs to display and not to the record. No confidence interval
+is computed.
+
+**Caveats.** These are built per run and travel inside the artifact, in `caveats`, and in the text
+output — not here, where nobody quoting a number will read them:
+
+- Queries are commit subjects, not issue text, and the cases are this repository's recent
+  commits. The numbers describe this repository at those commits with this build. They are not
+  comparable with the frozen commit-derived baselines above or with published benchmarks.
+- The sample's resolution, computed from the run: at 20 scored cases one case moves R@k by 0.05,
+  and no interval is computed, so a smaller difference is noise.
+- The report records the Open Kioku version and no commit, because the build does not embed its
+  source commit; state that commit beside any published number. The benchmarked repository's own
+  `HEAD` is recorded as a digest only: it belongs to the user, like the paths.
+- Queries are commit subjects and the ranker's `subject_twin_votes` history signal keys on commit
+  subjects, so this corpus's query distribution is that signal's own input distribution.
+- `R@20` cuts at rank 20, while `MRR` and `gold_recall@20` range over the whole returned list,
+  which reaches 30 files. The names follow the scorer's.
+- Task families are the router's labels. A per-family number measures the retrieval policy on
+  the cases routed to it, not whether routing chose the right family.
+- When any case had the commit-scope boost fire on a modified file, the count says so and those
+  ranks are optimistic: the query named the path the ranker rewards.
+- Semantic retrieval, SCIP, and state under `.ok/` are not used, so a repository that enables
+  them can see different packs from `ok context`.
+
 ## Gold yield at a token budget
 
 Recall@k and MRR say whether the right *file* is in the pack. They do not say whether the

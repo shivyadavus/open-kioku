@@ -294,7 +294,8 @@ enum Command {
         #[command(subcommand)]
         command: ContractCommand,
     },
-    /// Index a repository and report indexing and search timings, with optional quality cases.
+    /// Index a repository and report indexing and search timings, with optional quality cases;
+    /// `bench self` scores context retrieval against the repository's own recent commits.
     Bench(BenchArgs),
     /// Run the frozen workflow benchmark corpus (context, tests, impact, verification).
     WorkflowBench(WorkflowBenchArgs),
@@ -705,7 +706,11 @@ struct SetupAgentArgs {
 }
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 struct BenchArgs {
+    #[command(subcommand)]
+    command: Option<BenchCommand>,
+
     /// Repository to index and benchmark.
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -721,6 +726,47 @@ struct BenchArgs {
     /// Fail when quality precision@1 is below this threshold.
     #[arg(long, default_value_t = 0.0)]
     quality_min_precision_at_1: f64,
+}
+
+#[derive(Subcommand)]
+enum BenchCommand {
+    /// Score context retrieval against the repository's own recent commits, each indexed at its
+    /// parent in a temporary checkout.
+    #[command(
+        name = "self",
+        after_help = "Examples:
+  ok bench self --commits 20
+  ok --json bench self --commits 50 > bench-self.json
+  ok bench self --commits 20 --reveal-paths"
+    )]
+    SelfHistory(BenchSelfArgs),
+}
+
+#[derive(Args)]
+struct BenchSelfArgs {
+    /// Repository root whose history is benchmarked.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Number of recent qualifying non-merge commits to score, newest first.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    commits: u64,
+
+    /// Revision whose history is walked. Pin it to a commit to score two builds on the same
+    /// cases: the default follows the working checkout, which moves when a build commits.
+    #[arg(long, default_value = "HEAD", value_name = "REV")]
+    rev: String,
+
+    /// Publish metrics only when at least this many cases scored. Metrics are also withheld when
+    /// fewer than half the selected commits scored, so a run that stops being able to answer
+    /// most of its cases reports no score rather than a higher one over the few that remain.
+    #[arg(long, default_value_t = 10)]
+    min_cases: usize,
+
+    /// Include commit ids, subjects, repository-relative paths, and error messages instead of
+    /// redacted path shapes.
+    #[arg(long, default_value_t = false)]
+    reveal_paths: bool,
 }
 
 #[derive(Args)]
