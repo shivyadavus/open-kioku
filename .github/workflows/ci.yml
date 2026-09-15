@@ -116,8 +116,70 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      # Tests, profile validation, and the report are separate steps. A child process killed
+      # while the LLVM profile runtime writes its .profraw at exit (for example `ok doctor`
+      # stopping its `ok mcp serve` probe, or a test killing a lock holder) leaves a truncated
+      # profile, and one unreadable profile makes `llvm-profdata merge` abort the whole report.
+      # `--no-report` skips cargo-llvm-cov's automatic clean, so clean explicitly first: the
+      # cached target directory must not contribute profiles from an earlier run.
+      - name: Remove coverage artifacts from earlier runs
+        run: cargo llvm-cov clean --workspace
+      - name: Run tests with coverage instrumentation
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Discard truncated coverage profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_discarded=5
+          profile_dir=target/llvm-cov-target
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          llvm_profdata="$(rustc --print sysroot)/lib/rustlib/${host}/bin/llvm-profdata"
+          if [ ! -x "$llvm_profdata" ]; then
+            echo "::error::llvm-profdata not found at ${llvm_profdata}"
+            exit 1
+          fi
+          mapfile -d '' profiles < <(find "$profile_dir" -maxdepth 1 -type f -name '*.profraw' -print0)
+          if [ "${#profiles[@]}" -eq 0 ]; then
+            echo "::error::no .profraw files under ${profile_dir}; the test step produced no coverage data"
+            exit 1
+          fi
+          invalid="${RUNNER_TEMP}/invalid-profraw.tsv"
+          # Empty profiles are skipped by `llvm-profdata merge` itself, so only non-empty files
+          # are checked. Each line is "<path><TAB><first error line>".
+          printf '%s\0' "${profiles[@]}" \
+            | LLVM_PROFDATA="$llvm_profdata" xargs -0 -r -n 1 -P "$(nproc)" bash -c '
+                [ -s "$1" ] || exit 0
+                if ! err="$("$LLVM_PROFDATA" show "$1" 2>&1 >/dev/null)"; then
+                  printf "%s\t%s\n" "$1" "$(printf "%s\n" "$err" | head -n 1)"
+                fi
+              ' _ > "$invalid"
+          discarded="$(wc -l < "$invalid")"
+          echo "Validated ${#profiles[@]} profiles with ${llvm_profdata}; ${discarded} failed validation."
+          {
+            echo "### Coverage profile validation"
+            echo
+            echo "Validated ${#profiles[@]} \`.profraw\` files; ${discarded} failed \`llvm-profdata show\` (limit ${max_discarded})."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$discarded" -gt 0 ]; then
+            echo "| Profile | Error |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+            while IFS=$'\t' read -r path reason; do
+              echo "::warning::invalid coverage profile ${path}: ${reason}"
+              echo "| \`$(basename "$path")\` | ${reason} |" >> "$GITHUB_STEP_SUMMARY"
+            done < "$invalid"
+          fi
+          if [ "$discarded" -gt "$max_discarded" ]; then
+            echo "::error::${discarded} coverage profiles failed validation (limit ${max_discarded}); more than a killed child process explains, investigate the instrumentation"
+            exit 1
+          fi
+          while IFS=$'\t' read -r path _; do
+            rm -f -- "$path"
+            echo "Discarded ${path}"
+          done < "$invalid"
       - name: Generate coverage report
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+        # `--failure-mode any` is the default, stated so a profile that passes validation but
+        # still cannot be merged fails the job instead of being dropped.
+        run: cargo llvm-cov report --failure-mode any --lcov --output-path lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
