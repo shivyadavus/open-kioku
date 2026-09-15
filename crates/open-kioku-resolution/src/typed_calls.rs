@@ -76,10 +76,23 @@ fn inferred_receiver_type(
         return (call_path.to_string(), false);
     };
     let owner_name = owner.rsplit("::").next().unwrap_or(owner);
-    let constructors = collect_type_candidates(ctx, scope_id, owner)
+    let owner_types = collect_type_candidates(ctx, scope_id, owner);
+    let constructors = owner_types
         .iter()
         .flat_map(|type_id| find_members_by_name(ctx, type_id, constructor))
         .collect::<Vec<_>>();
+    // `#[derive(Default)]` adds no indexed member, but `Default::default` returns `Self` by the
+    // trait's definition. It proves a struct, enum or alias; a module path such as
+    // `config::default()` is a function call, not a constructor.
+    if constructors.is_empty() && constructor == "default" {
+        let proven = !owner_types.is_empty()
+            && owner_types.iter().all(|type_id| {
+                ctx.symbols
+                    .get(type_id)
+                    .is_some_and(|symbol| symbol.kind == SymbolKind::Class)
+            });
+        return (owner.to_string(), proven);
+    }
     let proven = !constructors.is_empty()
         && constructors.iter().all(|id| {
             ctx.symbols
@@ -1053,6 +1066,40 @@ mod tests {
                     }
                     other => panic!("expected an unproven candidate, got {other:?}"),
                 }
+            },
+        );
+    }
+
+    #[test]
+    fn derived_default_proves_a_struct_receiver_but_not_a_module_path() {
+        // `let svc = Service::default();` with `#[derive(Default)]`: no indexed `default` member.
+        with_receiver_binding(
+            vec![
+                type_symbol("symbol:type:Service", "Service"),
+                method_symbol("symbol:method:Service.run", "symbol:type:Service"),
+            ],
+            "Service::default()",
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Proven { candidate } => {
+                    assert_eq!(candidate.target_symbol_id.0, "symbol:method:Service.run")
+                }
+                other => panic!("expected a proven call on a derived default, got {other:?}"),
+            },
+        );
+
+        // `let svc = config::default();` names a module function, not a constructor.
+        with_receiver_binding(
+            vec![
+                Symbol {
+                    kind: SymbolKind::Module,
+                    ..type_symbol("symbol:module:config", "config")
+                },
+                method_symbol("symbol:method:config.run", "symbol:module:config"),
+            ],
+            "config::default()",
+            |ctx| match resolve_typed_receiver_outcome(&call(), ctx) {
+                ResolutionOutcome::Unresolved { candidates, .. } => assert_eq!(candidates.len(), 1),
+                other => panic!("expected an unproven candidate, got {other:?}"),
             },
         );
     }
