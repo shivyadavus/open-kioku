@@ -401,7 +401,7 @@ Two things need doing on upgrade, both detailed first below: **run `ok index` to
 ## [2.2.2] — 2026-07-02
 
 ### Changed
-- Comprehensively refactored and enriched MCP tool descriptions and guidance text for all 27 low-scoring tools to achieve A-level ratings on the Glama TDQS rubric.
+- Rewrote the descriptions and guidance text of 27 MCP tools to state each tool's purpose, inputs, and outputs more clearly.
 - Added explicit "Do NOT use when..." instructions, detailed sibling tool alternatives, and clarified data source and side-effect transparency.
 - Enriched all tool parameter schemas with default values, value constraints, and explicit semantic descriptions.
 - Updated integration test tools list snapshot to reflect the updated tool specifications.
@@ -427,7 +427,7 @@ Two things need doing on upgrade, both detailed first below: **run `ok index` to
 - Added MCP `title`, `annotations`, and `outputSchema` metadata to every tool definition.
 
 ### Changed
-- Expanded MCP tool descriptions with explicit when-to-use guidance, sibling alternatives, and side-effect transparency for better Glama TDQS scoring.
+- Expanded MCP tool descriptions with explicit when-to-use guidance, sibling alternatives, and side-effect transparency.
 - Marked write-like MCP tools with accurate read/write/destructive/open-world annotations.
 - Decomposed the CLI crate into command, benchmark, report, and shared type modules while keeping the binary behavior intact.
 - Added GitHub star and npm download badges to the README.
