@@ -620,8 +620,9 @@ fn verify_diff_input(
         diffs.push(fs::read_to_string(path)?);
     }
     if include_git_diff {
-        // Rename detection is requested rather than left to `diff.renames`, so the report pairs
-        // both sides of a rename whatever the local git config says.
+        // Rename detection, fixed path prefixes and uncoloured output are requested rather than
+        // left to local git config, so the report pairs both sides of a rename whatever that
+        // config says.
         let output = ProcessCommand::new("git")
             .arg("-C")
             .arg(repo)
@@ -629,6 +630,7 @@ fn verify_diff_input(
                 "diff",
                 "--unified=0",
                 "--no-ext-diff",
+                "--no-color",
                 "--find-renames",
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
@@ -669,6 +671,7 @@ fn verify_diff_since(
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--no-color",
             "--find-renames",
             "--src-prefix=a/",
             "--dst-prefix=b/",

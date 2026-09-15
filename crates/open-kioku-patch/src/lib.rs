@@ -1706,8 +1706,8 @@ fn api_fingerprint_key(fingerprint: &PublicApiFingerprint) -> (String, String, S
 
 /// A public item a rename carried to its new path with kind, name and signature unchanged. The
 /// item still exists, so the move warns. Its import path changes, though, so a contract whose
-/// `api_surface_constraints` forbid removals in the previous path's scope fails it: the explicit
-/// contract outranks the pairing.
+/// `api_surface_constraints` forbid removals in the previous path's scope, or additions in the
+/// new path's scope, fails it: the explicit contract outranks the pairing on both sides.
 fn api_surface_moved_finding(
     contract: &ChangeContractV1,
     before: &PublicApiFingerprint,
@@ -1715,29 +1715,32 @@ fn api_surface_moved_finding(
 ) -> VerificationFinding {
     let mut evidence_refs = evidence_ref_strings(&before.evidence_refs);
     evidence_refs.extend(evidence_ref_strings(&after.evidence_refs));
-    let matching_constraints = contract
-        .api_surface_constraints
-        .iter()
-        .enumerate()
-        .filter(|(_, constraint)| constraint_matches_scope(&constraint.scope, &before.path.0))
-        .collect::<Vec<_>>();
-    let removal_allowed = matching_constraints.iter().any(|(_, constraint)| {
-        constraint
-            .allowed_changes
-            .contains(&ApiSurfaceChangeKind::Removed)
-    });
-    let forbidding_constraint = matching_constraints
-        .iter()
-        .find(|(_, constraint)| constraint.severity == ConstraintSeverity::Forbidden)
-        .filter(|_| !removal_allowed);
-    match forbidding_constraint {
-        Some((index, constraint)) => {
+    let violation =
+        forbidding_api_constraint(contract, &before.path.0, ApiSurfaceChangeKind::Removed)
+            .map(|(index, constraint)| {
+                (
+                    index,
+                    constraint,
+                    &before.path.0,
+                    "removes it from",
+                    "removals",
+                )
+            })
+            .or_else(|| {
+                forbidding_api_constraint(contract, &after.path.0, ApiSurfaceChangeKind::Added).map(
+                    |(index, constraint)| {
+                        (index, constraint, &after.path.0, "adds it to", "additions")
+                    },
+                )
+            });
+    match violation {
+        Some((index, constraint, scope_path, effect, forbidden)) => {
             evidence_refs.extend(evidence_ref_strings(&constraint.evidence_refs));
             VerificationFinding {
-                path: Some(PathBuf::from(&before.path.0)),
+                path: Some(PathBuf::from(scope_path)),
                 kind: "api_surface_violation".into(),
                 reason: format!(
-                    "public {} `{}` moved with the rename from `{}` to `{}`, which removes it from a scope where api_surface_constraints[{index}] forbids removals: {}",
+                    "public {} `{}` moved with the rename from `{}` to `{}`, which {effect} a scope where api_surface_constraints[{index}] forbids {forbidden}: {}",
                     after.kind, after.symbol, before.path.0, after.path.0, constraint.reason
                 ),
                 evidence_refs,
@@ -1753,6 +1756,30 @@ fn api_surface_moved_finding(
             evidence_refs,
         },
     }
+}
+
+/// The constraint that forbids `change` in `path`'s scope, unless a constraint covering that scope
+/// allows it; the same precedence `api_surface_delta_finding` applies to an unpaired change.
+fn forbidding_api_constraint<'a>(
+    contract: &'a ChangeContractV1,
+    path: &str,
+    change: ApiSurfaceChangeKind,
+) -> Option<(usize, &'a open_kioku_contract::ApiSurfaceConstraint)> {
+    let matching = contract
+        .api_surface_constraints
+        .iter()
+        .enumerate()
+        .filter(|(_, constraint)| constraint_matches_scope(&constraint.scope, path))
+        .collect::<Vec<_>>();
+    if matching
+        .iter()
+        .any(|(_, constraint)| constraint.allowed_changes.contains(&change))
+    {
+        return None;
+    }
+    matching
+        .into_iter()
+        .find(|(_, constraint)| constraint.severity == ConstraintSeverity::Forbidden)
 }
 
 fn api_surface_delta_finding(
@@ -2365,25 +2392,22 @@ impl DependencyDeltaClassificationKey for DependencyDeltaClassification {
 pub fn changed_files_from_unified_diff(diff: &str) -> Vec<PathBuf> {
     let mut paths = BTreeSet::new();
     let mut pending_old: Option<String> = None;
-    let mut in_git_entry = false;
-    let mut in_git_hunks = false;
+    let mut hunk = HunkBody::default();
     for line in diff.lines() {
+        // A hunk's content lines are never headers: a removed `-- x` or an added `++ y` reads
+        // as `--- x` or `+++ y` and is not a path.
+        if hunk.take(line) {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            in_git_entry = true;
-            in_git_hunks = false;
             pending_old = None;
             if let (_, Some(path)) = git_header_paths(rest) {
                 paths.insert(PathBuf::from(path));
             }
             continue;
         }
-        if line.starts_with("@@ ") {
-            in_git_hunks = in_git_entry;
-            continue;
-        }
-        // After a `diff --git` entry's first hunk header every line is content: a removed
-        // `-- x` or an added `++ y` reads as `--- x` or `+++ y` and is not a path.
-        if in_git_hunks {
+        if let Some(header) = line.strip_prefix("@@ ") {
+            hunk = HunkBody::start(header);
             continue;
         }
         if let Some(path) = line.strip_prefix("--- ") {
@@ -2599,6 +2623,8 @@ fn take_path_token(raw: &str) -> Option<(String, &str)> {
 /// The path of a `rename from`/`rename to`/`copy from`/`copy to` line, which is the whole rest
 /// of the line and carries no `a/` or `b/` prefix.
 fn extended_header_path(value: &str) -> String {
+    // `str::lines` keeps the `\r` of a CRLF diff's last line when it has no final newline.
+    let value = value.trim_end_matches('\r');
     unquote_diff_path(value)
         .map(|(path, _)| path)
         .unwrap_or_else(|| value.to_string())
@@ -2666,30 +2692,28 @@ pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<Hunk
     let mut hunks = BTreeMap::<PathBuf, Vec<HunkRanges>>::new();
     let mut current: Option<PathBuf> = None;
     let mut pending_old: Option<String> = None;
-    let mut in_git_entry = false;
-    let mut in_git_hunks = false;
+    let mut body = HunkBody::default();
     for line in diff.lines() {
+        if body.take(line) {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            in_git_entry = true;
-            in_git_hunks = false;
             pending_old = None;
             current = git_header_paths(rest).1.map(PathBuf::from);
             continue;
         }
-        if !in_git_hunks {
-            if let Some(path) = line.strip_prefix("--- ") {
-                pending_old = diff_path(path);
-                continue;
+        if let Some(path) = line.strip_prefix("--- ") {
+            pending_old = diff_path(path);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
+                current = Some(PathBuf::from(path));
             }
-            if let Some(path) = line.strip_prefix("+++ ") {
-                if let Some(path) = diff_path(path).or_else(|| pending_old.take()) {
-                    current = Some(PathBuf::from(path));
-                }
-                continue;
-            }
+            continue;
         }
         if let Some(header) = line.strip_prefix("@@ ") {
-            in_git_hunks = in_git_entry;
+            body = HunkBody::start(header);
             let (Some(path), Some((old, new))) = (current.as_ref(), parse_hunk_header(header))
             else {
                 continue;
@@ -2700,6 +2724,54 @@ pub fn changed_hunks_from_unified_diff(diff: &str) -> BTreeMap<PathBuf, Vec<Hunk
         }
     }
     hunks
+}
+
+/// The lines a hunk still holds, from the counts in its `@@ -a,b +c,d @@` header (an omitted
+/// count is 1). While any remain, a line is content whatever it starts with; once both reach
+/// zero, the next line is a header again, which is where a following git or plain entry begins.
+#[derive(Default)]
+struct HunkBody {
+    old: u32,
+    new: u32,
+}
+
+impl HunkBody {
+    fn start(header: &str) -> Self {
+        let mut parts = header.split_whitespace();
+        let count = |side: Option<&str>, marker: char| -> u32 {
+            side.and_then(|side| side.strip_prefix(marker))
+                .and_then(|side| match side.split_once(',') {
+                    Some((_, count)) => count.parse::<u32>().ok(),
+                    None => Some(1),
+                })
+                .unwrap_or(0)
+        };
+        let old = count(parts.next(), '-');
+        let new = count(parts.next(), '+');
+        Self { old, new }
+    }
+
+    /// Whether `line` is content of this hunk, counting it off if so. A line the remaining
+    /// counts cannot place, such as `diff --git`, ends the hunk.
+    fn take(&mut self, line: &str) -> bool {
+        if self.old == 0 && self.new == 0 {
+            return false;
+        }
+        match line.as_bytes().first() {
+            Some(b'-') if self.old > 0 => self.old -= 1,
+            Some(b'+') if self.new > 0 => self.new -= 1,
+            Some(b' ') | None if self.old > 0 && self.new > 0 => {
+                self.old -= 1;
+                self.new -= 1;
+            }
+            Some(b'\\') => {}
+            _ => {
+                *self = Self::default();
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// `-a,b +c,d` (a `,count` of 1 may be omitted) into `(old, new)` line ranges.
@@ -4247,6 +4319,97 @@ rename to src/menu.rs
     }
 
     #[test]
+    fn a_plain_entry_after_a_git_entry_is_still_a_changed_file() {
+        // `git diff > p.diff; diff -u a b >> p.diff` joins a git entry and a plain entry.
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n--- src/b.rs.orig\n+++ src/b.rs\n@@ -1,2 +1,2 @@\n context\n-x\n+y\n";
+
+        assert_eq!(
+            changed_files_from_unified_diff(diff),
+            vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
+        );
+        assert_eq!(
+            changed_hunks_from_unified_diff(diff)
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![Path::new("src/a.rs"), Path::new("src/b.rs")]
+        );
+        let report = verify_diff(&plan_forbidding_secrets(&["src/a.rs"]), diff);
+        assert!(
+            report.boundary_violations.iter().any(|finding| {
+                finding.kind == "out_of_boundary"
+                    && finding.path.as_deref() == Some(Path::new("src/b.rs"))
+            }),
+            "{:?}",
+            report.boundary_violations
+        );
+    }
+
+    #[test]
+    fn plain_diff_hunk_counts_decide_where_content_ends() {
+        // Removed `-- x` and added `++ y` lines inside counted hunks, and hunk headers whose
+        // single-line counts are omitted.
+        let diff = "--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -3,2 +3,2 @@\n--- legacy index\n+++ replacement index\n--- old view\n+++ new view\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ -3 +3 @@\n--- one\n+++ two\n--- a/src/y.rs\n+++ b/src/y.rs\n@@ -1 +0,0 @@\n--- gone\n";
+
+        assert_eq!(
+            changed_files_from_unified_diff(diff),
+            vec![
+                PathBuf::from("db/schema.sql"),
+                PathBuf::from("src/x.rs"),
+                PathBuf::from("src/y.rs")
+            ]
+        );
+        assert_eq!(
+            changed_hunks_from_unified_diff(diff)
+                .iter()
+                .map(|(path, hunks)| (path.as_path(), hunks.len()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Path::new("db/schema.sql"), 1),
+                (Path::new("src/x.rs"), 1),
+                (Path::new("src/y.rs"), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_crlf_rename_matches_exact_forbidden_files() {
+        let mut plan = plan_forbidding_secrets(&["src/handler.rs", "src/moved.rs"]);
+        plan.recommended_change_boundary.forbidden_files = vec![PathBuf::from("src/forbidden.rs")];
+        // The last line has no final newline, so `str::lines` leaves its `\r` in place.
+        let report = verify_diff(
+            &plan,
+            "diff --git a/src/forbidden.rs b/src/moved.rs\r\nsimilarity index 100%\r\nrename to src/moved.rs\r\nrename from src/forbidden.rs\r",
+        );
+
+        assert_eq!(
+            report.previous_paths,
+            vec![PreviousPath {
+                path: PathBuf::from("src/moved.rs"),
+                previous_path: PathBuf::from("src/forbidden.rs"),
+                kind: PreviousPathKind::Rename,
+            }]
+        );
+        assert_eq!(
+            report.changed_files,
+            vec![
+                PathBuf::from("src/forbidden.rs"),
+                PathBuf::from("src/moved.rs")
+            ]
+        );
+        assert!(
+            report.boundary_violations.iter().any(|finding| {
+                finding.kind == "forbidden_boundary"
+                    && finding.path.as_deref() == Some(Path::new("src/forbidden.rs"))
+                    && finding
+                        .reason
+                        .starts_with("matches forbidden contract file")
+            }),
+            "{:?}",
+            report.boundary_violations
+        );
+    }
+
+    #[test]
     fn a_rename_with_edits_scopes_changed_symbols_to_each_side_of_its_hunks() {
         let store = store_with_handler_symbols();
         let plan = plan_forbidding_secrets(&["src/handler.rs", "src/checkout.rs"]);
@@ -4421,6 +4584,51 @@ rename to src/menu.rs
                 && violation.reason.contains("`src/checkout.rs`")
                 && violation.reason.contains("api_surface_constraints[0]")
                 && violation.reason.contains("the handler API is frozen"),
+            "{}",
+            violation.reason
+        );
+        assert!(!report
+            .change_report
+            .warnings
+            .iter()
+            .any(|finding| finding.kind == "api_surface_moved"));
+    }
+
+    #[test]
+    fn a_rename_into_a_scope_that_forbids_api_additions_fails() {
+        let report = verify_api_surface_of_rename(
+            "pub fn handle() {}\n",
+            "pub fn handle() {}\n",
+            "diff --git a/src/handler.rs b/src/checkout.rs\nsimilarity index 100%\nrename from src/handler.rs\nrename to src/checkout.rs\n",
+            vec![ApiSurfaceConstraint {
+                scope: "src/checkout.rs".into(),
+                allowed_changes: Vec::new(),
+                severity: ConstraintSeverity::Forbidden,
+                reason: "public entry points are added only by review".into(),
+                evidence_refs: Vec::new(),
+            }],
+        );
+
+        assert_eq!(report.decision, VerificationDecision::Fail);
+        let violation = report
+            .change_report
+            .boundary_violations
+            .iter()
+            .find(|finding| finding.kind == "api_surface_violation")
+            .expect("a move into a scope that forbids additions fails");
+        assert_eq!(
+            violation.path.as_deref(),
+            Some(Path::new("src/checkout.rs"))
+        );
+        assert!(
+            violation.reason.contains("`handle`")
+                && violation.reason.contains("`src/handler.rs`")
+                && violation.reason.contains(
+                    "adds it to a scope where api_surface_constraints[0] forbids additions"
+                )
+                && violation
+                    .reason
+                    .contains("public entry points are added only by review"),
             "{}",
             violation.reason
         );
