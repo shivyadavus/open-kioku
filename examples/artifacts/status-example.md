@@ -35,10 +35,10 @@ Quality notes:
 | Status | Check | Evidence |
 | --- | --- | --- |
 | `pass` | `rustc` | found rustc 1.95.0 |
-| `pass` | `repo` | found .ok directory at /Users/shivyadav/dev/open-code-factory/open-kioku-demo/.ok |
+| `pass` | `repo` | found .ok directory at /path/to/open-kioku-demo/.ok |
 | `pass` | `index` | 5 files, 8 symbols, indexed at 2026-06-05 19:58:42.724421 UTC |
 | `warn` | `quality` | SCIP exact references unavailable; 5 tests, 5 imports indexed |
-| `pass` | `config` | loaded /Users/shivyadav/dev/open-code-factory/open-kioku-demo/ok.toml |
+| `pass` | `config` | loaded /path/to/open-kioku-demo/ok.toml |
 | `pass` | `grammars` | parsers available for Rust |
 | `pass` | `mcp` | server responded to initialize request |
 
