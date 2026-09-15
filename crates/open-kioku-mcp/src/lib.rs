@@ -899,9 +899,7 @@ async fn dispatch(
                 .map(str::to_string);
             if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
                 for change in changed_ranges_since(repo, since)? {
-                    if let Some(path) = change.new_path.or(change.old_path) {
-                        changed_files.push(path);
-                    }
+                    changed_files.extend(change.changed_paths());
                 }
                 if unified_diff.is_none() {
                     unified_diff = git_diff_since(repo, since)?;
@@ -2097,12 +2095,16 @@ fn task_with_changed_ranges(repo: &Path, task: &str, since: &str) -> anyhow::Res
 }
 
 fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
-    let path = change
-        .new_path
-        .as_ref()
-        .or(change.old_path.as_ref())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<unknown>".into());
+    let path = match (&change.old_path, &change.new_path) {
+        (Some(old), Some(new)) if old != new => {
+            format!("{} (from {})", new.display(), old.display())
+        }
+        (old, new) => new
+            .as_ref()
+            .or(old.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unknown>".into()),
+    };
     let ranges = change
         .hunks
         .iter()
@@ -2125,6 +2127,10 @@ fn render_changed_range(change: &open_kioku_git::DiffFile) -> String {
 fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
     // `since` is caller input on a read-only server. Without the terminator a value such as
     // `--output=<path>` is an option to git, which exits 0 and writes the diff there.
+    // Rename detection, the `a/`/`b/` path prefixes and uncoloured output are requested rather
+    // than left to `diff.renames`, `diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix` or
+    // `color.diff`, so the report pairs both sides of a rename, and only a real rename, whatever
+    // the local git config says.
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -2132,6 +2138,10 @@ fn git_diff_since(repo: &Path, since: &str) -> anyhow::Result<Option<String>> {
             "diff",
             "--unified=0",
             "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--relative",
             "--end-of-options",
         ])
@@ -2159,6 +2169,8 @@ struct VerificationExplanationOutput {
     contract_id: String,
     decision: String,
     changed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previous_paths: Vec<String>,
     boundary_failures: Vec<String>,
     warnings: Vec<String>,
     dependency_deltas: Vec<String>,
@@ -2228,9 +2240,7 @@ fn verify_change_contract_tool(
         .map(str::to_string);
     if let Some(since) = params.get("since_plan").and_then(Value::as_str) {
         for change in changed_ranges_since(repo, since)? {
-            if let Some(path) = change.new_path.or(change.old_path) {
-                changed_files.push(path);
-            }
+            changed_files.extend(change.changed_paths());
         }
         if unified_diff.is_none() {
             unified_diff = git_diff_since(repo, since)?;
@@ -2351,6 +2361,22 @@ fn explain_verification_report(
             .changed_files
             .iter()
             .map(|path| path.display().to_string())
+            .collect(),
+        previous_paths: report
+            .change_report
+            .previous_paths
+            .iter()
+            .map(|previous| {
+                let relation = match previous.kind {
+                    open_kioku_patch::PreviousPathKind::Rename => "renamed from",
+                    open_kioku_patch::PreviousPathKind::Copy => "copied from",
+                };
+                format!(
+                    "{} {relation} {}",
+                    previous.path.display(),
+                    previous.previous_path.display()
+                )
+            })
             .collect(),
         boundary_failures: verification_finding_summaries(
             &report.change_report.boundary_violations,
@@ -2662,6 +2688,13 @@ fn render_verification_explanation_markdown(explanation: &VerificationExplanatio
         explanation.contract_id, explanation.decision
     ));
     push_markdown_list(&mut out, "Changed Files", &explanation.changed_files);
+    if !explanation.previous_paths.is_empty() {
+        push_markdown_list(
+            &mut out,
+            "Renamed and Copied Files",
+            &explanation.previous_paths,
+        );
+    }
     push_markdown_list(
         &mut out,
         "Boundary Failures",
@@ -2697,6 +2730,9 @@ fn render_verification_explanation_toon(explanation: &VerificationExplanationOut
         explanation.contract_id, explanation.decision
     );
     push_toon_list(&mut out, "changed_files", &explanation.changed_files);
+    if !explanation.previous_paths.is_empty() {
+        push_toon_list(&mut out, "previous_paths", &explanation.previous_paths);
+    }
     push_toon_list(
         &mut out,
         "boundary_failures",
@@ -3202,6 +3238,77 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("invalid input: verify requires at least one changed file"));
+    }
+
+    #[tokio::test]
+    async fn verify_change_checks_both_sides_of_a_renamed_file() {
+        let fixture = McpSnapshotFixture::new();
+        let plan = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            r#"{"jsonrpc":"2.0","id":"plan","method":"tools/call","params":{"name":"plan_change","arguments":{"task":"publish invoice","format":"json"}}}"#,
+        )
+        .await
+        .expect("plan_change should answer");
+        let mut plan =
+            plan.result.expect("plan_change should succeed")["structuredContent"].clone();
+        let boundary = &mut plan["recommended_change_boundary"];
+        boundary["allowed_files"] = json!(["src/billing.rs", "src/invoices.rs"]);
+        boundary["caution_files"] = json!([]);
+        boundary["caution_rules"] = json!([]);
+        boundary["forbidden_files"] = json!([]);
+        boundary["forbidden_rules"] =
+            json!([{"pattern": "src/secrets/**", "reason": "secrets stay in place"}]);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "verify",
+            "method": "tools/call",
+            "params": {"name": "verify_change", "arguments": {
+                "plan": plan,
+                "diff": "diff --git a/src/secrets/billing_keys.rs b/src/invoices.rs\nsimilarity index 100%\nrename from src/secrets/billing_keys.rs\nrename to src/invoices.rs\n",
+            }},
+        })
+        .to_string();
+
+        let response = handle_line(
+            &fixture.repo,
+            ServedIndex::Ready(&fixture.store),
+            &fixture.config,
+            &request,
+        )
+        .await
+        .expect("verify_change should answer");
+
+        let report =
+            response.result.expect("verify_change should succeed")["structuredContent"].clone();
+        assert_eq!(report["verdict"], "fail", "{report}");
+        assert_eq!(
+            report["previous_paths"],
+            json!([{
+                "path": "src/invoices.rs",
+                "previous_path": "src/secrets/billing_keys.rs",
+                "kind": "rename"
+            }])
+        );
+        let violation = report["boundary_violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| {
+                finding["kind"] == "forbidden_boundary"
+                    && finding["path"] == "src/secrets/billing_keys.rs"
+            })
+            .unwrap_or_else(|| {
+                panic!("the previous path is not held to the forbidden rule: {report}")
+            });
+        assert!(
+            violation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("renamed to `src/invoices.rs`"),
+            "{violation}"
+        );
     }
 
     #[tokio::test]
@@ -4436,6 +4543,47 @@ mod tests {
 
         let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();
         assert!(diff.contains("+two"), "{diff}");
+    }
+
+    /// Local path-prefix settings would make one path read as two, which the verifier would
+    /// take for a rename, and forced colour would hide every path; the diff pins `a/`, `b/` and
+    /// uncoloured output.
+    #[test]
+    fn git_diff_since_output_ignores_local_prefix_and_color_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "one"]);
+        git(&["config", "diff.mnemonicPrefix", "true"]);
+        git(&["config", "diff.srcPrefix", "old/"]);
+        git(&["config", "diff.dstPrefix", "new/"]);
+        git(&["config", "color.diff", "always"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let diff = git_diff_since(repo, "HEAD").unwrap().unwrap();
+
+        assert!(
+            diff.contains("--- a/a.txt") && diff.contains("+++ b/a.txt"),
+            "{diff}"
+        );
+        assert_eq!(
+            open_kioku_patch::changed_files_from_unified_diff(&diff),
+            vec![PathBuf::from("a.txt")]
+        );
     }
 
     #[tokio::test]
